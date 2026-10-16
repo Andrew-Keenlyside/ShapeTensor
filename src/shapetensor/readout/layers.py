@@ -109,3 +109,96 @@ def layer_tensor_direction(a: torch.Tensor, sigma: float, rho: float, truncate: 
     S = st.structure_tensor_3d(a, sigma, rho, truncate)
     val, vec = st.eig_special_3d(S)
     return vec.flip(0), ((val[1] - val[2]) / val[1].clamp_min(1e-12)).clamp(0, 1)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# N populations, their masks, and the export of a population field
+# ---------------------------------------------------------------------------------------------------------------
+
+def activation_null(dictionary: SignatureDictionary, blocks, offsets_deg=(45.0, 60.0, 75.0), q: float = 0.8, per: int = 60_000, seed: int = 0, smooth: int = 3) -> float:
+    """The activation a wrong population's signature reaches on single-population voxels: for each calibration block
+    (one population, teacher direction d), unmix its fibre voxels onto {own signature, a signature rotated by each
+    offset in the fibre plane} + background and take the ``q`` quantile of the rotated signatures' activations.
+    A population's mask is where its (``smooth``³-averaged) activation exceeds this. Offsets near 90° are left out:
+    in the double-angle code two signatures 90° apart are anti-parallel and their unmixing is degenerate."""
+    g = torch.Generator().manual_seed(seed)
+    vals = []
+    for F, d, w in blocks:
+        f = dictionary._prep(F); wv = w.reshape(-1).float().cpu()
+        idx = torch.multinomial(wv / wv.sum(), min(per, int((wv > 0).sum())), replacement=False, generator=g).to(F.device)
+        Xn = (f.reshape(f.shape[0], -1)[:, idx].T - dictionary.mean) / dictionary.std
+        dd = d.reshape(3, -1)[:, idx].T
+        _, V = torch.linalg.eigh(dd.T @ dd); d0 = V[:, -1]                                 # the axial mean: the principal direction (signs are arbitrary)
+        # a perpendicular in-plane axis to rotate around: any unit vector orthogonal to d0
+        ref = torch.tensor([0.0, 1.0, 0.0], device=d0.device) if abs(float(d0[1])) < 0.9 else torch.tensor([1.0, 0.0, 0.0], device=d0.device)
+        e2 = torch.linalg.cross(d0, ref); e2 = e2 / e2.norm().clamp_min(1e-9)
+        sigs = [dictionary.signature(d0)]
+        for off in offsets_deg:
+            r = math.radians(off); sigs.append(dictionary.signature(math.cos(r) * d0 + math.sin(r) * e2))
+        S = torch.stack(sigs, 1)
+        if dictionary.background is not None:
+            S = torch.cat([S, dictionary.background[:, None]], 1)
+        a = nnls_batched(S, Xn)
+        vals.append(a[:, 1:1 + len(offsets_deg)].reshape(-1))
+    v = torch.cat(vals)
+    # the activations will be averaged over smooth^3 voxels before thresholding; the null of an average of n draws
+    # of a one-sided noise is well below the per-voxel quantile -- approximate by averaging random groups
+    if smooth > 1:
+        n = smooth ** 3; m = (len(v) // n) * n
+        v = v[torch.randperm(len(v), device=v.device)[:m]].reshape(-1, n).mean(1)
+    return float(torch.quantile(v, q))
+
+
+def population_masks(A: torch.Tensor, tau: float, min_voxels: int = 0):
+    """Masks from the activations ``A (N, Z, Y, X)``: ``masks (N, Z, Y, X)`` = activation above the null ``tau``,
+    ``union (Z, Y, X)`` = any population, ``strongest (Z, Y, X)`` int8 = 1 + the index of the largest activation
+    inside the union (0 outside)."""
+    masks = A > tau
+    if min_voxels:
+        for r in range(masks.shape[0]):
+            if int(masks[r].sum()) < min_voxels:
+                masks[r] = False
+    union = masks.any(0)
+    strongest = (A.argmax(0) + 1).to(torch.int8) * union.to(torch.int8)
+    return masks, union, strongest
+
+
+def detect_populations(P: torch.Tensor, grid: torch.Tensor, F: torch.Tensor, dictionary: SignatureDictionary, tau: float,
+                       region=None, rel: float = 0.3, min_sep_deg: float = 25.0, nmax: int = 4, mass_floor: float = 0.1,
+                       min_mask_share: float = 0.05):
+    """N populations of a block without specifying N: the modes of the summed per-voxel distribution ``P (n_dirs, Z, Y,
+    X)`` over ``region`` (a bool volume; default all), then a confirmation by the layers -- each candidate is unmixed
+    with the others and kept only if its mask (activation above ``tau``) covers at least ``min_mask_share`` of the
+    region. Returns the kept modes ``(N, 3)``, the activations ``(N, Z, Y, X)``, the residual and the masks."""
+    from .orientation import modes_from_density
+    reg = torch.ones(P.shape[1:], dtype=torch.bool, device=P.device) if region is None else region
+    dens = (P * reg.float()[None]).reshape(P.shape[0], -1).sum(1)
+    modes, h, n = modes_from_density(dens, grid, rel=rel, min_sep_deg=min_sep_deg, nmax=nmax, mass_floor=mass_floor)
+    keep = list(range(n))
+    while keep:
+        A, R = unmix(F, dictionary, modes[keep])
+        A = Fn.avg_pool3d(A[None], 3, stride=1, padding=1)[0]                                  # the masks are taken on the 3^3-averaged activation
+        masks, union, strongest = population_masks(A, tau)
+        share = torch.stack([(m & reg).float().sum() / reg.float().sum().clamp_min(1) for m in masks])
+        worst = int(share.argmin())
+        if float(share[worst]) >= min_mask_share or len(keep) == 1:
+            return modes[keep], A, R, masks, union, strongest, {"candidates": int(n), "heights": h[:n].tolist(), "mask_shares": share.tolist()}
+        keep.pop(worst)
+    return modes[:0], None, None, None, None, None, {"candidates": int(n), "heights": h[:n].tolist(), "mask_shares": []}
+
+
+def export_population_field(path, modes: torch.Tensor, A: torch.Tensor, dirs: torch.Tensor, gaps: torch.Tensor, masks: torch.Tensor,
+                            union: torch.Tensor, strongest: torch.Tensor, voxel_mm: float, attrs: dict | None = None):
+    """Write the population field as a zarr group: ``modes (N, 3)`` (z, y, x), ``activation (N, Z, Y, X)`` float16,
+    ``dirs (N, 3, Z, Y, X)`` float16 (each layer's own tensor direction, (z, y, x)), ``gap (N, Z, Y, X)``,
+    ``masks (N, Z, Y, X)`` bool (where that population's vectors go), ``union_mask (Z, Y, X)`` bool (any population:
+    a node-sampling mask), ``strongest (Z, Y, X)`` int8 (1 + the index of the strongest population, 0 outside)."""
+    import numpy as np, zarr
+    g = zarr.open_group(str(path), mode="w")
+    g.create_array("modes", data=modes.cpu().numpy().astype(np.float32))
+    g.create_array("activation", data=A.cpu().numpy().astype(np.float16))
+    g.create_array("dirs", data=dirs.cpu().numpy().astype(np.float16))
+    g.create_array("gap", data=gaps.cpu().numpy().astype(np.float16))
+    g.create_array("masks", data=masks.cpu().numpy()); g.create_array("union_mask", data=union.cpu().numpy()); g.create_array("strongest", data=strongest.cpu().numpy())
+    g.attrs.update({"voxel_mm": voxel_mm, "n_populations": int(modes.shape[0]), "component_order": "zyx", **(attrs or {})})
+    return path

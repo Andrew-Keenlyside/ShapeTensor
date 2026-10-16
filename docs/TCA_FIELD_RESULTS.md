@@ -681,3 +681,42 @@ texture (its contrast 0.78 vs 0.41). The spurious third mode is the intersection
 Next within the stage: unmix in the orientation subspace itself (the dictionary's two principal directions) so
 texture-phase variance cannot leak into an activation; sharper features (smaller average); and the layer's tensor
 with the activation's *confidence* as its weight.
+
+## 23. How many populations? (`scripts/bench/n_populations.py`; N never specified; seed 0, ρ 10, small blocks)
+
+The rule: the modes of the block's summed per-voxel distribution (§21) above the single-population null of the
+second mode's height (0.64, 99th percentile) and a 10% mass floor are the *candidates*; each candidate is then
+unmixed with the others (§22) and kept only if its mask — its 3³-averaged activation above the wrong-population
+null (0.46: the 80th percentile of what a signature 45–75° away reaches on single-population voxels) — covers at
+least 5% of the fibre voxels. The masks are also the answer to "where do a population's vectors go": a population's
+direction field is written where its mask holds; the union of the masks is where any population is present; the
+strongest-population map says which one dominates each voxel.
+
+| phantom | true N | detected N (candidates) | mode errors | layer-tensor direction errors on the truth voxels | mask Dice vs truth |
+|---|---|---|---|---|---|
+| one population, 30° / 105° | 1 | **1** (1) | 4.9° / 5.1° | 3.0° / 5.3° | 0.90 / 0.90 |
+| two, 90° apart | 2 | **2** (2) | 8.6°, 10.4° | 6.6°, 11.8° | 0.66, 0.67 |
+| two, 60° apart | 2 | **2** (2) | 8.6°, 15.1° | 5.2°, 14.0° | 0.65, 0.58 |
+| three, 0 / 60 / 120° | 3 | 4 (4) | 5.4°, 30°, 23°, 3.7° | 17°, 6°, 11°, 54° | 0.30–0.57 |
+| three, 20 / 75 / 130° | 3 | 4 (4) | 18.5°, 1.3°, 20°, 17° | 34°, 21°, 20°, 55° | 0.48–0.51 |
+
+Per window (0.4 mm) the density rule alone gives N = 1 in 100% of single-population windows, N = 2 in 70% (60°)
+and 43% (90°; 30% N = 1, 27% N = 3) of two-population windows, and N = 3 in 49% / 26% of three-population
+windows.
+
+- **One and two populations are detected without being told**, with directions within 3–14° and masks at Dice
+  0.58–0.90 against the true voxels.
+- **Three are not**: the candidates are right (3–4 modes, two of them within 4–5° of truths) but the layer
+  confirmation cannot cut the extra one, because the signatures of three populations are linearly dependent in the
+  encoder's orientation code. §22 showed that code to be a (cos 2θ, sin 2θ) plane; three signatures in a plane sum
+  to a non-negative combination of any two, so three-way unmixing is degenerate (mask shares 0.6–0.9 for every
+  candidate). The per-voxel *distribution* readout, being nonlinear, does see three modes in half of the windows;
+  the *layers* cannot separate them. A third population per window needs higher harmonics in the shape space's
+  orientation code (cos 4θ terms) — the next shape-features question — or the distribution readout alone with a
+  stricter null.
+
+The 3-population field is exported (`fields/phantom_3pop_population_field.zarr`: `modes`, `activation`, `dirs`,
+`gap`, `masks`, `union_mask`, `strongest`); the union mask is the candidate node-sampling mask for a streamline
+builder, kept as a later step.
+
+![N populations](../img/n_populations.png)
