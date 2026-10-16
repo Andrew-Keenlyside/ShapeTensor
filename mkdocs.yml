@@ -15,6 +15,12 @@ nav:
   - Quick start: quickstart.md
   - The structure tensor and where it fails: structure_tensor.md
   - Theory of the shape tensor: theory.md
+  - The pipeline, stage by stage:
+      - Overview: pipeline/index.md
+      - 1. Getting the shape features: pipeline/shape_features.md
+      - 2. Separating populations in shape space: pipeline/separating.md
+      - 3. Getting tensors from populations: pipeline/tensors_from_populations.md
+      - 4. Merging population vector fields: pipeline/merging.md
   - Phantoms and validation: phantoms.md
   - Brain image data: brain_data.md
   - BigBrain: bigbrain.md
