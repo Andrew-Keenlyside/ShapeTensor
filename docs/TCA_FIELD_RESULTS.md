@@ -409,3 +409,37 @@ to come from the tensor's anisotropy — the orientation gap (λ2−λ3)/λ2 and
 fixels are read. `fixels_3d` now carries the interface exclusion (`interface_gate`, 3× the median coarse gradient,
 the same rule as the excision) and the dispersed-tissue threshold (`peak_rel` 0.5) as defaults; the anisotropy floor
 is the caller's gate on the field's `gap`.
+
+## 15. The ρ-10 pass (tag `rho10`; intensity + anatomix48, 29 phantoms, 2 seeds; `scripts/bench/REPORT_rho10.md`, `SCORECARD_rho10.md`)
+
+A smaller window than the suite's 8 / 16 / 32, at the user's working value. Median angle within 0.1 mm (U-fibres:
+the 0.25–0.5 mm band), seed mean; clear tissue (> 2 mm) in the last column.
+
+| phantom | plain | excised (ungated) | `cl`-gated | anatomix48 TCA | clear (plain / excised) |
+|---|---|---|---|---|---|
+| P3-40 | 5.6 | 4.6 | 5.5 | 7.6 | 3.7 / 3.7 |
+| P3-40-t0.5 | 33.5 | **4.5** | 23.8 | 44.1 | 4.5 / 4.6 |
+| P3-40-t0.25 | 56.4 | **9.1** | 9.1 | 60.5 | 10.1 / 10.1 |
+| P3-15-t0.25 | 18.7 | 16.2 | 18.3 | 36.5 | 10.5 / 10.5 |
+| P1-t0.5 (gyrus) | 28.7 | **4.2** | 15.6 | 26.9 | 2.6 / 2.6 |
+| P1-t0.25 | 67.4 | **11.4** | 13.4 | 63.5 | 6.5 / 6.5 |
+| P2-t0.5 (U-fibres) | 1.8 | 2.2 | 2.1 | — | — |
+| P6 / P6-t0.5 (vessel) | 8.3 / 22.9 | **5.4 / 6.3** | 8.1 / 16.3 | 5.4 / 7.7 | — |
+| P7-t0.5 / t0.25 (slab) | 5.1 / 11.0 | 5.4 / 11.1 | 5.1 / 10.9 | 5.9 / 11.3 | — |
+
+- **Excision holds at ρ 10**: the step, the gyrus and the vessel come down to the clear-tissue level (4.5 vs 4.5°;
+  9.1 vs 10.1°; 4.2 vs 2.6°; 6.3°), U-fibres and the slab are untouched. The scorecard's "interface fixed" row
+  fails at ρ 10 only through P3-15-t0.25 (16.2°), where the *clear tissue itself* is at 10.5° — at a quarter of
+  the real texture a 0.2 mm window does not average enough texture for any method; at half texture it does
+  (4.5°). So ρ 10 is usable at the real crop's texture level and marginal below it.
+- **Crossings lose resolution at ρ 10** (seed 0, CSD at the uncalibrated rel 0.3): anatomix48 60° found at 91% but
+  both within 15° at 68% (ρ 16: 94%, ρ 32: 100%); 90° at 70%; 45° at 31%; the intensity ODF 17% / 41% / 3%.
+  Multi-population read-outs want ρ ≥ 16.
+- **Null calibration at ρ 10** (`results/csd_calibrated_rho10.json`): widths 22.9 / 25.0° (t1) and 28.9 / 30.0°
+  (t0.5) for intensity / anatomix48; line-null thresholds 0.3 (t1), 0.7 / 0.5 (t0.5). The dispersed-tissue and
+  interface tests (`sheet_null_gates_rho10.py`) repeat §14 at ρ 10: far from the step the intensity ODF is at 7 / 4 /
+  2% for rel 0.7 / 0.8 / 0.9 and anatomix48 at 50 / 37 / 24% for 0.5 / 0.6 / 0.7 (compliance needs ≈ 0.9); the `gm`
+  gate removes the 0–0.25 mm bands at the step and the gyrus; the laminar slab at quarter texture reads as two
+  populations at 69–73% (intensity, rel 0.7) and 22–38% (anatomix48).
+- **Boundary detector** at ρ 10: no arm reaches PR-AUC 0.9 (the coarse gradient at ρ 10 integrates too little; it
+  is 0.85–0.96 at ρ 16).

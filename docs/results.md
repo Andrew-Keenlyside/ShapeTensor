@@ -100,6 +100,15 @@ Out of reach: the tenth-texture step at ρ ≤ 16, where excision brings the int
 
 ![gyrus glyphs](img/P1-t0.5_glyphs.png)
 
+## A smaller window: ρ 10
+
+At ρ 10 (0.2 mm at 20 µm; results log §15) the excision still brings the step (33.5 → 4.5° at half texture, 56 →
+9.1° at quarter), the gyrus (28.7 → 4.2°) and the vessel (22.9 → 6.3°) to the clear-tissue level, and U-fibres and
+the laminar slab are untouched. What ρ 10 cannot do is resolve crossings (60° both-within-15° at 68% with anatomix48
+CSD, against 94% at ρ 16 and 100% at ρ 32) or detect boundaries at the 0.9 PR-AUC line; and at a quarter of the real
+texture its clear-tissue error is already 10°. The working recommendation: ρ 10 for the single-direction field at
+the real texture level, ρ ≥ 16 for fixels.
+
 ## Speed (`scripts/bench/speed.py`, RTX A6000, ρ 16, σ 1; `scripts/bench/speed_A6000.json`)
 
 | arm | 128³ (2.1 Mvox) | 256³ (16.8 Mvox) | Mvoxel / s | relative |
