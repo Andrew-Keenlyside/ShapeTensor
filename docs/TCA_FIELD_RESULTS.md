@@ -647,3 +647,37 @@ What to work on next within the stage: the per-voxel distribution's sharpness an
 feature average (1–2 voxels instead of 3³) and a sharper target kernel (8–10° instead of 12°), the two encoder
 blocks together (block 1's finer receptive field), and the readout's resolution of the 60° pair as the
 pre-registered test; then the window modes' null and separation (25°) at that sharpness.
+
+## 22. Per-population layers of the shape space (`readout.layers`, `scripts/fig_population_layers.py`; seed 0, ρ 10)
+
+The pipeline's own form of the division: the feature vector at a voxel is a non-negative mixture of the
+*signatures* of the populations present, ``f(v) ≈ Σ_r a_r(v) S_r``; unmixing gives one full-volume activation
+``a_r(v)`` per population — its own image, read from the shape space, no mask — and the population's structure
+tensor is that of its activation (``∇(a_r S_r) = ∇a_r ⊗ S_r``). The dictionary of signatures is the mean
+standardised encoder-2 pattern per orientation over the calibration voxels and their teacher direction (the
+excised tensor; no labels), plus a *background* signature from the voxels with the lowest teacher gap, which
+absorbs what is not a population. The populations present are the modes of the slab's per-voxel distribution (§21).
+
+**The signatures form a double-angle code.** The cosine similarity between the signatures of two orientations is
+≈ cos 2Δθ (0.84 at 15°, 0.34 at 30°, ≈ 0 at 45°, −0.5 at 60°, −0.98 at 90°): encoder 2's orientation code is, to a
+good approximation, a 2-dimensional (cos 2θ, sin 2θ) subspace — a steerable code. On single-fibre blocks, NNLS onto
+a 60°-apart pair picks the own signature in 85–94% of fibre voxels; the orientation subspace holds ~8% of the
+feature variance (texture phase holds the rest), and without the background signature the background's projection
+on that subspace made one layer of every pair blotchy (its tensor 40–68° off). With it:
+
+| crossing | modes (error to truth) | activation on own voxels vs the other's | layer 1 / layer 2 own-tensor error on own voxels (within 15°) | the image's tensor on the same voxels |
+|---|---|---|---|---|
+| 90° | 8.6° / 10.4° (+ a third at 45°) | 0.80 / 0.34 · 0.79 / 0.34 | **5.7° (90%) / 9.4°** | 33.5° / 34.1° |
+| 60° | 4.5° / 4.9° (+ 26.6°) | 0.78 / 0.41 · 0.88 / 0.45 | **20.2° (29%) / 6.4° (97%)** | 28.3° / 28.1° |
+| 45° | 4.9° / 11.2° (+ 18.5°) | 0.99 / 0.74 · 0.79 / 0.41 | **10.2° (90%) / 13.4°** | 20.8° / 23.2° |
+
+Residual energy share 0.72–0.75 (0.92 without the background signature). So on 90° and 45° both populations'
+layers carry their own direction to 6–13° where the image's tensor is 21–34° off; at 60° one layer is right (6.4°)
+and the other is at 20° — the 90°-population's activation is still contaminated by the 30° fascicles at this
+texture (its contrast 0.78 vs 0.41). The spurious third mode is the intersections.
+
+![layers at 60°](../img/population_layers_c60.png)
+
+Next within the stage: unmix in the orientation subspace itself (the dictionary's two principal directions) so
+texture-phase variance cannot leak into an activation; sharper features (smaller average); and the layer's tensor
+with the activation's *confidence* as its weight.
