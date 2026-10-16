@@ -105,6 +105,29 @@ def test_run_volume_equals_one_pass(tmp_path):
     assert np.median(np.abs((g["vec"][:] * vec).sum(0))) > 0.999
 
 
+def test_spacing_isotropic_identity_and_physical_directions():
+    """spacing=(1, 1, 1) is the plain tensor. A fibre texture along (x, y, z) = (1, 0, 1) coarsened 2.5x along z:
+    the spacing-aware tensor recovers the direction, the naive (voxel-unit) tensor tilts it towards the coarse
+    axis (the analytic bias for this geometry is 23 deg)."""
+    import math
+    rng = np.random.default_rng(0)
+    v = torch.as_tensor(rng.normal(size=(40, 48, 48)).astype(np.float32))
+    S0 = st.structure_tensor_3d(v, 1.0, 4.0, device="cpu"); S1 = st.structure_tensor_3d(v, 1.0, 4.0, spacing=(1, 1, 1), device="cpu")
+    assert torch.equal(S0, S1)
+    z, y, x = np.meshgrid(np.arange(100), np.arange(96), np.arange(96), indexing="ij")
+    tex = (np.sin(0.3 * (z - x) / math.sqrt(2)) + np.sin(0.3 * y) + 0.3 * rng.normal(size=z.shape)).astype(np.float32)
+    va = torch.nn.functional.interpolate(torch.as_tensor(tex)[None, None], size=(40, 96, 96), mode="area")[0, 0]
+    truth = torch.tensor([1.0, 0.0, 1.0]) / math.sqrt(2)
+    def med_angle(S):
+        _, vec = st.eig_special_3d(S, device="cpu")
+        c = (vec[:, 8:-8, 16:-16, 16:-16].reshape(3, -1) * truth[:, None]).sum(0).abs().clamp(max=1)
+        return float(torch.rad2deg(torch.arccos(c)).median())
+    a_sp = med_angle(st.structure_tensor_3d(va, 1.0, 6.0, spacing=(2.5, 1, 1), device="cpu"))
+    a_nv = med_angle(st.structure_tensor_3d(va, 1.0, 6.0, device="cpu"))
+    assert a_sp < 6 and a_nv > 15, (a_sp, a_nv)
+    assert st.to_isotropic(va, (2.5, 1, 1)).shape == (100, 96, 96)
+
+
 if __name__ == "__main__":
     import tempfile, pathlib
     for name, fn in list(globals().items()):

@@ -208,13 +208,16 @@ def odf_dense(G: torch.Tensor, rho: float, truncate: float, reduce: int, core, l
 
 
 def excision_weights(vol: torch.Tensor, sigma_coarse: float = 3.0, factor: float = 3.0, truncate: float = 3.0,
-                     mask: torch.Tensor | None = None, gate: torch.Tensor | None = None) -> torch.Tensor:
+                     mask: torch.Tensor | None = None, gate: torch.Tensor | None = None, spacing=None) -> torch.Tensor:
     """Fix A's gradient excision as a weight map in [0, 1]: 0 where the coarse (``sigma_coarse``) gradient magnitude
     exceeds ``factor`` x its median (over ``mask``, default everywhere), else 1. With ``gate (Z, Y, X)`` in [0, 1]
     (a boundary-strength map upsampled to the block), the excision applies only in proportion to the gate:
-    ``w = 1 - gate * (1 - w0)``, which is "excision only near detected interfaces" (arm H2)."""
+    ``w = 1 - gate * (1 - w0)``, which is "excision only near detected interfaces" (arm H2). ``spacing``: voxel
+    ratios ``(dz, dy, dx)`` relative to the finest axis for anisotropic data (filters shrink, derivatives scale)."""
     v = vol.float()
-    g2 = sum(gaussian(v, sigma_coarse, order=o, truncate=truncate) ** 2 for o in ((1, 0, 0), (0, 1, 0), (0, 0, 1)))
+    sp = (1.0, 1.0, 1.0) if spacing is None else tuple(spacing)
+    sig = sigma_coarse if spacing is None else tuple(sigma_coarse / s for s in sp)
+    g2 = sum((gaussian(v, sig, order=o, truncate=truncate) / sp[i]) ** 2 for i, o in enumerate(((1, 0, 0), (0, 1, 0), (0, 0, 1))))
     gm = g2.sqrt()
     ref = gm[mask] if mask is not None else gm
     med = ref.flatten().median()

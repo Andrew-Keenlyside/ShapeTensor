@@ -79,6 +79,16 @@ samples an orientation field at vertices, `shapetensor.field.compute_field` writ
   in these pages rests on the phantoms. `scripts/demo_real_crop.py` renders the field on the 20 µm crop for a visual
   check (glyphs over the image, the boundary strength, the N-population map).
 
+## Anisotropic voxels
+
+Section stacks and many tomographic protocols are coarser along one axis (20 × 20 × 50 µm, say). Pass the voxel
+size as `spacing=(dz, dy, dx)`: the derivative and integration filters are scaled per axis (`sigma` / `rho` stay in
+units of the finest voxel), the gradients are divided by the spacing so the tensor and its eigenvectors are in
+physical coordinates, and the shape engines resample the block to isotropic voxels before the network (and the
+tensor back afterwards). Ignoring the anisotropy tilts every oblique direction towards the coarse axis — for a fibre
+at 45° to a 2.5× coarser axis the naive tensor is 23° off, the spacing-aware one < 2° (`tests/test_st.py`); the
+phantom and BigBrain measurements are in the results log (§15).
+
 ## Two demonstrations on the S-21-46 crop (no ground truth)
 
 `scripts/demo_real_crop.py` (384³ core, ρ 16, sites every 4 voxels; CSD response 29°, threshold 0.4 — the null

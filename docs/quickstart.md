@@ -23,6 +23,7 @@ dirs = st.shapetensor(image, rho=16.0, fixels=True)            # (3, 3, Z, Y, X)
 | `excise_mask` | white-matter mask `(Z, Y, X)`: the excision threshold is 3× the median coarse gradient *over the mask*; without it, over the whole image, which is too low where much of the image is smooth grey matter or background | `None` |
 | `fixels` | return up to three directions per voxel from CSD of the gradient ODF | `False` |
 | `order` | component order of the vectors, `"xyz"` or `"zyx"` | `"xyz"` |
+| `spacing` | voxel size per axis `(dz, dy, dx)` for anisotropic data, e.g. `(2.5, 1, 1)` for 50 × 20 × 20 µm: filters scale per axis, gradients and directions are physical; the shape engines resample to isotropic internally | `None` |
 | `truncate` | filter extent in standard deviations | 4.0 |
 | `device` | torch device | `"cuda"` |
 

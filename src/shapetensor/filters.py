@@ -14,7 +14,17 @@ import torch.nn.functional as F
 
 
 def kernel1d(sigma: float, order: int = 0, truncate: float = 3.0) -> np.ndarray:
-    """scipy's Gaussian (derivative) kernel: ``q(x) * phi(x) / sum(phi)``, q the Hermite-type polynomial."""
+    """scipy's Gaussian (derivative) kernel: ``q(x) * phi(x) / sum(phi)``, q the Hermite-type polynomial. Below
+    ``sigma`` 0.8 the sampled first-derivative kernel loses its unit first moment (at 0.4 it returns half the
+    derivative), so there it is rescaled to ``sum(-x k(x)) = 1``; at the usual sigma >= 1 nothing changes."""
+    k = _kernel1d_scipy(sigma, order, truncate)
+    if order == 1 and sigma < 0.8:
+        x = np.arange(-(len(k) // 2), len(k) // 2 + 1, dtype=np.float64)
+        k = k / abs((x * k).sum())
+    return k
+
+
+def _kernel1d_scipy(sigma: float, order: int = 0, truncate: float = 3.0) -> np.ndarray:
     radius = int(truncate * sigma + 0.5)
     x = np.arange(-radius, radius + 1, dtype=np.float64)
     phi = np.exp(-0.5 / sigma ** 2 * x ** 2)

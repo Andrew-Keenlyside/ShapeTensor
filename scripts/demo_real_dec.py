@@ -49,6 +49,7 @@ def main():
     ap.add_argument("--reduce", type=int, default=4); ap.add_argument("--nyquist", default="none"); ap.add_argument("--sigma", type=float, default=1.0)
     ap.add_argument("--tile", type=int, default=256); ap.add_argument("--margin", type=int, default=64)   # tile 128 / margin 64 for a 12 GB card
     ap.add_argument("--n-pcs", type=int, default=8)   # 8 PCs read the same as 16 (results log §10); 16 at 520^3 needs 27 GB of channel gradients
+    ap.add_argument("--tag", default="", help="suffix for the figure / json names")
     a = ap.parse_args()
     t0 = time.time()
     b, rho, tr = a.reduce, a.rho, 4.0
@@ -140,8 +141,8 @@ def main():
                      f"DEC: R = |x|, G = |y|, B = |z|. Bright tissue: excised vs ST median {summ['median_angle_ST_vs_excised_bright']:.1f}°, TCA vs ST {summ['median_angle_ST_vs_tca_bright']:.1f}°. No ground truth.",
                      fontsize=10, x=0.01, ha="left")
         fig.tight_layout(rect=[0, 0, 1, 0.96])
-        out = FIGS / f"real_S2146_dec_{pname}.png"; fig.savefig(out); plt.close(fig); print("wrote", out, flush=True)
-    json.dump(summ, open(FIGS / "real_S2146_dec.json", "w"), indent=1)
+        out = FIGS / f"real_S2146_dec{a.tag}_{pname}.png"; fig.savefig(out); plt.close(fig); print("wrote", out, flush=True)
+    json.dump(summ, open(FIGS / f"real_S2146_dec{a.tag}.json", "w"), indent=1)
     print(f"DEC DEMO DONE {time.time() - t0:.0f} s", flush=True)
 
 

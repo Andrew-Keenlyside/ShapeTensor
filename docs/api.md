@@ -4,7 +4,7 @@
 
 ```python
 shapetensor(image, *, sigma=1.0, rho=16.0, truncate=4.0, engine="intensity", excise=True, excise_mask=None,
-            fixels=False, order="xyz", n_pcs=16, engine_kwargs=None, device="cuda", **fixel_kwargs)
+            fixels=False, order="xyz", n_pcs=16, engine_kwargs=None, spacing=None, device="cuda", **fixel_kwargs)
 ```
 
 The fibre direction field of `image (Z, Y, X)`: `(3, Z, Y, X)` unit axial vectors, or with `fixels=True`
@@ -16,11 +16,11 @@ integration (intensity engine); `order` the component order.
 
 | function | returns |
 |---|---|
-| `structure_tensor_3d(volume, sigma, rho, truncate=4.0, *, weights=None, device, dtype)` | `S (6, Z, Y, X) = [Sxx, Syy, Szz, Sxy, Sxz, Syz]`, x the last axis |
-| `excised_structure_tensor_3d(volume, sigma, rho, truncate=4.0, *, factor=3.0, sigma_coarse=3.0, gate=None, mask=None, ...)` | `S` with boundary gradients excised and the integration renormalised |
+| `structure_tensor_3d(volume, sigma, rho, truncate=4.0, *, weights=None, spacing=None, device, dtype)` | `S (6, Z, Y, X) = [Sxx, Syy, Szz, Sxy, Sxz, Syz]`, x the last axis |
+| `excised_structure_tensor_3d(volume, sigma, rho, truncate=4.0, *, factor=3.0, sigma_coarse=3.0, gate=None, mask=None, spacing=None, ...)` | `S` with boundary gradients excised and the integration renormalised |
 | `shape_structure_tensor_3d(volume, sigma, rho, truncate=4.0, *, engine, n_pcs=16, engine_kwargs, ...)` | `S` summed over a feature engine's channel gradients |
 | `eig_special_3d(S, full=False, eigenvalue_order="desc", *, device, chunk)` | `val (3, ...)`, `vec (3, ...)` the smallest eigenvalue's vector in (x, y, z); `(3, 3, ...)` with `full=True` |
-| `fixels_3d(volume, sigma, rho, truncate=4.0, *, lmax=8, reduce=None, csd_width_deg=20, peak_rel=0.5, min_sep_deg=25, nmax=3, interface_gate=3.0, sigma_coarse=3.0, upsample=True, device)` | `dirs (nmax, 3, ...)`, `fracs (nmax, ...)`, `npop (...)` |
+| `fixels_3d(volume, sigma, rho, truncate=4.0, *, lmax=8, reduce=None, csd_width_deg=20, peak_rel=0.5, min_sep_deg=25, nmax=3, interface_gate=3.0, sigma_coarse=3.0, upsample=True, spacing=None, device)` | `dirs (nmax, 3, ...)`, `fracs (nmax, ...)`, `npop (...)` |
 | `run_volume(src, dst, *, sigma, rho, truncate, chunk, outputs, excise_factor, fixel_kwargs, level, rank, world, device, log)` | a chunked driver over a zarr volume with halos; writes `S`, `S_excised`, `val`, `vec`, `vec_excised`, `dirs`, `fracs`, `npop` |
 
 Inputs may be numpy, cupy or torch; outputs come back as the input's kind.
@@ -39,7 +39,8 @@ says how far from a block face its output is unreliable. `shapetensor.pca.PCA.fi
 - `k_sites(G, rho, truncate, reduce, y_rows, core_zx, weights=None)` → `K (ny, nz, nx, P)` packed upper triangle on
   the sites of the given rows; `k_dense(G, rho, truncate, reduce, core, weights=None)` → `K (nz, ny, nx, P)` on a block.
 - `odf_sites(...)`, `odf_dense(...)` → the gradient-direction ODF in even real spherical harmonics on the same sites.
-- `excision_weights(vol, sigma_coarse=3.0, factor=3.0, truncate, mask=None, gate=None)` → weights in [0, 1].
+- `excision_weights(vol, sigma_coarse=3.0, factor=3.0, truncate, mask=None, gate=None, spacing=None)` → weights in [0, 1].
+- `st.spacing_ratio(spacing)`, `st.to_isotropic(v, spacing)`, `st.from_isotropic(t, shape)`: the anisotropic-voxel helpers (ratios relative to the finest axis; trilinear resampling).
 
 ## `shapetensor.readout`
 

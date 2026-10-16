@@ -64,38 +64,81 @@ def _like(t: torch.Tensor, like):
 # the structure tensor and its variants
 # ---------------------------------------------------------------------------------------------------------------
 
-def _derivatives(v: torch.Tensor, sigma: float, truncate: float):
-    Vx = gaussian(v, sigma, order=(0, 0, 1), truncate=truncate)
-    Vy = gaussian(v, sigma, order=(0, 1, 0), truncate=truncate)
-    Vz = gaussian(v, sigma, order=(1, 0, 0), truncate=truncate)
+def spacing_ratio(spacing):
+    """``spacing (dz, dy, dx)`` -> the voxel sizes relative to the finest axis, or None when isotropic. ``sigma`` and
+    ``rho`` are in voxels of the finest axis; along a coarser axis the filters shrink by this ratio and the
+    derivative is divided by it, so gradients and directions are in physical (finest-voxel) units."""
+    if spacing is None:
+        return None
+    sp = tuple(float(s) for s in spacing)
+    m = min(sp)
+    sp = tuple(s / m for s in sp)
+    return None if all(abs(s - 1.0) < 1e-9 for s in sp) else sp
+
+
+def _per_axis(value: float, spacing):
+    return value if spacing is None else tuple(value / s for s in spacing)
+
+
+def _derivatives(v: torch.Tensor, sigma: float, truncate: float, spacing=None):
+    sig = _per_axis(sigma, spacing)
+    sz, sy, sx = (1.0, 1.0, 1.0) if spacing is None else spacing
+    Vx = gaussian(v, sig, order=(0, 0, 1), truncate=truncate) / sx
+    Vy = gaussian(v, sig, order=(0, 1, 0), truncate=truncate) / sy
+    Vz = gaussian(v, sig, order=(1, 0, 0), truncate=truncate) / sz
     return Vx, Vy, Vz
 
 
-def _integrate(prods, rho: float, truncate: float, weights: torch.Tensor | None):
+def _integrate(prods, rho: float, truncate: float, weights: torch.Tensor | None, spacing=None):
     """``S[k] = G_rho * (w * prod_k) / G_rho * w`` (plain mean when ``weights`` is None)."""
+    r = _per_axis(rho, spacing)
     S = torch.empty((6,) + tuple(prods[0].shape), dtype=prods[0].dtype, device=prods[0].device)
-    wn = None if weights is None else gaussian(weights, rho, truncate=truncate).clamp_min(1e-12)
+    wn = None if weights is None else gaussian(weights, r, truncate=truncate).clamp_min(1e-12)
     for k, p in enumerate(prods):
-        S[k] = gaussian(p if weights is None else p * weights, rho, truncate=truncate)
+        S[k] = gaussian(p if weights is None else p * weights, r, truncate=truncate)
         if wn is not None:
             S[k] /= wn
     return S
 
 
-def structure_tensor_3d(volume, sigma: float, rho: float, truncate: float = 4.0, *, weights=None, device: str = "cuda",
-                        dtype=torch.float32):
+def to_isotropic(v: torch.Tensor, spacing, mode: str = "trilinear") -> torch.Tensor:
+    """Resample ``v (..., Z, Y, X)`` with voxel ratios ``spacing`` onto the finest-axis grid (shape grows along the
+    coarser axes)."""
+    import torch.nn.functional as Fn
+    sp = spacing_ratio(spacing)
+    if sp is None:
+        return v
+    size = tuple(int(round(n * s)) for n, s in zip(v.shape[-3:], sp))
+    lead = v.shape[:-3]
+    out = Fn.interpolate(v.reshape(-1, 1, *v.shape[-3:]).float(), size=size, mode=mode, **({} if mode == "nearest" else {"align_corners": False}))
+    return out.reshape(*lead, *size).to(v.dtype)
+
+
+def from_isotropic(t: torch.Tensor, shape, mode: str = "trilinear") -> torch.Tensor:
+    """Resample ``t (..., Z', Y', X')`` back onto the original ``shape (Z, Y, X)``."""
+    import torch.nn.functional as Fn
+    lead = t.shape[:-3]
+    out = Fn.interpolate(t.reshape(-1, 1, *t.shape[-3:]).float(), size=tuple(shape), mode=mode, **({} if mode == "nearest" else {"align_corners": False}))
+    return out.reshape(*lead, *shape).to(t.dtype)
+
+
+def structure_tensor_3d(volume, sigma: float, rho: float, truncate: float = 4.0, *, weights=None, spacing=None,
+                        device: str = "cuda", dtype=torch.float32):
     """``S (6, Z, Y, X) = [Sxx, Syy, Szz, Sxy, Sxz, Syz]`` of ``volume (Z, Y, X)``: derivatives at ``sigma``,
     integration at ``rho``. ``weights (Z, Y, X)`` in [0, 1], if given, excises gradients with a normalised
-    integration (see :func:`excised_structure_tensor_3d`)."""
+    integration (see :func:`excised_structure_tensor_3d`). ``spacing (dz, dy, dx)``: the voxel size per axis for
+    anisotropic data; ``sigma`` / ``rho`` are then in units of the finest voxel and the tensor is in physical
+    coordinates (see :func:`spacing_ratio`)."""
     v = _to_torch(volume, device, dtype)
-    Vx, Vy, Vz = _derivatives(v, sigma, truncate)
+    sp = spacing_ratio(spacing)
+    Vx, Vy, Vz = _derivatives(v, sigma, truncate, sp)
     w = None if weights is None else _to_torch(weights, device, dtype)
-    S = _integrate((Vx * Vx, Vy * Vy, Vz * Vz, Vx * Vy, Vx * Vz, Vy * Vz), rho, truncate, w)
+    S = _integrate((Vx * Vx, Vy * Vy, Vz * Vz, Vx * Vy, Vx * Vz, Vy * Vz), rho, truncate, w, sp)
     return _like(S, volume)
 
 
 def excised_structure_tensor_3d(volume, sigma: float, rho: float, truncate: float = 4.0, *, factor: float = 3.0,
-                                sigma_coarse: float = 3.0, gate=None, mask=None, device: str = "cuda",
+                                sigma_coarse: float = 3.0, gate=None, mask=None, spacing=None, device: str = "cuda",
                                 dtype=torch.float32):
     """Fix A: gradients whose coarse (``sigma_coarse``) magnitude exceeds ``factor`` x the reference median are left
     out of the integration, which is renormalised by the surviving weight. The reference median is taken over
@@ -103,23 +146,29 @@ def excised_structure_tensor_3d(volume, sigma: float, rho: float, truncate: floa
     is smooth grey matter or background). ``gate (Z, Y, X)`` in [0, 1] restricts the excision to where it is > 0
     (e.g. near detected interfaces). Returns ``S`` as :func:`structure_tensor_3d`."""
     v = _to_torch(volume, device, dtype)
+    sp = spacing_ratio(spacing)
     g = None if gate is None else _to_torch(gate, device, dtype)
     m = None if mask is None else _to_torch(mask, device, dtype) > 0.5
-    w = excision_weights(v, sigma_coarse=sigma_coarse, factor=factor, truncate=truncate, mask=m, gate=g)
-    Vx, Vy, Vz = _derivatives(v, sigma, truncate)
-    S = _integrate((Vx * Vx, Vy * Vy, Vz * Vz, Vx * Vy, Vx * Vz, Vy * Vz), rho, truncate, w)
+    w = excision_weights(v, sigma_coarse=sigma_coarse, factor=factor, truncate=truncate, mask=m, gate=g, spacing=sp)
+    Vx, Vy, Vz = _derivatives(v, sigma, truncate, sp)
+    S = _integrate((Vx * Vx, Vy * Vy, Vz * Vz, Vx * Vy, Vx * Vz, Vy * Vz), rho, truncate, w, sp)
     return _like(S, volume)
 
 
 def shape_structure_tensor_3d(volume, sigma: float, rho: float, truncate: float = 4.0, *, engine: str = "anatomix48",
-                              n_pcs: int = 16, engine_kwargs: dict | None = None, device: str = "cuda",
+                              n_pcs: int = 16, engine_kwargs: dict | None = None, spacing=None, device: str = "cuda",
                               dtype=torch.float32):
     """``S`` summed over the gradients of a feature engine's channels (``sum_c grad f_c grad f_c^T``, integrated at
     ``rho``), in the layout of :func:`structure_tensor_3d`. The engine needs its own context margin on the volume
-    (64 voxels for the anatomix engines)."""
+    (64 voxels for the anatomix engines). With anisotropic ``spacing`` the volume is resampled to the finest-axis
+    grid first (the network expects isotropic voxels) and ``S`` is resampled back onto the input grid."""
     from .features import make_engine
     from .pca import PCA
     v = _to_torch(volume, device, torch.float32)
+    sp = spacing_ratio(spacing)
+    if sp is not None:
+        shape_in = tuple(v.shape)
+        v = to_isotropic(v, sp)
     eng = make_engine(engine, **(engine_kwargs or {}))
     F = eng(v)
     if F.shape[0] > n_pcs:
@@ -131,6 +180,8 @@ def shape_structure_tensor_3d(volume, sigma: float, rho: float, truncate: float 
             prods[k] += (a * b).to(dtype)
     del F
     S = _integrate(prods, rho, truncate, None)
+    if sp is not None:
+        S = from_isotropic(S, shape_in)
     return _like(S, volume)
 
 
@@ -170,7 +221,7 @@ def eig_special_3d(S, full: bool = False, eigenvalue_order: Literal["desc", "asc
 
 def shapetensor(image, *, sigma: float = 1.0, rho: float = 16.0, truncate: float = 4.0, engine: str = "intensity",
                 excise: bool = True, excise_mask=None, fixels: bool = False, order: str = "xyz", n_pcs: int = 16,
-                engine_kwargs: dict | None = None, device: str = "cuda", **fixel_kwargs):
+                engine_kwargs: dict | None = None, spacing=None, device: str = "cuda", **fixel_kwargs):
     """The fibre direction field of ``image (Z, Y, X)`` in one call, as the caller's array kind.
 
     Returns ``vec (3, Z, Y, X)``: the unit fibre direction per voxel (axial), components in ``order`` (``"xyz"`` as
@@ -181,19 +232,20 @@ def shapetensor(image, *, sigma: float = 1.0, rho: float = 16.0, truncate: float
     ``"anatomix16"``, ``"anatomix48"``) whose channel gradients are summed instead. ``excise``: drop boundary
     gradients before integrating (the boundary-robust tensor; intensity engine only), with the excision threshold
     referred to the median over ``excise_mask (Z, Y, X)`` (a white-matter mask) when given. ``sigma`` / ``rho`` in
-    voxels.
+    voxels of the finest axis; ``spacing (dz, dy, dx)`` declares anisotropic voxels (e.g. ``(2.5, 1, 1)`` for
+    50 x 20 x 20 um), under which the filters are scaled per axis and the directions are physical.
     """
     if fixels:
-        dirs, _, _ = fixels_3d(image, sigma, rho, truncate, device=device, **fixel_kwargs)
+        dirs, _, _ = fixels_3d(image, sigma, rho, truncate, spacing=spacing, device=device, **fixel_kwargs)
         return dirs if order == "xyz" else _like(_to_torch(dirs, device).flip(1), image)
     if engine == "intensity":
         if excise:
-            S = excised_structure_tensor_3d(image, sigma, rho, truncate, mask=excise_mask, device=device)
+            S = excised_structure_tensor_3d(image, sigma, rho, truncate, mask=excise_mask, spacing=spacing, device=device)
         else:
-            S = structure_tensor_3d(image, sigma, rho, truncate, device=device)
+            S = structure_tensor_3d(image, sigma, rho, truncate, spacing=spacing, device=device)
     else:
         S = shape_structure_tensor_3d(image, sigma, rho, truncate, engine=engine, n_pcs=n_pcs,
-                                      engine_kwargs=engine_kwargs, device=device)
+                                      engine_kwargs=engine_kwargs, spacing=spacing, device=device)
     _, vec = eig_special_3d(S, device=device)
     if order == "zyx":
         vec = _like(_to_torch(vec, device).flip(0), image)
@@ -206,7 +258,8 @@ def shapetensor(image, *, sigma: float = 1.0, rho: float = 16.0, truncate: float
 
 def fixels_3d(volume, sigma: float, rho: float, truncate: float = 4.0, *, lmax: int = 8, reduce: int | None = None,
               csd_width_deg: float = 20.0, peak_rel: float = 0.5, min_sep_deg: float = 25.0, nmax: int = 3,
-              interface_gate: float | None = 3.0, sigma_coarse: float = 3.0, upsample: bool = True, device: str = "cuda"):
+              interface_gate: float | None = 3.0, sigma_coarse: float = 3.0, upsample: bool = True, spacing=None,
+              device: str = "cuda"):
     """Up to ``nmax`` axial directions with fractions per site from the CSD of the gradient-direction ODF.
 
     ``peak_rel`` is the peak threshold relative to the strongest: 0.5 gives <= 2% false second populations on
@@ -220,6 +273,10 @@ def fixels_3d(volume, sigma: float, rho: float, truncate: float = 4.0, *, lmax: 
     """
     from .odf import csd, peaks, ring_profile, zonal_kernel
     v = _to_torch(volume, device, torch.float32)
+    sp = spacing_ratio(spacing)
+    if sp is not None:                                   # the ODF is read on the isotropic grid; outputs come back nearest
+        shape_in = tuple(v.shape)
+        v = to_isotropic(v, sp)
     Z, Y, X = v.shape
     b = reduce or max(1, int(rho // 4))
     core = ((0, Z // b * b), (0, Y // b * b), (0, X // b * b))
@@ -254,6 +311,9 @@ def fixels_3d(volume, sigma: float, rho: float, truncate: float = 4.0, *, lmax: 
             dirs = torch.nn.functional.pad(dirs, (0, px[1], 0, py[1], 0, pz[1]))
             fracs = torch.nn.functional.pad(fracs, (0, px[1], 0, py[1], 0, pz[1]))
             npop = torch.nn.functional.pad(npop, (0, px[1], 0, py[1], 0, pz[1]))
+        if sp is not None:
+            dirs, fracs = from_isotropic(dirs, shape_in, "nearest"), from_isotropic(fracs, shape_in, "nearest")
+            npop = from_isotropic(npop, shape_in, "nearest")
     return _like(dirs, volume), _like(fracs, volume), _like(npop, volume)
 
 
