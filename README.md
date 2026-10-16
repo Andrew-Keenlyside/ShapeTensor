@@ -24,6 +24,12 @@ are the populations; and the excised tensor (fix A), which drops boundary gradie
 written for BRIDGE carries the single direction, the boundary strength and normal, a quality measure, and up to three
 fixels per site.
 
+<div align="center">
+
+<img src="images/pipeline_overview.png" alt="ShapeTensor pipeline overview" width="100%" />
+
+</div>
+
 **Validation.** Nine phantom families with twins at 20 µm, calibrated label-free to the real S-21-46 crop (noise
 spectrum, texture bands, intensity levels, orientation coherence), swept along a step-to-texture-ratio axis and
 scored by distance to the interface, with controls (the structure tensor at matched ρ, fix A, the no-network jet).
@@ -36,12 +42,7 @@ estimator; the anatomix layer-58 features sharpen it on tight crossings. Orienta
 its second encoder block, which a small phantom-trained head can read per voxel — but the output head removes it.
 Details: `docs/TCA_FIELD_REVIEW.md` (§11 for the verdict), `docs/TCA_FIELD_RESULTS.md`.
 
-<div align="center">
-
-<img src="figures/tca_field/graphical_abstract.png" alt="pipeline and validation overview" width="100%" />
-
-</div>
-
+The validation design and its verdict in one figure: `figures/tca_field/graphical_abstract.png`.
 How TCA reads several orientations out of shape-space data: `figures/tca_field/tca_multi_explainer.png`. Why the
 shape space cannot be clustered into fibre populations first: `figures/tca_field/shape_space_clusters.png`. Where
 orientation is encoded inside anatomix: `figures/tca_field/encoder_tuning.png`.
