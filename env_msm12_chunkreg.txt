@@ -1,0 +1,16 @@
+anatomix==0.1.0
+einops==0.8.2
+huggingface_hub==2.0.0
+matplotlib==3.11.2
+monai==1.5.2
+nibabel==5.4.2
+numpy==2.5.2
+omegaconf==2.3.1
+safetensors==0.8.0
+scikit-learn==1.9.1
+scipy==1.18.1
+tifffile==2026.9.20
+torch==2.5.1+cu124
+torchio==1.2.1
+torchvision==0.20.1+cu124
+zarr==3.4.0
