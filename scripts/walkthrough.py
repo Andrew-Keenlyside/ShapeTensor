@@ -325,7 +325,7 @@ def step6_7(B, O, gm_s, tis, d_ex):
 
 
 def step8(B, d_st, tis):
-    F = make_engine("anatomix48", nyquist="none", n_pcs=8)(B.v)
+    F = make_engine("anatomix48", nyquist="none", n_pcs=4)(B.v)          # 4 PCs: the channel-resolved K of a full phantom at 8 needs > 40 GB
     (z0, z1), _, (x0, x1) = B.core
     rgb = F[:3, z0:z1, B.y_draw, x0:x1].float().cpu().numpy()
     lo, hi = np.percentile(rgb, 1, axis=(1, 2)), np.percentile(rgb, 99, axis=(1, 2))
