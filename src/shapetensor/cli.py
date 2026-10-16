@@ -31,6 +31,13 @@ def main(argv=None):
     p.add_argument("--tex", default=None); p.add_argument("--rho-max", type=float, default=32.0); p.add_argument("--vox", type=float, default=0.02)
     r = sub.add_parser("run"); r.add_argument("--spec", required=True); r.add_argument("--only", choices=("caches", "single", "multi", "hybrid", "all"), default="all")
     q = sub.add_parser("report"); q.add_argument("--tag", default="main"); q.add_argument("--out", default=None)
+    v = sub.add_parser("volume", help="structure-tensor-compatible outputs for a whole zarr volume, chunked, on one GPU")
+    v.add_argument("src"); v.add_argument("dst"); v.add_argument("--level", default=None)
+    v.add_argument("--sigma", type=float, default=1.0); v.add_argument("--rho", type=float, default=16.0)
+    v.add_argument("--truncate", type=float, default=4.0); v.add_argument("--chunk", type=int, nargs=3, default=[256, 256, 256])
+    v.add_argument("--outputs", nargs="+", default=["S", "eig", "excised", "fixels"], choices=["S", "eig", "excised", "fixels"])
+    v.add_argument("--excise-factor", type=float, default=3.0); v.add_argument("--rank", type=int, default=0)
+    v.add_argument("--world", type=int, default=1); v.add_argument("--device", default="cuda")
     a = ap.parse_args(argv)
     if a.cmd == "stats":
         from .phantoms import stats
@@ -66,6 +73,10 @@ def main(argv=None):
     elif a.cmd == "report":
         from .validate import report
         report.write(a.tag, a.out)
+    elif a.cmd == "volume":
+        from .st import run_volume
+        run_volume(a.src, a.dst, sigma=a.sigma, rho=a.rho, truncate=a.truncate, chunk=tuple(a.chunk), outputs=tuple(a.outputs),
+                   excise_factor=a.excise_factor, level=a.level, rank=a.rank, world=a.world, device=a.device)
     return 0
 
 

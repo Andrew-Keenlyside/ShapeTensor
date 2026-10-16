@@ -1,5 +1,5 @@
 """The orientation field of a block: the package's product, computed densely on a coarse site grid and written as a
-zarr group a later BRIDGE reader can sample. Its design follows the validation (docs/TCA_FIELD_RESULTS.md):
+zarr group a downstream consumer can sample. Its design follows the validation (docs/TCA_FIELD_RESULTS.md):
 
 * the single direction is the **intensity structure tensor with gradient excision** (fix A: gradients whose coarse
   magnitude exceeds ``excise_factor`` x the block median are dropped and the integration renormalised), which removes
@@ -11,7 +11,7 @@ zarr group a later BRIDGE reader can sample. Its design follows the validation (
 * optionally a shape-engine TCA direction (``shape_engine``) for comparison; it is not the recommended source.
 
 Arrays on the site grid ``(nz, ny, nx)``, ``reduce`` voxels per site; vectors ``(3, nz, ny, nx)`` in (z, y, x) order,
-axial, BRIDGE's canonical sign:
+axial, canonical sign (largest |component| positive):
 ``dir_st``, ``dir`` (excised), ``gap_st``, ``gap`` (quality: (λ2−λ3)/λ2), ``cl``, ``n_cl``, ``gm``, ``excised_share``,
 ``dirs (3, 3, …)``, ``fracs (3, …)``, ``npop``, and with a shape engine ``dir_shape``, ``gap_shape``.
 """

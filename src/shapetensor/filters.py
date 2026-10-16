@@ -4,7 +4,7 @@ Every kernel is scipy's ``_gaussian_kernel1d(sigma, order, radius)`` with ``radi
 applied as scipy applies it (``correlate1d`` with the reversed kernel, i.e. a convolution) under ``mode='nearest'``
 (replicate padding). So ``gaussian(x, s, order=(0, 0, 1), truncate=t)`` equals
 ``scipy.ndimage.gaussian_filter(x, s, order=[0, 0, 1], mode='nearest', truncate=t)`` to float32 rounding, which is what
-BRIDGE's vertex stage computes (``bridge.stages._vertex_fields._structure_tensor``). Checked in tests/test_filters.py.
+the ``structure-tensor`` package computes. Checked in tests/test_filters.py.
 """
 from __future__ import annotations
 

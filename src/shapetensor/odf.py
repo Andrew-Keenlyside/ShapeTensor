@@ -140,48 +140,64 @@ def csd(coef: torch.Tensor, lmax: int, kernel: torch.Tensor, lam: float = 1.0, t
     return out
 
 
+_NB_CACHE = {}
+
+
+def _grid_neighbours(grid: int, nbr_deg: float, device):
+    """The hemisphere grid ``D (grid, 3)`` and each point's neighbours within ``nbr_deg`` (axially), as a padded
+    index table ``(grid, K)`` (padded with the point itself)."""
+    key = (grid, nbr_deg, str(device))
+    if key not in _NB_CACHE:
+        D = torch.as_tensor(hemisphere(grid), dtype=torch.float32, device=device)
+        adj = ((D @ D.T).abs() > math.cos(math.radians(nbr_deg)))
+        K = int(adj.sum(1).max())
+        idx = torch.arange(grid, device=device)[:, None].expand(grid, K).clone()
+        for i in range(grid):
+            nb = torch.nonzero(adj[i], as_tuple=False).squeeze(1)
+            idx[i, :nb.numel()] = nb
+        _NB_CACHE[key] = (D, idx)
+    return _NB_CACHE[key]
+
+
 def peaks(coef: torch.Tensor, lmax: int, nmax: int = 3, rel: float = 0.5, min_sep_deg: float = 25.0,
-          nbr_deg: float = 7.0, grid: int = 2000, floor: float = 0.0):
+          nbr_deg: float = 7.0, grid: int = 2000, floor: float = 0.0, n_cand: int = 8, chunk: int = 4096):
     """Local maxima of the ODF given by ``coef (N, ncoef)`` on a hemisphere grid: returns ``dirs (N, nmax, 3)``
     (zero rows where absent), ``amps (N, nmax)`` and ``count (N,)``. A peak must exceed ``rel`` x the site's maximum
     and the absolute ``floor``, be a maximum over its ``nbr_deg`` neighbourhood, and lie ``min_sep_deg`` from kept
-    peaks (axially)."""
+    peaks (axially). Fully vectorised on the device (sites in chunks of ``chunk``; the ``n_cand`` strongest
+    candidates per site are considered)."""
     dev = coef.device
-    D = torch.as_tensor(hemisphere(grid), dtype=torch.float32, device=dev)
+    D, nb = _grid_neighbours(grid, nbr_deg, dev)
     Y = real_sh(D, lmax)
-    O = coef @ Y.T                                                     # (N, grid)
-    O = O - O.min(1, keepdim=True).values
-    cosnb = math.cos(math.radians(nbr_deg))
-    adj = ((D @ D.T).abs() > cosnb)                                    # (grid, grid) incl. self
-    # a grid point is a local max if it is >= every neighbour
-    # (dense max over neighbours; grid 2000 -> 4e6 entries, fine)
-    nb_max = torch.full_like(O, -1.0)
-    for a in range(0, grid, 200):
-        m = adj[a:a + 200]                                             # (200, grid)
-        vals = torch.where(m[None], O[:, None, :], torch.full_like(O[:, None, :], -1.0))
-        nb_max[:, a:a + 200] = vals.max(2).values
-    is_max = (O >= nb_max - 1e-7)
-    mx = O.max(1, keepdim=True).values
-    cand = is_max & (O >= rel * mx) & (O > floor)
     N = coef.shape[0]
     dirs = torch.zeros((N, nmax, 3), device=dev)
     amps = torch.zeros((N, nmax), device=dev)
     count = torch.zeros((N,), dtype=torch.int64, device=dev)
     cos_sep = math.cos(math.radians(min_sep_deg))
-    order = torch.argsort(O * cand.float(), dim=1, descending=True)[:, :20]     # top candidates per site
-    Oc = torch.gather(O, 1, order)
-    Cc = torch.gather(cand, 1, order)
-    for n in range(N):
-        kept = []
-        for j in range(order.shape[1]):
-            if not bool(Cc[n, j]):
-                break
-            d = D[order[n, j]]
-            if all(float((d @ D[k]).abs()) < cos_sep for k in kept):
-                kept.append(int(order[n, j]))
-                dirs[n, len(kept) - 1] = d
-                amps[n, len(kept) - 1] = Oc[n, j]
-                if len(kept) == nmax:
-                    break
-        count[n] = len(kept)
+    ar = torch.arange(nmax, device=dev)
+    for a in range(0, N, chunk):
+        O = coef[a:a + chunk] @ Y.T                                    # (n, grid)
+        O = O - O.min(1, keepdim=True).values
+        nb_max = O[:, nb].max(2).values                                # (n, grid): max over each point's neighbourhood
+        mx = O.max(1, keepdim=True).values
+        cand = (O >= nb_max - 1e-7) & (O >= rel * mx) & (O > floor)
+        score = torch.where(cand, O, torch.full_like(O, -1.0))
+        top_v, top_i = score.topk(n_cand, dim=1)                       # (n, n_cand)
+        n = O.shape[0]
+        kept = torch.zeros((n, nmax, 3), device=dev)
+        kamp = torch.zeros((n, nmax), device=dev)
+        cnt = torch.zeros((n,), dtype=torch.int64, device=dev)
+        rows = torch.arange(n, device=dev)
+        for j in range(n_cand):
+            d = D[top_i[:, j]]                                         # (n, 3)
+            valid = (top_v[:, j] > 0) & (cnt < nmax)
+            dots = (kept * d[:, None, :]).sum(-1).abs()                # (n, nmax)
+            active = ar[None, :] < cnt[:, None]
+            sep_ok = ((dots < cos_sep) | ~active).all(1)
+            take = valid & sep_ok
+            slot = cnt.clamp(max=nmax - 1)
+            kept[rows[take], slot[take]] = d[take]
+            kamp[rows[take], slot[take]] = top_v[take, j]
+            cnt = cnt + take.long()
+        dirs[a:a + chunk], amps[a:a + chunk], count[a:a + chunk] = kept, kamp, cnt
     return dirs, amps, count

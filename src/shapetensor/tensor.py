@@ -1,7 +1,7 @@
 """The channel-resolved tensor ``K = G_rho * (g g^T)`` and the gradient-direction ODF, on a site grid.
 
 ``g`` is the vector of all channel gradients at a voxel, indexed ``c * 3 + i`` (channel, then axis in Z, Y, X order
-as BRIDGE stores vectors), so ``K`` is ``3C x 3C`` per site; summed over channels it is the familiar 3 x 3 structure
+as the consumer stores vectors), so ``K`` is ``3C x 3C`` per site; summed over channels it is the familiar 3 x 3 structure
 tensor, and with one channel it IS the structure tensor (tests/test_tensor.py checks that against scipy exactly).
 
 Products are formed at full resolution (where the texture lives), then block-averaged by ``reduce`` voxels in z and x

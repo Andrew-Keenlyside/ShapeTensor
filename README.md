@@ -65,13 +65,22 @@ src/shapetensor/
   readout/hybrid.py H1 blend / switch;  tensor.excision_weights(gate=...) is H2
   phantoms/         P1-P9 at any voxel size with twins and truth; stats.py measures real crops to set them
   validate/         suite.py (caches, read-outs, scores), score.py, report.py (REPORT.md + figures)
-  field.py          the field store a later BRIDGE reader would sample
-  cli.py            shapetensor stats | phantoms | run | report
+  st.py             structure-tensor-compatible volume API: structure_tensor_3d, eig_special_3d, excised and shape
+                    variants, fixels_3d, and run_volume (chunked zarr driver, one process per GPU)
+  field.py          the orientation-field store on a coarse site grid
+  cli.py            shapetensor stats | phantoms | run | report | volume
 ```
+
+Everything computes on the GPU in torch; `shapetensor.st` takes numpy, cupy or torch arrays and returns the caller's
+kind (cupy through DLPack), with the `structure-tensor` package's layout (`S = [xx, yy, zz, xy, xz, yz]`, `x` the last
+axis; `eig_special_3d` -> descending values and the smallest eigenvalue's vector in `(x, y, z)`), so its tensors can
+be substituted wherever that package's are consumed. `shapetensor volume SRC.zarr DST.zarr --rho 16 --rank r --world n`
+runs a whole volume chunk by chunk with halos on one GPU per process.
 
 Environment: the `shapetensors` conda env (torch 2.5.1, anatomix); the package is on its path through a `.pth`
 file (`src/`). Tests: `python tests/test_core.py` (CPU/GPU parity and recovery), `python tests/test_anatomix.py`
-(GPU). Data: `/home/andrew/bridge_wmcov/shapetensor/` (phantoms, caches, results, figures).
+(GPU), `python tests/test_st.py` (the volume API). Data root: `SHAPETENSOR_DATA` (default
+`/home/andrew/bridge_wmcov/shapetensor/`: phantoms, caches, results, figures).
 
 The work started inside BRIDGE, as the grey/white boundary-shell problem (`docs/BOUNDARY_PROBLEM.md`). It moved here
 on 2026-10-15 to be tested as an approach in its own right. Everything here is a **prototype**.

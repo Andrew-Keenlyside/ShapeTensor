@@ -1,5 +1,5 @@
 """Shared algebra on ``K``: packing, the channel-summed tensor, eigen read-outs, the Cholesky factor that turns a
-site's ``K`` into the small 3-way array CP works on, Westin's shape measures and BRIDGE's sign rule."""
+site's ``K`` into the small 3-way array CP works on, Westin's shape measures and the canonical sign rule."""
 from __future__ import annotations
 
 import numpy as np
@@ -55,7 +55,7 @@ def null_dir(M: torch.Tensor) -> torch.Tensor:
 
 
 def canonical_sign(v: torch.Tensor) -> torch.Tensor:
-    """BRIDGE's rule: the largest-|component| made positive; ties go to the earlier axis (z, y, x)."""
+    """Canonical sign: the largest-|component| made positive; ties go to the earlier axis (z, y, x)."""
     a0, a1, a2 = v[..., 0].abs(), v[..., 1].abs(), v[..., 2].abs()
     lead = torch.where((a0 >= a1) & (a0 >= a2), v[..., 0], torch.where(a1 >= a2, v[..., 1], v[..., 2]))
     return torch.where((lead < 0)[..., None], -v, v)

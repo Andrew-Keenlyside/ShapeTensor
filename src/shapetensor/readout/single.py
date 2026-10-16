@@ -1,6 +1,6 @@
 """Single-direction read-outs of ``K``.
 
-``eigen``: the smallest eigenvector of the channel-summed tensor (for one channel, BRIDGE's structure tensor).
+``eigen``: the smallest eigenvector of the channel-summed tensor (for one channel, the structure tensor).
 ``tca``: CP of the per-site array at rank R (default 3); the fibre is the null direction of the pieces' gradient-axis
 Gram ``sum_r lam_r^2 d_r d_r^T``. Nothing is dropped. The pieces also give the boundary candidate: the strongest
 piece's direction is the putative interface normal and its dominance (share of the strongest minus the second) a

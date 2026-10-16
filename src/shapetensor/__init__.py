@@ -8,4 +8,7 @@ Pipeline:  image block -> features (engine) -> channel-resolved tensor K on a si
 
 __version__ = "0.1.0"
 
-DATA_ROOT = "/home/andrew/bridge_wmcov/shapetensor"
+import os as _os
+
+#: where phantoms, caches, results and figures go (override with SHAPETENSOR_DATA)
+DATA_ROOT = _os.environ.get("SHAPETENSOR_DATA", "/home/andrew/bridge_wmcov/shapetensor")
