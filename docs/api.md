@@ -20,7 +20,7 @@ integration (intensity engine); `order` the component order.
 | `excised_structure_tensor_3d(volume, sigma, rho, truncate=4.0, *, factor=3.0, sigma_coarse=3.0, gate=None, mask=None, ...)` | `S` with boundary gradients excised and the integration renormalised |
 | `shape_structure_tensor_3d(volume, sigma, rho, truncate=4.0, *, engine, n_pcs=16, engine_kwargs, ...)` | `S` summed over a feature engine's channel gradients |
 | `eig_special_3d(S, full=False, eigenvalue_order="desc", *, device, chunk)` | `val (3, ...)`, `vec (3, ...)` the smallest eigenvalue's vector in (x, y, z); `(3, 3, ...)` with `full=True` |
-| `fixels_3d(volume, sigma, rho, truncate=4.0, *, lmax=8, reduce=None, csd_width_deg=20, peak_rel=0.3, min_sep_deg=25, nmax=3, upsample=True, device)` | `dirs (nmax, 3, ...)`, `fracs (nmax, ...)`, `npop (...)` |
+| `fixels_3d(volume, sigma, rho, truncate=4.0, *, lmax=8, reduce=None, csd_width_deg=20, peak_rel=0.5, min_sep_deg=25, nmax=3, interface_gate=3.0, sigma_coarse=3.0, upsample=True, device)` | `dirs (nmax, 3, ...)`, `fracs (nmax, ...)`, `npop (...)` |
 | `run_volume(src, dst, *, sigma, rho, truncate, chunk, outputs, excise_factor, fixel_kwargs, level, rank, world, device, log)` | a chunked driver over a zarr volume with halos; writes `S`, `S_excised`, `val`, `vec`, `vec_excised`, `dirs`, `fracs`, `npop` |
 
 Inputs may be numpy, cupy or torch; outputs come back as the input's kind.

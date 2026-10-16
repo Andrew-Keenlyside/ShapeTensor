@@ -400,3 +400,12 @@ real crop's texture level the multi-population read-out is, with a compliant thr
 11–18° directions; the 60° result holds at full texture only. The scorecard's "no false populations" row is met by
 the intensity ODF at every texture level with these thresholds, and by anatomix48 at full texture; "crossings at
 60°" is met by anatomix48 at full texture with a compliant threshold (rel 0.5–0.6, ρ 32: 100%).
+
+**Addendum — no "N = 0" from the fODF.** On isotropic (correlated) noise the CSD read-out reports N ≥ 1 at 100% and
+N ≥ 2 at 66–74% of sites at rel 0.5, and the strongest peak sits at 11–16× the fODF's isotropic mean — the same range
+as a real fibre (16× at full texture, 7–10× at half). Deconvolution turns noise into peaks, so no amplitude floor on
+the fODF can tell "no population" from "one population"; the N = 0 verdict (grey matter, CSF, isotropic tissue) has
+to come from the tensor's anisotropy — the orientation gap (λ2−λ3)/λ2 and the planar measure — applied before the
+fixels are read. `fixels_3d` now carries the interface exclusion (`interface_gate`, 3× the median coarse gradient,
+the same rule as the excision) and the dispersed-tissue threshold (`peak_rel` 0.5) as defaults; the anisotropy floor
+is the caller's gate on the field's `gap`.

@@ -205,12 +205,18 @@ def shapetensor(image, *, sigma: float = 1.0, rho: float = 16.0, truncate: float
 # ---------------------------------------------------------------------------------------------------------------
 
 def fixels_3d(volume, sigma: float, rho: float, truncate: float = 4.0, *, lmax: int = 8, reduce: int | None = None,
-              csd_width_deg: float = 20.0, peak_rel: float = 0.3, min_sep_deg: float = 25.0, nmax: int = 3,
-              upsample: bool = True, device: str = "cuda"):
+              csd_width_deg: float = 20.0, peak_rel: float = 0.5, min_sep_deg: float = 25.0, nmax: int = 3,
+              interface_gate: float | None = 3.0, sigma_coarse: float = 3.0, upsample: bool = True, device: str = "cuda"):
     """Up to ``nmax`` axial directions with fractions per site from the CSD of the gradient-direction ODF.
 
-    Returns ``dirs (nmax, 3, ...)`` in ``(x, y, z)`` component order (zero where absent), ``fracs (nmax, ...)`` and
-    ``npop (...)``, on the ``reduce``-voxel site grid (default ``rho / 4``) or nearest-upsampled to the volume grid.
+    ``peak_rel`` is the peak threshold relative to the strongest: 0.5 gives <= 2% false second populations on
+    dispersed single-population texture at the calibrated (full) texture level while keeping a 60 deg crossing; at
+    half that texture 0.7 (rho 16) / 0.5 (rho 32) are needed and only 90 deg crossings remain detectable (results
+    log §14). ``interface_gate``: sites whose coarse (``sigma_coarse``) gradient magnitude exceeds this multiple of
+    the site median are reported with no population (a contrast interface deconvolves to a ring of directions);
+    None keeps them. Returns ``dirs (nmax, 3, ...)`` in ``(x, y, z)`` component order (zero where absent),
+    ``fracs (nmax, ...)`` and ``npop (...)``, on the ``reduce``-voxel site grid (default ``rho / 4``) or
+    nearest-upsampled to the volume grid.
     """
     from .odf import csd, peaks, ring_profile, zonal_kernel
     v = _to_torch(volume, device, torch.float32)
@@ -228,6 +234,14 @@ def fixels_3d(volume, sigma: float, rho: float, truncate: float = 4.0, *, lmax: 
     dirs = d.reshape(shp + (nmax, 3)).permute(3, 4, 0, 1, 2).flip(1).contiguous()       # (nmax, (x,y,z), nz, ny, nx)
     fracs = frac.reshape(shp + (nmax,)).permute(3, 0, 1, 2).contiguous()
     npop = cnt.reshape(shp)
+    if interface_gate is not None:
+        gm = sum(gaussian(v, sigma_coarse, order=o, truncate=truncate) ** 2 for o in ((1, 0, 0), (0, 1, 0), (0, 0, 1))).sqrt()
+        (z0, z1), (y0, y1), (x0, x1) = core
+        gm_s = torch.nn.functional.avg_pool3d(gm[None, None, z0:z1, y0:y1, x0:x1], b)[0, 0] if b > 1 else gm[z0:z1, y0:y1, x0:x1]
+        at_interface = gm_s > interface_gate * gm_s.median()
+        dirs[:, :, at_interface] = 0.0
+        fracs[:, at_interface] = 0.0
+        npop[at_interface] = 0
     if upsample and b > 1:
         import torch.nn.functional as Fn
         up = lambda t: Fn.interpolate(t.reshape(-1, 1, *shp).float(), scale_factor=(b, b, b), mode="nearest")[:, 0]
