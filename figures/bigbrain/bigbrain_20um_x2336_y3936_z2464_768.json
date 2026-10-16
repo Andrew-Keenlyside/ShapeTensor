@@ -1,0 +1,34 @@
+{
+ "source": "https://neuroglancer.humanbrainproject.eu/precomputed/BigBrainRelease.2015/8bit",
+ "scale": "20um",
+ "voxel_um": [
+  21.17,
+  20.0,
+  21.17
+ ],
+ "origin_vox_xyz": [
+  2336,
+  3936,
+  2464
+ ],
+ "shape_zyx": [
+  768,
+  768,
+  768
+ ],
+ "array_order": "zyx",
+ "percentiles_1_5_25_50_75_95_99": [
+  106.0,
+  144.0,
+  181.0,
+  204.0,
+  222.0,
+  255.0,
+  255.0
+ ],
+ "hist_peaks": [
+  209,
+  252
+ ],
+ "share_ge_250": 0.19286614877206307
+}

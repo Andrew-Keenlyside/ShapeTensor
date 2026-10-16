@@ -135,7 +135,7 @@ def shape_structure_tensor_3d(volume, sigma: float, rho: float, truncate: float 
 
 
 def eig_special_3d(S, full: bool = False, eigenvalue_order: Literal["desc", "asc"] = "desc", *, device: str = "cuda",
-                   chunk: int = 1 << 22):
+                   chunk: int = 1 << 20):       # cusolver's batched Jacobi solver rejects batches of ~2M and above
     """Eigensolution of the symmetric 3 x 3 tensors in ``S (6, ...)``, as the ``structure-tensor`` package returns it:
     ``val (3, ...)`` (descending unless ``eigenvalue_order='asc'``) and ``vec (3, ...)`` = the unit eigenvector of the
     smallest eigenvalue in ``(x, y, z)`` component order, or with ``full=True`` ``(3, 3, ...)`` with ``vec[i]`` the
