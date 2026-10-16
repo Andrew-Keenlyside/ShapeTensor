@@ -17,6 +17,9 @@ nav:
   - Theory of the shape tensor: theory.md
   - Phantoms and validation: phantoms.md
   - Brain image data: brain_data.md
+  - BigBrain: bigbrain.md
+  - Non-isotropic data: anisotropy.md
+  - Walkthrough, step by step: walkthrough.md
   - Results: results.md
   - API: api.md
   - Research notes:
