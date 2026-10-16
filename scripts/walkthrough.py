@@ -46,11 +46,16 @@ class Block:
         if a.source.startswith("phantom:"):
             pid = a.source.split(":", 1)[1]
             img, tr, meta, grid = make.load(pid, a.seed)
-            self.name = f"phantom_{pid}"; self.v = torch.as_tensor(img, device="cuda").float(); self.truth = tr; self.grid = grid
+            self.name = f"phantom_{pid}"; self.truth = tr; self.grid = grid
+            # a y-slab around the scoring row (the truth is a function of z, x only) and sites every 4 voxels: a full
+            # phantom's dense site grid at 2 voxels does not fit beside the network
+            self.b = 4
+            ys0 = max(0, grid.y_mid - 96); ys1 = min(img.shape[1], grid.y_mid + 96)
+            self.v = torch.as_tensor(np.ascontiguousarray(img[:, ys0:ys1]), device="cuda").float()
             (z0, z1), (x0, x1) = grid.core_zx
             half = 64
-            self.core = ((z0, z1), (grid.y_mid - half, grid.y_mid + half), (x0, x1))
-            self.y_draw = grid.y_mid
+            self.core = ((z0, z1), (grid.y_mid - ys0 - half, grid.y_mid - ys0 + half), (x0, x1))
+            self.y_draw = grid.y_mid - ys0
             self.tissue_thr = None
             self.tex = "t0.5" if "t0.5" in pid else ("t0.25" if "t0.25" in pid else "t1")
         else:

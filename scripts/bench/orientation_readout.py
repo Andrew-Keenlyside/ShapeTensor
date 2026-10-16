@@ -50,7 +50,7 @@ def build(angles, seed, tex, g):
 
 
 def unit(a):
-    return torch.tensor([math.cos(math.radians(a)), 0.0, math.sin(math.radians(a))], device="cuda")
+    return torch.as_tensor(np.asarray(make._dir(a), np.float32), device="cuda")             # the phantom's own convention (z, y, x)
 
 
 def angle(d, t):
@@ -115,7 +115,7 @@ def main():
         # --- the crossings
         for cname, (a1, a2, f1) in CROSS.items():
             v, fib, masks = build([(a1, f1), (a2, 1 - f1)], 300, tex, g)
-            F = cached_features(eng, v); o, conf = ro.predict(F); G = gradients(v[None], SIGMA, TR)
+            F = cached_features(eng, v); o, conf = ro.predict(F); G = gradients(v[None], SIGMA, TR, out_dtype=torch.float32)
             t1, t2 = unit(a1), unit(a2)
             m1, m2 = masks[0] & ~masks[1], masks[1] & ~masks[0]
             e1 = angle(o.permute(1, 2, 3, 0), t1); e2 = angle(o.permute(1, 2, 3, 0), t2)

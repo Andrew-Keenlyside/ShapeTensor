@@ -55,7 +55,7 @@ def build(angles, seed, tex, g):
 
 
 def unit(a):
-    return np.array([math.cos(math.radians(a)), 0.0, math.sin(math.radians(a))])           # (z, y, x) in-plane
+    return np.asarray(make._dir(a), np.float32)                                              # the phantom's own convention (z, y, x)
 
 
 def angle(d, t):
@@ -81,7 +81,7 @@ def main():
             for k, a in enumerate(ANG):
                 img, masks = build([(a, 1.0)], 100 + k, tex, g)
                 v = torch.as_tensor(img, device="cuda").float()
-                F = cached_features(eng, v); G = gradients(v[None], SIGMA, TR)
+                F = cached_features(eng, v); G = gradients(v[None], SIGMA, TR, out_dtype=torch.float32)
                 s = populations.separate_sites(F, G, centers, rho)
                 ratios.append((s["lam"][:, 1] / s["lam"][:, 0].clamp_min(1e-12)).cpu().numpy())
                 errs.append(angle(s["dirs"][:, 0].cpu().numpy(), unit(a)))
@@ -94,7 +94,7 @@ def main():
             for cname, (a1, a2, f1) in CROSS.items():
                 img, masks = build([(a1, f1), (a2, 1 - f1)], 300, tex, g)
                 v = torch.as_tensor(img, device="cuda").float()
-                F = cached_features(eng, v); G = gradients(v[None], SIGMA, TR)
+                F = cached_features(eng, v); G = gradients(v[None], SIGMA, TR, out_dtype=torch.float32)
                 t1, t2 = unit(a1), unit(a2)
                 out = {}
                 # signatures
@@ -106,7 +106,7 @@ def main():
                 out["signatures"] = {"found2_share": round(float((n >= 2).mean()), 3), "both_within_15_share": round(float(((n >= 2) & (both <= 15)).mean()), 3),
                                      "dir_err_median_best_pair": round(float(np.median(both)), 1), "first_dir_err_to_nearest": round(float(np.median(np.minimum(e11, e12))), 1)}
                 # TCA on the channel-resolved tensor at the same sites
-                b = max(1, int(rho // 4)); K, sites = k_sites(gradients(F.float(), SIGMA, TR), rho, TR, b, [y_mid], ((40, Z - 40), (40, X - 40)))
+                b = max(1, int(rho // 4)); K, sites = k_sites(gradients(F.float(), SIGMA, TR, out_dtype=torch.float32), rho, TR, b, [y_mid], ((40, Z - 40), (40, X - 40)))
                 step = max(1, STRIDE // b)
                 Kp = K[0, ::step, ::step].reshape(-1, K.shape[-1]); Kt = common.unpack(Kp, common.nc3_from_packed(Kp.shape[-1]))
                 for mname, fn in (("tca_overcomplete", lambda: multi.overcomplete_group(Kt)), ("tca_bic", lambda: multi.n_by_bic(Kt))):
