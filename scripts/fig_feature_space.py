@@ -107,9 +107,11 @@ def main():
     crossings = {}
     for a1, a2 in CROSS:
         img, mask = build([(a1, 0.5), (a2, 0.5)], 300 + int(a2 - a1), tex, g)
-        _, m1 = build([(a1, 1.0)], 300 + int(a2 - a1), tex, g); _, m2 = build([(a2, 1.0)], 300 + int(a2 - a1), tex, g)
+        # population 1 is drawn first in both renders (same seed), so its render alone is its mask; population 2's
+        # voxels are the combined render's fibre voxels outside it (a fresh draw of population 2 would land elsewhere)
+        _, m1 = build([(a1, 0.5)], 300 + int(a2 - a1), tex, g)
         F = net_feats(net, img, LAYERS, a.smooth); F["jet (27 ch)"] = jet_feats(img, a.smooth)
-        crossings[int(a2 - a1)] = {"img": img, "mask": mask, "m1": m1 & ~m2, "m2": m2 & ~m1, "F": F, "angles": (a1, a2)}
+        crossings[int(a2 - a1)] = {"img": img, "mask": mask, "m1": m1, "m2": mask & ~m1, "F": F, "angles": (a1, a2)}
         print(f"[{time.time() - t0:4.0f}s] crossing {a2 - a1:.0f}", flush=True)
     # ---- analyses per layer
     from sklearn.decomposition import PCA
