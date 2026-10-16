@@ -524,11 +524,11 @@ the crossings.
 
 | shape space | probe ±15° | silhouette | tuning depth (median; channels > 0.3) | 60° crossing: within 15° of either truth | pop-1 voxels → 30° / pop-2 → 90° | 90° crossing: either / pop-1 / pop-2 |
 |---|---|---|---|---|---|---|
-| encoder 1 (layer 8, 16 ch) | 51% | −0.05 | 0.33; 10 / 16 | 72% | 39 / 42% | 55% / 37 / 28% |
-| **encoder 2 (layer 15, 32 ch)** | **82%** | −0.06 | **0.80; 29 / 32** | **82%** | **44 / 47%** | 74% / 47 / 62% |
-| layer 58 (48 ch) | 75% | −0.03 | 0.56; 38 / 48 | 32% | 11 / 26% | 59% / 29 / 40% |
-| output (16 ch) | 67% | −0.04 | 0.35; 11 / 16 | 23% | 14 / 16% | 48% / 13 / 55% |
-| jet (27 ch, no network) | 64% | −0.02 | 0.09; 0 / 27 | 70% | 38 / 54% | 75% / 52 / 57% |
+| encoder 1 (layer 8, 16 ch) | 51% | −0.05 | 0.33; 10 / 16 | 74% | 60 / 50% | 58% / 47 / 41% |
+| **encoder 2 (layer 15, 32 ch)** | **82%** | −0.06 | **0.80; 29 / 32** | **80%** | **63 / 58%** | 72% / 55 / 66% |
+| layer 58 (48 ch) | 75% | −0.03 | 0.56; 38 / 48 | 32% | 17 / 30% | 60% / 35 / 47% |
+| output (16 ch) | 67% | −0.04 | 0.35; 11 / 16 | 23% | 22 / 12% | 48% / 14 / 58% |
+| jet (27 ch, no network) | 64% | −0.02 | 0.09; 0 / 27 | 73% | 65 / 62% | 75% / 54 / 73% |
 
 - **The space is organised by orientation as a continuum, not as clusters.** The deep layers' first two
   principal components run through the angles in order (a hue gradient across the cloud), and a linear readout of
@@ -537,8 +537,8 @@ the crossings.
   dimensions; k-means in the full space found texture phase (§7) for this reason.
 - **The division works per fascicle in the shallow, orientation-selective spaces and fails in the deep ones.** On
   the 60° crossing the encoder-2 probe colours each fascicle by its own orientation (two peaks at ~30° and ~75–90°;
-  82% of voxels within 15° of a truth; 44% / 47% of each population's voxels assigned to it within ±15°), and the
-  jet does nearly as well (70%); layer 58 and the output assign nearly every voxel to ~60°, the bisector — their
+  80% of voxels within 15° of a truth; 63% / 58% of each population's voxels assigned to it within ±15°), and the
+  jet does nearly as well (73%; 65 / 62%); layer 58 and the output assign nearly every voxel to ~60°, the bisector — their
   receptive fields average the two populations before anything can separate them.
 - So the separation stage has to run at the **fascicle scale** (a few voxels) in **encoder block 2** (or the
   jet), before the ρ-window integration; the deep features are the wrong space for it, independently of the

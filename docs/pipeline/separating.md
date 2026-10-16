@@ -36,11 +36,11 @@ another, and the same readout applied per voxel to a 60° crossing:
 
 | shape space | orientation readable per voxel (±15°) | 60° crossing: voxels within 15° of either truth | each population's voxels assigned to it |
 |---|---|---|---|
-| encoder 1 | 51% | 72% | 39 / 42% |
-| **encoder 2** | **82%** | **82%** | **44 / 47%** |
-| layer 58 (`anatomix48`) | 75% | 32% | 11 / 26% |
-| output (`anatomix16`) | 67% | 23% | 14 / 16% |
-| jet (no network) | 64% | 70% | 38 / 54% |
+| encoder 1 | 51% | 74% | 60 / 50% |
+| **encoder 2** | **82%** | **80%** | **63 / 58%** |
+| layer 58 (`anatomix48`) | 75% | 32% | 17 / 30% |
+| output (`anatomix16`) | 67% | 23% | 22 / 12% |
+| jet (no network) | 64% | 73% | 65 / 62% |
 
 ![the shape space by orientation](../img/feature_space_embedding.png)
 ![the readout per voxel on the crossing](../img/feature_space_crossing.png)
