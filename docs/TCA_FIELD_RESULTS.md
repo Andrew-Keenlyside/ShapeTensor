@@ -574,3 +574,40 @@ reads like the fibre-rich stain alone, slightly diluted; concatenating the shape
 the joint shape read-out at the interface (6 → 24° at ρ 10) while the crossing keeps its resolution (46 → 51%); TCA on a stacked K is
 worse than the stacked tensor (the CP picks the shared boundary piece). The merged field is as good as the best
 stain, not better — stain selection, or per-stain weights, belongs in the merge stage.
+
+## 20. Stage 2, round 1: dividing the shape space on the crossings (`separate_shape_space.py`, `orientation_readout.py`; small blocks, seed 0)
+
+Three label-free divisions of a window's voxels, the truth split as the ceiling. Crossings at 90 / 60 / 45° (1:1)
+and 60° at 4:1; "found 2 / both directions within 15°" over the windows; the ceiling column is a tensor per
+population from the *true* voxel split.
+
+| space, ρ | signatures (principal-signature memberships) | TCA over-complete | TCA BIC | **truth-split ceiling** (both ≤ 15° · error) |
+|---|---|---|---|---|
+| enc2, 10 — 90 / 60 / 45 / 4:1 | 0 / 0 / 0 / 0% | 100 / 59, 100 / 13, 100 / 11, 74 / 0% | 0 | 100% · 0.8 — 29% · 11.4 — 38% · 11.1 — 0% · 24.5 |
+| enc2, 16 | 0% | 100 / 48, 100 / 4, 100 / 0, 76 / 0% | 0 | same |
+| layer 58, 10 | 0% | 100 / 53, 100 / 12, 96 / 8, 74 / 3% | 0 | same |
+| layer 58, 16 | 0% | 100 / 67, 100 / 25, 99 / 5, 61 / 0% | 0 | same |
+
+- **Signatures fail as predicted by §18**: the principal variance of a window's channel-energy patterns is texture
+  phase, so the second signature never clears the single-fibre null (N = 1 everywhere) and the first signature's
+  direction is 23–75° off. The split must target the orientation axis, not the principal one.
+- **TCA over-complete** finds two populations everywhere but the directions are right in 48–67% of windows at 90°
+  and 4–25% at 60°; BIC never selects two (as in §6).
+- **The ceiling itself is low**: with the true voxel split, a membership-weighted intensity tensor per population
+  gives 11° errors at 60° (both within 15° in only 29–43% of windows) and 24° at 4:1, because the σ = 1 gradients
+  of a voxel in one fascicle already mix the neighbouring fascicle of the other population. A tensor per population
+  from intensity gradients is bounded by fascicle interdigitation at this density; the per-population direction
+  has to come from the shape-space orientations themselves.
+
+**The self-calibrated orientation readout** (ridge map from encoder-2 features to d dᵀ; teacher: the excised tensor
+at ρ 8 on confident single-fibre voxels, 2.1° accurate; no labels): fit R² 0.65; per-voxel orientation on held-out
+single fibres **10.6° median, 64% within 15°** (the label-trained probe of §18: 82%); on the crossings, voxels within
+15° of either truth 50–60% (each population's voxels assigned to it 36–50% / 27–31%); window modes over-split
+(N = 3 in 95–100% of windows with a 15° kernel and the single-fibre null), both modes within 15° at 58% (90°) and
+0% (60°), mode directions 20–47° off. Layer 58: R² 0.24, 24° median per voxel; the jet: R² 0.47, 15.9°, 48%.
+
+So after round 1: the orientation-carrying space is confirmed (encoder 2 > jet > layer 58), the division has to be
+done on per-voxel orientations rather than on principal signatures or on gradient tensors, and the two things to
+improve are the per-voxel readout's accuracy (a nonlinear map; the linear one leaves the cos²-type tuning on the
+table) and the mode finder's width and null (over-splitting). Round 2 runs both (`OrientationReadoutMLP`, kernel
+25°, a 15% mass floor per mode).
