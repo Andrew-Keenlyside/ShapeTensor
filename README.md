@@ -65,8 +65,10 @@ three fixels per site. `figures/tca_field/graphical_abstract.png` shows the vali
 
 - The structure tensor's boundary failure is a step-to-texture-ratio effect: at the real crop's texture level it is
   41 / 13 / 7° (ρ 8 / 16 / 32 voxels) next to a 40-level step, against 3–6° in clear tissue.
-- Shape-space TCA does not rescue it at this resolution; **gradient excision does** (7.9 / 2.7 / 1.8° where the plain
-  tensor is 60 / 50 / 37°), with the coarse gradient magnitude as the boundary detector.
+- Shape-space TCA does not rescue it at this resolution; **gradient excision does** (5.4 / 2.9 / 2.1° at the step,
+  5.2 / 2.5 / 1.9° at the gyrus with the `cl` gate, 1.3° at a vessel), with the coarse gradient magnitude as the
+  boundary detector and nothing lost in clear tissue; the gyrus needs the gate (or a white-matter reference median),
+  because the ungated threshold is too low when most of the window is smooth grey matter.
 - For several populations, **CSD of the gradient-direction ODF** is the rank-free estimator; the anatomix layer-58
   features sharpen it on tight crossings (60° at 100% both within 15°).
 - Orientation is encoded in anatomix's *encoder* (block 2: selectivity up to 0.83), not its output; a small

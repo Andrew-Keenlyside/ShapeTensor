@@ -184,3 +184,55 @@ the engine stays a configuration choice and the intensity ODF is the no-network 
 48-channel features earn their place (60° at 100%, 45° at 61%, against 90°-only for the intensity ODF); at the
 realistic texture level every engine finds the 60° crossing but with 11–18° errors, and the anatomix48 advantage is
 gone (its threshold has to rise to 0.4–0.5 to stay null-safe). SH order 12 is the follow-up for 45° and below.
+
+## 8. The full suite complete (tag `main`, 18:25; `scripts/bench/REPORT_main.md`, `SCORECARD_main.md`)
+
+Every family at every texture level, two seeds, the eight arms of `report.ARMS` including the two excision arms
+(`excise_all` ungated, `excise_cl` gated by the null-calibrated `cl`). Median angle within 0.1 mm, ρ 8 / 16 / 32,
+seed mean:
+
+| phantom | plain tensor | excision, ungated | excision, `cl`-gated | clear tissue (plain) |
+|---|---|---|---|---|
+| P3-40-t0.5 | 41 / 13 / 7 | **5.4 / 2.9 / 2.1** | 27 / 9.4 / 6.1 | 5.9 / 2.8 / 2.1 |
+| P3-40-t0.25 | 58 / 53 / 42 | **11.9 / 5.5 / 3.1** | 12.1 / 5.5 / 3.5 | 14 / 5 / 3 |
+| P3-40-t0.1 | 74 / 72 / 60 | 62 / 62 / 53 | 49 / 31 / 9.7 | — |
+| P1-t0.5 (gyrus) | 34.5 / 16 / 5.0 | 37 / 18 / 9.0 | **5.2 / 2.5 / 1.9** | 3.3 / 1.9 / 1.3 |
+| P1-t0.25 | 68 / 65 / 13 | 64 / 57 / 53 | **15 / 6.6 / 2.7** | 8.9 / 3.3 / 1.9 |
+| P2-t0.5 (U-fibre band 0.25–0.5 mm) | 2.3 / 1.3 / 2.5 | 2.3 / 1.5 / 2.9 | 2.8 / 1.7 / 2.4 | — |
+| P6 (vessel, 2 radii) | 10.7 / 4.7 / 1.5 | 10.6 / 4.7 / 1.5 | 7.0 / 3.2 / 1.3 | — |
+| P6-t0.5 | 24.7 / 11.8 / 5.3 | 23.8 / 12.0 / 5.5 | 8.2 / 3.3 / **1.3** | — |
+| P7-t0.25 (slab face) | 14.8 / 5.8 / 2.6 | 13.7 / 5.8 / 2.8 | 14.5 / 5.8 / 2.9 | — |
+
+Two things the interim pass could not show:
+
+- **The ungated excision fails at the gyrus** (P1: 37 / 18 / 9 against 34.5 / 16 / 5 plain) and at the vessel, while
+  the `cl`-gated form removes the shell at every texture level (5.2 / 2.5 / 1.9; 15 / 6.6 / 2.7 at quarter texture).
+  The cause is the reference: the ungated threshold is 3× the median coarse-gradient magnitude over the *block*, and
+  at the gyrus most of the block is smooth grey matter and CSF, so the median is small, the threshold low, and ordinary
+  white-matter texture is excised. On the slab, where the block is all textured white matter, the ungated threshold is
+  right and the gate misses it at ρ 8. The fix is not the gate but the reference: a median over white matter (the
+  pipeline's mask) — tested post hoc in `excision_variants.py` (§9).
+- **P3-40-t0.1** (a tenth of the real texture) is beyond both excision forms at ρ ≤ 16; the step-to-texture ratio
+  there is ~4× the real crop's, and ρ 32 with the gated form (9.7°) is the only usable setting.
+
+The scorecard (`src/shapetensor/validate/scorecard.py`, worst phantom per claim, seed mean of per-seed medians):
+
+| claim (threshold) | pass / arms | best arm |
+|---|---|---|
+| interface fixed (≤ 10° within 0.1 mm; P3-40-t0.25, P3-40-t0.5, P3-15-t0.25) | 6 / 84 | excise_all ρ 32 **3.68°**, ρ 16 7.59°; excise_cl ρ 32 6.1°, ρ 16 9.4°; jet eigen ρ 32 7.6°, ρ 16 9.2° |
+| nothing lost in clear tissue (≤ plain + 1°, > 2 mm; P3-40*, P1*) | 47 / 84 | every excision and hybrid arm (3.1° vs 3.1°) |
+| U-fibres kept (≤ 10°, band 0.25–0.5 mm; P2*) | 77 / 84 | 1.3–3° |
+| vessels (≤ 15° within 2 radii; P6*) | 52 / 84 | excise_all ρ 32 1.33° |
+| crossings 60° (both ≤ 15° at ≥ 90%) | 2 / 60 | anatomix48 csd ρ 32 **1.00**, ρ 16 0.93 |
+| crossings 45° | 0 / 60 | anatomix48 csd ρ 32 0.61 |
+| no false populations (≤ 2%) | 27 / 60 | null-calibrated CSD |
+| fractions 4:1 (≤ 0.1) | met where two are found | 0.04 |
+| boundary detector (PR-AUC ≥ 0.9; P3-40*) | 1 / 60 | gm ρ 32 0.90 (ρ 16: 0.85–0.96 by texture) |
+
+The jet eigen read-out passes the interface claim at ρ 32 by being *flat* (7–8° everywhere, interface and clear
+tissue alike): it does not see the step, and does not see the fibre well either. The "no shape-space read-out passes"
+statement of the review stands for the anatomix engines.
+
+Glyph figures for ten phantoms (truth, five arms, CSD fixels, sticks coloured by error) are in
+`figures/tca_field/glyphs/` (`scripts/fig_glyphs.py --tag main --rho 16 --seed 0`); the gyrus one is on the docs
+results page.

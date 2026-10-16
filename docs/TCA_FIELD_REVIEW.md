@@ -424,9 +424,14 @@ extraction of §5 does not come from TCA either.
 
 **What works instead.**
 1. *Single direction:* the intensity tensor with **gradient excision** (fix A: drop gradients whose coarse magnitude
-   exceeds 3× the median, renormalise the integration): 7.9 / 2.7 / 1.8° at the interface where the plain tensor is
-   60 / 50 / 37°, at zero cost in clear tissue, excising 0–1% of voxels. Where there is no texture signal to recover
-   (a tenth of the texture at ρ 8) nothing helps but a larger window.
+   exceeds 3× the median, renormalise the integration): 5.4 / 2.9 / 2.1° at the step (half texture) and
+   11.9 / 5.5 / 3.1° (quarter) where the plain tensor is 41 / 13 / 7° and 58 / 53 / 42°, at zero cost in clear
+   tissue, excising 0–1% of voxels; 1.3° at a vessel. The full suite added one condition: the reference median must
+   be taken over *white matter*, or the excision gated by the null-calibrated `cl` — with the block median the
+   threshold is too low at a gyrus (most of the window is smooth grey matter and CSF) and the ungated form harms
+   there (37 / 18 / 9°), while the gated form clears the shell (5.2 / 2.5 / 1.9°; 15 / 6.6 / 2.7° at quarter
+   texture). Where there is no texture signal to recover (a tenth of the texture at ρ ≤ 16) nothing helps but a
+   larger window.
 2. *Boundary field:* the **coarse gradient magnitude** is the boundary detector (PR-AUC 0.85–0.96 at ρ 16 at every
    texture level); Westin's **cl** of the intensity tensor fires only when the step dominates the window, which is
    exactly when the orientation is at risk, so it is the right gate / reliability flag; the orientation gap
