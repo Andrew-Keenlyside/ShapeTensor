@@ -72,6 +72,8 @@ three fixels per site. `figures/tca_field/graphical_abstract.png` shows the vali
   features sharpen it on tight crossings (60° at 100% both within 15°).
 - Orientation is encoded in anatomix's *encoder* (block 2: selectivity up to 0.83), not its output; a small
   phantom-trained head reads it per voxel at ±15–20°.
+- Speed (RTX A6000, ρ 16): tensor + eigen 11.8 Mvoxel/s, 25–30× the `structure-tensor` package on one CPU; the
+  excision adds 6%; fixels at every voxel are 29× the tensor and belong on a site grid.
 
 Details and every number: `docs/TCA_FIELD_REVIEW.md` (§11 for the verdict), `docs/TCA_FIELD_RESULTS.md`; the
 explainer figures `figures/tca_field/tca_multi_explainer.png`, `shape_space_clusters.png`, `encoder_tuning.png`.

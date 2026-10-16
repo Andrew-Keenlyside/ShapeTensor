@@ -78,3 +78,33 @@ samples an orientation field at vertices, `shapetensor.field.compute_field` writ
 - Real-tissue outputs are consistency demonstrations: no ground truth exists at this scale, and every accuracy claim
   in these pages rests on the phantoms. `scripts/demo_real_crop.py` renders the field on the 20 µm crop for a visual
   check (glyphs over the image, the boundary strength, the N-population map).
+
+## Two demonstrations on the S-21-46 crop (no ground truth)
+
+`scripts/demo_real_crop.py` (384³ core, ρ 16, sites every 4 voxels; CSD response 29°, threshold 0.4 — the null
+calibration at the crop's texture level) and `scripts/demo_real_dec.py` (256³ core: direction-encoded colour of the
+structure tensor, the excised tensor and the anatomix48 TCA direction, the shape-space feature RGB and the angular
+differences):
+
+![real crop field](img/real_S2146_rho16_axial.png)
+
+![real crop DEC](img/real_S2146_dec_axial.png)
+
+What they show, and what to read with care:
+
+- **Excision changes the direction only at boundaries.** Against the plain tensor, the excised direction differs by
+  0.7° (median over bright tissue), 2.4% of sites by more than 30°; 0.6° where the coarse gradient is weak and 3.3°
+  in its top decile, with the largest changes on the dark vessel. Exactly the phantom behaviour (nothing lost in clear
+  tissue; the halo removed), at 6% extra cost.
+- **The anatomix48 TCA direction is not the fibre direction here.** It differs from the structure tensor by 34°
+  (median; 60% of sites > 30°) in patches of one colour with sharp edges, and reports an orientation gap of 0.82
+  against the tensor's 0.23 — confident and wrong, as on the phantoms: at this resolution the layer-58 features
+  carry texture phase, not fibre orientation, and the CP fit lands in one of a few local minima per neighbourhood.
+  The feature RGB (first three PCs) shows the same: structure at the texture scale, with the bundles and vessels
+  visible as streaks, not as uniform regions.
+- **The N-population map over-reads sheets.** With the null-calibrated threshold the CSD still reports two
+  populations at 37% and three at 16% of sites, concentrated on the laminar bundles (top left) and the boundary band
+  where `cl` is high. A sheet gives the gradient-direction ODF a single peak, which the ring deconvolution turns into
+  a ring of fibre directions — several peaks. Fixels therefore need a sheet gate (`cl`, and the boundary strength)
+  before they go into tractography; the sheet-null test on the laminar, gyrus, step and vessel phantoms (results log
+  §13) measures the false rate and what the gate removes.

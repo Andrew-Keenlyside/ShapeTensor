@@ -1,0 +1,19 @@
+{
+ "rho": 16.0,
+ "reduce": 4,
+ "core": 256,
+ "block": [
+  124,
+  644
+ ],
+ "median_angle_ST_vs_excised_bright": 0.7116191387176514,
+ "share_gt30_ST_vs_excised": 0.023882683366537094,
+ "median_angle_ST_vs_tca_bright": 34.18769454956055,
+ "share_gt30_ST_vs_tca": 0.5984878540039062,
+ "median_gap_ST": 0.23296627402305603,
+ "median_gap_excised": 0.22757425904273987,
+ "median_gap_tca": 0.8241425156593323,
+ "share_cl_gt_0.3": 0.049400392919778824,
+ "median_angle_ST_vs_excised_at_high_gm": 3.2502236366271973,
+ "median_angle_ST_vs_excised_at_low_gm": 0.573349118232727
+}
