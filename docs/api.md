@@ -3,8 +3,8 @@
 ## `shapetensor.np` / `shapetensor.cp` / `shapetensor.st` — the one call
 
 ```python
-shapetensor(image, *, sigma=1.0, rho=16.0, truncate=4.0, engine="intensity", excise=True, fixels=False,
-            order="xyz", n_pcs=16, engine_kwargs=None, device="cuda", **fixel_kwargs)
+shapetensor(image, *, sigma=1.0, rho=16.0, truncate=4.0, engine="intensity", excise=True, excise_mask=None,
+            fixels=False, order="xyz", n_pcs=16, engine_kwargs=None, device="cuda", **fixel_kwargs)
 ```
 
 The fibre direction field of `image (Z, Y, X)`: `(3, Z, Y, X)` unit axial vectors, or with `fixels=True`
@@ -17,7 +17,7 @@ integration (intensity engine); `order` the component order.
 | function | returns |
 |---|---|
 | `structure_tensor_3d(volume, sigma, rho, truncate=4.0, *, weights=None, device, dtype)` | `S (6, Z, Y, X) = [Sxx, Syy, Szz, Sxy, Sxz, Syz]`, x the last axis |
-| `excised_structure_tensor_3d(volume, sigma, rho, truncate=4.0, *, factor=3.0, sigma_coarse=3.0, gate=None, ...)` | `S` with boundary gradients excised and the integration renormalised |
+| `excised_structure_tensor_3d(volume, sigma, rho, truncate=4.0, *, factor=3.0, sigma_coarse=3.0, gate=None, mask=None, ...)` | `S` with boundary gradients excised and the integration renormalised |
 | `shape_structure_tensor_3d(volume, sigma, rho, truncate=4.0, *, engine, n_pcs=16, engine_kwargs, ...)` | `S` summed over a feature engine's channel gradients |
 | `eig_special_3d(S, full=False, eigenvalue_order="desc", *, device, chunk)` | `val (3, ...)`, `vec (3, ...)` the smallest eigenvalue's vector in (x, y, z); `(3, 3, ...)` with `full=True` |
 | `fixels_3d(volume, sigma, rho, truncate=4.0, *, lmax=8, reduce=None, csd_width_deg=20, peak_rel=0.3, min_sep_deg=25, nmax=3, upsample=True, device)` | `dirs (nmax, 3, ...)`, `fracs (nmax, ...)`, `npop (...)` |

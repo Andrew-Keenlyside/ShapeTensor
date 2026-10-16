@@ -95,13 +95,17 @@ def structure_tensor_3d(volume, sigma: float, rho: float, truncate: float = 4.0,
 
 
 def excised_structure_tensor_3d(volume, sigma: float, rho: float, truncate: float = 4.0, *, factor: float = 3.0,
-                                sigma_coarse: float = 3.0, gate=None, device: str = "cuda", dtype=torch.float32):
-    """Fix A: gradients whose coarse (``sigma_coarse``) magnitude exceeds ``factor`` x the volume median are left out
-    of the integration, which is renormalised by the surviving weight. ``gate (Z, Y, X)`` in [0, 1] restricts the
-    excision to where it is > 0 (e.g. near detected interfaces). Returns ``S`` as :func:`structure_tensor_3d`."""
+                                sigma_coarse: float = 3.0, gate=None, mask=None, device: str = "cuda",
+                                dtype=torch.float32):
+    """Fix A: gradients whose coarse (``sigma_coarse``) magnitude exceeds ``factor`` x the reference median are left
+    out of the integration, which is renormalised by the surviving weight. The reference median is taken over
+    ``mask (Z, Y, X)`` (a white-matter mask; the whole volume if None -- too low a threshold where much of the volume
+    is smooth grey matter or background). ``gate (Z, Y, X)`` in [0, 1] restricts the excision to where it is > 0
+    (e.g. near detected interfaces). Returns ``S`` as :func:`structure_tensor_3d`."""
     v = _to_torch(volume, device, dtype)
     g = None if gate is None else _to_torch(gate, device, dtype)
-    w = excision_weights(v, sigma_coarse=sigma_coarse, factor=factor, truncate=truncate, gate=g)
+    m = None if mask is None else _to_torch(mask, device, dtype) > 0.5
+    w = excision_weights(v, sigma_coarse=sigma_coarse, factor=factor, truncate=truncate, mask=m, gate=g)
     Vx, Vy, Vz = _derivatives(v, sigma, truncate)
     S = _integrate((Vx * Vx, Vy * Vy, Vz * Vz, Vx * Vy, Vx * Vz, Vy * Vz), rho, truncate, w)
     return _like(S, volume)
@@ -165,7 +169,7 @@ def eig_special_3d(S, full: bool = False, eigenvalue_order: Literal["desc", "asc
 # ---------------------------------------------------------------------------------------------------------------
 
 def shapetensor(image, *, sigma: float = 1.0, rho: float = 16.0, truncate: float = 4.0, engine: str = "intensity",
-                excise: bool = True, fixels: bool = False, order: str = "xyz", n_pcs: int = 16,
+                excise: bool = True, excise_mask=None, fixels: bool = False, order: str = "xyz", n_pcs: int = 16,
                 engine_kwargs: dict | None = None, device: str = "cuda", **fixel_kwargs):
     """The fibre direction field of ``image (Z, Y, X)`` in one call, as the caller's array kind.
 
@@ -175,13 +179,18 @@ def shapetensor(image, *, sigma: float = 1.0, rho: float = 16.0, truncate: float
 
     ``engine``: ``"intensity"`` (the image's own gradients; the default), or a feature engine (``"jet"``,
     ``"anatomix16"``, ``"anatomix48"``) whose channel gradients are summed instead. ``excise``: drop boundary
-    gradients before integrating (the boundary-robust tensor; intensity engine only). ``sigma`` / ``rho`` in voxels.
+    gradients before integrating (the boundary-robust tensor; intensity engine only), with the excision threshold
+    referred to the median over ``excise_mask (Z, Y, X)`` (a white-matter mask) when given. ``sigma`` / ``rho`` in
+    voxels.
     """
     if fixels:
         dirs, _, _ = fixels_3d(image, sigma, rho, truncate, device=device, **fixel_kwargs)
         return dirs if order == "xyz" else _like(_to_torch(dirs, device).flip(1), image)
     if engine == "intensity":
-        S = (excised_structure_tensor_3d if excise else structure_tensor_3d)(image, sigma, rho, truncate, device=device)
+        if excise:
+            S = excised_structure_tensor_3d(image, sigma, rho, truncate, mask=excise_mask, device=device)
+        else:
+            S = structure_tensor_3d(image, sigma, rho, truncate, device=device)
     else:
         S = shape_structure_tensor_3d(image, sigma, rho, truncate, engine=engine, n_pcs=n_pcs,
                                       engine_kwargs=engine_kwargs, device=device)

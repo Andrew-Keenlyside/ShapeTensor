@@ -20,6 +20,7 @@ dirs = st.shapetensor(image, rho=16.0, fixels=True)            # (3, 3, Z, Y, X)
 | `rho` | integration window, voxels (at 20 µm, 16 = 0.32 mm) | 16.0 |
 | `engine` | `"intensity"`, `"jet"`, `"anatomix16"`, `"anatomix48"` | `"intensity"` |
 | `excise` | drop boundary gradients before integrating (intensity engine) | `True` |
+| `excise_mask` | white-matter mask `(Z, Y, X)`: the excision threshold is 3× the median coarse gradient *over the mask*; without it, over the whole image, which is too low where much of the image is smooth grey matter or background | `None` |
 | `fixels` | return up to three directions per voxel from CSD of the gradient ODF | `False` |
 | `order` | component order of the vectors, `"xyz"` or `"zyx"` | `"xyz"` |
 | `truncate` | filter extent in standard deviations | 4.0 |
