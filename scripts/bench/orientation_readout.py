@@ -21,7 +21,8 @@ from shapetensor.features import make_engine
 from shapetensor.features.cache import cached_features
 from shapetensor.phantoms import make
 from shapetensor.readout import common, orientation
-from shapetensor.readout.orientation import OrientationReadout, assign, window_modes
+from shapetensor.readout.orientation import OrientationReadout, OrientationReadoutMLP, assign, window_modes
+import argparse
 from shapetensor.tensor import gradients
 
 FIGS = Path(__file__).resolve().parents[2] / "figures" / "tca_field"
@@ -66,6 +67,8 @@ def teacher(v):
 
 
 def main():
+    ap = argparse.ArgumentParser(); ap.add_argument("--model", default="mlp", choices=["ridge", "mlp"]); ap.add_argument("--kappa", type=float, default=25.0)
+    ap.add_argument("--mass-floor", type=float, default=0.15); args = ap.parse_args()
     t0 = time.time()
     tex = json.load(open(f"{DATA_ROOT}/results/tex_calibrated.json"))["texture"]; tex["widths"] = [tuple(w) for w in tex["widths"]]
     tex = make.TextureParams(**{**tex, "dispersion_deg": 8.0, "pitch_deg": 4.0})
@@ -82,7 +85,7 @@ def main():
             F = cached_features(eng, v); d, gap = teacher(v)
             w = torch.zeros_like(gap); w[inner] = (gap[inner] > torch.quantile(gap[inner], 0.7)).float() * fib[inner].float()
             blocks.append((F, d, w))
-        ro = OrientationReadout(smooth=3, ridge=1.0).fit(blocks, n_sample=240_000)
+        ro = (OrientationReadoutMLP(smooth=3) if args.model == "mlp" else OrientationReadout(smooth=3, ridge=1.0)).fit(blocks, n_sample=240_000)
         del blocks; torch.cuda.empty_cache()
         r = {"fit_r2": round(ro.fit_r2, 3)}
         # --- test on seed B single fibres: per-voxel error on fibre voxels, teacher error for reference
@@ -108,7 +111,7 @@ def main():
                 for x in xs:
                     sl = (slice(None), slice(z - half, z + half + 1), slice(y_mid - half // 2, y_mid + half // 2 + 1), slice(x - half, x + half + 1))
                     oo = o[sl].reshape(3, -1).T; ww = (conf[sl[1:]] * fib[sl[1:]].float()).reshape(-1)
-                    _, h, n = window_modes(oo, ww, rel=0.0)
+                    _, h, n = window_modes(oo, ww, kappa_deg=args.kappa, rel=0.0)
                     second.append(float(h[1]))
         thr = float(np.percentile(second, 99)); r["mode_rel_thr_99"] = round(thr, 3)
         print(f"[{time.time() - t0:4.0f}s] {sname}: null second-mode height 99th pct {thr:.3f}", flush=True)
@@ -126,7 +129,7 @@ def main():
                 for x in xs:
                     sl = (slice(None), slice(z - half, z + half + 1), slice(y_mid - half // 2, y_mid + half // 2 + 1), slice(x - half, x + half + 1))
                     oo = o[sl].reshape(3, -1).T; ww = (conf[sl[1:]] * fib[sl[1:]].float()).reshape(-1)
-                    modes, h, n = window_modes(oo, ww, rel=max(thr, 0.2))
+                    modes, h, n = window_modes(oo, ww, kappa_deg=args.kappa, rel=max(thr, 0.2), mass_floor=args.mass_floor)
                     nfound.append(n)
                     if n >= 2:
                         found += 1
@@ -149,7 +152,7 @@ def main():
             if cname == "c60":
                 ax = axs[0, j]
                 img = v[36:Z - 36, y_mid, 36:X - 36].cpu().numpy(); ax.imshow(img, cmap="gray", origin="lower")
-                oz = o[:, 36:Z - 36, y_mid, 36:X - 36]; ang_map = torch.rad2deg(torch.atan2(oz[2], oz[0])) % 180
+                oz = o[:, 36:Z - 36, y_mid, 36:X - 36]; ang_map = torch.rad2deg(torch.atan2(oz[0], oz[2])) % 180
                 msk = (fib & (conf > 0.2))[36:Z - 36, y_mid, 36:X - 36]
                 ax.imshow(np.ma.masked_where(~msk.cpu().numpy(), ang_map.cpu().numpy()), cmap="hsv", vmin=0, vmax=180, origin="lower", alpha=0.75, interpolation="nearest")
                 ax.set_title(f"{sname}: per-voxel orientation on the 60° crossing\nwithin 15° of either: {vox['within_15_of_either']:.0%}; pop1→30°: {vox['pop1_voxels_to_pop1']:.0%}, pop2→90°: {vox['pop2_voxels_to_pop2']:.0%}", fontsize=10); ax.set_xticks([]); ax.set_yticks([])
@@ -158,9 +161,9 @@ def main():
                 ax.set_title(f"windows: N=2 at {r[cname]['found2_share']:.0%}, both within 15°: {r[cname]['both_within_15_share']:.0%}", fontsize=10); ax.set_xlabel("per-voxel orientation (deg)"); ax.set_yticks([])
             del F, G; torch.cuda.empty_cache()
         res[sname] = r
-        json.dump(res, open(f"{DATA_ROOT}/results/orientation_readout.json", "w"), indent=1)
+        json.dump({"model": args.model, "kappa_deg": args.kappa, "mass_floor": args.mass_floor, **res}, open(f"{DATA_ROOT}/results/orientation_readout_{args.model}.json", "w"), indent=1)
     fig.suptitle("Stage 2 by a self-calibrated orientation readout of the shape space (teacher: the excised tensor on confident single-fibre voxels; no labels)", x=0.01, ha="left", fontsize=11)
-    fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(FIGS / "orientation_readout_crossing.png"); plt.close(fig)
+    fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(FIGS / f"orientation_readout_crossing_{args.model}.png"); plt.close(fig)
     print("ORIENTATION READOUT DONE", flush=True)
 
 

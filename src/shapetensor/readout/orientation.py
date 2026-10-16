@@ -98,6 +98,55 @@ def modes_dense(o: torch.Tensor, conf: torch.Tensor, rho: float, truncate: float
     return d.reshape(shp + (nmax, 3)), (a / a.sum(1, keepdim=True).clamp_min(1e-30)).reshape(shp + (nmax,)), cnt.reshape(shp), sites
 
 
+class OrientationReadoutMLP(OrientationReadout):
+    """The same readout with a small MLP (features -> hidden -> the six tensor entries), fitted by Adam on the same
+    self-calibrated targets; captures the cos²-type tuning the linear map cannot."""
+
+    def __init__(self, smooth: int = 3, hidden: int = 64, steps: int = 1500, lr: float = 2e-3, weight_decay: float = 1e-4, seed: int = 0):
+        super().__init__(smooth=smooth, ridge=0.0)
+        self.hidden, self.steps, self.lr, self.wd, self.seed = int(hidden), int(steps), float(lr), float(weight_decay), int(seed)
+        self.net = None
+
+    def fit(self, blocks, n_sample: int = 200_000, seed: int = 0):
+        g = torch.Generator().manual_seed(seed)
+        Xs, Ys = [], []
+        per = max(1, n_sample // max(1, len(blocks)))
+        for F, d, w in blocks:
+            f = self._prep(F)
+            wv = w.reshape(-1).float().cpu()
+            idx = torch.multinomial(wv / wv.sum(), min(per, int((wv > 0).sum())), replacement=False, generator=g).to(F.device)
+            Xs.append(f.reshape(f.shape[0], -1)[:, idx].T); Ys.append(outer6(d.reshape(3, -1)[:, idx].T))
+        X = torch.cat(Xs); Y = torch.cat(Ys)
+        self.mean, self.std = X.mean(0), X.std(0).clamp_min(1e-6)
+        Xn = (X - self.mean) / self.std
+        torch.manual_seed(self.seed)
+        self.net = torch.nn.Sequential(torch.nn.Linear(X.shape[1], self.hidden), torch.nn.GELU(), torch.nn.Linear(self.hidden, self.hidden),
+                                       torch.nn.GELU(), torch.nn.Linear(self.hidden, 6)).to(X.device)
+        opt = torch.optim.Adam(self.net.parameters(), lr=self.lr, weight_decay=self.wd)
+        n = len(Xn); bs = min(8192, n)
+        for step in range(self.steps):
+            i = torch.randint(0, n, (bs,), device=X.device)
+            loss = ((self.net(Xn[i]) - Y[i]) ** 2).mean()
+            opt.zero_grad(); loss.backward(); opt.step()
+        with torch.no_grad():
+            pred = torch.cat([self.net(Xn[a:a + 65536]) for a in range(0, n, 65536)])
+            self.fit_r2 = float(1 - ((pred - Y) ** 2).sum() / ((Y - Y.mean(0)) ** 2).sum())
+        return self
+
+    def predict(self, F: torch.Tensor, z_chunk: int = 16):
+        f = self._prep(F)
+        C, Z, Y, X = f.shape
+        d_out = torch.empty((3, Z, Y, X), device=F.device); c_out = torch.empty((Z, Y, X), device=F.device)
+        with torch.no_grad():
+            for z in range(0, Z, z_chunk):
+                fz = f[:, z:z + z_chunk]
+                t6 = self.net((fz.reshape(C, -1).T - self.mean) / self.std)
+                lam, V = eigh(tensor_from6(t6))
+                d = V[..., :, 2]; conf = ((lam[:, 2] - lam[:, 1]) / lam[:, 2].abs().clamp_min(1e-6)).clamp(0, 1)
+                d_out[:, z:z + z_chunk] = d.T.reshape(3, *fz.shape[1:]); c_out[z:z + z_chunk] = conf.reshape(fz.shape[1:])
+        return d_out, c_out
+
+
 def hemisphere(n: int = 1500, device="cpu") -> torch.Tensor:
     """Roughly uniform unit vectors on a hemisphere (z >= 0), a Fibonacci set, (n, 3) in (z, y, x)."""
     i = torch.arange(n, dtype=torch.float64) + 0.5
@@ -108,7 +157,7 @@ def hemisphere(n: int = 1500, device="cpu") -> torch.Tensor:
 
 
 def window_modes(o: torch.Tensor, w: torch.Tensor, kappa_deg: float = 15.0, rel: float = 0.5, min_sep_deg: float = 25.0,
-                 nmax: int = 3, grid: torch.Tensor | None = None):
+                 nmax: int = 3, grid: torch.Tensor | None = None, mass_floor: float = 0.0):
     """Modes of axial orientations ``o (n, 3)`` with weights ``w (n,)``: a kernel density on the hemisphere grid
     (von Mises–Fisher-like, width ``kappa_deg``), peaks picked greedily above ``rel`` x the top peak and
     ``min_sep_deg`` apart. Returns modes ``(nmax, 3)`` (zero rows where absent), their relative heights and N."""
@@ -119,11 +168,17 @@ def window_modes(o: torch.Tensor, w: torch.Tensor, kappa_deg: float = 15.0, rel:
     modes = torch.zeros(nmax, 3, device=o.device); heights = torch.zeros(nmax, device=o.device)
     top = float(dens.max()); taken = torch.zeros(len(u), dtype=torch.bool, device=o.device)
     cos_sep = math.cos(math.radians(min_sep_deg)); n = 0
+    wsum = float(w.sum())
     for r in range(nmax):
         d = dens.masked_fill(taken, -1.0)
         j = int(d.argmax())
         if d[j] < rel * top or d[j] <= 0:
             break
+        if mass_floor > 0 and r > 0:
+            # the mass of the voxels nearer this candidate than any kept mode, as a share of the window
+            near = ((o @ u[j]) ** 2 >= (o @ modes[:r].T).pow(2).max(1).values)
+            if float(w[near].sum()) / max(wsum, 1e-12) < mass_floor:
+                taken[j] = True; continue
         modes[r] = u[j]; heights[r] = d[j] / top; n += 1
         taken |= (u @ u[j]).abs() >= cos_sep
     return modes, heights, n

@@ -42,7 +42,7 @@ class Block:
     """The volume, the slab to draw, the site grid, and (phantom) the truth at the sites."""
 
     def __init__(self, a):
-        self.a = a; self.b = 2; self.rho = a.rho; self.sigma = a.sigma; self.tr = 4.0
+        self.a = a; self.b = 4; self.rho = a.rho; self.sigma = a.sigma; self.tr = 4.0        # sites every 4 voxels (80 um)
         if a.source.startswith("phantom:"):
             pid = a.source.split(":", 1)[1]
             img, tr, meta, grid = make.load(pid, a.seed)
@@ -59,7 +59,7 @@ class Block:
             self.tissue_thr = None
             self.tex = "t0.5" if "t0.5" in pid else ("t0.25" if "t0.25" in pid else "t1")
         else:
-            m = int(math.ceil((self.tr * (a.sigma + a.rho) + 64) / self.b) * self.b)
+            m = int(math.ceil((self.tr * (a.sigma + a.rho) + 64) / 4) * 4)
             if a.source == "s2146":
                 import zarr
                 z0 = zarr.open(CROP, mode="r")["0"]; n = z0.shape[0]
