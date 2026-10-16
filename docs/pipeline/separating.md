@@ -69,10 +69,7 @@ encoder-2 and the layer-58 spaces.
 
 ## Beyond the window: fascicles
 
-Separation per voxel is possible in principle: encoder block 2 of the network is orientation-selective, and a
-linear head on it reads a voxel's orientation at ±15–20° (73% within ±15° on held-out phantoms) — enough to split a
-90° crossing by voting, not 60°. The sound form of "clusters" is spatial rather than feature-based: at 20 µm
-fascicle boundaries are visible, so a fascicle instance segmentation (orientation-coherence watershed on the
-excised tensor, or a learned fascicle map) would assign voxels to populations as connected fascicles, and a tensor
-per fascicle would follow with no decomposition at all. That is the next study; today the ODF route is the
-estimator.
+The per-voxel readout above (82% within ±15° in encoder 2) is what makes a *spatial* form of the division possible:
+at 20 µm fascicle boundaries are visible, so voxels that share an orientation and are connected form a fascicle,
+and a tensor per fascicle follows with no decomposition at all — an orientation-coherence watershed on the
+encoder-2 orientation map, or a learned fascicle map. That is the study after the window-level separation.
