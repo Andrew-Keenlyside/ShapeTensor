@@ -6,9 +6,45 @@
 
 # ShapeTensors
 
-Fibre orientation from anatomix "shape space" rather than from intensity gradients: can a tensor built from
-shape-space gradients, or from the fibre component of shape space, ignore grey/white and tract-interface steps that
-the intensity structure tensor mistakes for fibres?
+Fibre orientation fields for HiP-CT white matter, from multichannel "shape space" features as well as from the
+intensity itself, with the boundary problem of the structure tensor and several fibre populations per site in view.
+The question it set out to answer: can a tensor built from the gradients of anatomix's shape-space channels, or a
+tensor component analysis (TCA, a CP decomposition) of them, ignore the grey/white and tract-interface steps that the
+intensity structure tensor mistakes for fibres, and give more than one orientation where fibres cross?
+
+## Summary
+
+**Pipeline.** An image block with context margins goes through a pluggable *feature engine* (the intensity itself;
+a locally normalised derivative jet; anatomix's 16-channel output; anatomix's 48-channel layer 58). The gradients of
+every channel, integrated over a window ρ, form the channel-resolved tensor `K = G_ρ ∗ (g gᵀ)` (the structure tensor
+when there is one channel) and the gradient-direction ODF on a coarse site grid. *Read-outs* turn them into
+directions: the eigenvector of the summed tensor; TCA, which fits the unsummed voxel × channel × axis array as pieces
+with one direction each and pairs them into populations; constrained spherical deconvolution of the ODF, whose peaks
+are the populations; and the excised tensor (fix A), which drops boundary gradients before integrating. The *field*
+written for BRIDGE carries the single direction, the boundary strength and normal, a quality measure, and up to three
+fixels per site.
+
+**Validation.** Nine phantom families with twins at 20 µm, calibrated label-free to the real S-21-46 crop (noise
+spectrum, texture bands, intensity levels, orientation coherence), swept along a step-to-texture-ratio axis and
+scored by distance to the interface, with controls (the structure tensor at matched ρ, fix A, the no-network jet).
+
+**What it found.** The boundary failure is a step-to-texture-ratio effect; at 20 µm it appears in weak-texture
+white matter next to a strong step. Shape-space TCA does not rescue the orientation there; gradient excision does
+(7.9 / 2.7 / 1.8° where the plain tensor is 60 / 50 / 37°, at no cost in clear tissue), with the coarse gradient
+magnitude as the boundary detector. For several populations, CSD of the gradient-direction ODF is the rank-free
+estimator; the anatomix layer-58 features sharpen it on tight crossings. Orientation does live inside anatomix — in
+its second encoder block, which a small phantom-trained head can read per voxel — but the output head removes it.
+Details: `docs/TCA_FIELD_REVIEW.md` (§11 for the verdict), `docs/TCA_FIELD_RESULTS.md`.
+
+<div align="center">
+
+<img src="figures/tca_field/graphical_abstract.png" alt="pipeline and validation overview" width="100%" />
+
+</div>
+
+How TCA reads several orientations out of shape-space data: `figures/tca_field/tca_multi_explainer.png`. Why the
+shape space cannot be clustered into fibre populations first: `figures/tca_field/shape_space_clusters.png`. Where
+orientation is encoded inside anatomix: `figures/tca_field/encoder_tuning.png`.
 
 ## The package (2026-10-16): `src/shapetensor/`
 
