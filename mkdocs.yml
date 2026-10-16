@@ -1,0 +1,41 @@
+site_name: ShapeTensor
+site_description: Fibre orientation fields for high-resolution white-matter volumes, on the GPU
+site_url: https://shapetensor.readthedocs.io/
+repo_url: https://github.com/Andrew-Keenlyside/ShapeTensor
+repo_name: Andrew-Keenlyside/ShapeTensor
+copyright: Andrew Keenlyside, UCL
+docs_dir: docs
+theme:
+  name: readthedocs
+  logo: img/shapetensor_logo.png
+  highlightjs: true
+nav:
+  - Introduction: index.md
+  - Installation: installation.md
+  - Quick start: quickstart.md
+  - The structure tensor and where it fails: structure_tensor.md
+  - Theory of the shape tensor: theory.md
+  - Phantoms and validation: phantoms.md
+  - Brain image data: brain_data.md
+  - Results: results.md
+  - API: api.md
+  - Research notes:
+      - Review and recommendation: research/TCA_FIELD_REVIEW.md
+      - Results log: research/TCA_FIELD_RESULTS.md
+      - Build plan: research/TCA_FIELD_PLAN.md
+      - Image to vectors (pre-package): research/IMAGE_TO_VECTORS.md
+      - Shape-space handoff: research/SHAPE_SPACE_HANDOFF.md
+      - The boundary problem: research/BOUNDARY_PROBLEM.md
+      - Literature review: research/literature_review.md
+      - Prototype scripts: research/PROTOTYPES.md
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.superfences
+extra_javascript:
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
