@@ -81,7 +81,13 @@ resolution.
 
 ![step 4](img/walkthrough/step4_direction.png)
 
-## Step 5 — the gradient-direction ODF
+
+!!! note "Steps 5–7 are the archived ODF route"
+    They are kept in the walkthrough because the figures are a useful check on the gradient distribution and on
+    interfaces, but they are not part of the pipeline: the N-population stage of the pipeline is the shape-space
+    separation of [stage 2](pipeline/separating.md) followed by one tensor per population.
+
+## Step 5 — the gradient-direction ODF *(archived route)*
 
 *What*: per site, the distribution of gradient directions on the sphere, weighted by |∇I|², in even real spherical
 harmonics to order 8. Its l ≤ 2 part is the structure tensor; the higher orders hold the information the tensor
@@ -95,7 +101,7 @@ texture, 28.9° at half, intensity ODF); on a sheet phantom the ODF is one peak,
 
 ![step 5](img/walkthrough/step5_odf.png)
 
-## Step 6 — deconvolution and peaks: the fixels
+## Step 6 — deconvolution and peaks: the fixels *(archived route)*
 
 *What*: constrained spherical deconvolution of the ODF with the single-fibre ring response, then the peaks of the
 fibre ODF above a relative threshold and 25° apart: up to three directions with fractions per site. The threshold
@@ -111,7 +117,7 @@ step or gyrus phantom the share of N ≥ 2 by distance from the interface (the s
 
 ![step 6](img/walkthrough/step6_fixels.png)
 
-## Step 7 — the interface gate on the fixels
+## Step 7 — the interface gate on the fixels *(archived route)*
 
 *What*: sites whose coarse gradient exceeds 3× the median report no population — the same scale criterion as the
 excision. A contrast sheet deconvolves to a ring of fibre directions, so fixels there are not trusted; the single
