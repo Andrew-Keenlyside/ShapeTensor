@@ -9,9 +9,10 @@ the lost resolution is across them -- the realistic section-stack case) and z (a
 
     python scripts/bench/anisotropy_test.py [pid ...]      -> results/anisotropy_test.json
 """
-import json, sys, time
+import json, math, sys, time
 import numpy as np, torch, torch.nn.functional as Fn
 from shapetensor import DATA_ROOT, st
+from shapetensor.filters import gaussian
 from shapetensor.phantoms import make
 from shapetensor.validate import score
 
@@ -72,8 +73,14 @@ def main():
                 sp = [1.0, 1.0, 1.0]; sp[axis] = RATIO
                 zs_a = site_index(zs, RATIO) if axis == 0 else zs
                 row_a = site_index([grid.y_mid], RATIO)[0] if axis == 1 else grid.y_mid
+                # PSF matching: the area average over 2.5 voxels is a box of sd 2.5 / sqrt(12) fine voxels; blur the other
+                # two axes by the same amount so all three share one resolution, then use physical spacing
+                psf = tuple(0.0 if k == axis else RATIO / math.sqrt(12) for k in range(3))
+                vm = gaussian(va, psf, truncate=TR)
                 arms = {
                     "naive plain": lambda: st.structure_tensor_3d(va, SIGMA, rho, TR),
+                    "psf-matched plain": lambda: st.structure_tensor_3d(vm, SIGMA, rho, TR, spacing=sp),
+                    "psf-matched excised": lambda: st.excised_structure_tensor_3d(vm, SIGMA, rho, TR, spacing=sp),
                     "spacing plain": lambda: st.structure_tensor_3d(va, SIGMA, rho, TR, spacing=sp),
                     "naive excised": lambda: st.excised_structure_tensor_3d(va, SIGMA, rho, TR),
                     "spacing excised": lambda: st.excised_structure_tensor_3d(va, SIGMA, rho, TR, spacing=sp),
@@ -85,7 +92,7 @@ def main():
                 vr = refine(va, axis, v.shape[axis])
                 S = st.structure_tensor_3d(vr, SIGMA, rho, TR); res[f"{name}: resampled plain"] = bands_of(dirs_at(S, zs, grid.y_mid, xs), t); del S
                 S = st.excised_structure_tensor_3d(vr, SIGMA, rho, TR); res[f"{name}: resampled excised"] = bands_of(dirs_at(S, zs, grid.y_mid, xs), t)
-                del S, vr, va; torch.cuda.empty_cache()
+                del S, vr, va, vm; torch.cuda.empty_cache()
             out[pid][f"rho{rho:g}"] = res
             print(f"[{time.time() - t0:5.0f}s] {pid} rho {rho:g}", flush=True)
             for arm, b in res.items():
