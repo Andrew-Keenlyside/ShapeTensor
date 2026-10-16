@@ -1,3 +1,9 @@
+<div align="center">
+
+<img src="images/shapetensor_logo.png" alt="ShapeTensor" width="55%" />
+
+</div>
+
 # ShapeTensors
 
 Fibre orientation from anatomix "shape space" rather than from intensity gradients: can a tensor built from
