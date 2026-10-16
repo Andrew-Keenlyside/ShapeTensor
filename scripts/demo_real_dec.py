@@ -48,6 +48,7 @@ def main():
     ap.add_argument("--core", type=int, default=256); ap.add_argument("--rho", type=float, default=16.0)
     ap.add_argument("--reduce", type=int, default=4); ap.add_argument("--nyquist", default="none"); ap.add_argument("--sigma", type=float, default=1.0)
     ap.add_argument("--tile", type=int, default=256); ap.add_argument("--margin", type=int, default=64)   # tile 128 / margin 64 for a 12 GB card
+    ap.add_argument("--n-pcs", type=int, default=8)   # 8 PCs read the same as 16 (results log §10); 16 at 520^3 needs 27 GB of channel gradients
     a = ap.parse_args()
     t0 = time.time()
     b, rho, tr = a.reduce, a.rho, 4.0
@@ -70,8 +71,9 @@ def main():
     Kg, _ = k_dense(gm[None].half(), rho, tr, b, core); gm_s = Kg[..., 0].clamp_min(0).sqrt(); del Kg, gm, w
     print(f"intensity tensors done {time.time() - t0:.0f} s", flush=True)
     # 2. shape features: anatomix48 -> 16 PCs; feature RGB = PCs 1-3; TCA direction from K
-    eng = make_engine("anatomix48", nyquist=a.nyquist, tile=a.tile, margin=a.margin)
-    F = eng(v)                                                           # (16, Z, Y, X) fp16, PCs in order
+    torch.cuda.empty_cache()
+    eng = make_engine("anatomix48", nyquist=a.nyquist, tile=a.tile, margin=a.margin, n_pcs=a.n_pcs)
+    F = eng(v)                                                           # (n_pcs, Z, Y, X) fp16, PCs in order
     rgb_full = F[:3].float()
     rgb_core = rgb_full[:, m:Z - m, m:Y - m, m:X - m].cpu().numpy()
     lo_p, hi_p = np.percentile(rgb_core, 1, axis=(1, 2, 3)), np.percentile(rgb_core, 99, axis=(1, 2, 3))

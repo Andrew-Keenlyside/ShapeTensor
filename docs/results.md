@@ -69,24 +69,34 @@ per-voxel linear head reads orientation at 73% within ±15° on held-out single-
 
 ## Excision across the families (final pass, 2 seeds)
 
-Within 0.1 mm of the structure, ρ 8 / 16 / 32: plain tensor → excision ungated → excision gated by `cl`
-(clear tissue of the same phantom in brackets).
+Within 0.1 mm of the structure, ρ 8 / 16 / 32: plain tensor → excision ungated (fix A as specified) → excision
+gated by the null-calibrated `cl`; last column the clear tissue (> 2 mm) of the same phantom, which excision leaves
+unchanged to 0.1°.
 
 | phantom | plain | excision, ungated | excision, `cl`-gated | clear |
 |---|---|---|---|---|
 | P3 step 40, half texture | 41 / 13 / 7 | **5.4 / 2.9 / 2.1** | 27 / 9.4 / 6.1 | 5.9 / 2.8 / 2.1 |
-| P3 step 40, quarter | 58 / 53 / 42 | **11.9 / 5.5 / 3.1** | 12.1 / 5.5 / 3.5 | 14 / 5 / 3 |
-| P1 gyrus, half | 34.5 / 16 / 5.0 | 37 / 18 / 9 | **5.2 / 2.5 / 1.9** | 3.3 / 1.9 / 1.3 |
-| P1 gyrus, quarter | 68 / 65 / 13 | 64 / 57 / 53 | **15 / 6.6 / 2.7** | 8.9 / 3.3 / 1.9 |
-| P2 U-fibre band, half (0.25–0.5 mm) | 2.3 / 1.3 / 2.5 | 2.3 / 1.5 / 2.9 | 2.8 / 1.7 / 2.4 | — |
-| P7 slab face, quarter | 14.8 / 5.8 / 2.6 | 13.7 / 5.8 / 2.8 | 14.5 / 5.8 / 2.9 | — |
+| P3 step 40, quarter | 58 / 53 / 42 | **11.9 / 5.5 / 3.1** | 12.1 / 5.5 / 3.5 | 14 / 5.5 / 3.1 |
+| P3 step 40, tenth | 74 / 72 / 60 | 49 / 31 / 9.7 | 49 / 31 / 9.7 | 48 / 27 / 9.5 |
+| P3 step 15, quarter | 24.5 / 9.4 / 4.0 | 20.6 / 7.6 / 3.7 | 23.7 / 9.2 / 4.0 | 14 / 5.5 / 3.1 |
+| P1 gyrus, half | 34.5 / 16 / 5.0 | **5.2 / 2.5 / 1.9** | 18.5 / 11.5 / 4.0 | 3.3 / 1.9 / 1.3 |
+| P1 gyrus, quarter | 68 / 65 / 13 | **15 / 6.6 / 2.7** | 17.5 / 7.6 / 2.7 | 8.9 / 3.3 / 1.9 |
+| P2 U-fibre band, half (0.25–0.5 mm) | 2.3 / 1.3 / 2.5 | 2.8 / 1.7 / 2.4 | 2.4 / 1.7 / 2.0 | — |
+| P6 vessel, full · half texture | 10.7 / 4.7 / 1.5 · 24.7 / 11.8 / 5.3 | **7.0 / 3.2 / 1.3 · 8.2 / 3.3 / 1.3** | 10.2 / 4.5 / 1.4 · 23.9 / 9.7 / 3.3 | — |
+| P7 slab face, half · quarter | 6.5 / 3.2 / 1.2 · 14.8 / 5.8 / 2.6 | 6.8 / 3.5 / 1.3 · 14.5 / 5.8 / 2.7 | 6.5 / 3.3 / 1.2 · 14.7 / 5.8 / 2.6 | — |
 
-On the slab (one interface in textured white matter) the ungated form is right and the gate misses at ρ 8; at the
-gyrus (grey matter and CSF in the block) the ungated form *harms*, because its threshold — 3× the block median of the
-coarse gradient — is too low when much of the block is smooth, while the gated form removes the shell entirely at
-every texture level. The default is therefore the gated excision with the reference median taken over white matter
-(a pipeline's mask), under test post hoc as `excision_variants.py`. Excision also removes the vessel halos (P6:
-1.3° at ρ 32 against 5.3° for the plain tensor).
+The ungated excision — a gradient dropped wherever its coarse magnitude exceeds 3× the volume median, nothing
+else — is the right form everywhere: it clears the shell at the step, the gyrus and the vessel at every window,
+costs nothing in clear tissue or on the U-fibres, and changes nothing on the laminar slab, whose face the plain
+tensor already handles (14.5 vs 14.8°, the clear-tissue level at that texture). Gating it by `cl` under-excises
+wherever the step does not yet dominate the window — 27° at the step and 24° at the vessel at ρ 8, 18° at the
+gyrus — because the gate opens late. The post-hoc variants (`scripts/bench/excision_variants.py`, seed 0) agree: a
+reference median over white matter only is indistinguishable from the volume median (2.0 vs 3.2% of voxels
+excised, 3.1 vs 2.5° at the gyrus), a `gm` gate is a little worse everywhere, the `cl` gate worse at ρ 8. The
+default is therefore fix A as specified; `excise_mask` is kept for volumes where background dominates the median.
+Out of reach: the tenth-texture step at ρ ≤ 16, where excision brings the interface to the clear-tissue level
+(49 / 31 / 9.7 vs 48 / 27 / 9.5°) but that level is itself poor — the texture is too weak for any window below
+ρ 32 — and the step-15 at quarter texture at ρ 8 (20.6° against 14° clear).
 
 ![gyrus glyphs](img/P1-t0.5_glyphs.png)
 
@@ -94,7 +104,7 @@ every texture level. The default is therefore the gated excision with the refere
 
 | claim | outcome |
 |---|---|
-| interface fixed (≤ 10° within 0.1 mm, step ≥ 15) | **met**: excision ungated 3.7° (ρ 32), 7.6° (ρ 16); `cl`-gated 6.1° / 9.4°; no shape-space read-out passes (best: jet eigen 7.6° at ρ 32, which is its floor everywhere) |
+| interface fixed (≤ 10° within 0.1 mm, step ≥ 15) | **met**: excision ungated 3.7° (ρ 32), 7.6° (ρ 16); `cl`-gated 6.1° / 9.4° (worse); no shape-space read-out passes (best: jet eigen 7.6° at ρ 32, which is its floor everywhere) |
 | nothing lost in clear tissue (≤ plain tensor + 1°, > 2 mm) | met by every excision and hybrid arm (3.1° vs 3.1° at ρ 32) |
 | U-fibres kept (≤ 10°) | met by 77 / 84 arms (1.3–3°) |
 | vessels (≤ 15° within 2 radii) | met by 52 / 84 arms; best excision ungated 1.3° (ρ 32) |

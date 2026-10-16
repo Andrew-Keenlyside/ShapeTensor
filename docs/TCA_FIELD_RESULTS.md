@@ -194,26 +194,32 @@ seed mean:
 | phantom | plain tensor | excision, ungated | excision, `cl`-gated | clear tissue (plain) |
 |---|---|---|---|---|
 | P3-40-t0.5 | 41 / 13 / 7 | **5.4 / 2.9 / 2.1** | 27 / 9.4 / 6.1 | 5.9 / 2.8 / 2.1 |
-| P3-40-t0.25 | 58 / 53 / 42 | **11.9 / 5.5 / 3.1** | 12.1 / 5.5 / 3.5 | 14 / 5 / 3 |
-| P3-40-t0.1 | 74 / 72 / 60 | 62 / 62 / 53 | 49 / 31 / 9.7 | — |
-| P1-t0.5 (gyrus) | 34.5 / 16 / 5.0 | 37 / 18 / 9.0 | **5.2 / 2.5 / 1.9** | 3.3 / 1.9 / 1.3 |
-| P1-t0.25 | 68 / 65 / 13 | 64 / 57 / 53 | **15 / 6.6 / 2.7** | 8.9 / 3.3 / 1.9 |
-| P2-t0.5 (U-fibre band 0.25–0.5 mm) | 2.3 / 1.3 / 2.5 | 2.3 / 1.5 / 2.9 | 2.8 / 1.7 / 2.4 | — |
-| P6 (vessel, 2 radii) | 10.7 / 4.7 / 1.5 | 10.6 / 4.7 / 1.5 | 7.0 / 3.2 / 1.3 | — |
-| P6-t0.5 | 24.7 / 11.8 / 5.3 | 23.8 / 12.0 / 5.5 | 8.2 / 3.3 / **1.3** | — |
-| P7-t0.25 (slab face) | 14.8 / 5.8 / 2.6 | 13.7 / 5.8 / 2.8 | 14.5 / 5.8 / 2.9 | — |
+| P3-40-t0.25 | 58 / 53 / 42 | **11.9 / 5.5 / 3.1** | 12.1 / 5.5 / 3.5 | 14 / 5.5 / 3.1 |
+| P3-40-t0.1 | 74 / 72 / 60 | 49 / 31 / 9.7 | 49 / 31 / 9.7 | 48 / 27 / 9.5 |
+| P3-15-t0.25 | 24.5 / 9.4 / 4.0 | 20.6 / 7.6 / 3.7 | 23.7 / 9.2 / 4.0 | 14 / 5.5 / 3.1 |
+| P1-t0.5 (gyrus) | 34.5 / 16 / 5.0 | **5.2 / 2.5 / 1.9** | 18.5 / 11.5 / 4.0 | 3.3 / 1.9 / 1.3 |
+| P1-t0.25 | 68 / 65 / 13 | **15 / 6.6 / 2.7** | 17.5 / 7.6 / 2.7 | 8.9 / 3.3 / 1.9 |
+| P2-t0.5 (U-fibre band 0.25–0.5 mm) | 2.3 / 1.3 / 2.5 | 2.8 / 1.7 / 2.4 | 2.4 / 1.7 / 2.0 | — |
+| P6 (vessel, 2 radii) | 10.7 / 4.7 / 1.5 | **7.0 / 3.2 / 1.3** | 10.2 / 4.5 / 1.4 | — |
+| P6-t0.5 | 24.7 / 11.8 / 5.3 | **8.2 / 3.3 / 1.3** | 23.9 / 9.7 / 3.3 | — |
+| P7-t0.5 (slab face) | 6.5 / 3.2 / 1.2 | 6.8 / 3.5 / 1.3 | 6.5 / 3.3 / 1.2 | — |
+| P7-t0.25 | 14.8 / 5.8 / 2.6 | 14.5 / 5.8 / 2.7 | 14.7 / 5.8 / 2.6 | — |
 
-Two things the interim pass could not show:
+(An earlier draft of this section had the ungated and gated columns swapped at the gyrus and the vessel, read
+from a mis-labelled summary; the table above is computed from the per-seed JSON, `results/main/hybrid/`.)
 
-- **The ungated excision fails at the gyrus** (P1: 37 / 18 / 9 against 34.5 / 16 / 5 plain) and at the vessel, while
-  the `cl`-gated form removes the shell at every texture level (5.2 / 2.5 / 1.9; 15 / 6.6 / 2.7 at quarter texture).
-  The cause is the reference: the ungated threshold is 3× the median coarse-gradient magnitude over the *block*, and
-  at the gyrus most of the block is smooth grey matter and CSF, so the median is small, the threshold low, and ordinary
-  white-matter texture is excised. On the slab, where the block is all textured white matter, the ungated threshold is
-  right and the gate misses it at ρ 8. The fix is not the gate but the reference: a median over white matter (the
-  pipeline's mask) — tested post hoc in `excision_variants.py` (§9).
-- **P3-40-t0.1** (a tenth of the real texture) is beyond both excision forms at ρ ≤ 16; the step-to-texture ratio
-  there is ~4× the real crop's, and ρ 32 with the gated form (9.7°) is the only usable setting.
+What the interim pass could not show:
+
+- **The ungated excision is right everywhere.** It clears the gyrus (5.2 / 2.5 / 1.9°; 15 / 6.6 / 2.7° at quarter
+  texture) and the vessel (8.2 / 3.3 / 1.3°) as it clears the step, at no cost in clear tissue or on the U-fibres,
+  and is neutral on the laminar slab, whose face the plain tensor already reads at its clear-tissue level. The
+  `cl`-gated form under-excises wherever the step does not yet dominate the window (27° at the step and 24° at the
+  vessel at ρ 8, 18° at the gyrus): the gate opens late. The post-hoc variants (§11) confirm that neither a
+  white-matter reference median nor a `gm` gate improves on it.
+- **P3-40-t0.1** (a tenth of the real texture, ~4× the real step-to-texture ratio) is beyond any window below ρ 32:
+  excision brings the interface to the clear-tissue level (49 / 31 / 9.7 vs 48 / 27 / 9.5°), but that level is
+  itself poor because the texture is too weak. The step-15 at quarter texture is fixed at ρ ≥ 16 and not at ρ 8
+  (20.6° against 14° clear).
 
 The scorecard (`src/shapetensor/validate/scorecard.py`, worst phantom per claim, seed mean of per-seed medians):
 
@@ -260,3 +266,9 @@ truncated series. The upgrade path is a finer peak grid with Newton refinement a
 deconvolution, not a higher order on its own. The anatomix48 ρ 32 cell ran out of memory (the order-12 basis on
 all channels at full resolution, 10.7 GB in one allocation) and is rerun after the chain with the basis evaluated per
 channel.
+
+## 10. PCA variants (`scripts/bench/spec_var_pcs*.json`, seed 0, ρ 16, P3-40 family)
+
+anatomix48 with 8 principal components instead of 16: P3-40-t0.25 TCA 59.4° within 0.1 mm (16 PCs: 60°), P3-40
+4.5° (16 PCs: 4.6°). The number of components is not what limits the layer-58 read-out at the interface. The
+48-component (no PCA) variant ran out of memory on this GPU (48 fp32 channel gradients at 480³) and was not run.
