@@ -45,7 +45,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rho", type=float, default=16.0); ap.add_argument("--core", type=int, default=384)
     ap.add_argument("--reduce", type=int, default=4); ap.add_argument("--shape", default=None)
-    ap.add_argument("--width", type=float, default=20.0); ap.add_argument("--peak-rel", type=float, default=0.3)
+    # CSD response width and peak threshold: the null calibration at the real crop's texture level (t0.5 in
+    # results/csd_calibrated.json: 28.9 deg, rel 0.4 for the intensity ODF at rho 16); 20 / 0.3 are the full-texture values
+    ap.add_argument("--width", type=float, default=29.0); ap.add_argument("--peak-rel", type=float, default=0.4)
+    ap.add_argument("--tag", default="", help="suffix for the figure / json names")
     a = ap.parse_args()
     t0 = time.time()
     z0 = zarr.open(CROP, mode="r")["0"]
@@ -91,7 +94,10 @@ def main():
             frac = field["fracs"][k][sl]
             d = d * (frac > 0)[None]
             sticks(ax, d, ext, step, scale, col, (keep[0], keep[1]), lw=1.0)
-        ax.set_title("CSD N-population map (white 0, light 1, mid 2, dark 3) + fixels", fontsize=10.5); ax.set_xticks([]); ax.set_yticks([])
+        ax.set_title(f"CSD N-population map (white 0, light 1, mid 2, dark 3) + fixels\nresponse {a.width:g}°, threshold {a.peak_rel:g}",
+                     fontsize=10.5); ax.set_xticks([]); ax.set_yticks([])
+        for ax in axs[0, len(panels) + 1:]:
+            ax.axis("off")
         for ax, (key, title, vmax) in zip(axs[1], (("gm", "boundary strength: coarse gradient magnitude", None), ("cl", "sheet dominance (Westin cl)", 0.6),
                                                    ("gap", "orientation gap (λ2−λ3)/λ2, excised tensor", 1.0), ("gap_st", "orientation gap, plain tensor", 1.0))):
             im = ax.imshow(field[key][sl], cmap=cmap, origin="lower", extent=ext, vmin=0, vmax=vmax)
@@ -103,12 +109,12 @@ def main():
                      "Sticks = in-plane direction (short = out of plane). No ground truth: a consistency demonstration only.",
                      fontsize=10.5, x=0.01, ha="left")
         fig.tight_layout(rect=[0, 0, 1, 0.96])
-        out = FIGS / f"real_S2146_rho{a.rho:g}_{pname}.png"
+        out = FIGS / f"real_S2146_rho{a.rho:g}{a.tag}_{pname}.png"
         fig.savefig(out); plt.close(fig)
         print("wrote", out, flush=True)
     json.dump({"rho": a.rho, "core": a.core, "reduce": a.reduce, "block": [lo, hi], "csd_width_deg": a.width, "peak_rel": a.peak_rel,
                "excised_share": float(field["excised_share"].mean()), "npop_shares": [float((field["npop"] == k).mean()) for k in range(4)],
-               "elapsed_s": time.time() - t0}, open(FIGS / f"real_S2146_rho{a.rho:g}.json", "w"), indent=1)
+               "elapsed_s": time.time() - t0}, open(FIGS / f"real_S2146_rho{a.rho:g}{a.tag}.json", "w"), indent=1)
 
 
 if __name__ == "__main__":
