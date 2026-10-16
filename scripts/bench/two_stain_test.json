@@ -1,0 +1,406 @@
+{
+ "step: fibre-rich (P3-15, t1) + cell-like (P3-40, t0.25)": {
+  "same_truth": true,
+  "intensity|rho10|A": {
+   "eigen": {
+    "0-0.1mm": 3.78,
+    "0.25-0.5mm": 3.36,
+    ">2mm": 3.88
+   }
+  },
+  "intensity|rho10|B": {
+   "eigen": {
+    "0-0.1mm": 55.59,
+    "0.25-0.5mm": 25.64,
+    ">2mm": 10.01
+   }
+  },
+  "intensity|rho10|A+B": {
+   "eigen": {
+    "0-0.1mm": 4.52,
+    "0.25-0.5mm": 3.41,
+    ">2mm": 3.69
+   },
+   "tca": {
+    "0-0.1mm": 6.46,
+    "0.25-0.5mm": 3.51,
+    ">2mm": 3.89
+   }
+  },
+  "intensity|rho16|A": {
+   "eigen": {
+    "0-0.1mm": 2.37,
+    "0.25-0.5mm": 2.57,
+    ">2mm": 2.76
+   }
+  },
+  "intensity|rho16|B": {
+   "eigen": {
+    "0-0.1mm": 53.07,
+    "0.25-0.5mm": 42.15,
+    ">2mm": 5.52
+   }
+  },
+  "intensity|rho16|A+B": {
+   "eigen": {
+    "0-0.1mm": 3.58,
+    "0.25-0.5mm": 2.83,
+    ">2mm": 2.64
+   },
+   "tca": {
+    "0-0.1mm": 4.0,
+    "0.25-0.5mm": 2.75,
+    ">2mm": 2.76
+   }
+  },
+  "anatomix48|rho10|A": {
+   "eigen": {
+    "0-0.1mm": 6.0,
+    "0.25-0.5mm": 4.55,
+    ">2mm": 5.27
+   },
+   "tca": {
+    "0-0.1mm": 3.76,
+    "0.25-0.5mm": 3.37,
+    ">2mm": 3.9
+   }
+  },
+  "anatomix48|rho10|B": {
+   "eigen": {
+    "0-0.1mm": 60.19,
+    "0.25-0.5mm": 58.83,
+    ">2mm": 55.21
+   },
+   "tca": {
+    "0-0.1mm": 60.46,
+    "0.25-0.5mm": 37.25,
+    ">2mm": 33.68
+   }
+  },
+  "anatomix48|rho10|A+B": {
+   "eigen": {
+    "0-0.1mm": 24.26,
+    "0.25-0.5mm": 12.84,
+    ">2mm": 12.69
+   },
+   "tca": {
+    "0-0.1mm": 26.69,
+    "0.25-0.5mm": 4.08,
+    ">2mm": 11.21
+   }
+  },
+  "anatomix48|rho16|A": {
+   "eigen": {
+    "0-0.1mm": 5.06,
+    "0.25-0.5mm": 4.5,
+    ">2mm": 4.56
+   },
+   "tca": {
+    "0-0.1mm": 2.82,
+    "0.25-0.5mm": 2.57,
+    ">2mm": 2.92
+   }
+  },
+  "anatomix48|rho16|B": {
+   "eigen": {
+    "0-0.1mm": 59.06,
+    "0.25-0.5mm": 58.35,
+    ">2mm": 55.21
+   },
+   "tca": {
+    "0-0.1mm": 59.53,
+    "0.25-0.5mm": 38.14,
+    ">2mm": 34.07
+   }
+  },
+  "anatomix48|rho16|A+B": {
+   "eigen": {
+    "0-0.1mm": 15.77,
+    "0.25-0.5mm": 14.08,
+    ">2mm": 11.9
+   },
+   "tca": {
+    "0-0.1mm": 7.19,
+    "0.25-0.5mm": 3.52,
+    ">2mm": 10.78
+   }
+  }
+ },
+ "step: two realisations of P3-40-t0.5": {
+  "same_truth": true,
+  "intensity|rho10|A": {
+   "eigen": {
+    "0-0.1mm": 29.39,
+    "0.25-0.5mm": 6.1,
+    ">2mm": 4.42
+   }
+  },
+  "intensity|rho10|B": {
+   "eigen": {
+    "0-0.1mm": 30.69,
+    "0.25-0.5mm": 6.39,
+    ">2mm": 4.64
+   }
+  },
+  "intensity|rho10|A+B": {
+   "eigen": {
+    "0-0.1mm": 28.21,
+    "0.25-0.5mm": 4.74,
+    ">2mm": 3.04
+   },
+   "tca": {
+    "0-0.1mm": 37.59,
+    "0.25-0.5mm": 6.08,
+    ">2mm": 3.62
+   }
+  },
+  "intensity|rho16|A": {
+   "eigen": {
+    "0-0.1mm": 12.52,
+    "0.25-0.5mm": 6.68,
+    ">2mm": 2.55
+   }
+  },
+  "intensity|rho16|B": {
+   "eigen": {
+    "0-0.1mm": 12.9,
+    "0.25-0.5mm": 6.67,
+    ">2mm": 3.02
+   }
+  },
+  "intensity|rho16|A+B": {
+   "eigen": {
+    "0-0.1mm": 12.46,
+    "0.25-0.5mm": 6.22,
+    ">2mm": 1.87
+   },
+   "tca": {
+    "0-0.1mm": 38.17,
+    "0.25-0.5mm": 10.04,
+    ">2mm": 2.37
+   }
+  },
+  "anatomix48|rho10|A": {
+   "eigen": {
+    "0-0.1mm": 43.08,
+    "0.25-0.5mm": 16.42,
+    ">2mm": 16.22
+   },
+   "tca": {
+    "0-0.1mm": 39.56,
+    "0.25-0.5mm": 7.4,
+    ">2mm": 8.95
+   }
+  },
+  "anatomix48|rho10|B": {
+   "eigen": {
+    "0-0.1mm": 45.71,
+    "0.25-0.5mm": 23.33,
+    ">2mm": 15.82
+   },
+   "tca": {
+    "0-0.1mm": 37.78,
+    "0.25-0.5mm": 8.61,
+    ">2mm": 7.49
+   }
+  },
+  "anatomix48|rho10|A+B": {
+   "eigen": {
+    "0-0.1mm": 45.05,
+    "0.25-0.5mm": 19.32,
+    ">2mm": 15.99
+   },
+   "tca": {
+    "0-0.1mm": 55.87,
+    "0.25-0.5mm": 31.71,
+    ">2mm": 22.07
+   }
+  },
+  "anatomix48|rho16|A": {
+   "eigen": {
+    "0-0.1mm": 37.65,
+    "0.25-0.5mm": 21.45,
+    ">2mm": 14.8
+   },
+   "tca": {
+    "0-0.1mm": 11.23,
+    "0.25-0.5mm": 8.61,
+    ">2mm": 7.99
+   }
+  },
+  "anatomix48|rho16|B": {
+   "eigen": {
+    "0-0.1mm": 41.47,
+    "0.25-0.5mm": 30.04,
+    ">2mm": 15.31
+   },
+   "tca": {
+    "0-0.1mm": 11.56,
+    "0.25-0.5mm": 7.85,
+    ">2mm": 7.16
+   }
+  },
+  "anatomix48|rho16|A+B": {
+   "eigen": {
+    "0-0.1mm": 40.09,
+    "0.25-0.5mm": 27.31,
+    ">2mm": 14.7
+   },
+   "tca": {
+    "0-0.1mm": 54.05,
+    "0.25-0.5mm": 47.93,
+    ">2mm": 43.55
+   }
+  }
+ },
+ "crossing 60: t1 + t0.5": {
+  "same_truth": true,
+  "intensity|rho10|A": {
+   "found2": 0.2916666666666667,
+   "both15": 0.1396484375,
+   "false2": null,
+   "ring_width_deg": 22.8
+  },
+  "intensity|rho10|B": {
+   "found2": 0.6871744791666666,
+   "both15": 0.19173177083333334,
+   "false2": null,
+   "ring_width_deg": 28.9
+  },
+  "intensity|rho10|A+B": {
+   "found2": 0.369140625,
+   "both15": 0.17252604166666666,
+   "false2": null,
+   "ring_width_deg": 24.9
+  },
+  "intensity|rho16|A": {
+   "found2": 0.19759114583333334,
+   "both15": 0.1005859375,
+   "false2": null,
+   "ring_width_deg": 22.8
+  },
+  "intensity|rho16|B": {
+   "found2": 0.7841796875,
+   "both15": 0.2796223958333333,
+   "false2": null,
+   "ring_width_deg": 28.9
+  },
+  "intensity|rho16|A+B": {
+   "found2": 0.2867838541666667,
+   "both15": 0.13606770833333334,
+   "false2": null,
+   "ring_width_deg": 24.8
+  },
+  "anatomix48|rho10|A": {
+   "found2": 0.8811848958333334,
+   "both15": 0.36328125,
+   "false2": null,
+   "ring_width_deg": 24.6
+  },
+  "anatomix48|rho10|B": {
+   "found2": 0.9983723958333334,
+   "both15": 0.012369791666666666,
+   "false2": null,
+   "ring_width_deg": 29.8
+  },
+  "anatomix48|rho10|A+B": {
+   "found2": 0.9996744791666666,
+   "both15": 0.375,
+   "false2": null,
+   "ring_width_deg": 27.3
+  },
+  "anatomix48|rho16|A": {
+   "found2": 0.9788411458333334,
+   "both15": 0.4599609375,
+   "false2": null,
+   "ring_width_deg": 24.6
+  },
+  "anatomix48|rho16|B": {
+   "found2": 1.0,
+   "both15": 0.0,
+   "false2": null,
+   "ring_width_deg": 29.8
+  },
+  "anatomix48|rho16|A+B": {
+   "found2": 1.0,
+   "both15": 0.5143229166666666,
+   "false2": null,
+   "ring_width_deg": 27.3
+  }
+ },
+ "single line (null for the crossing): t1 + t0.5": {
+  "same_truth": true,
+  "intensity|rho10|A": {
+   "found2": null,
+   "both15": null,
+   "false2": 0.0,
+   "ring_width_deg": 22.8
+  },
+  "intensity|rho10|B": {
+   "found2": null,
+   "both15": null,
+   "false2": 0.034505208333333336,
+   "ring_width_deg": 28.9
+  },
+  "intensity|rho10|A+B": {
+   "found2": null,
+   "both15": null,
+   "false2": 0.0,
+   "ring_width_deg": 24.9
+  },
+  "intensity|rho16|A": {
+   "found2": null,
+   "both15": null,
+   "false2": 0.0,
+   "ring_width_deg": 22.8
+  },
+  "intensity|rho16|B": {
+   "found2": null,
+   "both15": null,
+   "false2": 0.005208333333333333,
+   "ring_width_deg": 28.9
+  },
+  "intensity|rho16|A+B": {
+   "found2": null,
+   "both15": null,
+   "false2": 0.0,
+   "ring_width_deg": 24.8
+  },
+  "anatomix48|rho10|A": {
+   "found2": null,
+   "both15": null,
+   "false2": 0.0,
+   "ring_width_deg": 24.6
+  },
+  "anatomix48|rho10|B": {
+   "found2": null,
+   "both15": null,
+   "false2": 0.017578125,
+   "ring_width_deg": 29.8
+  },
+  "anatomix48|rho10|A+B": {
+   "found2": null,
+   "both15": null,
+   "false2": 0.0,
+   "ring_width_deg": 27.3
+  },
+  "anatomix48|rho16|A": {
+   "found2": null,
+   "both15": null,
+   "false2": 0.0,
+   "ring_width_deg": 24.6
+  },
+  "anatomix48|rho16|B": {
+   "found2": null,
+   "both15": null,
+   "false2": 0.0,
+   "ring_width_deg": 29.8
+  },
+  "anatomix48|rho16|A+B": {
+   "found2": null,
+   "both15": null,
+   "false2": 0.0,
+   "ring_width_deg": 27.3
+  }
+ }
+}

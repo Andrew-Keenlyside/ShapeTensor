@@ -547,3 +547,30 @@ the crossings.
 
 ![embedding](../img/feature_space_embedding.png)
 ![crossing](../img/feature_space_crossing.png)
+
+## 19. Two stains of one block, read together (`scripts/bench/two_stain_test.py`; `results/two_stain_test.json`)
+
+Phantom pairs with the same geometry and truth under different texture realisations / levels stand in for two
+co-registered stains (BigBrain has one stain, so this stays a phantom result): a fibre-rich stain (P3-15 at full
+texture) with a cell-like stain (P3-40 at quarter texture: weak fibre texture, strong boundary); two realisations
+of P3-40 at half texture (the pure SNR control); the 60° crossing at full + half texture with its single-line null.
+Read alone (A, B) and stacked (A+B: the intensity tensors add; the anatomix48 features of both are concatenated,
+8 PCs each). Median angle within 0.1 mm · 0.25–0.5 mm · far, ρ 10 / ρ 16:
+
+| pair | A | B | A+B (stacked tensor) | A+B (TCA on the stacked K) |
+|---|---|---|---|---|
+| fibre-rich + cell-like, intensity | 3.8 · 3.4 · 3.9 / 2.4 · 2.6 · 2.8 | 56 · 26 · 10 / 53 · 42 · 5.5 | 4.5 · 3.4 · 3.7 / 3.6 · 2.8 · 2.6 | 6.5 · 3.5 · 3.9 / 4.0 · 2.8 · 2.8 |
+| fibre-rich + cell-like, anatomix48 | 6.0 · 4.6 · 5.3 / 5.1 · 4.5 · 4.6 (TCA 3.8 / 2.8) | 60 · 59 · 55 / 59 · 58 · 55 | 24 · 13 · 13 / 16 · 14 · 12 | 27 · 4.1 · 11 / 7.2 · 3.5 · 11 |
+| two realisations, intensity | 29 · 6.1 · 4.4 / 12.5 · 6.7 · 2.6 | 31 · 6.4 · 4.6 / 12.9 · 6.7 · 3.0 | 28 · 4.7 · **3.0** / 12.5 · 6.2 · **1.9** | 38 · 6.1 · 3.6 / 38 · 10 · 2.4 |
+| two realisations, anatomix48 | 43 · 16 · 16 / 38 · 21 · 15 | 46 · 23 · 16 / 41 · 30 · 15 | 45 · 19 · 16 / 40 · 27 · 15 | 56 · 32 · 22 / 54 · 48 · 44 |
+
+Crossing at 60° (A full texture, B half), "found 2 / both within 15°", ρ 16: intensity ODF A 20 / 10%, B 78 / 28%,
+A+B 29 / 14%; anatomix48 ODF A 100 / 94%, B 100 / 0%, A+B 100 / **51%**. Single-line null: ≤ 3.5% false seconds in
+every combination.
+
+Stacking is tensor averaging: two realisations of one stain gain the expected √2 far from structures (4.4 → 3.0°,
+2.6 → 1.9°) and nothing at the interface, which both stains share; a fibre-rich stain plus a weak-texture stain
+reads like the fibre-rich stain alone, slightly diluted; concatenating the shape features of a weak stain degrades
+the joint shape read-out (6 → 24° at ρ 10) and halves the crossing resolution (94 → 51%); TCA on a stacked K is
+worse than the stacked tensor (the CP picks the shared boundary piece). The merged field is as good as the best
+stain, not better — stain selection, or per-stain weights, belongs in the merge stage.
