@@ -235,6 +235,21 @@ def shapetensor(image, *, sigma: float = 1.0, rho: float = 16.0, truncate: float
     voxels of the finest axis; ``spacing (dz, dy, dx)`` declares anisotropic voxels (e.g. ``(2.5, 1, 1)`` for
     50 x 20 x 20 um), under which the filters are scaled per axis and the directions are physical.
     """
+    if isinstance(image, (list, tuple)):
+        # several co-registered stains / contrasts of the same tissue: the tensors add (the structure tensor of the
+        # channel stack), so every stain's gradients -- and every stain's shape features -- count together
+        if fixels:
+            raise ValueError("fixels on several stains: compute the ODF per stain and add it (readout.multi); not in the one-call API")
+        S = None
+        for im in image:
+            Si = _to_torch(shapetensor(im, sigma=sigma, rho=rho, truncate=truncate, engine=engine, excise=excise, excise_mask=excise_mask,
+                                       fixels=False, order="xyz", n_pcs=n_pcs, engine_kwargs=engine_kwargs, spacing=spacing,
+                                       device=device, _tensor_only=True), device)
+            S = Si if S is None else S + Si
+        _, vec = eig_special_3d(S, device=device)
+        if order == "zyx":
+            vec = vec.flip(0)
+        return _like(vec, image[0])
     if fixels:
         dirs, _, _ = fixels_3d(image, sigma, rho, truncate, spacing=spacing, device=device, **fixel_kwargs)
         return dirs if order == "xyz" else _like(_to_torch(dirs, device).flip(1), image)
@@ -246,6 +261,8 @@ def shapetensor(image, *, sigma: float = 1.0, rho: float = 16.0, truncate: float
     else:
         S = shape_structure_tensor_3d(image, sigma, rho, truncate, engine=engine, n_pcs=n_pcs,
                                       engine_kwargs=engine_kwargs, spacing=spacing, device=device)
+    if fixel_kwargs.pop("_tensor_only", False):
+        return S
     _, vec = eig_special_3d(S, device=device)
     if order == "zyx":
         vec = _like(_to_torch(vec, device).flip(0), image)

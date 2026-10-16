@@ -1,5 +1,12 @@
 # Quick start
 
+Several co-registered stains or contrasts of the same block are read together by passing a list — the tensors add,
+so every stain's gradients (and, with a shape engine, every stain's features) count in one direction field:
+
+```python
+vec = st.cp.shapetensor([cell_stain, myelin_stain], rho=10.0, engine="anatomix48")
+```
+
 ## One call
 
 ```python
