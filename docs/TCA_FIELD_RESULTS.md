@@ -513,3 +513,37 @@ fields (the BigBrain one partly section striping), so these are consistency numb
 statement is the phantoms' (§16). Isotropic reference numbers for the record: excised vs plain 1.4 / 2.4° (BigBrain
 ρ 10 / 16; 12° in the top boundary decile — the CSF and grey-matter steps are strong in a cell stain), 0.9° (HiP-CT);
 the anatomix48 shape tensor 25–29° (BigBrain) and 42° (HiP-CT) from the structure tensor.
+
+## 18. The shape feature space by orientation (`scripts/fig_feature_space.py`; `results/feature_space.json`; CPU)
+
+Single-population phantoms with straight fibres at 12 in-plane angles (two texture realisations), the 45 / 60 / 90°
+crossings; per-voxel features averaged over 3³ voxels from four depths of the network and from the jet; per layer
+a PCA embedding coloured by angle, the channel tuning, the silhouette over the 12 angle classes, a linear 12-class
+probe trained on seed A and tested on seed B (scored within ±15°; chance 25%), and the probe applied per voxel to
+the crossings.
+
+| shape space | probe ±15° | silhouette | tuning depth (median; channels > 0.3) | 60° crossing: within 15° of either truth | pop-1 voxels → 30° / pop-2 → 90° | 90° crossing: either / pop-1 / pop-2 |
+|---|---|---|---|---|---|---|
+| encoder 1 (layer 8, 16 ch) | 51% | −0.05 | 0.33; 10 / 16 | 72% | 39 / 42% | 55% / 37 / 28% |
+| **encoder 2 (layer 15, 32 ch)** | **82%** | −0.06 | **0.80; 29 / 32** | **82%** | **44 / 47%** | 74% / 47 / 62% |
+| layer 58 (48 ch) | 75% | −0.03 | 0.56; 38 / 48 | 32% | 11 / 26% | 59% / 29 / 40% |
+| output (16 ch) | 67% | −0.04 | 0.35; 11 / 16 | 23% | 14 / 16% | 48% / 13 / 55% |
+| jet (27 ch, no network) | 64% | −0.02 | 0.09; 0 / 27 | 70% | 38 / 54% | 75% / 52 / 57% |
+
+- **The space is organised by orientation as a continuum, not as clusters.** The deep layers' first two
+  principal components run through the angles in order (a hue gradient across the cloud), and a linear readout of
+  the angle works in every layer (64–82%); but every silhouette is ≈ 0 — there are no gaps between orientations.
+  Dividing the shape space therefore means finding *modes along its orientation axis*, not clusters in C
+  dimensions; k-means in the full space found texture phase (§7) for this reason.
+- **The division works per fascicle in the shallow, orientation-selective spaces and fails in the deep ones.** On
+  the 60° crossing the encoder-2 probe colours each fascicle by its own orientation (two peaks at ~30° and ~75–90°;
+  82% of voxels within 15° of a truth; 44% / 47% of each population's voxels assigned to it within ±15°), and the
+  jet does nearly as well (70%); layer 58 and the output assign nearly every voxel to ~60°, the bisector — their
+  receptive fields average the two populations before anything can separate them.
+- So the separation stage has to run at the **fascicle scale** (a few voxels) in **encoder block 2** (or the
+  jet), before the ρ-window integration; the deep features are the wrong space for it, independently of the
+  method. This fixes the layer and the scale of the stage, and leaves its method — label-free mode / signature
+  finding — as the open piece (`readout.populations`, `scripts/bench/separate_shape_space.py`).
+
+![embedding](../img/feature_space_embedding.png)
+![crossing](../img/feature_space_crossing.png)
