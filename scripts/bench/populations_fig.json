@@ -1,0 +1,62 @@
+{
+ "c60": {
+  "n_modes": 3,
+  "mode_err_to_nearest_truth": [
+   26.6,
+   4.5,
+   4.9
+  ],
+  "mode1": {
+   "truth": 2,
+   "dir_err": 4.5,
+   "dice_membership_gt_0.5_vs_truth": 0.586,
+   "truth_voxels_with_membership_gt_0.5": 0.442
+  },
+  "mode2": {
+   "truth": 1,
+   "dir_err": 4.9,
+   "dice_membership_gt_0.5_vs_truth": 0.455,
+   "truth_voxels_with_membership_gt_0.5": 0.349
+  }
+ },
+ "c90": {
+  "n_modes": 3,
+  "mode_err_to_nearest_truth": [
+   8.6,
+   10.4,
+   45.0
+  ],
+  "mode1": {
+   "truth": 1,
+   "dir_err": 8.6,
+   "dice_membership_gt_0.5_vs_truth": 0.696,
+   "truth_voxels_with_membership_gt_0.5": 0.659
+  },
+  "mode2": {
+   "truth": 2,
+   "dir_err": 10.4,
+   "dice_membership_gt_0.5_vs_truth": 0.669,
+   "truth_voxels_with_membership_gt_0.5": 0.545
+  }
+ },
+ "c45": {
+  "n_modes": 3,
+  "mode_err_to_nearest_truth": [
+   18.5,
+   4.9,
+   11.2
+  ],
+  "mode1": {
+   "truth": 1,
+   "dir_err": 4.9,
+   "dice_membership_gt_0.5_vs_truth": 0.435,
+   "truth_voxels_with_membership_gt_0.5": 0.325
+  },
+  "mode2": {
+   "truth": 2,
+   "dir_err": 11.2,
+   "dice_membership_gt_0.5_vs_truth": 0.395,
+   "truth_voxels_with_membership_gt_0.5": 0.25
+  }
+ }
+}
