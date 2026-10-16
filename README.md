@@ -7,7 +7,8 @@ the intensity structure tensor mistakes for fibres?
 The work started inside BRIDGE, as the grey/white boundary-shell problem (`docs/BOUNDARY_PROBLEM.md`). It moved here
 on 2026-10-15 to be tested as an approach in its own right. Everything here is a **prototype**.
 
-**Start with `docs/SHAPE_SPACE_HANDOFF.md`.** It holds the status, the results so far, the user's standing
+**For the current recommended pipeline, read `docs/IMAGE_TO_VECTORS.md`** (image to vector field: what to use, the
+evidence, the open problems). **For the history, start with `docs/SHAPE_SPACE_HANDOFF.md`.** It holds the status, the results so far, the user's standing
 directions, the clean-anatomix recipe and the open threads. The task in progress is at the end of its section 8.
 
 ## Layout
