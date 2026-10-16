@@ -105,7 +105,7 @@ def main():
                 out["signatures"] = {"found2_share": round(float((n >= 2).mean()), 3), "both_within_15_share": round(float(((n >= 2) & (both <= 15)).mean()), 3),
                                      "dir_err_median_best_pair": round(float(np.median(both)), 1), "first_dir_err_to_nearest": round(float(np.median(np.minimum(e11, e12))), 1)}
                 # TCA on the channel-resolved tensor at the same sites
-                b = max(1, int(rho // 4)); K, sites = k_sites(G.new_tensor(0) if False else gradients(F, SIGMA, TR), rho, TR, b, [y_mid], ((40, Z - 40), (40, X - 40)))
+                b = max(1, int(rho // 4)); K, sites = k_sites(gradients(F.float(), SIGMA, TR), rho, TR, b, [y_mid], ((40, Z - 40), (40, X - 40)))
                 step = max(1, STRIDE // b)
                 Kp = K[0, ::step, ::step].reshape(-1, K.shape[-1]); Kt = common.unpack(Kp, common.nc3_from_packed(Kp.shape[-1]))
                 for mname, fn in (("tca_overcomplete", lambda: multi.overcomplete_group(Kt)), ("tca_bic", lambda: multi.n_by_bic(Kt))):

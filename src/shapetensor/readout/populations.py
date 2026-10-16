@@ -42,21 +42,31 @@ def separate_site(F: torch.Tensor, G: torch.Tensor, center, rho: float, truncate
     cov = ec @ ec.T / wv.sum()                                                     # (C, C) weighted covariance
     lam, U = eigh(cov[None]); lam, U = lam[0].flip(0), U[0].flip(1)               # descending
     sig = U[:, :nmax]                                                              # (C, nmax) signatures
-    m = ((e - mean).T @ sig).clamp_min(0)                                          # (n, nmax) memberships
+    proj = (e - mean).T @ sig                                                      # (n, nmax) signed projections
     gv = g.reshape(3, -1)
-    dirs = torch.zeros(nmax, 3, device=F.device); weight = torch.zeros(nmax, device=F.device)
+    dirs = torch.zeros(nmax, 3, device=F.device); weight = torch.zeros(nmax, device=F.device); gap = torch.zeros(nmax, device=F.device)
     for r in range(nmax):
-        ww = wv * m[:, r]
-        S = (gv * ww) @ gv.T                                                       # membership-weighted structure tensor
-        wsum = ww.sum()
-        if wsum > 0:
-            _, V = eigh(S[None] / wsum); dirs[r] = V[0][:, 0]; weight[r] = wsum
-    return {"lam": lam[:nmax], "signatures": sig, "dirs": dirs, "weight": weight}
+        # an eigenvector's sign is arbitrary: each side of the signature is a candidate population; keep the side whose
+        # voxels form the more coherent fibre (the larger orientation gap of their weighted tensor)
+        best = None
+        for sgn in (1.0, -1.0):
+            ww = wv * (sgn * proj[:, r]).clamp_min(0)
+            wsum = ww.sum()
+            if wsum <= 0:
+                continue
+            S = (gv * ww) @ gv.T / wsum                                                # membership-weighted structure tensor
+            lam_s, V = eigh(S[None]); lam_s, V = lam_s[0], V[0]                        # ascending
+            gp = ((lam_s[1] - lam_s[0]) / lam_s[1].clamp_min(1e-12)).clamp(0, 1)      # the gap of the two smallest: how well the null direction is set
+            if best is None or gp > best[0]:
+                best = (gp, V[:, 0], wsum)
+        if best is not None:
+            gap[r], dirs[r], weight[r] = best
+    return {"lam": lam[:nmax], "signatures": sig, "dirs": dirs, "weight": weight, "gap": gap}
 
 
 def separate_sites(F: torch.Tensor, G: torch.Tensor, centers: torch.Tensor, rho: float, truncate: float = 3.0, nmax: int = 3) -> dict:
     """``separate_site`` over ``centers (N, 3)``; stacked outputs."""
-    out = {"lam": [], "dirs": [], "weight": []}
+    out = {"lam": [], "dirs": [], "weight": [], "gap": []}
     for c in centers:
         r = separate_site(F, G, c, rho, truncate, nmax)
         for k in out:
