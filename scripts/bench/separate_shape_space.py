@@ -44,11 +44,14 @@ def build(angles, seed, tex, g):
     for a, f in angles:
         make._add_population(sp, a, f)
     d = sp.render()
-    for a, f in angles:                       # each population alone, for the oracle split and the evaluation
-        rng2 = np.random.default_rng(seed); sp2 = make.Splat(g, tex, rng2, "cuda")
-        for a2, f2 in angles:
-            make._add_population(sp2, a2, f2 if a2 == a else 0.0)
-        masks.append((sp2.render() > 0.25))
+    # population masks from the SAME random sequence: population 1 is drawn first in both renders, so its render alone
+    # (same seed) is its mask; population 2's voxels are the combined render's fibre voxels not in population 1
+    if len(angles) > 1:
+        sp1 = make.Splat(g, tex, np.random.default_rng(seed), "cuda"); make._add_population(sp1, angles[0][0], angles[0][1])
+        m1 = sp1.render() > 0.25
+        masks.extend([m1, (d > 0.25) & ~m1])
+    else:
+        masks.append(d > 0.25)
     Zm, Xm = np.meshgrid(g.coords(0), g.coords(2), indexing="ij")
     img = make._finish(g, tex, np.full(Zm.shape, 164.0, np.float32), np.full(Zm.shape, tex.amp, np.float32), d, rng)
     return img, masks

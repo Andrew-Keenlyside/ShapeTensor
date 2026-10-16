@@ -39,12 +39,15 @@ def build(angles, seed, tex, g):
     for a, f in angles:
         make._add_population(sp, a, f)
     d = sp.render()
+    # population masks from the SAME random sequence: population 1 is drawn first in both renders, so its render alone
+    # (same seed) is its mask; population 2's voxels are the combined render's fibre voxels not in population 1
     masks = []
-    for a, f in angles:
-        sp2 = make.Splat(g, tex, np.random.default_rng(seed), "cuda")
-        for a2, f2 in angles:
-            make._add_population(sp2, a2, f2 if a2 == a else 0.0)
-        masks.append(sp2.render() > 0.25)
+    if len(angles) > 1:
+        sp1 = make.Splat(g, tex, np.random.default_rng(seed), "cuda"); make._add_population(sp1, angles[0][0], angles[0][1])
+        m1 = sp1.render() > 0.25
+        masks = [m1, (d > 0.25) & ~m1]
+    else:
+        masks = [d > 0.25]
     Zm, Xm = np.meshgrid(g.coords(0), g.coords(2), indexing="ij")
     img = make._finish(g, tex, np.full(Zm.shape, 164.0, np.float32), np.full(Zm.shape, tex.amp, np.float32), d, rng)
     return torch.as_tensor(img, device="cuda").float(), (d > 0.25), masks
@@ -96,7 +99,9 @@ def main():
             m = fib & torch.zeros_like(fib).index_fill_(0, torch.arange(36, Z - 36, device="cuda"), True)
             e = angle(o.permute(1, 2, 3, 0), unit(a)); et = angle(d.permute(1, 2, 3, 0), unit(a))
             errs.append(e[m & (conf > 0)].cpu()); errs_t.append(et[m].cpu()); confs.append(conf[m].cpu())
+        per_angle = [round(float(e.median()), 1) for e in errs]
         errs, errs_t, confs = torch.cat(errs), torch.cat(errs_t), torch.cat(confs)
+        r["single_err_median_by_angle"] = per_angle
         r["single_voxel_err_median"] = round(float(errs.median()), 1); r["single_voxel_within_15"] = round(float((errs <= 15).float().mean()), 3)
         r["single_teacher_err_median_rho8"] = round(float(errs_t.median()), 1); r["single_conf_median"] = round(float(confs.median()), 3)
         print(f"[{time.time() - t0:4.0f}s] {sname}: fit R2 {ro.fit_r2:.2f}; single fibres per voxel: median {errs.median():.1f} deg, within 15: {(errs <= 15).float().mean():.0%} (teacher rho 8: {errs_t.median():.1f} deg)", flush=True)
@@ -167,7 +172,7 @@ def main():
                 ax = axs[0, j]
                 img = v[36:Z - 36, y_mid, 36:X - 36].cpu().numpy(); ax.imshow(img, cmap="gray", origin="lower")
                 oz = o[:, 36:Z - 36, y_mid, 36:X - 36]; ang_map = torch.rad2deg(torch.atan2(oz[0], oz[2])) % 180
-                msk = (fib & (conf > 0.2))[36:Z - 36, y_mid, 36:X - 36]
+                msk = (fib & (conf > torch.quantile(conf[fib], 0.5)))[36:Z - 36, y_mid, 36:X - 36]
                 ax.imshow(np.ma.masked_where(~msk.cpu().numpy(), ang_map.cpu().numpy()), cmap="hsv", vmin=0, vmax=180, origin="lower", alpha=0.75, interpolation="nearest")
                 ax.set_title(f"{sname}: per-voxel orientation on the 60° crossing\nwithin 15° of either: {vox['within_15_of_either']:.0%}; pop1→30°: {vox['pop1_voxels_to_pop1']:.0%}, pop2→90°: {vox['pop2_voxels_to_pop2']:.0%}", fontsize=10); ax.set_xticks([]); ax.set_yticks([])
                 ax = axs[1, j]
