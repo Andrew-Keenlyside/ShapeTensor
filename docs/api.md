@@ -21,7 +21,7 @@ integration (intensity engine); `order` the component order.
 | `shape_structure_tensor_3d(volume, sigma, rho, truncate=4.0, *, engine, n_pcs=16, engine_kwargs, ...)` | `S` summed over a feature engine's channel gradients |
 | `eig_special_3d(S, full=False, eigenvalue_order="desc", *, device, chunk)` | `val (3, ...)`, `vec (3, ...)` the smallest eigenvalue's vector in (x, y, z); `(3, 3, ...)` with `full=True` |
 | `fixels_3d(volume, sigma, rho, truncate=4.0, *, lmax=8, reduce=None, csd_width_deg=20, peak_rel=0.5, min_sep_deg=25, nmax=3, interface_gate=3.0, sigma_coarse=3.0, upsample=True, spacing=None, device)` | `dirs (nmax, 3, ...)`, `fracs (nmax, ...)`, `npop (...)` |
-| `run_volume(src, dst, *, sigma, rho, truncate, chunk, outputs, excise_factor, fixel_kwargs, level, rank, world, device, log)` | a chunked driver over a zarr volume with halos; writes `S`, `S_excised`, `val`, `vec`, `vec_excised`, `dirs`, `fracs`, `npop` |
+| `run_volume(src, dst, *, sigma, rho, truncate, chunk, outputs, excise_factor, fixel_kwargs, level, rank, world, spacing, device, log)` | a chunked driver over a zarr volume with halos; writes `S`, `S_excised`, `val`, `vec`, `vec_excised`, `dirs`, `fracs`, `npop` |
 
 Inputs may be numpy, cupy or torch; outputs come back as the input's kind.
 
@@ -81,3 +81,15 @@ shapetensor report --tag main [--out REPORT.md]
 shapetensor volume SRC DST [--level L] [--sigma 1] [--rho 16] [--truncate 4] [--chunk 256 256 256]
                    [--outputs S eig excised fixels] [--excise-factor 3] [--rank r] [--world n] [--device cuda]
 ```
+
+## Stage 2: dividing the shape space (`shapetensor.readout.orientation`, `readout.populations`)
+
+- `OrientationReadout(smooth=3, ridge=1.0).fit(blocks)` — a ridge map from shape features to the voxel's orientation
+  tensor, fitted on `(features, teacher directions, weights)` blocks (the teacher: the excised tensor at its
+  confident single-population sites; no labels); `.predict(F)` → per-voxel orientation `(3, Z, Y, X)` and confidence.
+- `window_modes(o, w, kappa_deg=15, rel=0.5, min_sep_deg=25)` — the modes of one window's orientations (populations);
+  `assign(o, modes, n)` → memberships; `modes_dense(o, conf, rho, truncate, reduce, core)` — the same on a whole site
+  grid at once (spherical-harmonic density, order 8).
+- `populations.separate_sites(F, G, centers, rho)` — the principal-signature division of a window's voxel cloud with a
+  membership-weighted tensor per signature (the first form; superseded by the readout).
+- `features.cache.cached_features(engine, vol, tag)` — engine outputs cached on disk by engine configuration and volume hash.

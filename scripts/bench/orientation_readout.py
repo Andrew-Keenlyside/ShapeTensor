@@ -18,6 +18,7 @@ import torch
 
 from shapetensor import DATA_ROOT, st
 from shapetensor.features import make_engine
+from shapetensor.features.cache import cached_features
 from shapetensor.phantoms import make
 from shapetensor.readout import common, orientation
 from shapetensor.readout.orientation import OrientationReadout, assign, window_modes
@@ -78,7 +79,7 @@ def main():
         blocks = []
         for k, a in enumerate(ANG):
             v, fib, _ = build([(a, 1.0)], 100 + k, tex, g)
-            F = eng(v); d, gap = teacher(v)
+            F = cached_features(eng, v); d, gap = teacher(v)
             w = torch.zeros_like(gap); w[inner] = (gap[inner] > torch.quantile(gap[inner], 0.7)).float() * fib[inner].float()
             blocks.append((F, d, w))
         ro = OrientationReadout(smooth=3, ridge=1.0).fit(blocks, n_sample=240_000)
@@ -88,7 +89,7 @@ def main():
         errs, errs_t, confs = [], [], []
         for k, a in enumerate(ANG):
             v, fib, _ = build([(a, 1.0)], 200 + k, tex, g)
-            o, conf = ro.predict(eng(v)); d, gap = teacher(v)
+            o, conf = ro.predict(cached_features(eng, v)); d, gap = teacher(v)
             m = fib & torch.zeros_like(fib).index_fill_(0, torch.arange(36, Z - 36, device="cuda"), True)
             e = angle(o.permute(1, 2, 3, 0), unit(a)); et = angle(d.permute(1, 2, 3, 0), unit(a))
             errs.append(e[m & (conf > 0)].cpu()); errs_t.append(et[m].cpu()); confs.append(conf[m].cpu())
@@ -102,7 +103,7 @@ def main():
         second = []
         for k, a in enumerate(ANG[::3]):
             v, fib, _ = build([(a, 1.0)], 200 + 3 * k, tex, g)
-            o, conf = ro.predict(eng(v))
+            o, conf = ro.predict(cached_features(eng, v))
             for z in zs:
                 for x in xs:
                     sl = (slice(None), slice(z - half, z + half + 1), slice(y_mid - half // 2, y_mid + half // 2 + 1), slice(x - half, x + half + 1))
@@ -114,7 +115,7 @@ def main():
         # --- the crossings
         for cname, (a1, a2, f1) in CROSS.items():
             v, fib, masks = build([(a1, f1), (a2, 1 - f1)], 300, tex, g)
-            F = eng(v); o, conf = ro.predict(F); G = gradients(v[None], SIGMA, TR)
+            F = cached_features(eng, v); o, conf = ro.predict(F); G = gradients(v[None], SIGMA, TR)
             t1, t2 = unit(a1), unit(a2)
             m1, m2 = masks[0] & ~masks[1], masks[1] & ~masks[0]
             e1 = angle(o.permute(1, 2, 3, 0), t1); e2 = angle(o.permute(1, 2, 3, 0), t2)

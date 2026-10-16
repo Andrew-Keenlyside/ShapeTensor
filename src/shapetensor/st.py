@@ -341,7 +341,7 @@ def fixels_3d(volume, sigma: float, rho: float, truncate: float = 4.0, *, lmax: 
 def run_volume(src: str, dst: str, *, sigma: float = 1.0, rho: float = 16.0, truncate: float = 4.0,
                chunk=(256, 256, 256), outputs=("S", "eig", "excised", "fixels"), excise_factor: float = 3.0,
                fixel_kwargs: dict | None = None, level: str | None = None, rank: int = 0, world: int = 1,
-               device: str = "cuda", log=print):
+               spacing=None, device: str = "cuda", log=print):
     """Compute the requested outputs for a whole zarr volume, chunk by chunk with halos, on one GPU; several
     processes split the chunk list by ``rank`` / ``world``. ``src``: a zarr array, or a group with ``level`` (an
     OME-Zarr level such as ``"0"``). ``dst``: a zarr group that receives ``S`` and ``S_excised (6, Z, Y, X)``,
@@ -386,7 +386,7 @@ def run_volume(src: str, dst: str, *, sigma: float = 1.0, rho: float = 16.0, tru
         core = (slice(z0 - lo[0], z1 - lo[0]), slice(y0 - lo[1], y1 - lo[1]), slice(x0 - lo[2], x1 - lo[2]))
         out_sl = (slice(z0, z1), slice(y0, y1), slice(x0, x1))
         if "S" in outputs or "eig" in outputs:
-            S = structure_tensor_3d(blk, sigma, rho, truncate, device=device)
+            S = structure_tensor_3d(blk, sigma, rho, truncate, spacing=spacing, device=device)
             if "S" in outputs:
                 g["S"][(slice(None),) + out_sl] = S[(slice(None),) + core].cpu().numpy()
             if "eig" in outputs:
@@ -395,14 +395,14 @@ def run_volume(src: str, dst: str, *, sigma: float = 1.0, rho: float = 16.0, tru
                 g["vec"][(slice(None),) + out_sl] = vec.cpu().numpy()
             del S
         if "excised" in outputs:
-            Sx = excised_structure_tensor_3d(blk, sigma, rho, truncate, factor=excise_factor, device=device)
+            Sx = excised_structure_tensor_3d(blk, sigma, rho, truncate, factor=excise_factor, spacing=spacing, device=device)
             g["S_excised"][(slice(None),) + out_sl] = Sx[(slice(None),) + core].cpu().numpy()
             if "eig" in outputs:
                 _, vecx = eig_special_3d(Sx[(slice(None),) + core].contiguous(), device=device)
                 g["vec_excised"][(slice(None),) + out_sl] = vecx.cpu().numpy()
             del Sx
         if "fixels" in outputs:
-            dirs, fracs, npop = fixels_3d(blk, sigma, rho, truncate, device=device, **(fixel_kwargs or {}))
+            dirs, fracs, npop = fixels_3d(blk, sigma, rho, truncate, spacing=spacing, device=device, **(fixel_kwargs or {}))
             g["dirs"][(slice(None), slice(None)) + out_sl] = dirs[(slice(None), slice(None)) + core].half().cpu().numpy()
             g["fracs"][(slice(None),) + out_sl] = fracs[(slice(None),) + core].half().cpu().numpy()
             g["npop"][out_sl] = npop[core].to(torch.uint8).cpu().numpy()

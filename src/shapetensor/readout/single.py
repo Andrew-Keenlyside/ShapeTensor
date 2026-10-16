@@ -17,6 +17,7 @@ from .multi import cp_als
 
 def eigen(K: torch.Tensor) -> dict:
     """``K (N, 3C, 3C)`` -> ``dir (N, 3)``, ``vals (N, 3)`` descending, Westin measures."""
+    K = K.float()
     T = common.channel_sum(K)
     w, V = common.eigh_desc(T)
     return {"dir": common.canonical_sign(V[..., :, 2]), "vals": w, **common.westin(w)}
@@ -25,10 +26,11 @@ def eigen(K: torch.Tensor) -> dict:
 def tca(K: torch.Tensor, rank: int = 3, starts: int = 3, iters: int = 150, seed: int = 0) -> dict:
     """TCA read-out; also returns the pieces (``D (N, 3, R)`` directions, ``share (N, R)``, ``B`` signatures) and the
     boundary candidate (``bdir``, ``bshare``, ``bdom``)."""
+    K = K.float()
     Y = common.cholesky_factor(K)                                       # (N, P, C, I)
     T = common.channel_sum(common.normalise_trace(K.double())).float()
     Cg = common.channel_gram(common.normalise_trace(K.double())).float()
-    init = (torch.linalg.eigh(Cg)[1].flip(-1), torch.linalg.eigh(T)[1].flip(-1))
+    init = (common.eigh(Cg)[1].flip(-1), common.eigh(T)[1].flip(-1))
     A, B, D, err = cp_als(Y, rank, init, starts=starts, iters=iters, seed=seed)
     W = (A.mT @ A) * (B.mT @ B)                                         # (N, R, R)
     gram = D @ W @ D.mT                                                 # (N, 3, 3)

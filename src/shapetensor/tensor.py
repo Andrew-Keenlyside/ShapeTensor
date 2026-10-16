@@ -117,13 +117,36 @@ def k_dense(G: torch.Tensor, rho: float, truncate: float, reduce: int, core, wei
             raise ValueError("block and core must be multiples of reduce")
     a_idx, b_idx = pair_index(n3)
     P = len(a_idx)
-    buf = torch.empty((P, Z // b, Y // b, X // b), dtype=dtype, device=G.device)
+    nz, ny, nx = Z // b, Y // b, X // b
+    need = P * nz * ny * nx * torch.tensor([], dtype=dtype).element_size() * 2.2          # buf + the filter's copies
+    if G.is_cuda:
+        free = torch.cuda.mem_get_info(G.device)[0]
+        if need > free:
+            raise MemoryError(f"k_dense: {P} channel-pair maps on a {nz}x{ny}x{nx} site grid need ~{need / 1e9:.1f} GB, "
+                              f"{free / 1e9:.1f} GB free: use a larger reduce, fewer channels (n_pcs) or a smaller block")
+    buf = torch.empty((P, nz, ny, nx), dtype=dtype, device=G.device)
     w = None if weights is None else weights.to(dtype)
-    for k in range(P):
-        p = G[a_idx[k]].to(dtype) * G[b_idx[k]].to(dtype)
-        if w is not None:
-            p = p * w
-        buf[k] = p.reshape(Z // b, b, Y // b, b, X // b, b).mean((1, 3, 5)) if b > 1 else p
+    if n3 <= 6:
+        for k in range(P):
+            p = G[a_idx[k]].to(dtype) * G[b_idx[k]].to(dtype)
+            if w is not None:
+                p = p * w
+            buf[k] = p.reshape(nz, b, ny, b, nx, b).mean((1, 3, 5)) if b > 1 else p
+    else:
+        # channel-rich K (the shape engines): per block, sum_v w_v g_v g_v^T as one batched matmul per z-slab -- the same
+        # numbers as the pairwise loop, without P full-resolution products
+        ai = torch.as_tensor(np.asarray(a_idx), device=G.device); bi = torch.as_tensor(np.asarray(b_idx), device=G.device)
+        per_slab = ny * nx * (n3 * n3 + 2 * n3 * b ** 3) * 4 * b
+        zc = max(1, int((torch.cuda.mem_get_info(G.device)[0] * 0.4 // per_slab) if G.is_cuda else 8))
+        for za in range(0, nz, zc):
+            zb = min(nz, za + zc)
+            g = G[:, za * b:zb * b].to(dtype)
+            if w is not None:
+                g = g * w[za * b:zb * b].sqrt()
+            g = g.reshape(n3, zb - za, b, ny, b, nx, b).permute(1, 3, 5, 0, 2, 4, 6).reshape(-1, n3, b ** 3)
+            Kb = torch.bmm(g, g.transpose(1, 2)) / b ** 3                                   # (blocks, n3, n3)
+            buf[:, za:zb] = Kb[:, ai, bi].T.reshape(P, zb - za, ny, nx)
+            del g, Kb
     buf = gaussian(buf, rho / b, truncate=truncate, axes=(1, 2, 3))
     if w is not None:
         wn = w.reshape(Z // b, b, Y // b, b, X // b, b).mean((1, 3, 5)) if b > 1 else w
@@ -219,8 +242,10 @@ def excision_weights(vol: torch.Tensor, sigma_coarse: float = 3.0, factor: float
     sig = sigma_coarse if spacing is None else tuple(sigma_coarse / s for s in sp)
     g2 = sum((gaussian(v, sig, order=o, truncate=truncate) / sp[i]) ** 2 for i, o in enumerate(((1, 0, 0), (0, 1, 0), (0, 0, 1))))
     gm = g2.sqrt()
-    ref = gm[mask] if mask is not None else gm
+    ref = gm[mask] if (mask is not None and bool(mask.any())) else gm            # an empty mask falls back to the block
     med = ref.flatten().median()
+    if not torch.isfinite(med) or med <= 0:
+        return torch.ones_like(gm)                                                 # a flat block excises nothing
     w0 = (gm <= factor * med).float()
     if gate is None:
         return w0

@@ -67,17 +67,35 @@ class OrientationReadout:
         self.fit_r2 = float(1 - ((pred - Y) ** 2).sum() / ((Y - Y.mean(0)) ** 2).sum())
         return self
 
-    def predict(self, F: torch.Tensor):
-        """Per-voxel orientation ``(3, Z, Y, X)`` (unit, axial) and confidence ``(Z, Y, X)`` in [0, 1]."""
+    def predict(self, F: torch.Tensor, z_chunk: int = 16):
+        """Per-voxel orientation ``(3, Z, Y, X)`` (unit, axial) and confidence ``(Z, Y, X)`` in [0, 1]; z-chunked."""
         f = self._prep(F)
         C, Z, Y, X = f.shape
-        Xn = ((f.reshape(C, -1).T - self.mean) / self.std)
-        t6 = Xn @ self.W[:-1] + self.W[-1]
-        T = tensor_from6(t6)
-        lam, V = eigh(T)                                                                  # ascending
-        d = V[..., :, 2]                                                                  # principal eigenvector
-        conf = ((lam[:, 2] - lam[:, 1]) / lam[:, 2].abs().clamp_min(1e-6)).clamp(0, 1)
-        return d.T.reshape(3, Z, Y, X), conf.reshape(Z, Y, X)
+        d_out = torch.empty((3, Z, Y, X), device=F.device); c_out = torch.empty((Z, Y, X), device=F.device)
+        for z in range(0, Z, z_chunk):
+            fz = f[:, z:z + z_chunk]
+            Xn = ((fz.reshape(C, -1).T - self.mean) / self.std)
+            t6 = Xn @ self.W[:-1] + self.W[-1]
+            lam, V = eigh(tensor_from6(t6))                                               # ascending
+            d = V[..., :, 2]                                                              # principal eigenvector
+            conf = ((lam[:, 2] - lam[:, 1]) / lam[:, 2].abs().clamp_min(1e-6)).clamp(0, 1)
+            d_out[:, z:z + z_chunk] = d.T.reshape(3, *fz.shape[1:]); c_out[z:z + z_chunk] = conf.reshape(fz.shape[1:])
+        return d_out, c_out
+
+
+def modes_dense(o: torch.Tensor, conf: torch.Tensor, rho: float, truncate: float, reduce: int, core, lmax: int = 8,
+                rel: float = 0.5, min_sep_deg: float = 25.0, nmax: int = 3):
+    """The window modes on a whole site grid at once: the confidence-weighted density of the per-voxel orientations
+    in even spherical harmonics (order ``lmax``, angular resolution ~25 deg at 8), its peaks per site. Returns
+    ``modes (nz, ny, nx, nmax, 3)`` (z, y, x; zero where absent), ``fractions (nz, ny, nx, nmax)``, ``n (nz, ny, nx)``
+    and the sites. The same numbers as :func:`window_modes` up to the kernel (SH truncation vs the 15 deg kernel)."""
+    from ..tensor import odf_dense
+    from ..odf import peaks
+    G = (o * conf.clamp_min(0).sqrt()[None]).to(torch.float16)                      # odf_dense weights a direction by |g|^2 = conf
+    O, sites = odf_dense(G, rho, truncate, reduce, core, lmax=lmax)
+    d, a, cnt = peaks(O.reshape(-1, O.shape[-1]), lmax, nmax=nmax, rel=rel, min_sep_deg=min_sep_deg)
+    shp = O.shape[:3]
+    return d.reshape(shp + (nmax, 3)), (a / a.sum(1, keepdim=True).clamp_min(1e-30)).reshape(shp + (nmax,)), cnt.reshape(shp), sites
 
 
 def hemisphere(n: int = 1500, device="cpu") -> torch.Tensor:

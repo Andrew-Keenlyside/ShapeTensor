@@ -64,9 +64,13 @@ def filter_axis(x: torch.Tensor, kernel, axis: int, chunk_rows: int = 1 << 22) -
 def gaussian(x: torch.Tensor, sigma, order=(0, 0, 0), truncate: float = 3.0, axes=(-3, -2, -1)) -> torch.Tensor:
     """Separable Gaussian (derivative) filter over ``axes``; ``sigma`` a scalar or one value per axis."""
     sig = (sigma,) * len(axes) if np.isscalar(sigma) else tuple(sigma)
+    if len(sig) != len(axes) or len(order) < len(axes):
+        raise ValueError(f"gaussian: {len(axes)} axes but sigma {sig} / order {tuple(order)}")
     for ax, s, o in zip(axes, sig, order):
         if s <= 0 and o == 0:
             continue
+        if s <= 0:
+            raise ValueError(f"gaussian: a derivative of order {o} needs sigma > 0 (got {s})")
         x = filter_axis(x, kernel1d(float(s), int(o), truncate), ax)
     return x
 

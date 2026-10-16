@@ -106,11 +106,12 @@ def pair_geometric(D: torch.Tensor, W: torch.Tensor):
 
 
 def _prepare(K: torch.Tensor):
+    K = K.float()
     Y = common.cholesky_factor(K)
     Kn = common.normalise_trace(K.double())
     T = common.channel_sum(Kn).float()
     Cg = common.channel_gram(Kn).float()
-    init = (torch.linalg.eigh(Cg)[1].flip(-1), torch.linalg.eigh(T)[1].flip(-1))
+    init = (common.eigh(Cg)[1].flip(-1), common.eigh(T)[1].flip(-1))
     return Y, init
 
 

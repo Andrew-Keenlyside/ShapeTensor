@@ -23,6 +23,7 @@ import torch
 
 from shapetensor import DATA_ROOT
 from shapetensor.features import make_engine
+from shapetensor.features.cache import cached_features
 from shapetensor.phantoms import make
 from shapetensor.readout import common, multi, populations
 from shapetensor.tensor import gradients, k_sites
@@ -80,7 +81,7 @@ def main():
             for k, a in enumerate(ANG):
                 img, masks = build([(a, 1.0)], 100 + k, tex, g)
                 v = torch.as_tensor(img, device="cuda").float()
-                F = eng(v); G = gradients(v[None], SIGMA, TR)
+                F = cached_features(eng, v); G = gradients(v[None], SIGMA, TR)
                 s = populations.separate_sites(F, G, centers, rho)
                 ratios.append((s["lam"][:, 1] / s["lam"][:, 0].clamp_min(1e-12)).cpu().numpy())
                 errs.append(angle(s["dirs"][:, 0].cpu().numpy(), unit(a)))
@@ -93,7 +94,7 @@ def main():
             for cname, (a1, a2, f1) in CROSS.items():
                 img, masks = build([(a1, f1), (a2, 1 - f1)], 300, tex, g)
                 v = torch.as_tensor(img, device="cuda").float()
-                F = eng(v); G = gradients(v[None], SIGMA, TR)
+                F = cached_features(eng, v); G = gradients(v[None], SIGMA, TR)
                 t1, t2 = unit(a1), unit(a2)
                 out = {}
                 # signatures

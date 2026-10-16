@@ -155,9 +155,19 @@ class AnatomixEngine:
             shifts = list(itertools.product(range(self.phases), repeat=3))
         else:
             shifts = [(0, 0, 0)]
-        acc = torch.zeros((self.n_channels,) + shape, dtype=torch.float32, device=self.device)
-        for s in shifts:
-            self._run_block(vp, shape, s, acc, project)
+        while True:
+            try:
+                acc = torch.zeros((self.n_channels,) + shape, dtype=torch.float32, device=self.device)
+                for s in shifts:
+                    self._run_block(vp, shape, s, acc, project)
+                break
+            except torch.OutOfMemoryError:
+                # a smaller card, or another job on the GPU: halve the tile (the margin stays) and start the block again
+                if self.tile <= 2 * NET_MULTIPLE:
+                    raise
+                del acc; torch.cuda.empty_cache()
+                self.tile = max(NET_MULTIPLE, (self.tile // 2) // NET_MULTIPLE * NET_MULTIPLE)
+                import warnings; warnings.warn(f"anatomix: out of memory, retrying with tile {self.tile}")
         del vp
         acc /= len(shifts)
         if self.nyquist == "filter":
