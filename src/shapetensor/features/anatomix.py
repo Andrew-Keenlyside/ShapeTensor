@@ -37,8 +37,10 @@ from ..pca import PCA
 NET_MULTIPLE = 32          # four max-pools: tile dims must be multiples of 16; 32 is what chunkreg pads to
 #: one forward pass's ceiling per tap: the 48-channel full-resolution tensors must stay under 2^31 elements
 #: (448^3 fails in upsample_nearest3d at layer 58; the output head's padding fails at 384^3: 48 x 384^3 > 2^31)
-MAX_PASS = {"l58": 384, "out16": 352}
+MAX_PASS = {"l58": 384, "out16": 352, "enc2": 384}
 LAYER48 = 58               # decoder output at full resolution after the first skip concat: 32 + 16 channels
+LAYER_ENC2 = 15            # encoder block 2: 32 channels at half resolution -- the orientation-selective layer
+RAW = {"l58": 48, "out16": 16, "enc2": 32}
 
 _NET = {}
 
@@ -58,8 +60,8 @@ class AnatomixEngine:
                  margin: int = 64, n_pcs: int | None = 16, l2: bool = True, device: str = "cuda",
                  pca_tiles: int = 6, pca_sample: int = 300_000, seed: int = 0, out_dtype=torch.float16,
                  amp: bool = True):
-        if layer not in ("l58", "out16"):
-            raise ValueError("layer must be 'l58' or 'out16'")
+        if layer not in RAW:
+            raise ValueError("layer must be 'l58', 'out16' or 'enc2'")
         if nyquist not in ("phase", "filter", "none"):
             raise ValueError("nyquist must be 'phase', 'filter' or 'none'")
         max_pass = MAX_PASS[layer]
@@ -72,11 +74,11 @@ class AnatomixEngine:
         self.device, self.pca_tiles, self.pca_sample, self.seed = device, int(pca_tiles), int(pca_sample), int(seed)
         self.out_dtype = out_dtype
         self.amp = bool(amp)                       # bf16 autocast (as chunkreg runs it); False = float32
-        raw = 48 if layer == "l58" else 16
+        raw = RAW[layer]
         self.n_pcs = None if (n_pcs is None or n_pcs >= raw) else int(n_pcs)
         self.n_channels = self.n_pcs or raw
         self.raw_channels = raw
-        self.name = f"anatomix{raw}"
+        self.name = "anatomix_enc2" if layer == "enc2" else f"anatomix{raw}"
         self.pca: PCA | None = None
 
     # -- the network on one padded tile ----------------------------------------------------------------------
@@ -91,6 +93,9 @@ class AnatomixEngine:
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=self.amp):
             if self.layer == "l58":
                 f = net(xp, layers=[LAYER48], encode_only=True)[0][0]
+            elif self.layer == "enc2":
+                f = net(xp, layers=[LAYER_ENC2], encode_only=True)[0]                     # (1, 32, z/2, y/2, x/2)
+                f = F.interpolate(f.float(), size=tuple(xp.shape[-3:]), mode="trilinear", align_corners=False)[0]
             else:
                 f = net(xp)[0]
         f = f.float()[:, :shape[0], :shape[1], :shape[2]]

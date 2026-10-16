@@ -31,8 +31,16 @@ def _anatomix48(**kw):
     return AnatomixEngine(layer="l58", **kw)
 
 
+def _anatomix_enc2(**kw):
+    """Encoder block 2 (layer 15, 32 channels at half resolution, upsampled): the orientation-selective layer."""
+    from .anatomix import AnatomixEngine
+    kw.setdefault("n_pcs", None)
+    return AnatomixEngine(layer="enc2", **kw)
+
+
 ENGINES["anatomix16"] = _anatomix16
 ENGINES["anatomix48"] = _anatomix48
+ENGINES["anatomix_enc2"] = _anatomix_enc2
 
 
 def make_engine(name: str, **kwargs) -> FeatureEngine:
