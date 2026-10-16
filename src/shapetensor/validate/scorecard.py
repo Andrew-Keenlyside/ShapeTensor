@@ -16,8 +16,8 @@ from .suite import RESULTS_DIR
 CLAIMS = [
     {"claim": "interface fixed", "pids": ["P3-40-t0.25", "P3-40-t0.5", "P3-15-t0.25"], "band": "0-0.1mm", "stat": "median",
      "kind": "single", "op": "<=", "threshold": 10.0, "unit": "deg"},
-    {"claim": "nothing lost in clear tissue", "pids": ["P3-0", "P3-0-t0.5", "P3-0-t0.25", "P8", "P8-t0.5", "P8-t0.25"],
-     "band": "all", "stat": "median", "kind": "single", "op": "<= ST + 1", "threshold": 1.0, "unit": "deg"},
+    {"claim": "nothing lost in clear tissue (> 2 mm from the step)", "pids": ["P3-40", "P3-40-t0.5", "P3-40-t0.25", "P1", "P1-t0.5"],
+     "band": ">2mm", "stat": "median", "kind": "single", "op": "<= ST + 1", "threshold": 1.0, "unit": "deg"},
     {"claim": "U-fibres kept", "pids": ["P2", "P2-t0.5"], "band": "0.25-0.5mm", "stat": "median", "kind": "single",
      "op": "<=", "threshold": 10.0, "unit": "deg"},
     {"claim": "vessels", "pids": ["P6", "P6-t0.5"], "band": "0-0.1mm", "stat": "median", "kind": "single", "op": "<=",

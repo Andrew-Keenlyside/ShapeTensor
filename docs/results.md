@@ -67,20 +67,43 @@ over the tuning curves fails (the response to a crossing is not the sum of the s
 per-voxel linear head reads orientation at 73% within ±15° on held-out single-population phantoms and separates a
 90° crossing by voting (9° / 6°), not 60°.
 
-## Against the pre-registered thresholds
+## Excision across the families (final pass, 2 seeds)
+
+Within 0.1 mm of the structure, ρ 8 / 16 / 32: plain tensor → excision ungated → excision gated by `cl`
+(clear tissue of the same phantom in brackets).
+
+| phantom | plain | excision, ungated | excision, `cl`-gated | clear |
+|---|---|---|---|---|
+| P3 step 40, half texture | 41 / 13 / 7 | **5.4 / 2.9 / 2.1** | 27 / 9.4 / 6.1 | 5.9 / 2.8 / 2.1 |
+| P3 step 40, quarter | 58 / 53 / 42 | **11.9 / 5.5 / 3.1** | 12.1 / 5.5 / 3.5 | 14 / 5 / 3 |
+| P1 gyrus, half | 34.5 / 16 / 5.0 | 37 / 18 / 9 | **5.2 / 2.5 / 1.9** | 3.3 / 1.9 / 1.3 |
+| P1 gyrus, quarter | 68 / 65 / 13 | 64 / 57 / 53 | **15 / 6.6 / 2.7** | 8.9 / 3.3 / 1.9 |
+| P2 U-fibre band, half (0.25–0.5 mm) | 2.3 / 1.3 / 2.5 | 2.3 / 1.5 / 2.9 | 2.8 / 1.7 / 2.4 | — |
+| P7 slab face, quarter | 14.8 / 5.8 / 2.6 | 13.7 / 5.8 / 2.8 | 14.5 / 5.8 / 2.9 | — |
+
+On the slab (one interface in textured white matter) the ungated form is right and the gate misses at ρ 8; at the
+gyrus (grey matter and CSF in the block) the ungated form *harms*, because its threshold — 3× the block median of the
+coarse gradient — is too low when much of the block is smooth, while the gated form removes the shell entirely at
+every texture level. The default is therefore the gated excision with the reference median taken over white matter
+(a pipeline's mask), under test post hoc as `excision_variants.py`. Excision also removes the vessel halos (P6:
+1.3° at ρ 32 against 5.3° for the plain tensor).
+
+![gyrus glyphs](img/P1-t0.5_glyphs.png)
+
+## Against the pre-registered thresholds (`SCORECARD.md`, worst phantom per claim)
 
 | claim | outcome |
 |---|---|
-| interface fixed (≤ 10° within 0.5 mm) | **met by excision** (7.9 / 2.7 / 1.8° at step 40, t0.25); not met by any shape-space read-out |
-| nothing lost in clear tissue | met (excision = plain tensor to 0.1°) |
-| U-fibres kept | met (1–3°) |
-| grey/white shell gone (parallel share within 5 points of the twin) | the shell at 20 µm is disorder rather than wrapping; excision results in the final pass |
-| crossings resolved (≥ 45°, N ≥ 95%, both ≤ 15° at ≥ 90%) | met at 60° and 90° with anatomix48 CSD at full texture; 45° at 61%; at the realistic texture level directions are at 11–18° |
-| no false populations (≤ 2%) | met with the null-calibrated threshold |
-| fractions (≤ 0.1) | met where two populations are found |
-| boundary field (P / R ≥ 0.9) | met by the coarse gradient at ρ ≥ 16 |
-| vessels | in the final pass |
+| interface fixed (≤ 10° within 0.1 mm, step ≥ 15) | **met**: excision ungated 3.7° (ρ 32), 7.6° (ρ 16); `cl`-gated 6.1° / 9.4°; no shape-space read-out passes (best: jet eigen 7.6° at ρ 32, which is its floor everywhere) |
+| nothing lost in clear tissue (≤ plain tensor + 1°, > 2 mm) | met by every excision and hybrid arm (3.1° vs 3.1° at ρ 32) |
+| U-fibres kept (≤ 10°) | met by 77 / 84 arms (1.3–3°) |
+| vessels (≤ 15° within 2 radii) | met by 52 / 84 arms; best excision ungated 1.3° (ρ 32) |
+| crossings resolved at 60° (N ≥ 95%, both ≤ 15° at ≥ 90%) | **met** by anatomix48 CSD (100% at ρ 32, 93% at ρ 16); by no other arm |
+| crossings resolved at 45° | not met (anatomix48 CSD 61%); order 12 under test |
+| no false populations (≤ 2%) | met with the null-calibrated threshold (27 / 60 arms) |
+| fractions at 4:1 (≤ 0.1) | met where two populations are found (0.04) |
+| boundary detector (P / R AUC ≥ 0.9) | at the line: coarse gradient 0.90 (ρ 32), 0.85–0.96 at ρ 16 across texture levels |
 
-The remaining pass of the suite (vessels, laminar slab, the excision arms over every family) and the follow-ups
-(order-12 CSD on the 45° / 30° crossings, the PCA variants, the real-crop demonstration) are appended to the
-[results log](research/TCA_FIELD_RESULTS.md) as they complete.
+The follow-ups (order-12 CSD on the 45° / 30° crossings, the PCA variants, the excision-variant test, the real-crop
+demonstrations and the speed benchmark) are appended to the [results log](research/TCA_FIELD_RESULTS.md) as they
+complete.
