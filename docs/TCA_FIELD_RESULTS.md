@@ -611,3 +611,39 @@ done on per-voxel orientations rather than on principal signatures or on gradien
 improve are the per-voxel readout's accuracy (a nonlinear map; the linear one leaves the cos²-type tuning on the
 table) and the mode finder's width and null (over-splitting). Round 2 runs both (`OrientationReadoutMLP`, kernel
 25°, a 15% mass floor per mode).
+
+## 21. Stage 2, round 2: the per-voxel orientation readout in three forms (`orientation_readout.py --model ridge|mlp|dist`; seed 0, ρ 10, small blocks)
+
+Same self-calibration for all three (teacher: the excised tensor at ρ 8 on confident single-fibre voxels, 2.1°
+accurate; no labels). *Ridge*: a linear map to the orientation tensor d dᵀ. *MLP*: the same target through a small
+network. *Dist*: a softmax over 160 hemisphere directions trained on a soft target around the teacher direction —
+a voxel holding two populations keeps two bumps instead of their mean, and a window's population density is the
+sum of its voxels' distributions. (A scoring bug in the first two rounds — the second population's mask rendered
+from a fresh random draw, so it marked the wrong voxels — is fixed here; population 1 was unaffected.)
+
+| encoder 2 | single fibres per voxel (median; within 15°) | 90°: voxels near a truth · pop 1 / pop 2 assigned · windows N = 2 · both ≤ 15° · pair error | 60° | 45° | 60° at 4:1 |
+|---|---|---|---|---|---|
+| ridge | 10.6°; 64% | 50% · 36 / 28 · 100% · 30% · 34° | 54% · 39 / 31 · 100% · 0% · 28° | 60% · 41 / 31 · 98% · 0% | 56% · 50 / 17 · 95% · 1% |
+| MLP | 9.2°; 70% | 52% · 42 / 40 · 100% · 41% · 34° | 58% · 46 / 40 · 100% · 0% · 25° | 64% · 49 / 41 · 98% · 1% | 62% · 59 / 26 · 69% · 0% |
+| **dist** | 10.0°; 66% | 61% · 51 / 46 · 80% · **75%** · **5.3°** | 59% · 55 / 32 · 95% · 19% · 21° | 67% · 59 / 34 · 41% · 10% · 16° | 70% · 69 / 20 · 15% · 0% |
+
+The jet (no network) with the distribution readout: 90° 84% / 24% / 18°; 60° 24% / 24% / 8.7°; layer 58: N = 1 nearly
+everywhere.
+
+- **The form of the readout decides the crossing.** The two tensor-regression forms read every voxel of a crossing
+  towards the bisector (the per-voxel histogram is one hump between the truths; the modes they produce are 25–34°
+  off and over-split, N = 3 almost everywhere), because a voxel whose features already contain the neighbouring
+  fascicle is regressed to the *average* orientation. The distribution form keeps the populations apart: on the
+  90° crossing both directions are within 15° in 75% of windows with a 5.3° pair error — the first result of the
+  stage that meets its target angle.
+- **60° is the current limit**: two populations are found in 95% of windows but the pair is right in 19% (21°
+  error); per voxel, 55% / 32% of each population's voxels are read within 15° of their own direction. The
+  per-voxel distributions of the two populations overlap at 60° at this texture and smoothing (3³), so the
+  summed density's two modes pull together. 45° and 4:1 are not resolved.
+- Per-voxel accuracy on single fibres is the same in all three forms (9–11° median, 64–70% within 15°), so the
+  gain of the distribution form is entirely in how it composes at a crossing, not in its accuracy.
+
+What to work on next within the stage: the per-voxel distribution's sharpness and the mixing scale — a smaller
+feature average (1–2 voxels instead of 3³) and a sharper target kernel (8–10° instead of 12°), the two encoder
+blocks together (block 1's finer receptive field), and the readout's resolution of the 60° pair as the
+pre-registered test; then the window modes' null and separation (25°) at that sharpness.
