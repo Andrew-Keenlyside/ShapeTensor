@@ -4,7 +4,7 @@
 
 </div>
 
-# ShapeTensors
+# ShapeTensor
 
 Fibre orientation fields for HiP-CT white matter, from multichannel "shape space" features as well as from the
 intensity itself, with the boundary problem of the structure tensor and several fibre populations per site in view.
