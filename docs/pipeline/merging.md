@@ -53,7 +53,7 @@ vec = st.cp.shapetensor([cell_stain, myelin_stain], rho=10.0, engine="anatomix48
 On the phantom pairs (`scripts/bench/two_stain_test.py`) this behaves as tensor averaging: two realisations of one
 stain gain the expected √2 far from structures (4.4° → 3.0°) and nothing at the interface, which both share; a
 fibre-rich stain plus a weak-texture, strong-boundary stain reads like the fibre-rich stain alone; concatenating
-the shape features of a weak stain degrades the joint read-out (6 → 24° at the step; the 60° crossing from 94% to 51%).
+the shape features of a weak stain degrades the joint read-out (6 → 24° at the step) while the crossing keeps its resolution (46 → 51%).
 The merged field is as good as the best stain, not better — stain weights belong in the merge. (BigBrain has one stain, so this stays a phantom result until a co-registered pair exists.)
 
 ## Following the merged field

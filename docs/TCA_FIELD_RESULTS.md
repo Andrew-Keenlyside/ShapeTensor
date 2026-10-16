@@ -565,12 +565,12 @@ Read alone (A, B) and stacked (A+B: the intensity tensors add; the anatomix48 fe
 | two realisations, anatomix48 | 43 · 16 · 16 / 38 · 21 · 15 | 46 · 23 · 16 / 41 · 30 · 15 | 45 · 19 · 16 / 40 · 27 · 15 | 56 · 32 · 22 / 54 · 48 · 44 |
 
 Crossing at 60° (A full texture, B half), "found 2 / both within 15°", ρ 16: intensity ODF A 20 / 10%, B 78 / 28%,
-A+B 29 / 14%; anatomix48 ODF A 100 / 94%, B 100 / 0%, A+B 100 / **51%**. Single-line null: ≤ 3.5% false seconds in
+A+B 29 / 14%; anatomix48 ODF A 98 / 46%, B 100 / 0%, A+B 100 / **51%** (ρ 10: 88 / 36%, 100 / 1%, 100 / 38%). Single-line null: ≤ 3.5% false seconds in
 every combination.
 
 Stacking is tensor averaging: two realisations of one stain gain the expected √2 far from structures (4.4 → 3.0°,
 2.6 → 1.9°) and nothing at the interface, which both stains share; a fibre-rich stain plus a weak-texture stain
 reads like the fibre-rich stain alone, slightly diluted; concatenating the shape features of a weak stain degrades
-the joint shape read-out (6 → 24° at ρ 10) and halves the crossing resolution (94 → 51%); TCA on a stacked K is
+the joint shape read-out at the interface (6 → 24° at ρ 10) while the crossing keeps its resolution (46 → 51%); TCA on a stacked K is
 worse than the stacked tensor (the CP picks the shared boundary piece). The merged field is as good as the best
 stain, not better — stain selection, or per-stain weights, belongs in the merge stage.
