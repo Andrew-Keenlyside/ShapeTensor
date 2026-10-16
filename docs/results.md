@@ -52,7 +52,7 @@ populations on the single-fibre phantom); "found 2 / both within 15°", ρ 16 �
 | 60° at 4:1, t1 | 0 | 2 / 1% | 52 / 21% → 68 / 29% |
 | 60°, t0.5 (threshold 0.4–0.5) | 92 / 29% → 100 / 33% (13°) | 99 / 35% → **100 / 58% (11°)** | 100 / 0% (16–18°) |
 
-On the fan crossed by a bundle (P5), the jet and intensity ODFs lead (100 / 91–100% and 85–99% at ρ 32), anatomix48
+**On sheets and interfaces the read-out over-counts** (results log §13): within 0.5 mm of a step, a gyral boundary or a vessel it reports N ≥ 2 at 30–100% of sites (a sheet's single ODF peak deconvolves to a ring of fibre directions), and the anatomix48 threshold calibrated on straight lines gives a false second population at ~50% of sites on dispersed single-population texture. The null must be set on dispersed tissue and the fixels gated by the coarse gradient magnitude; the `cl` gate does not help. On the fan crossed by a bundle (P5), the jet and intensity ODFs lead (100 / 91–100% and 85–99% at ρ 32), anatomix48
 72–80%. The other N-selection methods on the same caches: FRT peaks resolve 90° only; **BIC never selects two
 populations**; the over-complete CP grouping reports two almost everywhere (false second population on single-fibre
 sites up to 100%); CSD + TCA refinement *degrades* the CSD directions; the residual-bootstrap stability filter
@@ -124,7 +124,7 @@ cost about 1 s per 256³ pass on this card on top of either tensor (results log 
 | vessels (≤ 15° within 2 radii) | met by 52 / 84 arms; best excision ungated 1.3° (ρ 32) |
 | crossings resolved at 60° (N ≥ 95%, both ≤ 15° at ≥ 90%) | **met** by anatomix48 CSD (100% at ρ 32, 93% at ρ 16); by no other arm |
 | crossings resolved at 45° | not met (anatomix48 CSD 61%); order 12 under test |
-| no false populations (≤ 2%) | met with the null-calibrated threshold (27 / 60 arms) |
+| no false populations (≤ 2%) | met on the straight-line null (27 / 60 arms); **not met on sheets, interfaces or dispersed tissue** — N ≥ 2 at 30–100% of sites within 0.5 mm of a step, gyral boundary or vessel, and the anatomix48 threshold set on lines gives 48–52% false seconds on dispersed single-population texture (results log §13); needs a dispersed-tissue null and an interface gate |
 | fractions at 4:1 (≤ 0.1) | met where two populations are found (0.04) |
 | boundary detector (P / R AUC ≥ 0.9) | at the line: coarse gradient 0.90 (ρ 32), 0.85–0.96 at ρ 16 across texture levels |
 

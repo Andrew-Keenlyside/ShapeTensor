@@ -69,7 +69,9 @@ three fixels per site. `figures/tca_field/graphical_abstract.png` shows the vali
   5.2 / 2.5 / 1.9° at the gyrus, 8.2 / 3.3 / 1.3° at a vessel; ungated, nothing lost in clear tissue), with the
   coarse gradient magnitude as the boundary detector.
 - For several populations, **CSD of the gradient-direction ODF** is the rank-free estimator; the anatomix layer-58
-  features sharpen it on tight crossings (60° at 100% both within 15°).
+  features sharpen it on tight crossings (60° at 100% both within 15°). It over-counts at interfaces and on
+  dispersed tissue when calibrated on straight lines (a sheet deconvolves to a ring), so fixels need a
+  dispersed-tissue null and an interface gate before use.
 - Orientation is encoded in anatomix's *encoder* (block 2: selectivity up to 0.83), not its output; a small
   phantom-trained head reads it per voxel at ±15–20°.
 - Speed (RTX A6000, ρ 16): tensor + eigen 11.8 Mvoxel/s, 25–30× the `structure-tensor` package on one CPU; the

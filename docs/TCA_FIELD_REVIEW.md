@@ -438,7 +438,9 @@ extraction of §5 does not come from TCA either.
    exactly when the orientation is at risk, so it is the right gate / reliability flag; the orientation gap
    (λ2−λ3)/λ2 remains the quality measure.
 3. *N populations:* **constrained spherical deconvolution of the gradient-direction ODF** (a ring response), rank-free
-   by construction: on a 90° crossing N = 2 at 96–100% of sites with both directions within 15° at 68–100% for
+   by construction — with the caveat found last (results log §13) that it over-counts at every contrast interface and,
+   with a threshold set on straight lines, on dispersed single-population tissue; the null must be set on dispersed
+   texture and the fixels gated by the coarse gradient magnitude: on a 90° crossing N = 2 at 96–100% of sites with both directions within 15° at 68–100% for
    ρ ≥ 16 (errors 4–9°), on the intensity gradients alone; the shape engines add a little at ρ 16. BIC never selects
    two populations; the over-complete CP grouping overcalls (up to 100% false second populations on single-population
    phantoms); the TCA refinement of the CSD peaks *degrades* them; the residual-bootstrap stability test is too strict.

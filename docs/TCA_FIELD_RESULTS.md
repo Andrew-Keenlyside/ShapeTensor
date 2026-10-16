@@ -297,3 +297,51 @@ The reference median makes no difference (the block median is already dominated 
 | fixels: ODF (order 8) + CSD + peaks at every voxel, GPU | 5.1 s | 40.6 s | 0.41 | 29× |
 
 The first run failed inside `torch.linalg.eigh`: cusolver's batched Jacobi solver rejects batches of ~2M matrices and above (`CUSOLVER_STATUS_INVALID_VALUE`), so `eig_special_3d` now chunks at 2²⁰.
+
+## 13. False populations on sheets and boundaries (`scripts/bench/sheet_null.py`, seed 0; `results/sheet_null.json`)
+
+The "no false populations" claim was calibrated and tested on the straight single-population line phantom only. On
+phantoms with one population and a sheet-like structure the CSD read-out (order 8, the suite's kernel, the
+null-calibrated threshold of that engine / ρ / texture) reports N ≥ 2 at these shares of white-matter sites, by
+distance from the structure; after the arrow, the same among the sites the null-calibrated `cl` gate keeps:
+
+| phantom | engine, ρ, threshold | 0–0.1 mm | 0.1–0.25 | 0.25–0.5 | > 2 mm | `cl`-gated out |
+|---|---|---|---|---|---|---|
+| P7 slab, half texture | intensity 16, 0.4 | 0 → 0% | 4 → 4% | 3 → 3% | — | 0% |
+| | intensity 32, 0.3 | 25 → 25% | — | 8 → 8% | — | 0% |
+| | anatomix48 16 / 32 | 0% | 0% | 0% | — | 0% |
+| P7 slab, quarter | intensity 16 / 32 | **100%** | 100% | 100% | — | 0–1% |
+| | anatomix48 16, 0.5 | 35% | 38% | 26% | — | 1% |
+| | anatomix48 32, 0.4 | 88% | — | 42% | — | 0% |
+| P1 gyrus, half | intensity 16, 0.4 | 69 → 83% | 32 → 40% | 5 → 4% | 0% | 22% |
+| | intensity 32, 0.3 | — | — | 37 → 33% | 0% | 33% |
+| | anatomix48 16, 0.5 | 99 → 98% | 90 → 89% | 81 → 80% | **11%** | 22% |
+| | anatomix48 32, 0.4 | — | — | 100% | **52%** | 33% |
+| P3 step 40, half | intensity 16, 0.4 | 60 → 84% | 51 → 65% | 31 → 33% | 7% | 4% |
+| | intensity 32, 0.3 | 54% | 46% | 50% | 6 → 5% | 2% |
+| | anatomix48 16, 0.5 | 65 → 97% | 62 → 87% | 65 → 69% | **48%** | 4% |
+| | anatomix48 32, 0.4 | 62% | 62% | 62% | **51%** | 2% |
+| P6 vessel, half | intensity 16, 0.4 | 51 → 37% | 60 → 45% | 40 → 35% | — | 6% |
+| | anatomix48 16, 0.5 | 29% | 38 → 33% | 37% | — | 6% |
+| | anatomix48 32, 0.4 | — | 81% | 75% | — | 1% |
+
+Three things follow.
+
+- **A sheet makes populations.** The gradient-direction ODF of a sheet is one peak; deconvolving it with the ring
+  response gives a ring of fibre directions, and the peak finder reports two or three of them. Near every interface
+  — the step, the gyral boundary, the vessel wall, the slab face at quarter texture — the read-out finds N ≥ 2 at
+  30–100% of sites. The `cl` gate at its null threshold removes 2–33% of sites and *raises* the false share among
+  the rest (it removes the sites where the sheet dominates, not those where it merely competes).
+- **The straight-line null does not transfer to dispersed tissue.** Far from any structure (> 2 mm) the intensity
+  ODF keeps the false share at 5–7% (the target was 2%) but the anatomix48 ODF reports a second population at
+  48–52% of sites on the dispersed single-population texture of P3 and at 11–52% on P1 — its threshold, set on
+  straight lines, is far too low for fibres with the real crop's dispersion. This is why the calibrated real-crop
+  demo still showed N ≥ 2 at 53% of sites.
+- **The slab at half texture is clean** (0–4% at ρ 16, both engines), so a laminar texture as such is not the
+  problem; the false populations come from *contrast* interfaces, and from under-calibration.
+
+Consequences for the N-population field: the null calibration must be done on dispersed single-population
+texture (the clear tissue of the P3 family, not the straight lines), and fixels need an *interface* gate (the coarse
+gradient magnitude, which detects every interface above, not `cl`) before they enter a tractography. Both are
+measured in §14 (`sheet_null_gates.py`: thresholds 0.1 and 0.2 above the line-null value; `cl`, `gm` and both as
+gates). Until that holds, the "no false populations" row of the scorecard is met on straight lines only.
