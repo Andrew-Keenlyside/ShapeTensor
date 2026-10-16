@@ -43,15 +43,28 @@ def channel_gram(K: torch.Tensor) -> torch.Tensor:
     return K.reshape(N, C, 3, C, 3).diagonal(dim1=2, dim2=4).sum(-1)
 
 
+CHUNK = 1 << 20          # cusolver's batched Jacobi solver rejects batches of ~2M matrices and above
+
+
+def eigh(M: torch.Tensor):
+    """``torch.linalg.eigh`` over the leading batch axis in chunks (ascending, as torch returns it)."""
+    if M.shape[0] <= CHUNK:
+        return torch.linalg.eigh(M)
+    ws, Vs = [], []
+    for a in range(0, M.shape[0], CHUNK):
+        w, V = torch.linalg.eigh(M[a:a + CHUNK]); ws.append(w); Vs.append(V)
+    return torch.cat(ws), torch.cat(Vs)
+
+
 def eigh_desc(M: torch.Tensor):
     """Eigenvalues descending ``(N, 3)`` and eigenvectors as columns ``(N, 3, 3)`` (column k for value k)."""
-    w, V = torch.linalg.eigh(M)
+    w, V = eigh(M)
     return w.flip(-1), V.flip(-1)
 
 
 def null_dir(M: torch.Tensor) -> torch.Tensor:
     """Unit eigenvector of the smallest eigenvalue of symmetric ``(N, 3, 3)``."""
-    return torch.linalg.eigh(M)[1][..., :, 0]
+    return eigh(M)[1][..., :, 0]
 
 
 def canonical_sign(v: torch.Tensor) -> torch.Tensor:

@@ -96,24 +96,36 @@ def main():
         res = {"same_truth": bool(same)}
         is_multi = pa.startswith("P4")
         for engine in ("intensity", "anatomix48"):
+            kernels = {}
+            if is_multi:
+                # the ring kernels from the single-line pair, read the same way (A, B or A+B) -- computed first and
+                # freed, so that only one stain pair's gradients are resident at a time (48 channels at 768^3 otherwise)
+                sA, _, _ = load("P4-lines-single", 0); sB, trS, _ = load("P4-lines-single-t0.5", 1)
+                GS_A = gradients(feats(sA, engine), SIGMA, TR); del sA
+                GS_B = gradients(feats(sB, engine), SIGMA, TR); del sB
+                for rho in RHOS:
+                    kernels[(rho, "A")] = kernel_for(GS_A, rho, grid, trS)
+                    kernels[(rho, "B")] = kernel_for(GS_B, rho, grid, trS)
+                    kernels[(rho, "A+B")] = kernel_for(torch.cat([GS_A, GS_B], 0), rho, grid, trS)
+                del GS_A, GS_B; torch.cuda.empty_cache()
             FA, FB = feats(vA, engine), feats(vB, engine)
             GA, GB = gradients(FA, SIGMA, TR), gradients(FB, SIGMA, TR); del FA, FB
-            GAB = torch.cat([GA, GB], 0)
             for rho in RHOS:
-                for tag, G in (("A", GA), ("B", GB), ("A+B", GAB)):
+                for tag in ("A", "B", "A+B"):
+                    G = {"A": GA, "B": GB}.get(tag)
+                    if G is None:
+                        G = torch.cat([GA, GB], 0)
                     key = f"{engine}|rho{rho:g}|{tag}"
                     if not is_multi:
                         res[key] = read_single(G, rho, grid, zs, xs, t)
                     else:
-                        # the ring kernel from the single-line pair read the same way (A, B or A+B)
-                        sA, _, _ = load("P4-lines-single", 0); sB, trS, _ = load("P4-lines-single-t0.5", 1)
-                        GS = {"A": gradients(feats(sA, engine), SIGMA, TR), "B": gradients(feats(sB, engine), SIGMA, TR)}
-                        GS["A+B"] = torch.cat([GS["A"], GS["B"]], 0); del sA, sB
-                        kern, width = kernel_for(GS[tag], rho, grid, trS); del GS
+                        kern, width = kernels[(rho, tag)]
                         res[key] = {**read_multi(G, rho, grid, trA, kern), "ring_width_deg": round(width, 1)}
                     print(f"[{time.time() - t0:5.0f}s] {name} | {key}: {res[key]}", flush=True)
+                    if tag == "A+B":
+                        del G
                     torch.cuda.empty_cache()
-            del GA, GB, GAB; torch.cuda.empty_cache()
+            del GA, GB; torch.cuda.empty_cache()
         out[name] = res
         del vA, vB; torch.cuda.empty_cache()
         json.dump(out, open(f"{DATA_ROOT}/results/two_stain_test.json", "w"), indent=1)
