@@ -345,3 +345,58 @@ texture (the clear tissue of the P3 family, not the straight lines), and fixels 
 gradient magnitude, which detects every interface above, not `cl`) before they enter a tractography. Both are
 measured in §14 (`sheet_null_gates.py`: thresholds 0.1 and 0.2 above the line-null value; `cl`, `gm` and both as
 gates). Until that holds, the "no false populations" row of the scorecard is met on straight lines only.
+
+## 14. Thresholds and gates for the false populations (`sheet_null_gates.py`, `dispersed_null.py`, `crossings_rel_sweep`; seed 0)
+
+Share of white-matter sites with N ≥ 2 on single-population phantoms as the CSD threshold rises above the line-null
+value, by band (0–0.1 / 0.1–0.25 / 0.25–0.5 mm / > 2 mm from the structure); and what the crossings keep at the
+same thresholds.
+
+**Full texture (P3-40, dispersed fibres, a 40-level step):**
+
+| engine, ρ | rel 0.3 | 0.4 | 0.5 | 0.6 | 0.7 |
+|---|---|---|---|---|---|
+| intensity 16 | 0 / 1 / 1 / 0% | 0% | 0% | 0% | 0% |
+| intensity 32 | 0% | 0% | 0% | 0% | 0% |
+| anatomix48 16 | 29 / 29 / 11 / 1% | 6 / 6 / 2 / 0% | 4 / 1 / 2 / 0% | 0 / 1 / 1 / 0% | 0% |
+| anatomix48 32 | 25 / 29 / 17 / 0% | 0% | 0% | 0% | 0% |
+
+Crossings at full texture, "both within 15°" (P4, seed 0), rel 0.3 → 0.7: anatomix48 ρ 32 — 90° 100 → 99%, 60°
+**100 → 100%**, 45° 60 → 60%; anatomix48 ρ 16 — 90° 90 → 80%, 60° 94 → 87%, 45° 41 → 35%; intensity ρ 32 — 90°
+97 → 97%, 60° 5%. The anatomix48 read-out at **rel 0.5–0.6** is therefore compliant at full texture (≤ 2% false
+seconds on dispersed tissue and at the step, 0% far from it) and keeps the 60° crossing at 100% (ρ 32) / 92–94%
+(ρ 16). The interface itself does not make populations at this texture level.
+
+**Half texture (the real crop's level; P3-40-t0.5):**
+
+| engine, ρ | rel 0.4 | 0.5 | 0.6 | 0.7 | 0.8 | 0.9 |
+|---|---|---|---|---|---|---|
+| intensity 16 | 60 / 51 / 31 / 7% | 40 / 40 / 22 / 4% | 31 / 25 / 15 / 3% | 23 / 17 / 11 / 2% | 21 / 9 / 8 / 2% | — |
+| intensity 32 | 42 / 33 / 38 / 3% | 25 / 25 / 25 / 2% | 12 / 12 / 12 / 2% | 8 / 4 / 12 / 2% | — | — |
+| anatomix48 16 | — | 65 / 62 / 65 / 48% | 56 / 60 / 59 / 38% | 44 / 44 / 55 / 20% | 29 / 32 / 42 / 8% | 10 / 16 / 25 / 2% |
+| anatomix48 32 | 62 / 62 / 62 / 51% | 62 / 62 / 62 / 43% | 62 / 62 / 62 / 36% | 58 / 58 / 58 / 27% | 38 / 50 / 38 / 4% | — |
+
+Compliance far from the step needs rel 0.7 (intensity, ρ 16), 0.5 (intensity, ρ 32), 0.9 (anatomix48, ρ 16) or
+≈ 0.85 (anatomix48, ρ 32); within 0.5 mm of the step the false share stays at 8–25% (intensity) and 10–50%
+(anatomix48) even then. At these thresholds the 60° crossing at half texture is at 25–32% both-within-15° for the
+intensity ODF (it was 31–35% at rel 0.3: the directions, not the detection, are the limit at this texture) and at
+1–4% for anatomix48 (as before). The gyrus (P1-t0.5) behaves like the step: intensity ρ 16 rel 0.6 → 21 / 4 / 0 / 0%,
+anatomix48 ρ 16 rel 0.7 → 71 / 62 / 32 / 0%. The laminar slab at quarter texture is read as two populations
+everywhere by the intensity ODF (85–100% at every threshold: the lamination *is* a second gradient family at that
+texture ratio), 16–35% by anatomix48. The vessel: intensity ρ 16 rel 0.6 → 30 / 36 / 22%, anatomix48 rel 0.7 →
+1 / 5 / 5%.
+
+**Gates.** The `cl` gate (null-calibrated on the no-interface phantoms) removes 0–33% of sites and never lowers the
+false share among the rest; the `gm` gate removes *every* site within 0.5 mm of the step and the gyral boundary and
+within 0.1 mm of the vessel (the bands disappear from the table), leaving the far-field rate. It is an exclusion
+zone, which is the right thing for a tractography input: fixels are not reported where an interface dominates the
+window, and the single direction there is the excised tensor's.
+
+**What this settles for the N-population field.** (1) The threshold must be set on dispersed single-population
+texture at the data's own texture level, not on straight lines: at full texture that is rel 0.5–0.6 for anatomix48
+(crossings intact), at half texture 0.7 / 0.5 for the intensity ODF (ρ 16 / 32) and ≈ 0.9 for anatomix48. (2) The
+coarse-gradient interface gate excludes the interface neighbourhood; the `cl` gate is not a substitute. (3) At the
+real crop's texture level the multi-population read-out is, with a compliant threshold, a 90°-only detector with
+11–18° directions; the 60° result holds at full texture only. The scorecard's "no false populations" row is met by
+the intensity ODF at every texture level with these thresholds, and by anatomix48 at full texture; "crossings at
+60°" is met by anatomix48 at full texture with a compliant threshold (rel 0.5–0.6, ρ 32: 100%).
