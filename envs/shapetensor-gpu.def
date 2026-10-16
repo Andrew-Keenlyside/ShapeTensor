@@ -1,0 +1,51 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+# ---------------------------------------------------------------------------
+# shapetensor GPU container for a Grid Engine / Slurm cluster with H100 nodes.
+#
+# CUDA 12.4 runtime: runs on driver >= 550 (the H100 nodes' 550.127.08). The
+# anatomix weights are fetched at build time into the image (compute nodes may
+# not reach the Hugging Face hub); HF_HOME points at that copy at run time.
+#
+# Build (on a machine with apptainer and network; the package is installed
+# from the repo checkout in the build context, so run from the repo root):
+#     apptainer build --fakeroot shapetensor-gpu.sif envs/shapetensor-gpu.def
+# ---------------------------------------------------------------------------
+
+%labels
+    Purpose   "shapetensor: orientation fields from multichannel shape features, GPU"
+    Torch     2.5.1+cu124
+    MinDriver 550
+
+%files
+    pyproject.toml /opt/shapetensor/pyproject.toml
+    README.md      /opt/shapetensor/README.md
+    src            /opt/shapetensor/src
+
+%post
+    set -e
+    export PIP_NO_CACHE_DIR=1
+    pip install --upgrade pip
+    pip install "numpy>=2" scipy "zarr>=3" nibabel tifffile matplotlib contourpy scikit-learn monai \
+        "git+https://github.com/neel-dey/anatomix.git"
+    pip install /opt/shapetensor
+    # bake the anatomix weights into the image
+    export HF_HOME=/opt/hf
+    python - <<'EOF'
+from anatomix.model.load_from_hf import load_from_hf
+load_from_hf("anatomix")
+print("anatomix weights cached")
+EOF
+    chmod -R a+rX /opt/hf
+
+%environment
+    export HF_HOME=/opt/hf
+    export HF_HUB_OFFLINE=1
+    export SHAPETENSOR_DATA=${SHAPETENSOR_DATA:-/data/shapetensor}
+
+%runscript
+    exec shapetensor "$@"
+
+%test
+    python -c "import torch, shapetensor, shapetensor.st; print('shapetensor', shapetensor.__version__, 'cuda', torch.cuda.is_available())"
