@@ -22,7 +22,7 @@ SEQ = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366
 INK, GRID = "#0b0b0b", "#e1e0d9"
 ARMS = [("single", "intensity", "eigen", "intensity structure tensor"), ("single", "anatomix48", "tca", "anatomix48 TCA R3"),
         ("single", "anatomix16", "tca", "anatomix16 TCA R3"), ("single", "jet", "tca", "jet TCA R3"),
-        ("hybrid", "anatomix48", "excise_all", "excised tensor (fix A)")]
+        ("hybrid", "excised-anatomix48", "excise_all", "excised tensor (fix A)")]
 POP = ["#6250d6", "#e34948", "#eda100"]
 
 
