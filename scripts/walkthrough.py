@@ -428,12 +428,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", default="phantom:P3-40-t0.5"); ap.add_argument("--rho", type=float, default=10.0); ap.add_argument("--sigma", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=0); ap.add_argument("--core", type=int, default=256); ap.add_argument("--no-shape", action="store_true")
+    ap.add_argument("--archived", action="store_true", help="also run the archived ODF / fixel steps 5-7 (slow: minutes per block)")
     a = ap.parse_args(); t0 = time.time()
     B = Block(a); print(f"block {tuple(B.v.shape)}, core {B.core}, drawn row {B.y_draw}; {B.name}", flush=True)
     step0(B); G = step1(B); w, gm = step2(B)
     d_st, d_ex, gap_ex, gm_s, tis = step3_4(B, G, w, gm)
-    O = step5(B, G); del G, w; torch.cuda.empty_cache()
-    dirs_g, fracs_g, npop_g = step6_7(B, O, gm_s, tis, d_ex); del O; torch.cuda.empty_cache()
+    if a.archived:
+        O = step5(B, G); del G, w; torch.cuda.empty_cache()
+        dirs_g, fracs_g, npop_g = step6_7(B, O, gm_s, tis, d_ex); del O; torch.cuda.empty_cache()
+    else:
+        del G, w; torch.cuda.empty_cache(); dirs_g = d_ex                 # the second field of step 9 is the excised tensor itself until the population field exists
     if not a.no_shape:
         step8(B, d_st, tis)
     step9(B, d_ex, dirs_g, tis)
