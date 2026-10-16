@@ -25,6 +25,8 @@ From: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 %post
     set -e
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
     export PIP_NO_CACHE_DIR=1
     pip install --upgrade pip
     pip install "numpy>=2" scipy "zarr>=3" nibabel tifffile matplotlib contourpy scikit-learn monai \

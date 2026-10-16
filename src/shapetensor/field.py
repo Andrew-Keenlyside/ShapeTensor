@@ -58,7 +58,7 @@ def compute_field(vol: torch.Tensor, rho: float = 16.0, reduce: int | None = Non
     # the boundary detector: coarse gradient magnitude over the window
     gm = sum(gaussian(v, 3.0, order=o, truncate=truncate) ** 2 for o in ((1, 0, 0), (0, 1, 0), (0, 0, 1))).sqrt()
     Kg, _ = k_dense(gm[None].half(), rho, truncate, b, core)
-    out["gm"] = Kg.reshape(-1, 6)[:, 0].clamp_min(0).sqrt()
+    out["gm"] = Kg.reshape(-1, Kg.shape[-1])[:, 0].clamp_min(0).sqrt()     # one map -> one packed entry (its square)
     del Kg
     # the excised tensor (fix A)
     if excise:

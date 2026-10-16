@@ -6,23 +6,108 @@
 
 # ShapeTensor
 
-Fibre orientation fields for HiP-CT white matter, from multichannel "shape space" features as well as from the
-intensity itself, with the boundary problem of the structure tensor and several fibre populations per site in view.
-The question it set out to answer: can a tensor built from the gradients of anatomix's shape-space channels, or a
-tensor component analysis (TCA, a CP decomposition) of them, ignore the grey/white and tract-interface steps that the
-intensity structure tensor mistakes for fibres, and give more than one orientation where fibres cross?
+Fibre orientation fields for high-resolution white-matter volumes (HiP-CT and similar), on the GPU. One package gives
+you the classic structure tensor, a boundary-robust version of it, several fibre directions per site, and the same
+quantities built from the gradients of learned "shape space" features instead of the intensity — plus the phantom
+suite that says which of these to trust where.
 
-## Summary
+## Install
 
-**Pipeline.** An image block with context margins goes through a pluggable *feature engine* (the intensity itself;
-a locally normalised derivative jet; anatomix's 16-channel output; anatomix's 48-channel layer 58). The gradients of
-every channel, integrated over a window ρ, form the channel-resolved tensor `K = G_ρ ∗ (g gᵀ)` (the structure tensor
-when there is one channel) and the gradient-direction ODF on a coarse site grid. *Read-outs* turn them into
-directions: the eigenvector of the summed tensor; TCA, which fits the unsummed voxel × channel × axis array as pieces
-with one direction each and pairs them into populations; constrained spherical deconvolution of the ODF, whose peaks
-are the populations; and the excised tensor (fix A), which drops boundary gradients before integrating. The *field*
-written for BRIDGE carries the single direction, the boundary strength and normal, a quality measure, and up to three
-fixels per site.
+```bash
+git clone https://github.com/Andrew-Keenlyside/ShapeTensor.git
+cd ShapeTensor
+pip install -e .                 # numpy, scipy, torch (CUDA), zarr >= 3, nibabel, matplotlib
+pip install -e ".[anatomix]"     # + the anatomix feature engines (weights come from the HF hub on first use)
+```
+
+A CUDA GPU is assumed (everything is torch on `device="cuda"`); `envs/shapetensor-gpu.def` builds the container and
+`scripts/cluster/shapetensor_sge.sh` runs a volume on an H100 node, one process per GPU.
+
+## Tutorial
+
+**1. The structure tensor of a volume** — a drop-in for the `structure-tensor` package (same layout, same eigen
+conventions), with numpy, cupy or torch in and the same kind out:
+
+```python
+import numpy as np
+from shapetensor import st
+
+vol = np.load("block.npy").astype(np.float32)        # (Z, Y, X) grey levels, e.g. a 20 µm HiP-CT block
+
+S = st.structure_tensor_3d(vol, sigma=1.0, rho=16.0)  # (6, Z, Y, X) = [Sxx, Syy, Szz, Sxy, Sxz, Syz], x = last axis
+val, vec = st.eig_special_3d(S)                       # val (3, ...) descending; vec (3, ...) = fibre direction (x, y, z)
+```
+
+`sigma` is the derivative scale and `rho` the integration window, both in voxels: at 20 µm, `rho=16` is 0.32 mm.
+
+**2. The boundary-robust tensor** — the same, with the gradients of tissue interfaces excised before integration.
+This is what removes the "boundary shell" (directions dragged into the grey/white boundary plane) at no cost
+elsewhere:
+
+```python
+Sx = st.excised_structure_tensor_3d(vol, sigma=1.0, rho=16.0)    # factor=3: drop gradients > 3x the median coarse gradient
+_, fibre = st.eig_special_3d(Sx)
+```
+
+**3. Several fibre populations per site** — constrained spherical deconvolution of the gradient-direction
+distribution; the number of populations comes from the data, not from a fixed k:
+
+```python
+dirs, fracs, npop = st.fixels_3d(vol, sigma=1.0, rho=16.0)       # dirs (3, 3, Z, Y, X): up to three (x, y, z) directions
+                                                                 # fracs (3, Z, Y, X), npop (Z, Y, X) in {0, 1, 2, 3}
+```
+
+**4. Shape features instead of the intensity** — any engine's channels can feed the same tensor:
+
+```python
+Ss = st.shape_structure_tensor_3d(vol, sigma=1.0, rho=16.0, engine="anatomix48")   # the block needs 64 voxels of context per face
+```
+
+or, lower level, the engine itself and the channel-resolved tensor the TCA read-outs work on:
+
+```python
+import torch
+from shapetensor.features import make_engine
+from shapetensor.tensor import gradients, k_dense
+from shapetensor.readout import common, single
+
+v = torch.as_tensor(vol, device="cuda")
+F = make_engine("anatomix48")(v)                                 # (16, Z, Y, X): layer-58 channels, PCA to 16
+G = gradients(F, sigma=1.0, truncate=4.0)                        # (48, Z, Y, X): every channel's gradient
+K, sites = k_dense(G, rho=16.0, truncate=4.0, reduce=4, core=((64, 192), (64, 192), (64, 192)))   # (nz, ny, nx, 1176)
+tca = single.tca(common.unpack(K.reshape(-1, K.shape[-1]), 48))  # TCA, rank 3: tca["dir"] (N, 3) in (z, y, x)
+```
+
+Engines: `intensity`, `jet` (a locally normalised derivative jet, no network), `anatomix16`, `anatomix48`.
+
+**5. A whole volume on one or more GPUs** — chunked with halos, outputs written to a zarr group:
+
+```bash
+shapetensor volume brain_20um.ome.zarr --level 0 out.zarr --rho 16 --outputs S eig excised fixels \
+    --chunk 256 256 256 --rank 0 --world 4          # one process per GPU, rank 0..3
+```
+
+**6. The orientation field a tractography consumer samples** — plain and excised directions, boundary strength and
+normal, quality, fixels, on a coarse site grid:
+
+```python
+from shapetensor.field import compute_field, write_store
+field = compute_field(v, rho=16.0, reduce=4)                     # dir, dir_st, gm, cl, n_cl, gap, dirs, fracs, npop
+write_store("block_field.zarr", field, voxel_mm=0.02)
+```
+
+**7. Phantoms and validation**
+
+```bash
+shapetensor phantoms --pids P3-40-t0.5 P8 --seeds 0 1         # build phantoms (with twins and truth)
+shapetensor run --spec results/spec_full.json                  # caches, read-outs, scores
+shapetensor report --tag main                                  # REPORT.md + figures
+```
+
+Tests: `python tests/test_core.py` (filters against scipy, K against the structure tensor, SH, CP),
+`python tests/test_st.py` (the volume API), `python tests/test_anatomix.py` (the engine on the GPU).
+
+## How it fits together
 
 <div align="center">
 
@@ -30,104 +115,41 @@ fixels per site.
 
 </div>
 
-**Validation.** Nine phantom families with twins at 20 µm, calibrated label-free to the real S-21-46 crop (noise
-spectrum, texture bands, intensity levels, orientation coherence), swept along a step-to-texture-ratio axis and
-scored by distance to the interface, with controls (the structure tensor at matched ρ, fix A, the no-network jet).
+A block with context margins goes through a feature engine; the gradients of every channel, integrated over a window
+ρ, form the channel-resolved tensor `K = G_ρ ∗ (g gᵀ)` (the structure tensor when there is one channel) and the
+gradient-direction ODF; read-outs turn them into directions (the summed tensor's eigenvector, TCA's pieces paired into
+populations, CSD peaks, the excised tensor); the field carries the single direction, the boundary, a quality and up to
+three fixels per site. `figures/tca_field/graphical_abstract.png` shows the validation design beside it.
 
-**What it found.** The boundary failure is a step-to-texture-ratio effect; at 20 µm it appears in weak-texture
-white matter next to a strong step. Shape-space TCA does not rescue the orientation there; gradient excision does
-(7.9 / 2.7 / 1.8° where the plain tensor is 60 / 50 / 37°, at no cost in clear tissue), with the coarse gradient
-magnitude as the boundary detector. For several populations, CSD of the gradient-direction ODF is the rank-free
-estimator; the anatomix layer-58 features sharpen it on tight crossings. Orientation does live inside anatomix — in
-its second encoder block, which a small phantom-trained head can read per voxel — but the output head removes it.
-Details: `docs/TCA_FIELD_REVIEW.md` (§11 for the verdict), `docs/TCA_FIELD_RESULTS.md`.
+## What the validation found (20 µm phantoms calibrated to a real crop)
 
-The validation design and its verdict in one figure: `figures/tca_field/graphical_abstract.png`.
-How TCA reads several orientations out of shape-space data: `figures/tca_field/tca_multi_explainer.png`. Why the
-shape space cannot be clustered into fibre populations first: `figures/tca_field/shape_space_clusters.png`. Where
-orientation is encoded inside anatomix: `figures/tca_field/encoder_tuning.png`.
+- The structure tensor's boundary failure is a step-to-texture-ratio effect: at the real crop's texture level it is
+  41 / 13 / 7° (ρ 8 / 16 / 32 voxels) next to a 40-level step, against 3–6° in clear tissue.
+- Shape-space TCA does not rescue it at this resolution; **gradient excision does** (7.9 / 2.7 / 1.8° where the plain
+  tensor is 60 / 50 / 37°), with the coarse gradient magnitude as the boundary detector.
+- For several populations, **CSD of the gradient-direction ODF** is the rank-free estimator; the anatomix layer-58
+  features sharpen it on tight crossings (60° at 100% both within 15°).
+- Orientation is encoded in anatomix's *encoder* (block 2: selectivity up to 0.83), not its output; a small
+  phantom-trained head reads it per voxel at ±15–20°.
 
-## The package (2026-10-16): `src/shapetensor/`
+Details and every number: `docs/TCA_FIELD_REVIEW.md` (§11 for the verdict), `docs/TCA_FIELD_RESULTS.md`; the
+explainer figures `figures/tca_field/tca_multi_explainer.png`, `shape_space_clusters.png`, `encoder_tuning.png`.
 
-The prototypes below were consolidated into an installable package with a pluggable feature engine and both
-read-out families, plus a phantom validation suite. **Read `docs/TCA_FIELD_REVIEW.md`** (the review and the
-recommended design) and **`docs/TCA_FIELD_PLAN.md`** (what is built and the run order).
+## Package layout
 
 ```
 src/shapetensor/
-  filters.py        scipy-identical Gaussian / derivative filters on the GPU (torch)
-  features/         engines: intensity | jet (no network) | anatomix16 | anatomix48  (make_engine(name))
-  pca.py            per-volume PCA to n_pcs channels
-  tensor.py         K = G_rho * (g g^T) on a site grid (k_sites: one row; k_dense: a block); the gradient-direction ODF
-  odf.py            real SH basis, Funk-Radon, CSD with a ring response, peaks
-  readout/single.py eigen (the structure tensor), TCA rank 3, boundary detectors
-  readout/multi.py  CP-ALS, geometric pairing, N by BIC / FRT / CSD + refinement + stability / over-complete grouping
-  readout/hybrid.py H1 blend / switch;  tensor.excision_weights(gate=...) is H2
-  phantoms/         P1-P9 at any voxel size with twins and truth; stats.py measures real crops to set them
-  validate/         suite.py (caches, read-outs, scores), score.py, report.py (REPORT.md + figures)
-  st.py             structure-tensor-compatible volume API: structure_tensor_3d, eig_special_3d, excised and shape
-                    variants, fixels_3d, and run_volume (chunked zarr driver, one process per GPU)
-  field.py          the orientation-field store on a coarse site grid
+  st.py             the volume API above (structure_tensor_3d, eig_special_3d, excised / shape variants, fixels_3d, run_volume)
+  features/         engines: intensity | jet | anatomix16 | anatomix48      (make_engine(name))
+  filters.py        scipy-identical Gaussian / derivative filters on the GPU
+  tensor.py         K and the ODF on a site grid or a block; excision weights
+  odf.py            spherical harmonics, Funk-Radon, CSD, peaks
+  readout/          single (eigen, TCA, detectors), multi (CP, pairing, N selection), hybrid
+  field.py          the orientation-field store
+  phantoms/         P1-P9 phantom families with twins and truth; stats.py measures real crops to set them
+  validate/         the suite, scores and report
   cli.py            shapetensor stats | phantoms | run | report | volume
 ```
 
-Everything computes on the GPU in torch; `shapetensor.st` takes numpy, cupy or torch arrays and returns the caller's
-kind (cupy through DLPack), with the `structure-tensor` package's layout (`S = [xx, yy, zz, xy, xz, yz]`, `x` the last
-axis; `eig_special_3d` -> descending values and the smallest eigenvalue's vector in `(x, y, z)`), so its tensors can
-be substituted wherever that package's are consumed. `shapetensor volume SRC.zarr DST.zarr --rho 16 --rank r --world n`
-runs a whole volume chunk by chunk with halos on one GPU per process.
-
-Environment: the `shapetensors` conda env (torch 2.5.1, anatomix); the package is on its path through a `.pth`
-file (`src/`). Tests: `python tests/test_core.py` (CPU/GPU parity and recovery), `python tests/test_anatomix.py`
-(GPU), `python tests/test_st.py` (the volume API). Data root: `SHAPETENSOR_DATA` (default
-`/home/andrew/bridge_wmcov/shapetensor/`: phantoms, caches, results, figures).
-
-The work started inside BRIDGE, as the grey/white boundary-shell problem (`docs/BOUNDARY_PROBLEM.md`). It moved here
-on 2026-10-15 to be tested as an approach in its own right. Everything here is a **prototype**.
-
-**For the current recommended pipeline, read `docs/IMAGE_TO_VECTORS.md`** (image to vector field: what to use, the
-evidence, the open problems). **For the history, start with `docs/SHAPE_SPACE_HANDOFF.md`.** It holds the status, the results so far, the user's standing
-directions, the clean-anatomix recipe and the open threads. The task in progress is at the end of its section 8.
-
-## Layout
-
-- `scripts/`: the study scripts, flat. Each puts its own directory on `sys.path` and imports its siblings.
-  - `anatomix_shape.py`: running anatomix cleanly (`anatomix_clean`), PCA/RGB helpers, `_PadTile` for windows under
-    32 voxels.
-  - `surface_phantoms.py` / `phantom_shell.py`: the phantoms (`python <script> make`).
-  - `shape_tensor*.py`, `fibre_select.py`, `shape_separate*.py`, `shape_window.py`: phantom studies.
-  - `shape_20um_space.py`, `shape_20um_explain.py`: steps 1 and 2 on the 20 µm S-21-46 crop.
-  - `shape_real.py`, `voi_location.py`: the 100 µm S2146 block (needs data not copied here).
-  - `tensor_variants.py`, `edge_aware_*.py`, `anat_lib.py`: shared tensor code, phantom figures, and the BRIDGE-side
-    helpers (`anat_lib` needs numba; `phantom_shell` and `edge_aware_builds` import `bridge` lazily, only to build
-    phantoms with BRIDGE).
-- `docs/`: the handoff, the boundary-problem brief, the literature review.
-- `figures/`: every figure so far (`shape_tensor/`, `anatomix/`, `edge_aware/`). New figures go here.
-
-## Path mapping from the BRIDGE days
-
-The docs were written inside BRIDGE. Read their paths as:
-
-| in the docs | here |
-|---|---|
-| `scripts/studies/wm_coverage/bending_wrapping/<x>.py` | `scripts/<x>.py` |
-| `scratch/wm_coverage/bending_wrapping/<dir>/` (figures) | `figures/<dir>/` |
-
-Data paths are unchanged and absolute (same user and layout as msm12):
-- `/home/andrew/bridge_wmcov/shape_tensor/`: features, scores, the `win/` window cache (float16), JSON results;
-- `/home/andrew/bridge_wmcov/edge_aware/phantoms/`, `/home/andrew/bridge_wmcov/phantom_shell/`: the phantoms;
-- `/home/andrew/bridge_wmcov/carryover/`: the BRIDGE boundary-problem carry-over (HCP comparison data, old scripts);
-- `/hdd/andrew/BRIDGE/atlas20/crops/S-21-46.ome.zarr`: the 20 µm calibration crop; `thresholds.json` beside it;
-- `/home/andrew/scripts/scalable-reg`: chunkreg, for `AnatomixFeatures` (put on `sys.path` by `anatomix_shape.py`).
-
-Not here: the 100 µm S2146 OME-Zarr, the BRIDGE study snapshot and HCP-1065 (only `shape_real.py`,
-`voi_location.py` and BRIDGE-level work need them), and the SynthSeg label crop path the 20 µm scripts name under
-`/hdd/data/...`. On czi001 the source crops, labels included, are at `/hdd/andrew/brain_atlas_20um_test_crops/`;
-labels are not in use (standing direction).
-
-## Environment
-
-anatomix work needs torch, anatomix (`pip install git+https://github.com/neel-dey/anatomix.git`), monai, numpy,
-scipy, scikit-learn, zarr 3, matplotlib, nibabel, tifffile. On msm12 this was the `chunkreg` conda env (torch 2.5.1,
-anatomix 0.1.0, monai 1.5.2; versions in `env_msm12_chunkreg.txt`). Weights come from the HF hub (`neeldey/anatomix`).
-czi001 had no env with torch + monai + anatomix at the move.
+Everything here is a **prototype**. The pre-package study scripts, their docs and data paths are described in
+`docs/PROTOTYPES.md`.
