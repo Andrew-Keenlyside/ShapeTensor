@@ -489,3 +489,27 @@ oblique fibre: 23° → 1.7°), and the wrong one when it does not. The remedy i
 fibre-texture scale (≤ 25 µm here); short of that the coarse-axis gradient energy has to be treated as a prior,
 not a measurement — an estimator the suite does not yet have. The real-data runs (BigBrain, the HiP-CT crop; results
 log §17) are consistency checks against an isotropic reference and carry no truth.
+
+## 17. Anisotropic voxels on real data (`scripts/demo_bigbrain.py --source bigbrain|s2146`; no truth)
+
+The 20 µm block area-resampled 2.5× along y (the section axis), each reading compared with the *isotropic*
+structure tensor at the same sites (median angle over tissue; in brackets the share > 30°). Orientation gap of
+the isotropic tensor 0.25–0.26 in all three blocks: the per-site anisotropy of real white matter at these windows
+is weak, which is what makes the direction easy to tip.
+
+| block, ρ | naive ST | spacing ST | PSF-matched ST | resampled ST | spacing excised | naive / spacing anatomix48 |
+|---|---|---|---|---|---|---|
+| BigBrain, 10 | **15.9°** (23%) | 59° (74%) | 53° (68%) | 41° (59%) | 64° (83%) | 32° / 65° |
+| BigBrain, 16 | **15.3°** (22%) | 62° (76%) | 56° (70%) | 45° (61%) | 67° (87%) | 29° / 67° |
+| HiP-CT S-21-46, 10 | **11.7°** (11%) | 68° (90%) | 60° (80%) | 53° (67%) | 71° (94%) | 39° / 75° |
+
+The real blocks behave like the phantoms' *across-the-fibres* regime (§16): every physically consistent reading
+snaps onto the averaged axis (the DEC panels turn uniformly green = y, `real_S2146_rho10_aniso_axial.png`,
+`bigbrain_rho10_aniso_axial.png`), and only the voxel-unit tensor stays near the isotropic field — 12–16°, by the
+same coincidental balance. In the top decile of boundary strength the physical readings agree better with the
+reference (6–16° for the resampled / PSF-matched BigBrain tensors), because there the interface's gradient, not
+the texture, sets the direction and it survives the averaging. The isotropic references themselves are mottled
+fields (the BigBrain one partly section striping), so these are consistency numbers, not accuracy; the accuracy
+statement is the phantoms' (§16). Isotropic reference numbers for the record: excised vs plain 1.4 / 2.4° (BigBrain
+ρ 10 / 16; 12° in the top boundary decile — the CSF and grey-matter steps are strong in a cell stain), 0.9° (HiP-CT);
+the anatomix48 shape tensor 25–29° (BigBrain) and 42° (HiP-CT) from the structure tensor.
