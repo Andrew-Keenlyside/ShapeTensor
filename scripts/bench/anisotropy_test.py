@@ -46,7 +46,13 @@ def dirs_at(S, zs, row, xs):
 
 
 def bands_of(d, t):
+    """Medians by distance band; phantoms without distances (the line crossings) report the ``all`` band, scored
+    against the nearer of the two true directions where two exist."""
     err = score.angle_err(d, t["dir1"])
+    if "dir2" in t and np.isfinite(t["dir2"][:, 0]).any():
+        err = np.fmin(err, score.angle_err(d, t["dir2"]))
+    if not np.isfinite(t["dist"]).any():
+        return {"all": round(float(np.nanmedian(err[t["region"] == 2] if "region" in t else err)), 2)}
     b = score.band_summary(err, t["dist"], t["region"])
     return {k: round(float(b[k]["median"]), 2) for k in BANDS if k in b and "median" in b[k]}
 
@@ -96,9 +102,14 @@ def main():
             out[pid][f"rho{rho:g}"] = res
             print(f"[{time.time() - t0:5.0f}s] {pid} rho {rho:g}", flush=True)
             for arm, b in res.items():
-                print(f"    {arm:28s} " + "  ".join(f"{k} {b.get(k, float('nan')):5.1f}" for k in BANDS), flush=True)
+                print(f"    {arm:28s} " + "  ".join(f"{k} {v:5.1f}" for k, v in b.items()), flush=True)
         del v; torch.cuda.empty_cache()
-        json.dump(out, open(f"{DATA_ROOT}/results/anisotropy_test.json", "w"), indent=1)
+        path = f"{DATA_ROOT}/results/anisotropy_test.json"
+        try:
+            prev = json.load(open(path))
+        except Exception:
+            prev = {}
+        prev.update(out); json.dump(prev, open(path, "w"), indent=1)
     print("ANISOTROPY TEST DONE", flush=True)
 
 

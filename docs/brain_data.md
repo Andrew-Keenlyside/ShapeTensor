@@ -86,8 +86,12 @@ size as `spacing=(dz, dy, dx)`: the derivative and integration filters are scale
 units of the finest voxel), the gradients are divided by the spacing so the tensor and its eigenvectors are in
 physical coordinates, and the shape engines resample the block to isotropic voxels before the network (and the
 tensor back afterwards). Ignoring the anisotropy tilts every oblique direction towards the coarse axis — for a fibre
-at 45° to a 2.5× coarser axis the naive tensor is 23° off, the spacing-aware one < 2° (`tests/test_st.py`); the
-phantom and BigBrain measurements are in the results log (§15).
+at 45° to a 2.5× coarser axis the naive tensor is 23° off, the spacing-aware one < 2° (`tests/test_st.py`). That is
+the whole story only while the coarse axis still resolves the texture: on the phantoms at 20 × 20 × 50 µm the
+across-fibre texture (~80 µm period) is at the Nyquist limit of the 50 µm axis, and for fibres running
+perpendicular to that axis every physically correct reading snaps onto it (84–89°) while the naive tensor is right
+by a coincidence of the numbers (results log §16). Treat 2.5× anisotropic data as unreliable for fibres across the
+coarse axis; the remedy is isotropic sampling at the texture scale.
 
 ## Two demonstrations on the S-21-46 crop (no ground truth)
 

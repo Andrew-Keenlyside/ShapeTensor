@@ -75,6 +75,9 @@ three fixels per site. `figures/tca_field/graphical_abstract.png` shows the vali
   read-out is a 90°-only detector.
 - Orientation is encoded in anatomix's *encoder* (block 2: selectivity up to 0.83), not its output; a small
   phantom-trained head reads it per voxel at ±15–20°.
+- Anisotropic voxels (20 × 20 × 50 µm): not robust in general — the coarse axis destroys the across-fibre
+  contrast of fibres perpendicular to it, and physically correct per-axis filtering (`spacing=`) is right only
+  when the coarse axis still resolves the texture; isotropic sampling at the texture scale is the remedy.
 - Speed (RTX A6000, ρ 16): tensor + eigen 11.8 Mvoxel/s, 25–30× the `structure-tensor` package on one CPU; the
   excision adds 6%; fixels at every voxel are 29× the tensor and belong on a site grid.
 

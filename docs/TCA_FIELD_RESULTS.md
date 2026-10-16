@@ -449,3 +449,43 @@ the 0.25–0.5 mm band), seed mean; clear tissue (> 2 mm) in the last column.
 - **Speed at ρ 10** (A6000, 256³): tensor + eigen 1.42 s (11.8 Mvox/s), excised 1.50 s, the anatomix48 shape tensor
   + eigen 4.9 s (3.5×), K + TCA rank 3 on the ρ/4 site grid 16 s (11.5×), fixels at every voxel 323 s (228×: the
   site grid at ρ 10 is ρ/4 = 2 voxels, 8× more sites than at ρ 16); scipy CPU 41 s.
+
+## 16. Anisotropic voxels: 20 × 20 × 50 µm (`scripts/bench/anisotropy_test.py`, seed 0; `results/anisotropy_test.json`)
+
+Each phantom resampled 2.5× coarser along one axis by area averaging, read back three ways — *naive* (voxel-unit
+filters, the anisotropy ignored), *spacing* (per-axis physical filters, `spacing=`), *PSF-matched* (the other two
+axes blurred to the same resolution, then `spacing`), *resampled* (interpolated back to isotropic first) — for the
+plain and excised tensors and the anatomix48 shape tensor; the isotropic run is the reference. Median angle to the
+truth within 0.1 mm (first) and far from the structure (second), ρ 16 (ρ 10 in `anisotropy_test.json` is the same
+picture):
+
+| phantom (t0.5) | isotropic plain / excised | coarse axis | naive plain / excised | spacing plain / excised | PSF-matched plain | resampled plain | anatomix48 naive / spacing |
+|---|---|---|---|---|---|---|---|
+| P3 step 40 | 12.6 / 3.1 · 2.6 | **y** (across the fibres) | 39 / **1.9** · 1.5 | 89 / 88 · 89 | 88 · 87 | 88 · 76 | 41 / 82 · 10 / 76 |
+| | | z (along the fibres) | 46 / 34 · 36 | **14 / 20** · 19 | 5.6 · 16 | 3.0 · 16 | 50 / 9.8 · 46 / 16 |
+| P1 gyrus | 15.5 / 2.5 · 1.9 | **y** | 37 / **1.7** · 0.9 | 89 / 89 · 87 | 89 · 38 | 89 · 6.0 | 43 / 88 · 3.5 / 79 |
+| | | z | 57 / 41 · 31 | **7.2 / 5.4** · 7.3 | 6.2 · 6.5 | 5.2 · 5.2 | 71 / 6.8 · 42 / 5.5 |
+| P6 vessel | 14.8 / 3.3 (0.25–0.5 mm: 5.7 / 2.8) | **y** | 8.9 / **2.5** · 1.7 | 68 / 88 · 89 | 55 · 86 | 45 · 57 | 13 / 64 · 12 / 75 |
+| | | z | 43 / 40 · 39 | **17 / 17** · 18 | 15 · 16 | 14 · 15 | 47 / 13 · 47 / 14 |
+
+Two regimes, decided by the geometry:
+
+- **Coarse axis across the fibres** (y here; the section-stack case, fibres in the section plane): every physically
+  consistent reading fails outright — the direction snaps onto the averaged axis (84–89° for `spacing`, PSF-matched
+  and resampled, plain or excised, intensity or anatomix48). The across-fibre texture has a period of ~4 voxels
+  (80 µm) at the fine scale, at or below the Nyquist limit of 50 µm sampling along y, so the y-contrast that
+  distinguishes "the fibre runs along y" from "y was blurred" is aliased away and y becomes the axis of least
+  variation. The naive tensor gives 1.7–2.5° with excision — as good as isotropic — only because its 2.5×
+  over-estimated y-derivative (6.25× in energy) happens to cancel the blur-and-aliasing loss at this texture scale
+  and ratio; it is a coincidence of the numbers, not an estimator.
+- **Coarse axis along the fibres** (z): the physical readings are right (5–20°; the gyrus at 5–7°, the dispersed
+  step and the vessel at 14–20°, against 3–5° isotropic) and the naive tensor carries the geometric bias the unit
+  test predicted and more (34–57°), as does naive anatomix48 (42–71°).
+
+So the tensors are **not robust to 2.5× anisotropic voxels in general**: a coarse axis destroys the across-fibre
+contrast of fibres running perpendicular to it, and no filter choice is right for both geometries. Per-axis
+physical filtering is the correct estimator whenever the coarse axis keeps the texture resolved (the unit test's
+oblique fibre: 23° → 1.7°), and the wrong one when it does not. The remedy is isotropic sampling at the
+fibre-texture scale (≤ 25 µm here); short of that the coarse-axis gradient energy has to be treated as a prior,
+not a measurement — an estimator the suite does not yet have. The real-data runs (BigBrain, the HiP-CT crop; results
+log §17) are consistency checks against an isotropic reference and carry no truth.

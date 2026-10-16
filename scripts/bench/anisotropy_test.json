@@ -1,0 +1,768 @@
+{
+ "P3-40-t0.5": {
+  "rho10": {
+   "iso plain": {
+    "0-0.1mm": 29.35,
+    "0.25-0.5mm": 6.12,
+    ">2mm": 4.43
+   },
+   "iso excised": {
+    "0-0.1mm": 4.62,
+    "0.25-0.5mm": 4.36,
+    ">2mm": 4.44
+   },
+   "iso anatomix48": {
+    "0-0.1mm": 43.26,
+    "0.25-0.5mm": 16.62,
+    ">2mm": 16.18
+   },
+   "y: naive plain": {
+    "0-0.1mm": 47.91,
+    "0.25-0.5mm": 7.23,
+    ">2mm": 2.3
+   },
+   "y: psf-matched plain": {
+    "0-0.1mm": 87.9,
+    "0.25-0.5mm": 85.31,
+    ">2mm": 84.1
+   },
+   "y: psf-matched excised": {
+    "0-0.1mm": 81.48,
+    "0.25-0.5mm": 81.56,
+    ">2mm": 84.22
+   },
+   "y: spacing plain": {
+    "0-0.1mm": 88.56,
+    "0.25-0.5mm": 87.67,
+    ">2mm": 87.7
+   },
+   "y: naive excised": {
+    "0-0.1mm": 3.09,
+    "0.25-0.5mm": 3.0,
+    ">2mm": 2.3
+   },
+   "y: spacing excised": {
+    "0-0.1mm": 86.45,
+    "0.25-0.5mm": 86.99,
+    ">2mm": 87.72
+   },
+   "y: naive anatomix48": {
+    "0-0.1mm": 47.06,
+    "0.25-0.5mm": 15.09,
+    ">2mm": 10.16
+   },
+   "y: spacing anatomix48": {
+    "0-0.1mm": 81.18,
+    "0.25-0.5mm": 80.0,
+    ">2mm": 74.94
+   },
+   "y: resampled plain": {
+    "0-0.1mm": 87.67,
+    "0.25-0.5mm": 80.95,
+    ">2mm": 66.99
+   },
+   "y: resampled excised": {
+    "0-0.1mm": 57.31,
+    "0.25-0.5mm": 51.74,
+    ">2mm": 67.36
+   },
+   "z: naive plain": {
+    "0-0.1mm": 48.95,
+    "0.25-0.5mm": 47.26,
+    ">2mm": 35.07
+   },
+   "z: psf-matched plain": {
+    "0-0.1mm": 7.47,
+    "0.25-0.5mm": 13.57,
+    ">2mm": 16.28
+   },
+   "z: psf-matched excised": {
+    "0-0.1mm": 17.88,
+    "0.25-0.5mm": 17.07,
+    ">2mm": 16.36
+   },
+   "z: spacing plain": {
+    "0-0.1mm": 8.28,
+    "0.25-0.5mm": 17.41,
+    ">2mm": 18.69
+   },
+   "z: naive excised": {
+    "0-0.1mm": 31.12,
+    "0.25-0.5mm": 32.04,
+    ">2mm": 35.17
+   },
+   "z: spacing excised": {
+    "0-0.1mm": 19.74,
+    "0.25-0.5mm": 19.09,
+    ">2mm": 18.72
+   },
+   "z: naive anatomix48": {
+    "0-0.1mm": 50.56,
+    "0.25-0.5mm": 49.62,
+    ">2mm": 46.13
+   },
+   "z: spacing anatomix48": {
+    "0-0.1mm": 5.89,
+    "0.25-0.5mm": 13.43,
+    ">2mm": 15.51
+   },
+   "z: resampled plain": {
+    "0-0.1mm": 6.33,
+    "0.25-0.5mm": 12.37,
+    ">2mm": 15.67
+   },
+   "z: resampled excised": {
+    "0-0.1mm": 16.99,
+    "0.25-0.5mm": 16.29,
+    ">2mm": 15.73
+   }
+  },
+  "rho16": {
+   "iso plain": {
+    "0-0.1mm": 12.56,
+    "0.25-0.5mm": 6.61,
+    ">2mm": 2.56
+   },
+   "iso excised": {
+    "0-0.1mm": 3.09,
+    "0.25-0.5mm": 3.14,
+    ">2mm": 2.57
+   },
+   "iso anatomix48": {
+    "0-0.1mm": 37.89,
+    "0.25-0.5mm": 22.2,
+    ">2mm": 14.62
+   },
+   "y: naive plain": {
+    "0-0.1mm": 39.16,
+    "0.25-0.5mm": 12.36,
+    ">2mm": 1.47
+   },
+   "y: psf-matched plain": {
+    "0-0.1mm": 88.52,
+    "0.25-0.5mm": 87.83,
+    ">2mm": 87.19
+   },
+   "y: psf-matched excised": {
+    "0-0.1mm": 84.09,
+    "0.25-0.5mm": 84.15,
+    ">2mm": 87.28
+   },
+   "y: spacing plain": {
+    "0-0.1mm": 89.04,
+    "0.25-0.5mm": 88.69,
+    ">2mm": 88.91
+   },
+   "y: naive excised": {
+    "0-0.1mm": 1.91,
+    "0.25-0.5mm": 2.1,
+    ">2mm": 1.47
+   },
+   "y: spacing excised": {
+    "0-0.1mm": 87.64,
+    "0.25-0.5mm": 87.87,
+    ">2mm": 88.92
+   },
+   "y: naive anatomix48": {
+    "0-0.1mm": 40.84,
+    "0.25-0.5mm": 22.61,
+    ">2mm": 9.83
+   },
+   "y: spacing anatomix48": {
+    "0-0.1mm": 81.69,
+    "0.25-0.5mm": 81.72,
+    ">2mm": 75.72
+   },
+   "y: resampled plain": {
+    "0-0.1mm": 88.23,
+    "0.25-0.5mm": 86.81,
+    ">2mm": 76.31
+   },
+   "y: resampled excised": {
+    "0-0.1mm": 63.46,
+    "0.25-0.5mm": 57.7,
+    ">2mm": 77.13
+   },
+   "z: naive plain": {
+    "0-0.1mm": 46.43,
+    "0.25-0.5mm": 45.84,
+    ">2mm": 36.3
+   },
+   "z: psf-matched plain": {
+    "0-0.1mm": 5.58,
+    "0.25-0.5mm": 12.1,
+    ">2mm": 16.23
+   },
+   "z: psf-matched excised": {
+    "0-0.1mm": 17.28,
+    "0.25-0.5mm": 16.77,
+    ">2mm": 16.27
+   },
+   "z: spacing plain": {
+    "0-0.1mm": 13.83,
+    "0.25-0.5mm": 16.5,
+    ">2mm": 18.68
+   },
+   "z: naive excised": {
+    "0-0.1mm": 33.68,
+    "0.25-0.5mm": 33.78,
+    ">2mm": 36.27
+   },
+   "z: spacing excised": {
+    "0-0.1mm": 19.55,
+    "0.25-0.5mm": 19.14,
+    ">2mm": 18.71
+   },
+   "z: naive anatomix48": {
+    "0-0.1mm": 49.59,
+    "0.25-0.5mm": 49.25,
+    ">2mm": 46.39
+   },
+   "z: spacing anatomix48": {
+    "0-0.1mm": 9.85,
+    "0.25-0.5mm": 13.14,
+    ">2mm": 16.14
+   },
+   "z: resampled plain": {
+    "0-0.1mm": 3.0,
+    "0.25-0.5mm": 10.81,
+    ">2mm": 15.55
+   },
+   "z: resampled excised": {
+    "0-0.1mm": 16.55,
+    "0.25-0.5mm": 16.12,
+    ">2mm": 15.59
+   }
+  }
+ },
+ "P1-t0.5": {
+  "rho10": {
+   "iso plain": {
+    "0-0.1mm": 25.01,
+    "0.25-0.5mm": 3.72,
+    ">2mm": 2.68
+   },
+   "iso excised": {
+    "0-0.1mm": 4.26,
+    "0.25-0.5mm": 3.04,
+    ">2mm": 2.58
+   },
+   "iso anatomix48": {
+    "0-0.1mm": 47.77,
+    "0.25-0.5mm": 16.74,
+    ">2mm": 11.24
+   },
+   "y: naive plain": {
+    "0-0.1mm": 49.14,
+    "0.25-0.5mm": 3.45,
+    ">2mm": 1.46
+   },
+   "y: psf-matched plain": {
+    "0-0.1mm": 88.32,
+    "0.25-0.5mm": 83.41,
+    ">2mm": 41.54
+   },
+   "y: psf-matched excised": {
+    "0-0.1mm": 87.13,
+    "0.25-0.5mm": 82.36,
+    ">2mm": 65.6
+   },
+   "y: spacing plain": {
+    "0-0.1mm": 88.91,
+    "0.25-0.5mm": 87.58,
+    ">2mm": 84.2
+   },
+   "y: naive excised": {
+    "0-0.1mm": 2.79,
+    "0.25-0.5mm": 1.94,
+    ">2mm": 1.46
+   },
+   "y: spacing excised": {
+    "0-0.1mm": 88.68,
+    "0.25-0.5mm": 87.6,
+    ">2mm": 85.53
+   },
+   "y: naive anatomix48": {
+    "0-0.1mm": 44.3,
+    "0.25-0.5mm": 7.23,
+    ">2mm": 3.43
+   },
+   "y: spacing anatomix48": {
+    "0-0.1mm": 88.27,
+    "0.25-0.5mm": 85.82,
+    ">2mm": 71.92
+   },
+   "y: resampled plain": {
+    "0-0.1mm": 87.93,
+    "0.25-0.5mm": 53.77,
+    ">2mm": 8.69
+   },
+   "y: resampled excised": {
+    "0-0.1mm": 83.92,
+    "0.25-0.5mm": 28.78,
+    ">2mm": 10.79
+   },
+   "z: naive plain": {
+    "0-0.1mm": 62.06,
+    "0.25-0.5mm": 49.03,
+    ">2mm": 29.63
+   },
+   "z: psf-matched plain": {
+    "0-0.1mm": 7.07,
+    "0.25-0.5mm": 4.17,
+    ">2mm": 6.12
+   },
+   "z: psf-matched excised": {
+    "0-0.1mm": 5.68,
+    "0.25-0.5mm": 3.97,
+    ">2mm": 6.17
+   },
+   "z: spacing plain": {
+    "0-0.1mm": 7.58,
+    "0.25-0.5mm": 4.44,
+    ">2mm": 6.84
+   },
+   "z: naive excised": {
+    "0-0.1mm": 39.56,
+    "0.25-0.5mm": 27.05,
+    ">2mm": 30.4
+   },
+   "z: spacing excised": {
+    "0-0.1mm": 5.78,
+    "0.25-0.5mm": 4.25,
+    ">2mm": 6.98
+   },
+   "z: naive anatomix48": {
+    "0-0.1mm": 73.04,
+    "0.25-0.5mm": 59.4,
+    ">2mm": 42.37
+   },
+   "z: spacing anatomix48": {
+    "0-0.1mm": 6.77,
+    "0.25-0.5mm": 3.95,
+    ">2mm": 5.44
+   },
+   "z: resampled plain": {
+    "0-0.1mm": 6.91,
+    "0.25-0.5mm": 3.78,
+    ">2mm": 4.95
+   },
+   "z: resampled excised": {
+    "0-0.1mm": 5.1,
+    "0.25-0.5mm": 3.69,
+    ">2mm": 5.07
+   }
+  },
+  "rho16": {
+   "iso plain": {
+    "0-0.1mm": 15.54,
+    "0.25-0.5mm": 4.21,
+    ">2mm": 1.92
+   },
+   "iso excised": {
+    "0-0.1mm": 2.53,
+    "0.25-0.5mm": 1.81,
+    ">2mm": 1.89
+   },
+   "iso anatomix48": {
+    "0-0.1mm": 46.74,
+    "0.25-0.5mm": 22.61,
+    ">2mm": 10.93
+   },
+   "y: naive plain": {
+    "0-0.1mm": 37.25,
+    "0.25-0.5mm": 7.51,
+    ">2mm": 0.9
+   },
+   "y: psf-matched plain": {
+    "0-0.1mm": 88.9,
+    "0.25-0.5mm": 87.44,
+    ">2mm": 37.63
+   },
+   "y: psf-matched excised": {
+    "0-0.1mm": 88.3,
+    "0.25-0.5mm": 85.59,
+    ">2mm": 71.83
+   },
+   "y: spacing plain": {
+    "0-0.1mm": 89.32,
+    "0.25-0.5mm": 88.8,
+    ">2mm": 86.24
+   },
+   "y: naive excised": {
+    "0-0.1mm": 1.67,
+    "0.25-0.5mm": 1.13,
+    ">2mm": 0.9
+   },
+   "y: spacing excised": {
+    "0-0.1mm": 89.15,
+    "0.25-0.5mm": 88.59,
+    ">2mm": 87.14
+   },
+   "y: naive anatomix48": {
+    "0-0.1mm": 43.03,
+    "0.25-0.5mm": 12.21,
+    ">2mm": 3.49
+   },
+   "y: spacing anatomix48": {
+    "0-0.1mm": 88.47,
+    "0.25-0.5mm": 87.51,
+    ">2mm": 79.11
+   },
+   "y: resampled plain": {
+    "0-0.1mm": 88.87,
+    "0.25-0.5mm": 84.93,
+    ">2mm": 6.0
+   },
+   "y: resampled excised": {
+    "0-0.1mm": 87.33,
+    "0.25-0.5mm": 63.54,
+    ">2mm": 7.93
+   },
+   "z: naive plain": {
+    "0-0.1mm": 57.04,
+    "0.25-0.5mm": 49.08,
+    ">2mm": 30.11
+   },
+   "z: psf-matched plain": {
+    "0-0.1mm": 6.18,
+    "0.25-0.5mm": 4.58,
+    ">2mm": 6.31
+   },
+   "z: psf-matched excised": {
+    "0-0.1mm": 5.31,
+    "0.25-0.5mm": 3.87,
+    ">2mm": 6.51
+   },
+   "z: spacing plain": {
+    "0-0.1mm": 7.23,
+    "0.25-0.5mm": 4.75,
+    ">2mm": 7.1
+   },
+   "z: naive excised": {
+    "0-0.1mm": 40.91,
+    "0.25-0.5mm": 29.13,
+    ">2mm": 30.8
+   },
+   "z: spacing excised": {
+    "0-0.1mm": 5.41,
+    "0.25-0.5mm": 4.1,
+    ">2mm": 7.29
+   },
+   "z: naive anatomix48": {
+    "0-0.1mm": 71.3,
+    "0.25-0.5mm": 62.9,
+    ">2mm": 41.66
+   },
+   "z: spacing anatomix48": {
+    "0-0.1mm": 6.78,
+    "0.25-0.5mm": 4.52,
+    ">2mm": 5.48
+   },
+   "z: resampled plain": {
+    "0-0.1mm": 5.16,
+    "0.25-0.5mm": 3.94,
+    ">2mm": 5.17
+   },
+   "z: resampled excised": {
+    "0-0.1mm": 4.8,
+    "0.25-0.5mm": 3.64,
+    ">2mm": 5.35
+   }
+  }
+ },
+ "P4-lines-single-t0.5": {
+  "rho10": {
+   "iso plain": {},
+   "iso excised": {},
+   "iso anatomix48": {},
+   "y: naive plain": {},
+   "y: psf-matched plain": {},
+   "y: psf-matched excised": {},
+   "y: spacing plain": {},
+   "y: naive excised": {},
+   "y: spacing excised": {},
+   "y: naive anatomix48": {},
+   "y: spacing anatomix48": {},
+   "y: resampled plain": {},
+   "y: resampled excised": {},
+   "z: naive plain": {},
+   "z: psf-matched plain": {},
+   "z: psf-matched excised": {},
+   "z: spacing plain": {},
+   "z: naive excised": {},
+   "z: spacing excised": {},
+   "z: naive anatomix48": {},
+   "z: spacing anatomix48": {},
+   "z: resampled plain": {},
+   "z: resampled excised": {}
+  },
+  "rho16": {
+   "iso plain": {},
+   "iso excised": {},
+   "iso anatomix48": {},
+   "y: naive plain": {},
+   "y: psf-matched plain": {},
+   "y: psf-matched excised": {},
+   "y: spacing plain": {},
+   "y: naive excised": {},
+   "y: spacing excised": {},
+   "y: naive anatomix48": {},
+   "y: spacing anatomix48": {},
+   "y: resampled plain": {},
+   "y: resampled excised": {},
+   "z: naive plain": {},
+   "z: psf-matched plain": {},
+   "z: psf-matched excised": {},
+   "z: spacing plain": {},
+   "z: naive excised": {},
+   "z: spacing excised": {},
+   "z: naive anatomix48": {},
+   "z: spacing anatomix48": {},
+   "z: resampled plain": {},
+   "z: resampled excised": {}
+  }
+ },
+ "P4-lines-c60-f1": {
+  "rho10": {
+   "iso plain": {},
+   "iso excised": {},
+   "iso anatomix48": {},
+   "y: naive plain": {},
+   "y: psf-matched plain": {},
+   "y: psf-matched excised": {},
+   "y: spacing plain": {},
+   "y: naive excised": {},
+   "y: spacing excised": {},
+   "y: naive anatomix48": {},
+   "y: spacing anatomix48": {},
+   "y: resampled plain": {},
+   "y: resampled excised": {},
+   "z: naive plain": {},
+   "z: psf-matched plain": {},
+   "z: psf-matched excised": {},
+   "z: spacing plain": {},
+   "z: naive excised": {},
+   "z: spacing excised": {},
+   "z: naive anatomix48": {},
+   "z: spacing anatomix48": {},
+   "z: resampled plain": {},
+   "z: resampled excised": {}
+  },
+  "rho16": {
+   "iso plain": {},
+   "iso excised": {},
+   "iso anatomix48": {},
+   "y: naive plain": {},
+   "y: psf-matched plain": {},
+   "y: psf-matched excised": {},
+   "y: spacing plain": {},
+   "y: naive excised": {},
+   "y: spacing excised": {},
+   "y: naive anatomix48": {},
+   "y: spacing anatomix48": {},
+   "y: resampled plain": {},
+   "y: resampled excised": {},
+   "z: naive plain": {},
+   "z: psf-matched plain": {},
+   "z: psf-matched excised": {},
+   "z: spacing plain": {},
+   "z: naive excised": {},
+   "z: spacing excised": {},
+   "z: naive anatomix48": {},
+   "z: spacing anatomix48": {},
+   "z: resampled plain": {},
+   "z: resampled excised": {}
+  }
+ },
+ "P6-t0.5": {
+  "rho10": {
+   "iso plain": {
+    "0-0.1mm": 28.96,
+    "0.25-0.5mm": 5.8
+   },
+   "iso excised": {
+    "0-0.1mm": 6.03,
+    "0.25-0.5mm": 4.61
+   },
+   "iso anatomix48": {
+    "0-0.1mm": 22.28,
+    "0.25-0.5mm": 20.91
+   },
+   "y: naive plain": {
+    "0-0.1mm": 14.18,
+    "0.25-0.5mm": 4.73
+   },
+   "y: psf-matched plain": {
+    "0-0.1mm": 51.89,
+    "0.25-0.5mm": 78.59
+   },
+   "y: psf-matched excised": {
+    "0-0.1mm": 80.57,
+    "0.25-0.5mm": 81.97
+   },
+   "y: spacing plain": {
+    "0-0.1mm": 59.06,
+    "0.25-0.5mm": 85.88
+   },
+   "y: naive excised": {
+    "0-0.1mm": 4.18,
+    "0.25-0.5mm": 2.78
+   },
+   "y: spacing excised": {
+    "0-0.1mm": 86.97,
+    "0.25-0.5mm": 87.25
+   },
+   "y: naive anatomix48": {
+    "0-0.1mm": 13.71,
+    "0.25-0.5mm": 12.18
+   },
+   "y: spacing anatomix48": {
+    "0-0.1mm": 51.1,
+    "0.25-0.5mm": 70.05
+   },
+   "y: resampled plain": {
+    "0-0.1mm": 45.85,
+    "0.25-0.5mm": 50.97
+   },
+   "y: resampled excised": {
+    "0-0.1mm": 25.88,
+    "0.25-0.5mm": 47.6
+   },
+   "z: naive plain": {
+    "0-0.1mm": 47.1,
+    "0.25-0.5mm": 41.0
+   },
+   "z: psf-matched plain": {
+    "0-0.1mm": 19.93,
+    "0.25-0.5mm": 15.52
+   },
+   "z: psf-matched excised": {
+    "0-0.1mm": 13.93,
+    "0.25-0.5mm": 15.92
+   },
+   "z: spacing plain": {
+    "0-0.1mm": 18.91,
+    "0.25-0.5mm": 18.14
+   },
+   "z: naive excised": {
+    "0-0.1mm": 42.01,
+    "0.25-0.5mm": 39.15
+   },
+   "z: spacing excised": {
+    "0-0.1mm": 16.69,
+    "0.25-0.5mm": 18.43
+   },
+   "z: naive anatomix48": {
+    "0-0.1mm": 47.42,
+    "0.25-0.5mm": 46.72
+   },
+   "z: spacing anatomix48": {
+    "0-0.1mm": 12.12,
+    "0.25-0.5mm": 13.82
+   },
+   "z: resampled plain": {
+    "0-0.1mm": 19.23,
+    "0.25-0.5mm": 14.85
+   },
+   "z: resampled excised": {
+    "0-0.1mm": 12.86,
+    "0.25-0.5mm": 15.18
+   }
+  },
+  "rho16": {
+   "iso plain": {
+    "0-0.1mm": 14.75,
+    "0.25-0.5mm": 5.74
+   },
+   "iso excised": {
+    "0-0.1mm": 3.31,
+    "0.25-0.5mm": 2.79
+   },
+   "iso anatomix48": {
+    "0-0.1mm": 21.35,
+    "0.25-0.5mm": 20.68
+   },
+   "y: naive plain": {
+    "0-0.1mm": 8.9,
+    "0.25-0.5mm": 4.28
+   },
+   "y: psf-matched plain": {
+    "0-0.1mm": 55.32,
+    "0.25-0.5mm": 74.99
+   },
+   "y: psf-matched excised": {
+    "0-0.1mm": 84.05,
+    "0.25-0.5mm": 86.14
+   },
+   "y: spacing plain": {
+    "0-0.1mm": 67.76,
+    "0.25-0.5mm": 84.77
+   },
+   "y: naive excised": {
+    "0-0.1mm": 2.45,
+    "0.25-0.5mm": 1.69
+   },
+   "y: spacing excised": {
+    "0-0.1mm": 87.85,
+    "0.25-0.5mm": 88.6
+   },
+   "y: naive anatomix48": {
+    "0-0.1mm": 12.8,
+    "0.25-0.5mm": 12.33
+   },
+   "y: spacing anatomix48": {
+    "0-0.1mm": 63.97,
+    "0.25-0.5mm": 74.47
+   },
+   "y: resampled plain": {
+    "0-0.1mm": 44.81,
+    "0.25-0.5mm": 52.63
+   },
+   "y: resampled excised": {
+    "0-0.1mm": 27.55,
+    "0.25-0.5mm": 56.82
+   },
+   "z: naive plain": {
+    "0-0.1mm": 43.43,
+    "0.25-0.5mm": 40.74
+   },
+   "z: psf-matched plain": {
+    "0-0.1mm": 15.07,
+    "0.25-0.5mm": 15.41
+   },
+   "z: psf-matched excised": {
+    "0-0.1mm": 14.53,
+    "0.25-0.5mm": 15.64
+   },
+   "z: spacing plain": {
+    "0-0.1mm": 16.87,
+    "0.25-0.5mm": 17.94
+   },
+   "z: naive excised": {
+    "0-0.1mm": 39.61,
+    "0.25-0.5mm": 38.71
+   },
+   "z: spacing excised": {
+    "0-0.1mm": 17.18,
+    "0.25-0.5mm": 18.21
+   },
+   "z: naive anatomix48": {
+    "0-0.1mm": 46.52,
+    "0.25-0.5mm": 46.48
+   },
+   "z: spacing anatomix48": {
+    "0-0.1mm": 12.89,
+    "0.25-0.5mm": 13.66
+   },
+   "z: resampled plain": {
+    "0-0.1mm": 13.77,
+    "0.25-0.5mm": 14.58
+   },
+   "z: resampled excised": {
+    "0-0.1mm": 13.56,
+    "0.25-0.5mm": 14.89
+   }
+  }
+ }
+}
