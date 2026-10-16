@@ -272,3 +272,28 @@ the rerun shows the same trade at ρ 32 (45° at 75% against 61%; 90° and 60° 
 anatomix48 with 8 principal components instead of 16: P3-40-t0.25 TCA 59.4° within 0.1 mm (16 PCs: 60°), P3-40
 4.5° (16 PCs: 4.6°). The number of components is not what limits the layer-58 read-out at the interface. The
 48-component (no PCA) variant ran out of memory on this GPU (48 fp32 channel gradients at 480³) and was not run.
+
+## 11. Excision variants (`scripts/bench/excision_variants.py`, seed 0; `results/excision_variants.json`)
+
+Within 0.1 mm / clear tissue, ρ 8 / 16 / 32, share of voxels excised in brackets — ungated with the block median (UB), ungated with the white-matter median (UW), gated by the null-calibrated `gm` or `cl` with the white-matter median:
+
+| phantom | UB | UW | gated `gm` | gated `cl` |
+|---|---|---|---|---|
+| P1-t0.5 | 5.4 / 2.5 / 2.1 (3.2%) | 6.2 / 3.1 / 2.7 (2.0%) | 11.6 / 6.7 / 3.9 | 20.3 / 10.4 / 4.1 |
+| P1-t0.25 | 16.6 / 7.1 / 3.0 (2.8%) | 16.6 / 7.3 / 3.0 (2.6%) | 17.8 / 8.6 / 5.6 | 18.0 / 7.9 / 3.2 |
+| P3-40-t0.5 | 5.9 / 3.1 / 2.4 (0.7%) | 5.9 / 3.1 / 2.4 (0.7%) | 5.9 / 3.3 / 2.7 | 31.0 / 9.4 / 5.8 |
+| P3-40-t0.25 | 14.3 / 6.4 / 3.6 (0.9%) | 14.3 / 6.4 / 3.6 (0.9%) | 14.6 / 6.8 / 4.9 | 14.4 / 6.4 / 4.1 |
+| P6-t0.5 | 7.2 / 3.3 / 1.4 (1.1%) | 7.1 / 3.3 / 1.4 (1.1%) | 7.5 / 4.6 / 2.1 | 30.6 / 11.7 / 4.1 |
+
+The reference median makes no difference (the block median is already dominated by white matter in every phantom; the white-matter median excises slightly fewer voxels at the gyrus and is slightly worse); any gate is worse than none. Fix A as specified stays the default.
+
+## 12. Speed (`scripts/bench/speed.py`, RTX A6000, ρ 16)
+
+| arm | 128³ (2.1 Mvox) | 256³ (16.8 Mvox) | Mvoxel / s | relative |
+|---|---|---|---|---|
+| `structure-tensor` package algorithm, CPU (scipy, one process) | 3.9 s | 47.1 s | 0.4–0.5 | 22–33× slower |
+| structure tensor + eigen, GPU (`st.structure_tensor_3d`, `eig_special_3d`) | 0.18 s | 1.42 s | 11.8 | 1 |
+| excised tensor + eigen, GPU | 0.19 s | 1.51 s | 11.1 | 1.06× |
+| fixels: ODF (order 8) + CSD + peaks at every voxel, GPU | 5.1 s | 40.6 s | 0.41 | 29× |
+
+The first run failed inside `torch.linalg.eigh`: cusolver's batched Jacobi solver rejects batches of ~2M matrices and above (`CUSOLVER_STATUS_INVALID_VALUE`), so `eig_special_3d` now chunks at 2²⁰.

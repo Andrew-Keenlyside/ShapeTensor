@@ -100,6 +100,20 @@ Out of reach: the tenth-texture step at ρ ≤ 16, where excision brings the int
 
 ![gyrus glyphs](img/P1-t0.5_glyphs.png)
 
+## Speed (`scripts/bench/speed.py`, RTX A6000, ρ 16, σ 1; `scripts/bench/speed_A6000.json`)
+
+| arm | 128³ (2.1 Mvox) | 256³ (16.8 Mvox) | Mvoxel / s | relative |
+|---|---|---|---|---|
+| `structure-tensor` package algorithm, CPU (scipy, one process) | 3.9 s | 47.1 s | 0.4–0.5 | 22–33× slower |
+| structure tensor + eigen, GPU (`st.structure_tensor_3d`, `eig_special_3d`) | 0.18 s | 1.42 s | 11.8 | 1 |
+| excised tensor + eigen, GPU | 0.19 s | 1.51 s | 11.1 | 1.06× |
+| fixels: ODF (order 8) + CSD + peaks at every voxel, GPU | 5.1 s | 40.6 s | 0.41 | 29× |
+
+The excision costs 6% over the plain tensor (one coarse gradient magnitude and a normalised integration). The fixel
+read-out at every voxel is the expensive arm — the order-8 basis per voxel and the CSD — and is meant for a site grid
+(`reduce` 4–8, i.e. 64–512× fewer sites), where it runs in a fraction of the tensor's time. The anatomix48 features
+cost about 1 s per 256³ pass on this card on top of either tensor (results log §8, the real-crop demos).
+
 ## Against the pre-registered thresholds (`SCORECARD.md`, worst phantom per claim)
 
 | claim | outcome |
