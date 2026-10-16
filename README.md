@@ -23,89 +23,29 @@ pip install -e ".[anatomix]"     # + the anatomix feature engines (weights come 
 A CUDA GPU is assumed (everything is torch on `device="cuda"`); `envs/shapetensor-gpu.def` builds the container and
 `scripts/cluster/shapetensor_sge.sh` runs a volume on an H100 node, one process per GPU.
 
-## Tutorial
-
-**1. The structure tensor of a volume** — a drop-in for the `structure-tensor` package (same layout, same eigen
-conventions), with numpy, cupy or torch in and the same kind out:
+## Use
 
 ```python
-import numpy as np
-from shapetensor import st
+from shapetensor import np as st          # or: from shapetensor import cp as st   (cupy out, no copy)
 
-vol = np.load("block.npy").astype(np.float32)        # (Z, Y, X) grey levels, e.g. a 20 µm HiP-CT block
-
-S = st.structure_tensor_3d(vol, sigma=1.0, rho=16.0)  # (6, Z, Y, X) = [Sxx, Syy, Szz, Sxy, Sxz, Syz], x = last axis
-val, vec = st.eig_special_3d(S)                       # val (3, ...) descending; vec (3, ...) = fibre direction (x, y, z)
+vec  = st.shapetensor(image, sigma=1.0, rho=16.0)                      # (3, Z, Y, X) fibre direction per voxel, (x, y, z); boundary-robust
+vec  = st.shapetensor(image, rho=16.0, excise=False)                   # the plain structure tensor's direction
+vec  = st.shapetensor(image, rho=16.0, engine="anatomix48")            # from shape-space features instead of the intensity
+dirs = st.shapetensor(image, rho=16.0, fixels=True)                    # (3, 3, Z, Y, X): up to three directions per voxel
 ```
 
-`sigma` is the derivative scale and `rho` the integration window, both in voxels: at 20 µm, `rho=16` is 0.32 mm.
+`image` is a `(Z, Y, X)` numpy, cupy or torch array of grey levels; `sigma` and `rho` are the derivative and
+integration scales in voxels (at 20 µm, `rho=16` is 0.32 mm). Everything runs on the GPU. Engines: `intensity`
+(default), `jet` (a locally normalised derivative jet, no network), `anatomix16`, `anatomix48` (the block needs 64
+voxels of context per face). The pieces behind the call — `structure_tensor_3d` / `eig_special_3d` in the layout of
+the `structure-tensor` package, `excised_structure_tensor_3d`, `shape_structure_tensor_3d`, `fixels_3d` — are in
+`shapetensor.st`; the feature engines, the channel-resolved tensor and the TCA / CSD read-outs are in `features/`,
+`tensor.py` and `readout/`; `field.py` writes the orientation-field store (direction, boundary, quality, fixels on a
+coarse grid) a tractography pipeline samples.
 
-**2. The boundary-robust tensor** — the same, with the gradients of tissue interfaces excised before integration.
-This is what removes the "boundary shell" (directions dragged into the grey/white boundary plane) at no cost
-elsewhere:
-
-```python
-Sx = st.excised_structure_tensor_3d(vol, sigma=1.0, rho=16.0)    # factor=3: drop gradients > 3x the median coarse gradient
-_, fibre = st.eig_special_3d(Sx)
-```
-
-**3. Several fibre populations per site** — constrained spherical deconvolution of the gradient-direction
-distribution; the number of populations comes from the data, not from a fixed k:
-
-```python
-dirs, fracs, npop = st.fixels_3d(vol, sigma=1.0, rho=16.0)       # dirs (3, 3, Z, Y, X): up to three (x, y, z) directions
-                                                                 # fracs (3, Z, Y, X), npop (Z, Y, X) in {0, 1, 2, 3}
-```
-
-**4. Shape features instead of the intensity** — any engine's channels can feed the same tensor:
-
-```python
-Ss = st.shape_structure_tensor_3d(vol, sigma=1.0, rho=16.0, engine="anatomix48")   # the block needs 64 voxels of context per face
-```
-
-or, lower level, the engine itself and the channel-resolved tensor the TCA read-outs work on:
-
-```python
-import torch
-from shapetensor.features import make_engine
-from shapetensor.tensor import gradients, k_dense
-from shapetensor.readout import common, single
-
-v = torch.as_tensor(vol, device="cuda")
-F = make_engine("anatomix48")(v)                                 # (16, Z, Y, X): layer-58 channels, PCA to 16
-G = gradients(F, sigma=1.0, truncate=4.0)                        # (48, Z, Y, X): every channel's gradient
-K, sites = k_dense(G, rho=16.0, truncate=4.0, reduce=4, core=((64, 192), (64, 192), (64, 192)))   # (nz, ny, nx, 1176)
-tca = single.tca(common.unpack(K.reshape(-1, K.shape[-1]), 48))  # TCA, rank 3: tca["dir"] (N, 3) in (z, y, x)
-```
-
-Engines: `intensity`, `jet` (a locally normalised derivative jet, no network), `anatomix16`, `anatomix48`.
-
-**5. A whole volume on one or more GPUs** — chunked with halos, outputs written to a zarr group:
-
-```bash
-shapetensor volume brain_20um.ome.zarr --level 0 out.zarr --rho 16 --outputs S eig excised fixels \
-    --chunk 256 256 256 --rank 0 --world 4          # one process per GPU, rank 0..3
-```
-
-**6. The orientation field a tractography consumer samples** — plain and excised directions, boundary strength and
-normal, quality, fixels, on a coarse site grid:
-
-```python
-from shapetensor.field import compute_field, write_store
-field = compute_field(v, rho=16.0, reduce=4)                     # dir, dir_st, gm, cl, n_cl, gap, dirs, fracs, npop
-write_store("block_field.zarr", field, voxel_mm=0.02)
-```
-
-**7. Phantoms and validation**
-
-```bash
-shapetensor phantoms --pids P3-40-t0.5 P8 --seeds 0 1         # build phantoms (with twins and truth)
-shapetensor run --spec results/spec_full.json                  # caches, read-outs, scores
-shapetensor report --tag main                                  # REPORT.md + figures
-```
-
-Tests: `python tests/test_core.py` (filters against scipy, K against the structure tensor, SH, CP),
-`python tests/test_st.py` (the volume API), `python tests/test_anatomix.py` (the engine on the GPU).
+A whole zarr volume, chunked with halos, one process per GPU: `shapetensor volume in.ome.zarr --level 0 out.zarr
+--rho 16 --rank 0 --world 4`. Phantoms and the validation suite: `shapetensor phantoms | run | report`. Tests:
+`python tests/test_core.py`, `tests/test_st.py`, `tests/test_anatomix.py`.
 
 ## How it fits together
 

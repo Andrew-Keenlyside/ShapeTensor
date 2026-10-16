@@ -161,6 +161,37 @@ def eig_special_3d(S, full: bool = False, eigenvalue_order: Literal["desc", "asc
 
 
 # ---------------------------------------------------------------------------------------------------------------
+# the one-call API
+# ---------------------------------------------------------------------------------------------------------------
+
+def shapetensor(image, *, sigma: float = 1.0, rho: float = 16.0, truncate: float = 4.0, engine: str = "intensity",
+                excise: bool = True, fixels: bool = False, order: str = "xyz", n_pcs: int = 16,
+                engine_kwargs: dict | None = None, device: str = "cuda", **fixel_kwargs):
+    """The fibre direction field of ``image (Z, Y, X)`` in one call, as the caller's array kind.
+
+    Returns ``vec (3, Z, Y, X)``: the unit fibre direction per voxel (axial), components in ``order`` (``"xyz"`` as
+    the structure-tensor package, or ``"zyx"``). With ``fixels=True`` returns ``(3, 3, Z, Y, X)``: up to three
+    directions per voxel from the CSD of the gradient-direction ODF (zero where absent), strongest first.
+
+    ``engine``: ``"intensity"`` (the image's own gradients; the default), or a feature engine (``"jet"``,
+    ``"anatomix16"``, ``"anatomix48"``) whose channel gradients are summed instead. ``excise``: drop boundary
+    gradients before integrating (the boundary-robust tensor; intensity engine only). ``sigma`` / ``rho`` in voxels.
+    """
+    if fixels:
+        dirs, _, _ = fixels_3d(image, sigma, rho, truncate, device=device, **fixel_kwargs)
+        return dirs if order == "xyz" else _like(_to_torch(dirs, device).flip(1), image)
+    if engine == "intensity":
+        S = (excised_structure_tensor_3d if excise else structure_tensor_3d)(image, sigma, rho, truncate, device=device)
+    else:
+        S = shape_structure_tensor_3d(image, sigma, rho, truncate, engine=engine, n_pcs=n_pcs,
+                                      engine_kwargs=engine_kwargs, device=device)
+    _, vec = eig_special_3d(S, device=device)
+    if order == "zyx":
+        vec = _like(_to_torch(vec, device).flip(0), image)
+    return vec
+
+
+# ---------------------------------------------------------------------------------------------------------------
 # several directions per site
 # ---------------------------------------------------------------------------------------------------------------
 
