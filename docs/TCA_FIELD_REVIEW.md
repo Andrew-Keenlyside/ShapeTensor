@@ -466,3 +466,84 @@ arms of the full suite (running), and the real-crop demonstration.
 6. The order of work: (i) package skeleton + features/tensor passes with parity tests; (ii) P3 and P8 at 20 µm with
    the ρ sweep and the C3 control; (iii) the hybrid; (iv) N populations on P4/P5; (v) the BRIDGE reader and the
    end-to-end builds; (vi) real-data demonstration; (vii) container + cluster run on a whole crop set.
+
+## 12. The mental model against the evidence: a wider theoretical review (2026-10-16, evening)
+
+The model as drawn: image → anatomix shape space (a feature vector per voxel) → **cluster the shape space into
+fibre populations** → one TCA per population → N direction fields → interleaved vertices. Four assumptions sit
+inside it: (A1) a voxel's local appearance identifies the population it belongs to; (A2) populations occupy
+separable regions of feature space; (A3) given a population's voxels, a tensor on them gives its direction; (A4) N
+is the number of clusters, chosen by a clustering criterion. What the suite says about each, and what it replaces
+them with.
+
+**A1 / A2 — identity is not in the shape space.** Fibre populations are defined by *orientation*: two bundles in a
+crossing have the same tissue, the same stain response, the same texture statistics, and differ only in the
+direction of that texture. A feature space can therefore separate them only if it encodes orientation. anatomix's
+output does not: it is trained for correspondence across subjects and modalities, which makes it (nearly)
+orientation-invariant by construction (selectivity 0.06 at the output, 0.46 at layer 58, where only 5 of 48
+channels prefer one bundle of a 60° pair). The layer-58 vectors of the two bundles overlap completely; k-means on
+them follows texture phase and background, and a tensor per cluster returns one bundle or the bisector (§7 of the
+results log, `shape_space_clusters.png`). Orientation *is* present earlier — encoder block 2 has clean tuning curves
+(18 of 32 channels selective, up to 0.83) — because early convolutional features are Gabor-like; later layers
+discard it. A per-voxel linear head on block 2 reads orientation at ±15–20°, which separates a 90° crossing by
+voting and not 60°: the encoder's angular resolution is the limit, not the method. So A1 can be true in principle
+(a voxel lies in one fascicle) and A2 is false for this network: the clustering step has nothing to cluster.
+
+**A3 — the decomposition was never the problem.** With the voxel sets chosen by the truth (an oracle split), a
+tensor per bundle recovers 8° / 7° on the 60° crossing; TCA on the channel-resolved tensor recovers planted
+directions when its pieces are separable. The bottleneck of the model is the assignment, not TCA.
+
+**A4 — N from a clustering criterion is unstable, N from angular structure is not.** BIC on CP ranks never selects
+two populations; the over-complete CP grouping reports two almost everywhere (false seconds up to 100% on single
+fibres); residual-bootstrap stability removes true populations (§6). What works is constrained spherical
+deconvolution of the gradient-direction ODF: a mixture model in *orientation space* with a calibrated null —
+N = 2 at 100% on 90° and 60° crossings (anatomix48 ODF, full texture), with ≤ 2% false seconds when the threshold is
+set on dispersed single-fibre texture (§14).
+
+**The reframing.** The structure tensor is the second moment of the gradient-direction distribution — the
+l ≤ 2 part of the ODF. The channel-resolved tensor K and its CP decomposition are channel-resolved second moments.
+The ODF's higher orders (l = 4–8) hold what the tensor cannot: two crossing populations give a planar tensor
+(one principal direction, Jones' limit of a rank-2 tensor) but two rings on the sphere. So the "shape tensor"
+family and the ODF/CSD read-out are the same object at different angular orders, and the N-population information
+lives in the orders the tensor drops. Clustering in feature space asks the features to carry orientation;
+deconvolving the ODF asks the gradients to, which they do exactly — a fibre's gradients fill the plane normal to it.
+Where the shape features do help is as a *gradient source*: the anatomix48 features are smoother than intensity
+with a higher orientation SNR (they average texture over receptive fields), which sharpens the ODF — 60° resolved
+at 100% against 5% for the intensity ODF at full texture, 45° at 61–75% against 0; the advantage vanishes at half
+texture, where every ODF finds the 60° pair but with 11–18° directions.
+
+**The boundary failure is a gradient-mixture problem, and scale separates it.** An interface adds one strong
+gradient direction (a delta on the sphere) to the texture's ring; the tensor's second moment is dominated by it,
+hence the shell. No appearance feature removes an edge that is really there. But the two components live at
+different scales — the texture has no energy at σ = 3 voxels, the interface has all of it — so dropping the
+gradients whose coarse magnitude exceeds 3× the median excises the delta and leaves the ring intact: 41 / 13 / 7° →
+5.4 / 2.9 / 2.1° at the step, 34.5 / 16 / 5 → 5.2 / 2.5 / 1.9° at the gyrus, 24.7 / 11.8 / 5.3 → 8.2 / 3.3 / 1.3° at a
+vessel, nothing lost in clear tissue or on U-fibres, at 6% cost; it holds at ρ 10 (33.5 → 4.5°). Gates and
+reference medians do not improve on it. The same delta, under the ring deconvolution, becomes a *ring of fibre
+directions* — the false populations near every interface and on laminar texture (§13) — which is why fixels are
+excluded by the same scale criterion (the coarse-gradient gate) rather than corrected.
+
+**What the output is, and is not.** The model's product is a population label per voxel and a direction per label;
+the pipeline's product is, per site, a set of directions with fractions (fixels) and no voxel-level assignment. For
+tractography the two are equivalent: a fixel tracker assigns a voxel to a population by direction continuity (the
+fixel aligned with the heading), which is how the interleaved-vertex input to a streamline builder is consumed. An
+N = 0 verdict (grey matter, CSF) cannot come from the fODF (deconvolved noise peaks at 10–16× the mean, as high as
+a fibre) and comes from the tensor's anisotropy instead.
+
+**What would make the mental model work as drawn.** (i) Orientation-selective or rotation-equivariant features per
+voxel: encoder block 2 with a nonlinear head trained on phantoms with 3-D angle sampling (today ±15–20°, 90° only), or
+a steerable network; (ii) assignment in *space* rather than in feature space — at 20 µm fascicle boundaries are
+visible, so a fascicle instance segmentation (orientation-coherence watershed on the excised tensor, or a learned
+fascicle map) would give the clusters as connected fascicles, and a tensor per fascicle then gives the direction
+with no decomposition at all. That version — cluster spatially by coherence, not by appearance — is the model's
+sound form; it is a segmentation problem, and it is the natural next study.
+
+**Open theoretical points.** Angular resolution: an order-8 ODF resolves ≈ 40° at best; order 12 trades precision
+for 45° detection (§9); a regularised deconvolution with Newton-refined peaks is the route to 45° and below. Sheet
+vs fibre: the ring kernel assumes fibres, so laminar structure deconvolves to spurious crossings; a two-kernel
+deconvolution (fibre ring + sheet delta) would separate lamination from crossing and is the principled fix for the
+laminar white matter of the internal capsule. Anisotropic sampling: information lost along a coarse axis cannot be
+recovered by any filter (the BigBrain block flips its direction onto the averaged axis); per-axis physical filtering
+removes the geometric bias (23° → < 2° on an oblique fibre) and PSF matching removes the resolution bias; the
+phantom test quantifies what remains. Window: ρ 10 suffices for the single direction at the real texture level,
+crossings need ρ ≥ 16 — the fixel field and the direction field can be computed at different windows.

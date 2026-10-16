@@ -443,3 +443,9 @@ the 0.25–0.5 mm band), seed mean; clear tissue (> 2 mm) in the last column.
   populations at 69–73% (intensity, rel 0.7) and 22–38% (anatomix48).
 - **Boundary detector** at ρ 10: no arm reaches PR-AUC 0.9 (the coarse gradient at ρ 10 integrates too little; it
   is 0.85–0.96 at ρ 16).
+- **Real crop at ρ 10** (`demo_real_crop.py --rho 10`, `demo_real_dec.py --rho 10`): excised vs plain direction
+  0.35° median over bright tissue (4.6° in the top boundary-strength decile, 2.7% of sites > 30°); anatomix48 TCA
+  36° from the tensor with gap 0.84 against 0.23; CSD (29°, 0.4) N = 1 / 2 / 3 at 43 / 39 / 18% of sites.
+- **Speed at ρ 10** (A6000, 256³): tensor + eigen 1.42 s (11.8 Mvox/s), excised 1.50 s, the anatomix48 shape tensor
+  + eigen 4.9 s (3.5×), K + TCA rank 3 on the ρ/4 site grid 16 s (11.5×), fixels at every voxel 323 s (228×: the
+  site grid at ρ 10 is ρ/4 = 2 voxels, 8× more sites than at ρ 16); scipy CPU 41 s.
