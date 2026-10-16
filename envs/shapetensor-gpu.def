@@ -32,8 +32,9 @@ From: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
     # keep the image's torch (2.5.1 + CUDA 12.4, the H100 nodes' driver generation): monai / anatomix must not pull a newer one
     python -c "import torch; print('torch==' + torch.__version__.split('+')[0])" > /tmp/constraints.txt
     cat /tmp/constraints.txt
-    pip install -c /tmp/constraints.txt "numpy>=2" scipy "zarr>=3" nibabel tifffile matplotlib contourpy scikit-learn monai \
-        "git+https://github.com/neel-dey/anatomix.git"
+    pip install -c /tmp/constraints.txt "numpy>=2" scipy "zarr>=3" nibabel tifffile matplotlib contourpy scikit-learn monai huggingface_hub
+    # anatomix pins a newer torch in its metadata; its code only needs torch + huggingface_hub, so install it without deps
+    pip install --no-deps "git+https://github.com/neel-dey/anatomix.git"
     pip install -c /tmp/constraints.txt /opt/shapetensor
     python -c "import torch; assert torch.version.cuda.startswith('12.4'), torch.version.cuda; print('torch', torch.__version__)"
     # bake the anatomix weights into the image
