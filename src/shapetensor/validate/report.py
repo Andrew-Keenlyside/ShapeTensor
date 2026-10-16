@@ -360,6 +360,9 @@ def write(tag: str = "main", out: str | None = None) -> Path:
                     f = fig_difficulty(tag, fam, rho, fdir / f"{fam}_rho{rho:g}_{band.replace('>', 'gt')}_difficulty.png", band=band)
                     if f:
                         figs.append(f); md.append(f"![]({f})\n")
+    from .scorecard import write as write_scorecard
+    sc = write_scorecard(tag)
+    md.append(f"\n## Pre-registered claims\n\nSee `{sc.name}` beside this report: every claim, every arm, PASS / FAIL.\n")
     path = Path(out) if out else RESULTS_DIR / tag / "REPORT.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(md))
