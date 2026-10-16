@@ -1,0 +1,77 @@
+{
+ "source": "s2146",
+ "rho": 10.0,
+ "sigma": 1.0,
+ "reduce": 4,
+ "texture_level": "t0.5",
+ "step0": {
+  "noise_sd": 9.112788200378418,
+  "texture_rms": {
+   "1-2": 3.989274090168689,
+   "2-4": 2.585151414556655,
+   "4-8": 1.7413824502823931,
+   "8-16": 1.4800396661996993
+  },
+  "real_crop_texture_rms": {
+   "1-2": 4.124255178692833,
+   "2-4": 3.1000003299217824,
+   "4-8": 2.4008073437994364,
+   "8-16": 2.3235816323522434
+  },
+  "texture_ratio_to_real_crop_1-2vox": 0.967
+ },
+ "step1": {
+  "grad_mag_median": 6.0234375,
+  "grad_mag_p99": 19.265625
+ },
+ "step2": {
+  "excised_share_block": 0.051315903663635254
+ },
+ "step3": {
+  "plain_vs_excised_median_deg": 0.34548425674438477,
+  "plain_vs_excised_median_high_gm": 4.647892951965332,
+  "plain_vs_excised_median_low_gm": 0.2373882383108139
+ },
+ "step4": {
+  "gap_median_tissue": 0.22008539736270905,
+  "cl_median_tissue": 0.09260877221822739
+ },
+ "step8": {
+  "shape_vs_structure_median_deg": 37.99787902832031,
+  "shape_gap_median": 0.30136117339134216
+ },
+ "step9": {
+  "excised tensor": {
+   "kept_share": 0.8016666769981384,
+   "length_mm_median": 1.5999999046325684,
+   "secondary_fixel_streamlines": 0.0
+  },
+  "fixels": {
+   "kept_share": 0.8016666769981384,
+   "length_mm_median": 1.5999999046325684,
+   "secondary_fixel_streamlines": 0.0
+  },
+  "fixels_vs_excised": {
+   "density_dice": 1.0,
+   "divergence_mm_median": 0.0
+  }
+ },
+ "step10": {
+  "y (across the drawn plane)": {
+   "naive": {
+    "vs_isotropic_median_deg": 62.07577133178711
+   },
+   "spacing": {
+    "vs_isotropic_median_deg": 76.52853393554688
+   }
+  },
+  "z (within the drawn plane)": {
+   "naive": {
+    "vs_isotropic_median_deg": 70.11775207519531
+   },
+   "spacing": {
+    "vs_isotropic_median_deg": 60.50995635986328
+   }
+  }
+ }
+}

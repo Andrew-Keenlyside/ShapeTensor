@@ -147,6 +147,76 @@ class OrientationReadoutMLP(OrientationReadout):
         return d_out, c_out
 
 
+class OrientationReadoutDist(OrientationReadoutMLP):
+    """Features -> a distribution over ``n_dirs`` hemisphere directions (softmax), trained with the same self-calibrated
+    teacher as a soft target (a kernel of ``target_deg`` around the teacher direction). Unlike the tensor regression,
+    a voxel that contains two populations keeps two bumps rather than their average, and the window's population
+    density is the sum of its voxels' distributions."""
+
+    def __init__(self, smooth: int = 3, hidden: int = 64, steps: int = 2000, lr: float = 2e-3, weight_decay: float = 1e-4, seed: int = 0,
+                 n_dirs: int = 160, target_deg: float = 12.0):
+        super().__init__(smooth=smooth, hidden=hidden, steps=steps, lr=lr, weight_decay=weight_decay, seed=seed)
+        self.n_dirs, self.target_deg = int(n_dirs), float(target_deg)
+        self.grid = None
+
+    def fit(self, blocks, n_sample: int = 200_000, seed: int = 0):
+        g = torch.Generator().manual_seed(seed)
+        Xs, Ds = [], []
+        per = max(1, n_sample // max(1, len(blocks)))
+        for F, d, w in blocks:
+            f = self._prep(F)
+            wv = w.reshape(-1).float().cpu()
+            idx = torch.multinomial(wv / wv.sum(), min(per, int((wv > 0).sum())), replacement=False, generator=g).to(F.device)
+            Xs.append(f.reshape(f.shape[0], -1)[:, idx].T); Ds.append(d.reshape(3, -1)[:, idx].T)
+        X = torch.cat(Xs); D = torch.cat(Ds)
+        self.grid = hemisphere(self.n_dirs, X.device)
+        k = 1.0 / (2 * math.sin(math.radians(self.target_deg)) ** 2)
+        Y = torch.exp(k * ((D @ self.grid.T) ** 2 - 1)); Y = Y / Y.sum(1, keepdim=True)         # soft targets (N, n_dirs)
+        self.mean, self.std = X.mean(0), X.std(0).clamp_min(1e-6)
+        Xn = (X - self.mean) / self.std
+        torch.manual_seed(self.seed)
+        self.net = torch.nn.Sequential(torch.nn.Linear(X.shape[1], self.hidden), torch.nn.GELU(), torch.nn.Linear(self.hidden, self.hidden),
+                                       torch.nn.GELU(), torch.nn.Linear(self.hidden, self.n_dirs)).to(X.device)
+        opt = torch.optim.Adam(self.net.parameters(), lr=self.lr, weight_decay=self.wd)
+        n = len(Xn); bs = min(8192, n)
+        for step in range(self.steps):
+            i = torch.randint(0, n, (bs,), device=X.device)
+            logp = torch.log_softmax(self.net(Xn[i]), 1)
+            loss = -(Y[i] * logp).sum(1).mean()
+            opt.zero_grad(); loss.backward(); opt.step()
+        with torch.no_grad():
+            P = torch.cat([torch.softmax(self.net(Xn[a:a + 65536]), 1) for a in range(0, n, 65536)])
+            self.fit_r2 = float((P * Y).sum(1).mean() / (Y * Y).sum(1).mean())              # overlap with the target, 1 = perfect
+        return self
+
+    def predict_dist(self, F: torch.Tensor, z_chunk: int = 16):
+        """Per-voxel distributions ``(n_dirs, Z, Y, X)``."""
+        f = self._prep(F); C, Z, Y, X = f.shape
+        out = torch.empty((self.n_dirs, Z, Y, X), device=F.device)
+        with torch.no_grad():
+            for z in range(0, Z, z_chunk):
+                fz = f[:, z:z + z_chunk]
+                P = torch.softmax(self.net((fz.reshape(C, -1).T - self.mean) / self.std), 1)
+                out[:, z:z + z_chunk] = P.T.reshape(self.n_dirs, *fz.shape[1:])
+        return out
+
+    def predict(self, F: torch.Tensor, z_chunk: int = 16):
+        """The distribution's peak direction per voxel and its confidence (the peak's share of the mass)."""
+        P = self.predict_dist(F, z_chunk)
+        j = P.argmax(0); conf = P.max(0).values.clamp(0, 1)
+        return self.grid[j].permute(3, 0, 1, 2).contiguous(), conf
+
+
+def smooth_field(o: torch.Tensor, conf: torch.Tensor, k: int = 5):
+    """Average the per-voxel orientation tensors ``conf * d dᵀ`` over a ``k``³ neighbourhood (a fascicle is several
+    voxels wide; a voxel's readout is noisy) and re-read the direction and confidence from the averaged tensor."""
+    T6 = outer6(o.permute(1, 2, 3, 0)) * conf[..., None]                              # (Z, Y, X, 6)
+    T6 = Fn.avg_pool3d(T6.permute(3, 0, 1, 2)[None], k, stride=1, padding=k // 2)[0].permute(1, 2, 3, 0)
+    lam, V = eigh(tensor_from6(T6.reshape(-1, 6)))
+    d = V[..., :, 2]; c = ((lam[:, 2] - lam[:, 1]) / lam[:, 2].abs().clamp_min(1e-9)).clamp(0, 1)
+    return d.T.reshape(3, *o.shape[1:]), c.reshape(o.shape[1:])
+
+
 def hemisphere(n: int = 1500, device="cpu") -> torch.Tensor:
     """Roughly uniform unit vectors on a hemisphere (z >= 0), a Fibonacci set, (n, 3) in (z, y, x)."""
     i = torch.arange(n, dtype=torch.float64) + 0.5
@@ -165,19 +235,26 @@ def window_modes(o: torch.Tensor, w: torch.Tensor, kappa_deg: float = 15.0, rel:
     k = 1.0 / (2 * math.sin(math.radians(kappa_deg)) ** 2)
     c2 = (o @ u.T) ** 2                                                                   # (n, m)
     dens = (w[:, None] * torch.exp(k * (c2 - 1))).sum(0)                                 # (m,)
-    modes = torch.zeros(nmax, 3, device=o.device); heights = torch.zeros(nmax, device=o.device)
-    top = float(dens.max()); taken = torch.zeros(len(u), dtype=torch.bool, device=o.device)
+    return modes_from_density(dens, u, rel=rel, min_sep_deg=min_sep_deg, nmax=nmax, mass_floor=mass_floor)
+
+
+def modes_from_density(dens: torch.Tensor, u: torch.Tensor, rel: float = 0.5, min_sep_deg: float = 25.0, nmax: int = 3,
+                       mass_floor: float = 0.0):
+    """Peaks of a density ``dens (m,)`` over grid directions ``u (m, 3)``: greedy, above ``rel`` x the top, at least
+    ``min_sep_deg`` apart; with ``mass_floor`` a candidate must own that share of the density (the grid points nearer
+    to it than to any kept mode)."""
+    modes = torch.zeros(nmax, 3, device=dens.device); heights = torch.zeros(nmax, device=dens.device)
+    top = float(dens.max()); taken = torch.zeros(len(u), dtype=torch.bool, device=dens.device)
     cos_sep = math.cos(math.radians(min_sep_deg)); n = 0
-    wsum = float(w.sum())
+    total = float(dens.clamp_min(0).sum())
     for r in range(nmax):
         d = dens.masked_fill(taken, -1.0)
         j = int(d.argmax())
         if d[j] < rel * top or d[j] <= 0:
             break
         if mass_floor > 0 and r > 0:
-            # the mass of the voxels nearer this candidate than any kept mode, as a share of the window
-            near = ((o @ u[j]) ** 2 >= (o @ modes[:r].T).pow(2).max(1).values)
-            if float(w[near].sum()) / max(wsum, 1e-12) < mass_floor:
+            near = ((u @ u[j]) ** 2 >= (u @ modes[:r].T).pow(2).max(1).values)
+            if float(dens.clamp_min(0)[near].sum()) / max(total, 1e-12) < mass_floor:
                 taken[j] = True; continue
         modes[r] = u[j]; heights[r] = d[j] / top; n += 1
         taken |= (u @ u[j]).abs() >= cos_sep

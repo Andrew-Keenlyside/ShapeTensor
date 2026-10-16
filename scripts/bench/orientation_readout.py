@@ -21,7 +21,7 @@ from shapetensor.features import make_engine
 from shapetensor.features.cache import cached_features
 from shapetensor.phantoms import make
 from shapetensor.readout import common, orientation
-from shapetensor.readout.orientation import OrientationReadout, OrientationReadoutMLP, assign, window_modes
+from shapetensor.readout.orientation import OrientationReadout, OrientationReadoutDist, OrientationReadoutMLP, assign, modes_from_density, smooth_field, window_modes
 import argparse
 from shapetensor.tensor import gradients
 
@@ -67,8 +67,8 @@ def teacher(v):
 
 
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("--model", default="mlp", choices=["ridge", "mlp"]); ap.add_argument("--kappa", type=float, default=25.0)
-    ap.add_argument("--mass-floor", type=float, default=0.15); args = ap.parse_args()
+    ap = argparse.ArgumentParser(); ap.add_argument("--model", default="mlp", choices=["ridge", "mlp", "dist"]); ap.add_argument("--kappa", type=float, default=25.0)
+    ap.add_argument("--mass-floor", type=float, default=0.15); ap.add_argument("--field-smooth", type=int, default=5); ap.add_argument("--conf-q", type=float, default=0.5); args = ap.parse_args()
     t0 = time.time()
     tex = json.load(open(f"{DATA_ROOT}/results/tex_calibrated.json"))["texture"]; tex["widths"] = [tuple(w) for w in tex["widths"]]
     tex = make.TextureParams(**{**tex, "dispersion_deg": 8.0, "pitch_deg": 4.0})
@@ -85,7 +85,7 @@ def main():
             F = cached_features(eng, v); d, gap = teacher(v)
             w = torch.zeros_like(gap); w[inner] = (gap[inner] > torch.quantile(gap[inner], 0.7)).float() * fib[inner].float()
             blocks.append((F, d, w))
-        ro = (OrientationReadoutMLP(smooth=3) if args.model == "mlp" else OrientationReadout(smooth=3, ridge=1.0)).fit(blocks, n_sample=240_000)
+        ro = ({"mlp": OrientationReadoutMLP(smooth=3), "dist": OrientationReadoutDist(smooth=3)}.get(args.model) or OrientationReadout(smooth=3, ridge=1.0)).fit(blocks, n_sample=240_000)
         del blocks; torch.cuda.empty_cache()
         r = {"fit_r2": round(ro.fit_r2, 3)}
         # --- test on seed B single fibres: per-voxel error on fibre voxels, teacher error for reference
@@ -106,12 +106,19 @@ def main():
         second = []
         for k, a in enumerate(ANG[::3]):
             v, fib, _ = build([(a, 1.0)], 200 + 3 * k, tex, g)
-            o, conf = ro.predict(cached_features(eng, v))
+            Fn_ = cached_features(eng, v); o, conf = ro.predict(Fn_)
+            os_, cs_ = smooth_field(o, conf, args.field_smooth) if args.field_smooth > 1 else (o, conf)
+            Pn = ro.predict_dist(Fn_) if args.model == "dist" else None
             for z in zs:
                 for x in xs:
                     sl = (slice(None), slice(z - half, z + half + 1), slice(y_mid - half // 2, y_mid + half // 2 + 1), slice(x - half, x + half + 1))
-                    oo = o[sl].reshape(3, -1).T; ww = (conf[sl[1:]] * fib[sl[1:]].float()).reshape(-1)
-                    _, h, n = window_modes(oo, ww, kappa_deg=args.kappa, rel=0.0)
+                    oo = os_[sl].reshape(3, -1).T; ww = (cs_[sl[1:]] * fib[sl[1:]].float()).reshape(-1)
+                    ww = ww * (ww >= torch.quantile(ww[ww > 0], args.conf_q)).float() if (ww > 0).sum() > 10 else ww
+                    if args.model == "dist":
+                        dens = (Pn[sl].reshape(Pn.shape[0], -1) * (fib[sl[1:]].float().reshape(-1))[None]).sum(1)
+                        _, h, n = modes_from_density(dens, ro.grid, rel=0.0)
+                    else:
+                        _, h, n = window_modes(oo, ww, kappa_deg=args.kappa, rel=0.0)
                     second.append(float(h[1]))
         thr = float(np.percentile(second, 99)); r["mode_rel_thr_99"] = round(thr, 3)
         print(f"[{time.time() - t0:4.0f}s] {sname}: null second-mode height 99th pct {thr:.3f}", flush=True)
@@ -119,17 +126,24 @@ def main():
         for cname, (a1, a2, f1) in CROSS.items():
             v, fib, masks = build([(a1, f1), (a2, 1 - f1)], 300, tex, g)
             F = cached_features(eng, v); o, conf = ro.predict(F); G = gradients(v[None], SIGMA, TR, out_dtype=torch.float32)
+            os_, cs_ = smooth_field(o, conf, args.field_smooth) if args.field_smooth > 1 else (o, conf)
+            Pd = ro.predict_dist(F) if args.model == "dist" else None
             t1, t2 = unit(a1), unit(a2)
             m1, m2 = masks[0] & ~masks[1], masks[1] & ~masks[0]
-            e1 = angle(o.permute(1, 2, 3, 0), t1); e2 = angle(o.permute(1, 2, 3, 0), t2)
+            e1 = angle(os_.permute(1, 2, 3, 0), t1); e2 = angle(os_.permute(1, 2, 3, 0), t2)
             vox = {"within_15_of_either": round(float(((e1 <= 15) | (e2 <= 15))[fib & (conf > 0)].float().mean()), 3),
                    "pop1_voxels_to_pop1": round(float((e1 <= 15)[m1].float().mean()), 3), "pop2_voxels_to_pop2": round(float((e2 <= 15)[m2].float().mean()), 3)}
             found, both, errs_pair, nfound = 0, 0, [], []
             for z in zs:
                 for x in xs:
                     sl = (slice(None), slice(z - half, z + half + 1), slice(y_mid - half // 2, y_mid + half // 2 + 1), slice(x - half, x + half + 1))
-                    oo = o[sl].reshape(3, -1).T; ww = (conf[sl[1:]] * fib[sl[1:]].float()).reshape(-1)
-                    modes, h, n = window_modes(oo, ww, kappa_deg=args.kappa, rel=max(thr, 0.2), mass_floor=args.mass_floor)
+                    oo = os_[sl].reshape(3, -1).T; cc = cs_[sl[1:]]; ww = (cc * fib[sl[1:]].float()).reshape(-1)
+                    ww = ww * (ww >= torch.quantile(ww[ww > 0], args.conf_q)).float() if (ww > 0).sum() > 10 else ww
+                    if args.model == "dist":
+                        dens = (Pd[sl].reshape(Pd.shape[0], -1) * (fib[sl[1:]].float().reshape(-1))[None]).sum(1)
+                        modes, h, n = modes_from_density(dens, ro.grid, rel=max(thr, 0.2), mass_floor=args.mass_floor)
+                    else:
+                        modes, h, n = window_modes(oo, ww, kappa_deg=args.kappa, rel=max(thr, 0.2), mass_floor=args.mass_floor)
                     nfound.append(n)
                     if n >= 2:
                         found += 1
@@ -161,7 +175,7 @@ def main():
                 ax.set_title(f"windows: N=2 at {r[cname]['found2_share']:.0%}, both within 15°: {r[cname]['both_within_15_share']:.0%}", fontsize=10); ax.set_xlabel("per-voxel orientation (deg)"); ax.set_yticks([])
             del F, G; torch.cuda.empty_cache()
         res[sname] = r
-        json.dump({"model": args.model, "kappa_deg": args.kappa, "mass_floor": args.mass_floor, **res}, open(f"{DATA_ROOT}/results/orientation_readout_{args.model}.json", "w"), indent=1)
+        json.dump({"model": args.model, "kappa_deg": args.kappa, "mass_floor": args.mass_floor, "field_smooth": args.field_smooth, "conf_q": args.conf_q, **res}, open(f"{DATA_ROOT}/results/orientation_readout_{args.model}.json", "w"), indent=1)
     fig.suptitle("Stage 2 by a self-calibrated orientation readout of the shape space (teacher: the excised tensor on confident single-fibre voxels; no labels)", x=0.01, ha="left", fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(FIGS / f"orientation_readout_crossing_{args.model}.png"); plt.close(fig)
     print("ORIENTATION READOUT DONE", flush=True)
