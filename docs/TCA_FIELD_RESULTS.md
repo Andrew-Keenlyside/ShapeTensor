@@ -236,3 +236,27 @@ statement of the review stands for the anatomix engines.
 Glyph figures for ten phantoms (truth, five arms, CSD fixels, sticks coloured by error) are in
 `figures/tca_field/glyphs/` (`scripts/fig_glyphs.py --tag main --rho 16 --seed 0`); the gyrus one is on the docs
 results page.
+
+## 9. CSD at spherical-harmonic order 12 (`scripts/bench/run_lmax12.py`, `results/lmax12_crossings.json`, seed 0)
+
+The ring width refitted at order 12 on the single-population phantom; peak threshold 0.3 (0.2 gave the same
+directions and up to 4% false second populations). "N2 / both within 15° / median errors", order 12 against order 8
+in brackets:
+
+| crossing | intensity ρ 16 | intensity ρ 32 | anatomix48 ρ 16 |
+|---|---|---|---|
+| 90° | 100 / 33% (100 / 68%), e 8 / 16° | 100 / 42% (100 / 97%), e 8 / 14° | 100 / 36% (100 / 90%), e 10 / 13° |
+| 60° | 99 / 27% (38 / 10%), e 19 / 8° | 100 / 27% (21 / 6%), e 20 / 7° | 100 / 63% (98 / 93%), e 9 / 9° |
+| 45° | 45 / 21% (0), e 14 / 10° | 31 / 11% (0) | 100 / **70%** (44 / 41%), e 9 / 10° |
+| 30° | 0 | 0 | 94 / 36% (—), e 7 / 19° |
+| single, error / false 2nd | 2.5°, 0% | 0.6°, 0% | 7.2°, 0% |
+
+Order 12 *detects* the tighter crossings (45° at 100% N = 2 with the layer-58 features, 30° at 94%) but every
+direction it returns is less precise: errors of 8–13° on the 90° crossing that order 8 resolved to 4–5°, and 7.2° on a
+single population against < 3°. The share "both within 15°" therefore falls on the crossings order 8 already
+resolved, and the net is a trade, not a gain. The cause is the sharper response acting on an ODF sampled at the
+same window: the deconvolved peaks are narrower than the sampling of the peak grid and ride on the ringing of the
+truncated series. The upgrade path is a finer peak grid with Newton refinement and a Laplace–Beltrami regularised
+deconvolution, not a higher order on its own. The anatomix48 ρ 32 cell ran out of memory (the order-12 basis on
+all channels at full resolution, 10.7 GB in one allocation) and is rerun after the chain with the basis evaluated per
+channel.

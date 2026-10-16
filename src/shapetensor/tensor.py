@@ -152,9 +152,12 @@ def odf_sites(G: torch.Tensor, rho: float, truncate: float, reduce: int, y_rows,
     rows_in_slab = [j - ys0 for j in y_rows]
     nc = n_coef(lmax)
     acc = torch.zeros((nc, Z // b, ys1 - ys0, X // b), dtype=torch.float32, device=G.device)
+    # z rows per pass: at most z_chunk sites, and at most ~2 GB for the (nc, zc, ys, X) basis (order 12 at rho 32
+    # would otherwise ask for > 10 GB in one allocation)
+    step = max(b, min(z_chunk * b, int(5e8 // (nc * (ys1 - ys0) * X)) // b * b))
     for c in chans:
-        for za in range(0, Z, z_chunk * b):
-            zb = min(Z, za + z_chunk * b)
+        for za in range(0, Z, step):
+            zb = min(Z, za + step)
             g = G[c * 3:c * 3 + 3, za:zb, ys0:ys1, :].float()                       # (3, zc, ys, X)
             mag2 = (g * g).sum(0)
             u = g / mag2.clamp_min(1e-20).sqrt()
