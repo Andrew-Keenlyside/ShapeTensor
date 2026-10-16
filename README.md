@@ -4,6 +4,32 @@ Fibre orientation from anatomix "shape space" rather than from intensity gradien
 shape-space gradients, or from the fibre component of shape space, ignore grey/white and tract-interface steps that
 the intensity structure tensor mistakes for fibres?
 
+## The package (2026-10-16): `src/shapetensor/`
+
+The prototypes below were consolidated into an installable package with a pluggable feature engine and both
+read-out families, plus a phantom validation suite. **Read `docs/TCA_FIELD_REVIEW.md`** (the review and the
+recommended design) and **`docs/TCA_FIELD_PLAN.md`** (what is built and the run order).
+
+```
+src/shapetensor/
+  filters.py        scipy-identical Gaussian / derivative filters on the GPU (torch)
+  features/         engines: intensity | jet (no network) | anatomix16 | anatomix48  (make_engine(name))
+  pca.py            per-volume PCA to n_pcs channels
+  tensor.py         K = G_rho * (g g^T) on a site grid (k_sites: one row; k_dense: a block); the gradient-direction ODF
+  odf.py            real SH basis, Funk-Radon, CSD with a ring response, peaks
+  readout/single.py eigen (the structure tensor), TCA rank 3, boundary detectors
+  readout/multi.py  CP-ALS, geometric pairing, N by BIC / FRT / CSD + refinement + stability / over-complete grouping
+  readout/hybrid.py H1 blend / switch;  tensor.excision_weights(gate=...) is H2
+  phantoms/         P1-P9 at any voxel size with twins and truth; stats.py measures real crops to set them
+  validate/         suite.py (caches, read-outs, scores), score.py, report.py (REPORT.md + figures)
+  field.py          the field store a later BRIDGE reader would sample
+  cli.py            shapetensor stats | phantoms | run | report
+```
+
+Environment: the `shapetensors` conda env (torch 2.5.1, anatomix); the package is on its path through a `.pth`
+file (`src/`). Tests: `python tests/test_core.py` (CPU/GPU parity and recovery), `python tests/test_anatomix.py`
+(GPU). Data: `/home/andrew/bridge_wmcov/shapetensor/` (phantoms, caches, results, figures).
+
 The work started inside BRIDGE, as the grey/white boundary-shell problem (`docs/BOUNDARY_PROBLEM.md`). It moved here
 on 2026-10-15 to be tested as an approach in its own right. Everything here is a **prototype**.
 

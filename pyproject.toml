@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shapetensor"
+version = "0.1.0"
+description = "Fibre orientation fields from tensor component analysis of multichannel shape features (prototype)"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Andrew Keenlyside" }]
+license = { text = "MIT" }
+dependencies = [
+    "numpy",
+    "scipy",
+    "torch",
+    "zarr>=3",
+    "nibabel",
+    "matplotlib",
+    "tifffile",
+]
+
+[project.optional-dependencies]
+# The anatomix engines. Weights come from the HF hub (neeldey/anatomix) on first use.
+anatomix = ["anatomix @ git+https://github.com/neel-dey/anatomix.git", "monai"]
+dev = ["pytest"]
+
+[project.scripts]
+shapetensor = "shapetensor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

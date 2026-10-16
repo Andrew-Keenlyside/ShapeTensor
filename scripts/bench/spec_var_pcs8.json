@@ -1,0 +1,2 @@
+{"pids": ["P3-0-t0.25", "P3-40-t0.25", "P3-40"], "seeds": [0], "engines": ["anatomix48"], "rhos": [16.0],
+ "stride": 4, "odf": false, "tag": "var-pcs8", "engine_kwargs": {"anatomix48": {"nyquist": "none", "n_pcs": 8}}}
