@@ -1,0 +1,48 @@
+{
+ "shape": {
+  "sigma": 1.0,
+  "rho": 10.0,
+  "nmax": 3,
+  "halo": 68,
+  "tau": 0.32213741540908813,
+  "engine": "anatomix_enc2",
+  "calibration_origin": [
+   609,
+   618,
+   618
+  ],
+  "calibration_size": 256,
+  "layout": "vec in (x, y, z); vecs ordered by activation, zero where absent",
+  "failed_chunks": []
+ },
+ "structure_tensor": {
+  "sigma": 1.0,
+  "rho": 10.0,
+  "truncate": 4.0,
+  "excised": true,
+  "excise_factor": 3.0,
+  "halo": 56,
+  "layout": "S = [xx, yy, zz, xy, xz, yz], x = last axis; vec in (x, y, z)",
+  "tissue_threshold": 1.0
+ },
+ "planes": {
+  "axial (z)": {
+   "agreement_median_deg": 8.7,
+   "agreement_where_tensor_confident_deg": 4.2,
+   "weight_p50": 0.37,
+   "tau": 0.32213741540908813
+  },
+  "coronal (y)": {
+   "agreement_median_deg": 9.8,
+   "agreement_where_tensor_confident_deg": 4.8,
+   "weight_p50": 0.43,
+   "tau": 0.32213741540908813
+  },
+  "sagittal (x)": {
+   "agreement_median_deg": 9.6,
+   "agreement_where_tensor_confident_deg": 4.1,
+   "weight_p50": 0.607,
+   "tau": 0.32213741540908813
+  }
+ }
+}

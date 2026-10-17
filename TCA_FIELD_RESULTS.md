@@ -77,8 +77,18 @@ Measured on the three phantoms (`shapetensor.phantoms`), 192³ blocks, calibrati
   tensor; gyral white matter 3, 12.7°; cerebellar white matter 2, 25.6° (tensor gap 0.08: little oriented
   texture); **brainstem 1 population, 2.4° — but the self-calibration is degenerate**: one fibre direction, 7 of 24
   teacher bins, null 2.8 (seven times the deep brain's), 6% of tissue above it. Self-calibration needs orientation
-  diversity in the calibration block; the production rule is one calibration per volume on a diverse block
-  (`run_volume`), and the regions figure's second row applies the deep-brain calibration to all four.
+  diversity in the calibration block.
+- **A calibration does not travel** (the regions rerun with the deep-brain block's calibration applied to the other
+  three): cortex 13.3° → 33.1° from the tensor (tissue above the null 84% → 44%), brainstem 2.5° → 14.6° (33% → 14%),
+  cerebellum 25.5° → 22.6° (81% → 33%). The readers are specific to the local feature statistics and signatures. So
+  the whole-volume rule is per-chunk self-calibration with the volume calibration as fallback below 12 of 24
+  teacher bins (`run_volume(calibrate_chunks=True, min_bins=12)`); the single-calibration whole-brain run (one
+  256³ at the centre) is superseded.
+- **Whole brain at 100 µm, single calibration** (for the record): 121 tissue chunks of 256³, 26 s each after the
+  speed work (130 s before), 51 min for the shape pass and 5 min for the structure tensor; agreement with the
+  excised tensor on the three mid planes 8.7–9.8° (4.1–4.8° where the tensor is confident). The unmixing of a
+  masked volume's air gave large "activations" (a constant block standardised is an outlier vector): the driver
+  now zeroes the weights where the volume has no data.
 
 ## 30. Speed review (2026-10-17)
 

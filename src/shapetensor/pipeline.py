@@ -278,15 +278,22 @@ def population_field(volume, tissue=None, *, nmax: int = 3, timings: dict | None
 # ---------------------------------------------------------------------------------------------------------------
 
 def run_volume(src: str, dst: str, *, level: str | None = None, chunk=(192, 192, 192), nmax: int = 3, tissue_threshold: float | None = None,
-               calibration_size: int = 256, calibration_origin=None, multi: bool = True, spacing=None, rank: int = 0, world: int = 1,
-               device: str = "cuda", log=print, **calibration) -> str:
+               calibration_size: int = 256, calibration_origin=None, calibrate_chunks: bool = True, min_bins: int = 12, multi: bool = True,
+               spacing=None, rank: int = 0, world: int = 1, device: str = "cuda", log=print, **calibration) -> str:
     """The pipeline over a whole zarr volume, chunk by chunk with halos (the filters' reach plus the engine's
-    margin), one process per GPU (``rank`` / ``world`` split the chunk list). Calibrated once on a
-    ``calibration_size``³ block at ``calibration_origin`` (default: the centre). ``dst`` receives ``vec (3, Z, Y, X)``
+    margin), one process per GPU (``rank`` / ``world`` split the chunk list). A volume calibration is fitted once on
+    a ``calibration_size``³ block at ``calibration_origin`` (default: the centre); with ``calibrate_chunks`` (the
+    default) every chunk is also calibrated on itself — the readers are specific to the local texture, and a
+    calibration from elsewhere in the brain reads a region's populations poorly — and the volume calibration is
+    the fallback for a chunk whose teacher covers fewer than ``min_bins`` of 24 orientation bins (one bundle, where
+    self-calibration degenerates). ``dst`` receives ``vec (3, Z, Y, X)``
     float16 in (x, y, z) component order (as the ``structure-tensor`` package), ``gap`` and ``weight`` (Z, Y, X), and
-    with ``multi`` also ``vecs (nmax, 3, Z, Y, X)`` and ``weights`` (zero rows where a chunk found fewer populations).
+    with ``multi`` also ``vecs (nmax, 3, Z, Y, X)`` and ``weights`` (zero rows where a chunk found fewer populations),
+    and ``calibration`` (int8, 1 = the chunk's own, 2 = the volume's) per chunk in ``attrs["chunk_calibration"]``.
     ``tissue_threshold``: the grey level above which a voxel is tissue (None: all); chunks whose core holds less than
-    1% tissue are skipped and stay zero, and a chunk that fails is logged, left zero and listed in the attributes."""
+    1% tissue are skipped and stay zero, the weights are zero below the threshold (a masked volume's air has no data,
+    and the unmixing of a constant block is not an activation), and a chunk that fails is logged, left zero and listed
+    in the attributes. The vectors are never masked."""
     import zarr
     a = zarr.open(src, mode="r")
     if level is not None:
@@ -307,10 +314,10 @@ def run_volume(src: str, dst: str, *, level: str | None = None, chunk=(192, 192,
     vc = torch.as_tensor(np.asarray(a[o[0]:o[0] + n, o[1]:o[1] + n, o[2]:o[2] + n]).astype(np.float32), device=device)
     cal = calibrate(vc, None if tissue_threshold is None else vc >= tissue_threshold, spacing=spacing, device=device, **calibration); del vc
     g.attrs.update({"sigma": sigma, "rho": rho, "nmax": nmax, "halo": halo, "tau": cal.tau, "engine": cal.engine, "calibration_origin": list(o),
-                    "calibration_size": n, "layout": "vec in (x, y, z); vecs ordered by activation, zero where absent"})
+                    "calibration_size": n, "calibrate_chunks": calibrate_chunks, "min_bins": min_bins, "layout": "vec in (x, y, z); vecs ordered by activation, zero where absent"})
     log(f"[{rank}/{world}] calibrated on {n}^3 at {o}: orientation bins {cal.orientation_bins_occupied}/24, readout overlap {cal.readout_overlap:.2f}, tau {cal.tau:.3f}")
     tiles = [(z0, y0, x0) for z0 in range(0, Z, cz) for y0 in range(0, Y, cy) for x0 in range(0, X, cx)]
-    skipped, failed = 0, []
+    skipped, failed, chunk_cal = 0, [], {}
     for i, (z0, y0, x0) in enumerate(tiles):
         if i % world != rank:
             continue
@@ -326,20 +333,28 @@ def run_volume(src: str, dst: str, *, level: str | None = None, chunk=(192, 192,
             cut = tuple(slice(max(0, c.start - reach), min(n, c.stop + reach)) for c, n in zip(core, blk.shape))   # ... stages 2-4 only the filters' reach
             blk = blk[cut].contiguous(); F = F[(slice(None),) + cut].contiguous()
             core = tuple(slice(c.start - k.start, c.stop - k.start) for c, k in zip(core, cut))
-            out = apply(cal, blk, None if tissue_threshold is None else blk >= tissue_threshold, nmax=nmax, spacing=spacing, features=F, device=device); del F
+            tis = None if tissue_threshold is None else blk >= tissue_threshold
+            use, which = cal, 2
+            if calibrate_chunks:                                                               # the chunk's own readers, unless its teacher holds too few orientations
+                own = calibrate(blk, tis, features=F, spacing=spacing, device=device, **calibration)
+                if own.orientation_bins_occupied >= min_bins:
+                    use, which = own, 1
+            chunk_cal[f"{z0},{y0},{x0}"] = which
+            out = apply(use, blk, tis, nmax=nmax, spacing=spacing, features=F, device=device); del F
         except Exception as e:                                                                 # a chunk must not end a whole-volume run
             failed.append((z0, y0, x0)); log(f"[{rank}/{world}] chunk {i + 1}/{len(tiles)} ({z0}, {y0}, {x0}) FAILED: {e!r}"); del blk; torch.cuda.empty_cache(); continue
+        data = torch.ones_like(blk) if tissue_threshold is None else (blk >= tissue_threshold).float()    # the weights are zero where the volume has no data (air of a masked volume)
         g["vec"][(slice(None),) + out_sl] = out["vec"].flip(0)[(slice(None),) + core].half().cpu().numpy()
-        g["gap"][out_sl] = out["vec_gap"][core].half().cpu().numpy(); g["weight"][out_sl] = out["weight"][core].half().cpu().numpy()
+        g["gap"][out_sl] = out["vec_gap"][core].half().cpu().numpy(); g["weight"][out_sl] = (out["weight"] * data)[core].half().cpu().numpy()
         if multi:
             N = out["vecs"].shape[0]
             vecs = torch.zeros((nmax, 3) + tuple(blk.shape), device=device); vecs[:N] = out["vecs"].flip(1)
-            wts = torch.zeros((nmax,) + tuple(blk.shape), device=device); wts[:N] = out["weights"]
+            wts = torch.zeros((nmax,) + tuple(blk.shape), device=device); wts[:N] = out["weights"] * data
             g["vecs"][(slice(None), slice(None)) + out_sl] = vecs[(slice(None), slice(None)) + core].half().cpu().numpy()
             g["weights"][(slice(None),) + out_sl] = wts[(slice(None),) + core].half().cpu().numpy()
         npop = int(out["modes"].shape[0]); del out, blk; torch.cuda.empty_cache()
-        log(f"[{rank}/{world}] chunk {i + 1}/{len(tiles)} ({z0}, {y0}, {x0}): {npop} populations")
+        log(f"[{rank}/{world}] chunk {i + 1}/{len(tiles)} ({z0}, {y0}, {x0}): {npop} populations" + (" (volume calibration)" if which == 2 and calibrate_chunks else ""))
     if skipped or failed:
         log(f"[{rank}/{world}] {skipped} chunks without tissue skipped; {len(failed)} failed: {failed}")
-    g.attrs.update({"failed_chunks": [list(f) for f in failed]})
+    g.attrs.update({"failed_chunks": [list(f) for f in failed], "chunk_calibration": chunk_cal})
     return dst

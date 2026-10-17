@@ -4,8 +4,8 @@ structure tensor over the volume, and a figure of three orthogonal planes of eac
     python scripts/wholebrain.py run         -> <OUT_ROOT>/shape.zarr (vec, gap, weight), <OUT_ROOT>/st.zarr (vec, gap)
     python scripts/wholebrain.py figure      -> docs/img/wholebrain_100um.png, results/wholebrain_100um.json
 
-Both at σ 1, ρ 10 voxels (1 mm integration at 100 µm); the pipeline calibrated once on the central 256³ (25.6 mm);
-chunks without tissue skipped (the volume is masked, air = 0).
+Both at σ 1, ρ 10 voxels (1 mm integration at 100 µm); every chunk calibrated on itself with the central 256³'s
+calibration as fallback; chunks without tissue skipped (the volume is masked, air = 0).
 """
 import json, sys, time
 from pathlib import Path
@@ -14,7 +14,7 @@ import numpy as np
 
 SRC = "/hdd/andrew/BRIDGE/50um_scale_S_21_46/sub-test/micr/sub-test_sample-brain_acq-50um_XPCT.ome.zarr"
 LEVEL = "1"
-OUT_ROOT = Path("/hdd/andrew/shapetensor_runs/S-21-46_100um")
+OUT_ROOT = Path("/hdd/andrew/shapetensor_runs/S-21-46_100um_chunkcal")
 DOC = Path(__file__).resolve().parents[1] / "docs" / "img"
 RES = Path(__file__).resolve().parents[1] / "results"
 SIGMA, RHO, THRESH = 1.0, 10.0, 1.0
@@ -46,16 +46,16 @@ def figure():
     stats = {"shape": dict(sh.attrs), "structure_tensor": dict(stz.attrs), "planes": {}}
     for j, (name, cut) in enumerate(cuts):
         im = np.asarray(cut(img, False)).astype(np.float32); tissue = im >= THRESH
-        v_sh = np.asarray(cut(sh["vec"], True)).astype(np.float32)[::-1]; w = np.asarray(cut(sh["weight"], False)).astype(np.float32)   # vec stored (x, y, z) -> (z, y, x)
-        v_st = np.asarray(cut(stz["vec"], True)).astype(np.float32)[::-1]; gap = np.asarray(cut(stz["gap"], False)).astype(np.float32)
+        v_sh = np.ascontiguousarray(np.asarray(cut(sh["vec"], True)).astype(np.float32)[::-1]); w = np.asarray(cut(sh["weight"], False)).astype(np.float32)   # vec stored (x, y, z) -> (z, y, x)
+        v_st = np.ascontiguousarray(np.asarray(cut(stz["vec"], True)).astype(np.float32)[::-1]); gap = np.asarray(cut(stz["gap"], False)).astype(np.float32)
         wref = max(float(np.percentile(w[tissue], 99)), 1e-6)
         e = angle_deg(torch.as_tensor(v_sh), torch.as_tensor(v_st)).numpy(); conf = tissue & (gap > np.percentile(gap[tissue], 75))
         stats["planes"][name] = {"agreement_median_deg": round(float(np.nanmedian(e[tissue])), 1), "agreement_where_tensor_confident_deg": round(float(np.nanmedian(e[conf])), 1),
                                  "weight_p50": round(float(np.percentile(w[tissue], 50)), 3), "tau": sh.attrs.get("tau")}
         axs[0, j].imshow(im, cmap="gray", origin="lower"); axs[0, j].set_title(f"S-21-46 at 100 µm, {name}", fontsize=11)
         axs[1, j].imshow(dec_rgb(v_st, tissue.astype(np.float32)), origin="lower", interpolation="nearest"); axs[1, j].set_title("excised structure tensor (ρ 1 mm)", fontsize=11)
-        axs[2, j].imshow(dec_rgb(v_sh, np.clip(w / wref, 0, 1)), origin="lower", interpolation="nearest")
-        axs[2, j].set_title(f"shape tensor, brightness = activation ({stats['planes'][name]['agreement_median_deg']}° from the tensor, {stats['planes'][name]['agreement_where_tensor_confident_deg']}° where it is confident)", fontsize=10)
+        axs[2, j].imshow(dec_rgb(v_sh, np.clip(w / wref, 0, 1) * tissue), origin="lower", interpolation="nearest")
+        axs[2, j].set_title(f"shape tensor, brightness = activation ({stats['planes'][name]['agreement_median_deg']}° from the tensor, {stats['planes'][name]['agreement_where_tensor_confident_deg']}° where confident)", fontsize=9.5)
     for ax in axs.ravel(): ax.set_xticks([]); ax.set_yticks([])
     fig.suptitle("A whole brain at 100 µm: the excised structure tensor and the shape tensor's single field, σ 1, ρ 10 voxels (DEC: R = |x|, G = |y|, B = |z|)", x=0.01, ha="left", fontsize=12)
     fig.savefig(DOC / "wholebrain_100um.png"); plt.close(fig)

@@ -45,13 +45,13 @@
    3022
   ],
   "n_populations": 2,
-  "tau": 0.925,
+  "tau": 0.954,
   "readout_bins": 17,
-  "tissue_above_null": 0.759,
-  "agreement_median_deg": 6.2,
-  "agreement_where_tensor_confident_deg": 4.8,
+  "tissue_above_null": 0.746,
+  "agreement_median_deg": 6.3,
+  "agreement_where_tensor_confident_deg": 4.9,
   "structure_tensor_gap_median": 0.213,
-  "seconds": 32.7
+  "seconds": 14.5
  },
  "50um": {
   "voxel_um": 50.0,
@@ -178,5 +178,155 @@
   "agreement_where_tensor_confident_deg": 20.2,
   "structure_tensor_gap_median": 0.079,
   "seconds": 32.4
+ },
+ "region: deep brain (self)": {
+  "voxel_um": 20.0,
+  "source": "/hdd/andrew/brain_atlas_20um_masked/S-21-46_brain_20um.ome.zarr",
+  "level": "0",
+  "centre_zyx": [
+   3833,
+   3865,
+   3022
+  ],
+  "n_populations": 2,
+  "tau": 0.954,
+  "readout_bins": 17,
+  "tissue_above_null": 0.746,
+  "agreement_median_deg": 6.3,
+  "agreement_where_tensor_confident_deg": 4.9,
+  "structure_tensor_gap_median": 0.213,
+  "seconds": 14.5
+ },
+ "region: deep brain (deep-brain calibration)": {
+  "voxel_um": 20.0,
+  "source": "/hdd/andrew/brain_atlas_20um_masked/S-21-46_brain_20um.ome.zarr",
+  "level": "0",
+  "centre_zyx": [
+   3833,
+   3865,
+   3022
+  ],
+  "n_populations": 2,
+  "tau": 0.954,
+  "readout_bins": 17,
+  "tissue_above_null": 0.746,
+  "agreement_median_deg": 6.3,
+  "agreement_where_tensor_confident_deg": 4.9,
+  "structure_tensor_gap_median": 0.213,
+  "seconds": 14.5
+ },
+ "region: cortex (self)": {
+  "voxel_um": 20.0,
+  "source": "/hdd/andrew/brain_atlas_20um_masked/S-21-46_brain_20um.ome.zarr",
+  "level": "0",
+  "centre_zyx": [
+   3300,
+   2600,
+   3950
+  ],
+  "calibration": "self",
+  "n_populations": 3,
+  "tau": 0.846,
+  "readout_bins": 22,
+  "tissue_above_null": 0.842,
+  "agreement_median_deg": 13.3,
+  "agreement_where_tensor_confident_deg": 10.0,
+  "structure_tensor_gap_median": 0.111,
+  "seconds": 13.5
+ },
+ "region: cortex (deep-brain calibration)": {
+  "voxel_um": 20.0,
+  "source": "/hdd/andrew/brain_atlas_20um_masked/S-21-46_brain_20um.ome.zarr",
+  "level": "0",
+  "centre_zyx": [
+   3300,
+   2600,
+   3950
+  ],
+  "calibration": "deep-brain calibration",
+  "n_populations": 2,
+  "tau": 0.954,
+  "readout_bins": 17,
+  "tissue_above_null": 0.438,
+  "agreement_median_deg": 33.1,
+  "agreement_where_tensor_confident_deg": 21.5,
+  "structure_tensor_gap_median": 0.111,
+  "seconds": 4.2
+ },
+ "region: brainstem (self)": {
+  "voxel_um": 20.0,
+  "source": "/hdd/andrew/brain_atlas_20um_masked/S-21-46_brain_20um.ome.zarr",
+  "level": "0",
+  "centre_zyx": [
+   3500,
+   5250,
+   3650
+  ],
+  "calibration": "self",
+  "n_populations": 1,
+  "tau": 1.141,
+  "readout_bins": 7,
+  "tissue_above_null": 0.333,
+  "agreement_median_deg": 2.5,
+  "agreement_where_tensor_confident_deg": 1.8,
+  "structure_tensor_gap_median": 0.461,
+  "seconds": 11.6
+ },
+ "region: brainstem (deep-brain calibration)": {
+  "voxel_um": 20.0,
+  "source": "/hdd/andrew/brain_atlas_20um_masked/S-21-46_brain_20um.ome.zarr",
+  "level": "0",
+  "centre_zyx": [
+   3500,
+   5250,
+   3650
+  ],
+  "calibration": "deep-brain calibration",
+  "n_populations": 1,
+  "tau": 0.954,
+  "readout_bins": 17,
+  "tissue_above_null": 0.143,
+  "agreement_median_deg": 14.6,
+  "agreement_where_tensor_confident_deg": 10.4,
+  "structure_tensor_gap_median": 0.461,
+  "seconds": 2.9
+ },
+ "region: cerebellum (self)": {
+  "voxel_um": 20.0,
+  "source": "/hdd/andrew/brain_atlas_20um_masked/S-21-46_brain_20um.ome.zarr",
+  "level": "0",
+  "centre_zyx": [
+   2400,
+   5450,
+   2800
+  ],
+  "calibration": "self",
+  "n_populations": 2,
+  "tau": 0.499,
+  "readout_bins": 24,
+  "tissue_above_null": 0.807,
+  "agreement_median_deg": 25.5,
+  "agreement_where_tensor_confident_deg": 20.2,
+  "structure_tensor_gap_median": 0.079,
+  "seconds": 13.3
+ },
+ "region: cerebellum (deep-brain calibration)": {
+  "voxel_um": 20.0,
+  "source": "/hdd/andrew/brain_atlas_20um_masked/S-21-46_brain_20um.ome.zarr",
+  "level": "0",
+  "centre_zyx": [
+   2400,
+   5450,
+   2800
+  ],
+  "calibration": "deep-brain calibration",
+  "n_populations": 2,
+  "tau": 0.954,
+  "readout_bins": 17,
+  "tissue_above_null": 0.326,
+  "agreement_median_deg": 22.6,
+  "agreement_where_tensor_confident_deg": 16.6,
+  "structure_tensor_gap_median": 0.079,
+  "seconds": 4.0
  }
 }

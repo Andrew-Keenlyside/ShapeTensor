@@ -39,17 +39,27 @@ Deep brain, a gyral white-matter site, the brainstem and the cerebellar white ma
 
 ![regions](img/regions_20um.png)
 
-The brainstem block shows the one real failure mode of self-calibration: its fibres run in one direction, the
-teacher occupies 7 of 24 orientation bins, the readers cannot learn an orientation code from one orientation, and
-the null rises until 6% of the tissue is above it. The field is then the excised tensor weighted by a degenerate
-activation (2° from the tensor, with weights that say nothing). The remedy is the one `run_volume` applies: **one
-calibration per volume**, fitted on a block that holds many orientations and applied everywhere; the second row of
-the figure is the four regions under the deep-brain block's calibration.
+Two things the figure settles about calibration.
+
+- **Self-calibration needs orientation diversity.** The brainstem block's fibres run in one direction, its teacher
+  occupies 7 of 24 orientation bins, the readers cannot learn an orientation code from one orientation, and the
+  null rises until a third of the tissue is above it. The field is then the excised tensor weighted by a degenerate
+  activation (2.5° from the tensor, weights that mean little).
+- **A calibration does not travel.** The third row applies the deep-brain block's calibration to the other three
+  regions: the cortex block goes from 13° to 33° from the tensor with 44% of its tissue above the null, the
+  brainstem from 2.5° to 15° with 14% above, the cerebellum keeps its 23°. The readers are specific to the local
+  texture (its feature statistics, its signatures); a calibration from elsewhere in the same brain reads a region's
+  populations poorly.
+
+So the rule for a volume is **calibrate every chunk on itself**, and fall back to a volume calibration only where a
+chunk's teacher covers too few orientations. That is what `run_volume` now does (`calibrate_chunks`, `min_bins`);
+one calibration for the whole volume remains an option.
 
 ## A whole brain at 100 µm
 
-S-21-46 at 100 µm (1475 × 1493 × 1493 voxels, level 1 of its 50 µm scan), calibrated once on the central 256³,
-run chunk by chunk with chunks without tissue skipped, and the excised structure tensor over the same volume at the
-same σ and ρ (1 mm integration).
+S-21-46 at 100 µm (1475 × 1493 × 1493 voxels, level 1 of its 50 µm scan), in 256³ chunks each calibrated on itself
+(the central 256³'s calibration as fallback), chunks without tissue skipped, and the excised structure tensor over
+the same volume at the same σ and ρ (1 mm integration). The weights are zero where the masked volume has no data;
+the vectors are never masked.
 
 ![whole brain](img/wholebrain_100um.png)
