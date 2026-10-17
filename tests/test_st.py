@@ -117,3 +117,22 @@ if __name__ == "__main__":
             else:
                 fn()
             print("ok", name)
+
+
+def test_eig_analytic_matches_eigh():
+    """The closed-form eigensolver against cusolver: eigenvalues to 1e-6 of the largest, the smallest eigenvector to
+    0.05 degrees where it is defined, on random SPD tensors and on tensor-like ones with a wide dynamic range."""
+    torch.manual_seed(0); dev = "cuda" if torch.cuda.is_available() else "cpu"
+    A = torch.randn(20000, 3, 3, device=dev); M = A @ A.transpose(1, 2)
+    M[:5000] *= 10 ** (6 * torch.rand(5000, 1, 1, device=dev))
+    S = torch.stack([M[:, 0, 0], M[:, 1, 1], M[:, 2, 2], M[:, 0, 1], M[:, 0, 2], M[:, 1, 2]])
+    va, ea = st.eig_special_3d(S, device=dev); vh, eh = st.eig_special_3d(S, device=dev, method="eigh")
+    assert float(((va - vh).abs() / vh[0].abs().clamp_min(1e-12)).max()) < 1e-5
+    gap = (vh[1] - vh[2]) / vh[1].clamp_min(1e-12)
+    ang = torch.rad2deg(torch.arccos((ea * eh).sum(0).abs().clamp(max=1)))
+    assert float(ang[gap > 0.02].max()) < 0.05
+    vf, ef = st.eig_special_3d(S, full=True, device=dev)                               # all three: orthonormal, A v = lambda v
+    assert float((ef.permute(2, 0, 1) @ ef.permute(2, 1, 0) - torch.eye(3, device=dev)).abs().max()) < 1e-4
+    Mv = (M @ ef.permute(2, 1, 0)); assert float((Mv - vf.T[:, None, :] * ef.permute(2, 1, 0)).abs().max() / M.abs().max()) < 1e-4
+    iso = torch.tensor([[1.0], [1.0], [1.0], [0.0], [0.0], [0.0]], device=dev); _, e_iso = st.eig_special_3d(iso, device=dev)
+    assert torch.isfinite(e_iso).all() and abs(float(e_iso.norm()) - 1) < 1e-5

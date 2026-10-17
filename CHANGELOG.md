@@ -22,6 +22,12 @@ population, the merged field — with the excised structure tensor as the baseli
   `st.run_volume` writes the arrays asked for (`vec gap` for a compact field) as float32 or float16 (`--arrays`, `--float16`,
   `--tissue-threshold` on `shapetensor structure-tensor`).
 - Docs: scales, regions and a whole brain (`scripts/scales.py`, `scripts/wholebrain.py`).
+- Speed (a 192³ block's stages 2–4 from 12.8 s to 2.7 s, its calibration from 17 s to 10 s): a closed-form symmetric 3 × 3
+  eigensolver in `st.eig_special_3d` (float64 internally, within 0.02° of cusolver, 10× faster); the non-negative
+  least squares by coordinate descent (exact where 60 projected-gradient steps were 10% off on correlated signatures,
+  5× faster); one averaged-feature pass shared by every reader; the gradient products computed once per block;
+  GPU sampling of the calibration voxels; the whole-volume driver runs stages 2–4 on the core plus the filters' reach
+  rather than the whole network halo.
 
 ## 0.1.0 — 2026-10
 

@@ -26,7 +26,7 @@ def run():
     OUT_ROOT.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     log = lambda *a: print(f"[{time.time() - t0:6.0f}s]", *a, flush=True)
-    run_volume(SRC, str(OUT_ROOT / "shape.zarr"), level=LEVEL, chunk=(192, 192, 192), nmax=3, tissue_threshold=THRESH, calibration_size=256, multi=False, sigma=SIGMA, rho=RHO, log=log)
+    run_volume(SRC, str(OUT_ROOT / "shape.zarr"), level=LEVEL, chunk=(256, 256, 256), nmax=3, tissue_threshold=THRESH, calibration_size=256, multi=False, sigma=SIGMA, rho=RHO, log=log)
     log("shape tensor done")
     st.run_volume(SRC, str(OUT_ROOT / "st.zarr"), sigma=SIGMA, rho=RHO, level=LEVEL, chunk=(256, 256, 256), arrays=("vec", "gap"), dtype=np.float16, tissue_threshold=THRESH, log=log)
     log("structure tensor done")

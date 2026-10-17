@@ -131,17 +131,28 @@ def excision_weights(vol: torch.Tensor, sigma_coarse: float = 3.0, factor: float
     return (gm <= factor * med).float()
 
 
+def gradient_products(volume, sigma: float, truncate: float = 4.0, *, spacing=None, device: str = "cuda", dtype=torch.float32):
+    """The six gradient products ``(6, Z, Y, X) = [VxVx, VyVy, VzVz, VxVy, VxVz, VyVz]`` at ``sigma``: what the
+    structure tensor integrates. Computed once, they serve every weighted tensor of the same block
+    (:func:`structure_tensor_3d` with ``products=``)."""
+    v = _to_torch(volume, device, dtype)
+    Vx, Vy, Vz = _derivatives(v, sigma, truncate, spacing_ratio(spacing))
+    return torch.stack((Vx * Vx, Vy * Vy, Vz * Vz, Vx * Vy, Vx * Vz, Vy * Vz))
+
+
 def structure_tensor_3d(volume, sigma: float, rho: float, truncate: float = 4.0, *, weights=None, spacing=None,
-                        device: str = "cuda", dtype=torch.float32):
+                        products=None, device: str = "cuda", dtype=torch.float32):
     """``S (6, Z, Y, X) = [Sxx, Syy, Szz, Sxy, Sxz, Syz]`` of ``volume (Z, Y, X)``: derivatives at ``sigma``, integration
     at ``rho``. ``weights (Z, Y, X)`` in [0, 1] excise gradients with a normalised integration. ``spacing (dz, dy, dx)``:
     the voxel size per axis for anisotropic data (``sigma`` / ``rho`` in finest-voxel units; the tensor in physical
-    coordinates)."""
-    v = _to_torch(volume, device, dtype)
+    coordinates). ``products``: the block's :func:`gradient_products`, if already computed."""
     sp = spacing_ratio(spacing)
-    Vx, Vy, Vz = _derivatives(v, sigma, truncate, sp)
+    if products is None:
+        v = _to_torch(volume, device, dtype)
+        Vx, Vy, Vz = _derivatives(v, sigma, truncate, sp)
+        products = (Vx * Vx, Vy * Vy, Vz * Vz, Vx * Vy, Vx * Vz, Vy * Vz)
     w = None if weights is None else _to_torch(weights, device, dtype)
-    S = _integrate((Vx * Vx, Vy * Vy, Vz * Vz, Vx * Vy, Vx * Vz, Vy * Vz), rho, truncate, w, sp)
+    S = _integrate(tuple(products), rho, truncate, w, sp)
     return _like(S, volume)
 
 
@@ -160,20 +171,74 @@ def excised_structure_tensor_3d(volume, sigma: float, rho: float, truncate: floa
     return _like(S, volume)
 
 
+def _eig3_sym(s: torch.Tensor, full: bool = False):
+    """Closed-form eigensolution of the symmetric 3 × 3 tensors ``s (6, N)`` = [xx, yy, zz, xy, xz, yz], in float64
+    internally (the trigonometric eigenvalues, the eigenvectors from the cross products of the rows of ``A − λI``):
+    ``val (3, N)`` ascending and the unit eigenvector of the smallest eigenvalue ``(3, N)``, or all three ``(3, 3, N)``
+    (``vec[i]`` for ``val[i]``) with ``full``. Within 0.02° of ``torch.linalg.eigh`` and an order of magnitude faster
+    than cusolver's batched solver; a degenerate tensor gets a unit vector in its eigenspace."""
+    import math
+    dt = s.dtype; s = s.double()
+    a, b, c, d, e, f = s[0], s[1], s[2], s[3], s[4], s[5]                                   # A = [[a, d, e], [d, b, f], [e, f, c]]
+    scale = torch.stack([a.abs(), b.abs(), c.abs(), d.abs(), e.abs(), f.abs()]).amax(0).clamp_min(1e-300)
+    a, b, c, d, e, f = a / scale, b / scale, c / scale, d / scale, e / scale, f / scale
+    q = (a + b + c) / 3
+    a0, b0, c0 = a - q, b - q, c - q
+    p2 = a0 * a0 + b0 * b0 + c0 * c0 + 2 * (d * d + e * e + f * f)
+    p = torch.sqrt(p2 / 6).clamp_min(1e-300)
+    detB = (a0 * (b0 * c0 - f * f) - d * (d * c0 - f * e) + e * (d * f - b0 * e)) / (p * p * p)
+    phi = torch.acos((detB / 2).clamp(-1, 1)) / 3
+    l1 = q + 2 * p * torch.cos(phi); l3 = q + 2 * p * torch.cos(phi + 2 * math.pi / 3); l2 = 3 * q - l1 - l3
+    iso = p2 < 1e-28
+    lams = [torch.where(iso, q, l3), torch.where(iso, q, l2), torch.where(iso, q, l1)]
+    val = torch.stack(lams) * scale
+
+    def vec_for(lam):
+        r0 = torch.stack([a - lam, d, e]); r1 = torch.stack([d, b - lam, f]); r2 = torch.stack([e, f, c - lam])
+        c01 = torch.linalg.cross(r0, r1, dim=0); c12 = torch.linalg.cross(r1, r2, dim=0); c20 = torch.linalg.cross(r2, r0, dim=0)
+        n01, n12, n20 = (c01 * c01).sum(0), (c12 * c12).sum(0), (c20 * c20).sum(0)
+        best = torch.where((n01 >= n12) & (n01 >= n20), c01, torch.where(n12 >= n20, c12, c20))
+        nb = best.norm(dim=0); ok = nb > 1e-40
+        v = torch.where(ok, best / nb.clamp_min(1e-300), torch.zeros_like(best))
+        if not bool(ok.all()):                                                            # a repeated eigenvalue: any unit vector of its plane
+            rows = torch.stack([r0, r1, r2]); rn = (rows * rows).sum(1)
+            rb = rows.gather(0, rn.argmax(0)[None, None].expand(1, 3, -1))[0]; rb = rb / rb.norm(dim=0).clamp_min(1e-300)
+            ex = torch.zeros_like(rb); ex[0] = 1.0; ey = torch.zeros_like(rb); ey[1] = 1.0
+            perp = torch.linalg.cross(rb, torch.where((rb[0].abs() < 0.9)[None], ex, ey), dim=0); pn = perp.norm(dim=0)
+            perp = torch.where(pn > 1e-40, perp / pn.clamp_min(1e-300), ex)
+            v = torch.where(ok, v, perp)
+        return v
+    vec = torch.stack([vec_for(l) for l in lams]) if full else vec_for(lams[0])
+    return val.to(dt), vec.to(dt)
+
+
 def eig_special_3d(S, full: bool = False, eigenvalue_order: Literal["desc", "asc"] = "desc", *, device: str = "cuda",
-                   chunk: int = 1 << 20):       # cusolver's batched solver rejects batches of ~2M and above
+                   chunk: int = 1 << 23, method: Literal["analytic", "eigh"] = "analytic"):
     """Eigensolution of the symmetric 3 × 3 tensors in ``S (6, ...)``, as the ``structure-tensor`` package returns it:
     ``val (3, ...)`` (descending unless ``eigenvalue_order='asc'``) and ``vec (3, ...)`` = the unit eigenvector of the
     smallest eigenvalue in ``(x, y, z)`` component order, or with ``full=True`` ``(3, 3, ...)`` with ``vec[i]`` the
-    eigenvector of ``val[i]``."""
+    eigenvector of ``val[i]``. ``method='analytic'`` (the closed form, :func:`_eig3_sym`) is the default;
+    ``'eigh'`` is cusolver's batched solver (chunks of at most ~1M: it rejects larger batches)."""
     St = _to_torch(S, device)
     shape = tuple(St.shape[1:])
     Sf = St.reshape(6, -1)
     N = Sf.shape[1]
     val = torch.empty((3, N), dtype=St.dtype, device=St.device)
     vec = torch.empty(((3, 3, N) if full else (3, N)), dtype=St.dtype, device=St.device)
+    if method == "eigh":
+        chunk = min(chunk, 1 << 20)
     for a in range(0, N, chunk):
         s = Sf[:, a:a + chunk]
+        if method == "analytic":
+            w, V = _eig3_sym(s, full)                                                      # ascending; V (3, n) or (3, 3, n)
+            if eigenvalue_order == "desc":
+                w = w.flip(0); V = V.flip(0) if full else V
+            val[:, a:a + chunk] = w
+            if full:
+                vec[:, :, a:a + chunk] = V
+            else:
+                vec[:, a:a + chunk] = V
+            continue
         M = torch.stack([torch.stack([s[0], s[3], s[4]], -1), torch.stack([s[3], s[1], s[5]], -1),
                          torch.stack([s[4], s[5], s[2]], -1)], -2)
         w, V = torch.linalg.eigh(M)

@@ -65,6 +65,12 @@ shapetensor structure-tensor brain_20um.ome.zarr st.zarr --level 0 --rho 10     
 shapetensor block block.tif block_field.zarr --rho 10                               # one block (.npy, .tif, .nii, zarr), with its layers
 shapetensor demo                                                                     # a crossing phantom through the pipeline: no data needed
 shapetensor bench --size 192 256                                                     # the structure tensor and the pipeline timed on this GPU
+```
+
+On a 48 GB Ampere GPU a 192³ block takes about 2.7 s for stages 2–4 after a 10 s calibration on the 384³ around
+it, half of which is the network; the whole-volume driver runs a 256³ chunk in about 20 s.
+
+```bash
 shapetensor validate --out validation                                                # the three phantoms
 ```
 

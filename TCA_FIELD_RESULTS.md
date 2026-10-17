@@ -79,3 +79,25 @@ Measured on the three phantoms (`shapetensor.phantoms`), 192³ blocks, calibrati
   teacher bins, null 2.8 (seven times the deep brain's), 6% of tissue above it. Self-calibration needs orientation
   diversity in the calibration block; the production rule is one calibration per volume on a diverse block
   (`run_volume`), and the regions figure's second row applies the deep-brain calibration to all four.
+
+## 30. Speed review (2026-10-17)
+
+Profiled on the HiP-CT block (192³ stages 2–4; 384³ calibration), synchronised timers on every hot function:
+
+- Before: 12.8 s per block, of which **7.8 s in cusolver's batched `eigh`** (14 per-voxel eigensolutions of 0.57 s),
+  2.5 s in the NNLS (108 small slabs, 60 projected-gradient steps each), 1 s in all Gaussian filtering, 0.6 s in
+  the network. Calibration 17 s: features 5 s, the readout's 2000 Adam steps 3.5 s, three averaged-feature passes
+  and CPU multinomial sampling of 56M weights 2 s, the teacher 1.5 s.
+- **Closed-form symmetric 3 × 3 eigensolver** (`st._eig3_sym`, float64 internally): within 0.02° of `eigh` on random
+  SPD and tensor-like matrices with a 1e6 dynamic range, 0.05 s on 7M voxels (11×), 0.46 s on 60M.
+- **NNLS by cyclic coordinate descent** from the normal-equation warm start: the old 60 projected-gradient steps
+  were *not converged* on correlated 5-column problems (max error 17% of the mean activation, 99.9th percentile 4%);
+  25 coordinate-descent sweeps reach 1e-3 in a third of the time, 12 sweeps for N ≤ 3 in a tenth.
+- One averaged-feature pass per block for every reader (candidates, confirmation, final unmixing); the block's
+  gradient products once for every population tensor; the sub-window densities' sum as the block's density; GPU
+  sampling (Gumbel-top-k) of the calibration voxels; slabs sized by voxels, not planes.
+- The driver: the network sees the full halo (reach + engine margin), stages 2–4 only the core + the filters' reach
+  (344³ instead of 392³ for a 256³ core).
+- After: **2.7 s per 192³ block** (4.7×), calibration 10 s (features 4.9, readout fit 2.8, teacher 1.5). Validation
+  unchanged within noise (crossing 2/2/2 populations, first vector 10.5° / 58%, interface 16.8° at the step).
+  The remaining cost is the Gaussian integration of 12–13 population tensors (0.9 s) and the network.

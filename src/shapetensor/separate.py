@@ -36,11 +36,22 @@ def hemisphere(n: int = 160, device="cpu") -> torch.Tensor:
 
 
 def sample_idx(w: torch.Tensor, n: int, g: torch.Generator) -> torch.Tensor:
-    """``n`` indices drawn without replacement with probability ∝ ``w`` (flat CPU weights), over the nonzero entries
-    only (``torch.multinomial`` is capped at 2^24 categories; a block has more)."""
+    """``n`` indices drawn without replacement with probability ∝ ``w`` (flat weights, any device), over the nonzero
+    entries only. On the GPU by Gumbel-top-k (``argmax`` of ``log w + Gumbel`` taken ``n`` times is sampling without
+    replacement ∝ ``w``; ``torch.multinomial`` is capped at 2^24 categories and a block has more), seeded from ``g``."""
     nz = (w > 0).nonzero(as_tuple=True)[0]
     k = min(n, len(nz))
+    if k == 0:
+        return nz
+    if w.is_cuda:
+        gd = torch.Generator(device=w.device).manual_seed(int(torch.randint(0, 2 ** 31 - 1, (1,), generator=g)))
+        u = torch.rand(len(nz), device=w.device, generator=gd).clamp(1e-12, 1 - 1e-12)
+        keys = torch.log(w[nz].float()) - torch.log(-torch.log(u))
+        return nz[keys.topk(k).indices]
     return nz[torch.multinomial(w[nz] / w[nz].sum(), k, replacement=False, generator=g)]
+
+
+_IDENTITY = lambda x: x                                                                   # the prep of features already averaged
 
 
 def _draw(blocks, per: int, seed: int):
@@ -50,7 +61,7 @@ def _draw(blocks, per: int, seed: int):
     Xs, Ds = [], []
     for F, d, w, prep in blocks:
         f = prep(F)
-        idx = sample_idx(w.reshape(-1).float().cpu(), per, g).to(F.device)
+        idx = sample_idx(w.reshape(-1), per, g)
         Xs.append(f.reshape(f.shape[0], -1)[:, idx].T)
         Ds.append(None if d is None else d.reshape(3, -1)[:, idx].T)
     return torch.cat(Xs), (None if Ds[0] is None else torch.cat(Ds))
@@ -87,8 +98,10 @@ class OrientationReadout:
         self.lr, self.wd, self.seed = float(lr), float(weight_decay), int(seed)
         self.mean = self.std = self.net = self.grid = None
 
-    def fit(self, blocks, n_sample: int = 240_000):
-        X, D = _draw([(F, d, w, self.prep) for F, d, w in blocks], max(1, n_sample // max(1, len(blocks))), self.seed)
+    def fit(self, blocks, n_sample: int = 240_000, prepped: bool = False):
+        """``blocks``: ``(F, d, w)`` triples of features (already averaged if ``prepped``), teacher directions and
+        sampling weights."""
+        X, D = _draw([(F, d, w, _IDENTITY if prepped else self.prep) for F, d, w in blocks], max(1, n_sample // max(1, len(blocks))), self.seed)
         self.grid = hemisphere(self.n_dirs, X.device)
         k = 1.0 / (2 * math.sin(math.radians(self.target_deg)) ** 2)
         Y = torch.exp(k * ((D @ self.grid.T) ** 2 - 1)); Y = Y / Y.sum(1, keepdim=True)
@@ -108,46 +121,49 @@ class OrientationReadout:
             self.fit_overlap = float((P * Y).sum(1).mean() / (Y * Y).sum(1).mean())            # 1 = perfect
         return self
 
-    def _chunks(self, F: torch.Tensor, z_chunk: int):
-        f = self.prep(F); C = f.shape[0]
+    def _chunks(self, F: torch.Tensor, z_chunk: int | None, prepped: bool = False):
+        """The per-voxel distributions in slabs of ``z_chunk`` planes (by default as many as keep a slab's
+        distributions under ~2.5 GB); ``prepped``: ``F`` is already the averaged features."""
+        f = F if prepped else self.prep(F); C = f.shape[0]
+        z_chunk = z_chunk or _slab(f.shape[1:], 4_000_000)
         with torch.no_grad():
             for z in range(0, f.shape[1], z_chunk):
                 fz = f[:, z:z + z_chunk]
                 yield z, fz.shape[1:], torch.softmax(self.net((fz.reshape(C, -1).T - self.mean) / self.std), 1)
 
-    def predict_dist(self, F: torch.Tensor, z_chunk: int = 16) -> torch.Tensor:
+    def predict_dist(self, F: torch.Tensor, z_chunk: int | None = None, prepped: bool = False) -> torch.Tensor:
         """Per-voxel distributions ``(n_dirs, Z, Y, X)``."""
         out = torch.empty((self.n_dirs,) + tuple(F.shape[1:]), device=F.device)
-        for z, shp, P in self._chunks(F, z_chunk):
+        for z, shp, P in self._chunks(F, z_chunk, prepped):
             out[:, z:z + shp[0]] = P.T.reshape(self.n_dirs, *shp)
         return out
 
-    def density(self, F: torch.Tensor, region: torch.Tensor | None = None, z_chunk: int = 16) -> torch.Tensor:
+    def density(self, F: torch.Tensor, region: torch.Tensor | None = None, z_chunk: int | None = None, prepped: bool = False) -> torch.Tensor:
         """The window's orientation density ``(n_dirs,)``: the distributions summed over ``region`` (all voxels when
         None), without holding them all."""
         dens = torch.zeros(self.n_dirs, device=F.device)
-        for z, shp, P in self._chunks(F, z_chunk):
+        for z, shp, P in self._chunks(F, z_chunk, prepped):
             if region is None:
                 dens += P.sum(0)
             else:
                 dens += (P * region[z:z + shp[0]].reshape(-1, 1).float()).sum(0)
         return dens
 
-    def window_densities(self, F: torch.Tensor, region: torch.Tensor, window: int, z_chunk: int = 16) -> torch.Tensor:
+    def window_densities(self, F: torch.Tensor, region: torch.Tensor, window: int, z_chunk: int | None = None, prepped: bool = False) -> torch.Tensor:
         """The orientation density of every ``window``³ sub-window of the block (``(n_windows, n_dirs)``), in one pass
-        over the features."""
+        over the features. The block's own density is their sum."""
         Z, Y, X = region.shape
         nz, ny, nx = (Z + window - 1) // window, (Y + window - 1) // window, (X + window - 1) // window
         ar = lambda n: torch.arange(n, device=F.device) // window
         wid = (ar(Z)[:, None, None] * ny + ar(Y)[None, :, None]) * nx + ar(X)[None, None, :]
         out = torch.zeros(nz * ny * nx, self.n_dirs, device=F.device)
-        for z, shp, P in self._chunks(F, z_chunk):
+        for z, shp, P in self._chunks(F, z_chunk, prepped):
             out.index_add_(0, wid[z:z + shp[0]].reshape(-1), P * region[z:z + shp[0]].reshape(-1, 1).float())
         return out
 
-    def predict(self, F: torch.Tensor, z_chunk: int = 16):
+    def predict(self, F: torch.Tensor, z_chunk: int | None = None, prepped: bool = False):
         """The distribution's peak direction per voxel ``(3, Z, Y, X)`` and its confidence (the peak's share)."""
-        P = self.predict_dist(F, z_chunk)
+        P = self.predict_dist(F, z_chunk, prepped)
         j = P.argmax(0)
         return self.grid[j].permute(3, 0, 1, 2).contiguous(), P.max(0).values.clamp(0, 1)
 
@@ -194,17 +210,18 @@ class SignatureDictionary:
     def _kernel(self, c2: torch.Tensor) -> torch.Tensor:
         return torch.exp((c2 - 1) / (2 * math.sin(math.radians(self.kernel_deg)) ** 2))
 
-    def fit(self, blocks, n_sample: int = 240_000, background=None):
-        """``blocks``: ``(F, d, w)`` triples of features, teacher directions and sampling weights; ``background``:
-        ``(F, w)`` pairs of features and weights of voxels with no orientation."""
-        X, D = _draw([(F, d, w, self.prep) for F, d, w in blocks], max(1, n_sample // max(1, len(blocks))), self.seed)
+    def fit(self, blocks, n_sample: int = 240_000, background=None, prepped: bool = False):
+        """``blocks``: ``(F, d, w)`` triples of features (already averaged if ``prepped``), teacher directions and
+        sampling weights; ``background``: ``(F, w)`` pairs of features and weights of voxels with no orientation."""
+        prep = _IDENTITY if prepped else self.prep
+        X, D = _draw([(F, d, w, prep) for F, d, w in blocks], max(1, n_sample // max(1, len(blocks))), self.seed)
         self.mean, self.std = X.mean(0), X.std(0).clamp_min(1e-6)
         Xn = self.standardise(X)
         self.grid = hemisphere(self.n_dirs, X.device)
         W = self._kernel((D @ self.grid.T) ** 2)                                           # (n, n_dirs)
         self.D = (W.T @ Xn) / W.sum(0)[:, None].clamp_min(1e-6)                            # (n_dirs, C)
         if background:
-            B, _ = _draw([(F, None, w, self.prep) for F, w in background], max(1, n_sample // max(1, len(background))), self.seed)
+            B, _ = _draw([(F, None, w, prep) for F, w in background], max(1, n_sample // max(1, len(background))), self.seed)
             self.background = self.standardise(B).mean(0)
         return self
 
@@ -219,22 +236,48 @@ class SignatureDictionary:
         return S if self.background is None else torch.cat([S, self.background[:, None]], 1)
 
 
-def nnls_batched(A: torch.Tensor, Y: torch.Tensor, iters: int = 60) -> torch.Tensor:
-    """Non-negative least squares ``min ||A x - y||²`` for many ``y``: ``A (C, N)``, ``Y (M, C)`` -> ``X (M, N)`` ≥ 0,
-    projected gradient with the exact Lipschitz step from the clamped normal-equation solution."""
-    AtA = A.T @ A; AtY = Y @ A
-    L = float(torch.linalg.eigvalsh(AtA).max().clamp_min(1e-9))
-    X = (AtY @ torch.linalg.pinv(AtA)).clamp_min(0)
-    for _ in range(iters):
-        X = (X - (X @ AtA - AtY) / L).clamp_min(0)
-    return X
+def nnls_batched(A: torch.Tensor, Y: torch.Tensor, iters: int = 40, tol: float = 1e-4) -> torch.Tensor:
+    """Non-negative least squares ``min ||A x - y||²`` for many ``y``: ``A (C, N)``, ``Y (M, C)`` -> ``X (M, N)`` ≥ 0.
+    Cyclic coordinate descent from the clamped normal-equation solution (each coordinate minimised exactly with
+    the others fixed), at most ``iters`` sweeps, stopped when a sweep moves no coordinate by more than ``tol`` of the
+    mean activation. For the pipeline's N ≤ 5 it reaches the exact solution in ~25 sweeps, where 60 projected
+    gradient steps were still 10% off on correlated signatures, at a fifth of the time."""
+    AtA = A.T @ A; AtY = Y @ A; N = A.shape[1]
+    X0 = (AtY @ torch.linalg.pinv(AtA)).clamp_min(0)
+    if N == 1:
+        return (AtY / AtA[0, 0].clamp_min(1e-12)).clamp_min(0)
+    cols = [X0[:, k].contiguous() for k in range(N)]
+    aty = [AtY[:, k].contiguous() for k in range(N)]
+    G = AtA.detach().cpu().double().numpy(); diag = [max(float(G[k, k]), 1e-12) for k in range(N)]
+    scale = float(X0.mean().clamp_min(1e-12)) * tol
+    for sweep in range(iters):
+        moved = 0.0
+        for k in range(N):
+            r = aty[k].clone()
+            for j in range(N):
+                if j != k:
+                    r.add_(cols[j], alpha=-float(G[j, k]))
+            new = (r / diag[k]).clamp_min_(0)
+            if (sweep + 1) % 5 == 0:
+                moved = max(moved, float((new - cols[k]).abs().max()))
+            cols[k] = new
+        if (sweep + 1) % 5 == 0 and moved < scale:
+            break
+    return torch.stack(cols, 1)
 
 
-def unmix(F: torch.Tensor, dictionary: SignatureDictionary, modes: torch.Tensor, z_chunk: int = 16, iters: int = 60):
+def _slab(shape, voxels: int) -> int:
+    """How many z planes of a ``(Z, Y, X)`` block hold about ``voxels`` voxels (at least one plane)."""
+    return max(1, int(voxels // max(1, int(shape[1]) * int(shape[2]))))
+
+
+def unmix(F: torch.Tensor, dictionary: SignatureDictionary, modes: torch.Tensor, z_chunk: int | None = None, iters: int = 60, prepped: bool = False):
     """Per-voxel non-negative unmixing of the features onto the signatures of ``modes (N, 3)``: the activation
-    layers ``A (N, Z, Y, X)`` ≥ 0 and the residual energy share ``R (Z, Y, X)`` in [0, 1]."""
-    f = dictionary.prep(F)
+    layers ``A (N, Z, Y, X)`` ≥ 0 and the residual energy share ``R (Z, Y, X)`` in [0, 1]. Slabs of ``z_chunk`` planes
+    (by default about 8M voxels each); ``prepped``: ``F`` is already the averaged features."""
+    f = F if prepped else dictionary.prep(F)
     C, Z, Y, X = f.shape
+    z_chunk = z_chunk or _slab(f.shape[1:], 8_000_000)
     S = dictionary.matrix(modes); N = modes.shape[0]
     A_out = torch.empty((N, Z, Y, X), device=F.device); R_out = torch.empty((Z, Y, X), device=F.device)
     for z in range(0, Z, z_chunk):
@@ -246,7 +289,7 @@ def unmix(F: torch.Tensor, dictionary: SignatureDictionary, modes: torch.Tensor,
     return A_out, R_out
 
 
-def direction_gains(dictionary: SignatureDictionary, readout: OrientationReadout, blocks, per: int = 60_000, seed: int = 0, floor: float = 0.2):
+def direction_gains(dictionary: SignatureDictionary, readout: OrientationReadout, blocks, per: int = 60_000, seed: int = 0, floor: float = 0.2, prepped: bool = False):
     """The response of the readers per direction, measured on the calibration samples against the teacher, so
     that every direction counts alike: ``density_gain (n_dirs,)`` = the readout's density of the samples over the
     teacher's own kernel-smoothed histogram, and ``activation_gain (n_dirs,)`` = the mean activation a sample reaches
@@ -255,10 +298,10 @@ def direction_gains(dictionary: SignatureDictionary, readout: OrientationReadout
     g = torch.Generator().manual_seed(seed)
     u = dictionary.grid; Xs, Ds, Ps = [], [], []
     for F, d, w in blocks:
-        f = dictionary.prep(F)
-        idx = sample_idx(w.reshape(-1).float().cpu(), per, g).to(F.device)
+        f = F if prepped else dictionary.prep(F)
+        idx = sample_idx(w.reshape(-1), per, g)
         Xs.append(dictionary.standardise(f.reshape(f.shape[0], -1)[:, idx].T)); Ds.append(d.reshape(3, -1)[:, idx].T)
-        fr = readout.prep(F)
+        fr = f if (prepped or readout.prep.smooth == dictionary.prep.smooth) else readout.prep(F)
         with torch.no_grad():
             Ps.append(torch.softmax(readout.net((fr.reshape(fr.shape[0], -1)[:, idx].T - readout.mean) / readout.std), 1))
     Xn, D, P = torch.cat(Xs), torch.cat(Ds), torch.cat(Ps)
@@ -280,7 +323,7 @@ def direction_gains(dictionary: SignatureDictionary, readout: OrientationReadout
 
 
 def activation_null(dictionary: SignatureDictionary, blocks, offsets_deg=(45.0, 60.0, 75.0), q: float = 0.8, per: int = 60_000,
-                    smooth: int = 3, seed: int = 0, activation_gain: torch.Tensor | None = None) -> float:
+                    smooth: int = 3, seed: int = 0, activation_gain: torch.Tensor | None = None, prepped: bool = False) -> float:
     """The activation a *wrong* population's signature reaches on single-population voxels: each calibration block's
     confident voxels are unmixed onto their own direction's signature, signatures rotated by ``offsets_deg`` in the
     fibre plane, and the background; the ``q`` quantile of the rotated activations (after a ``smooth``³ average) is
@@ -288,8 +331,8 @@ def activation_null(dictionary: SignatureDictionary, blocks, offsets_deg=(45.0, 
     g = torch.Generator().manual_seed(seed)
     vals = []
     for F, d, w in blocks:
-        f = dictionary.prep(F)
-        idx = sample_idx(w.reshape(-1).float().cpu(), per, g).to(F.device)
+        f = F if prepped else dictionary.prep(F)
+        idx = sample_idx(w.reshape(-1), per, g)
         Xn = dictionary.standardise(f.reshape(f.shape[0], -1)[:, idx].T)
         dd = d.reshape(3, -1)[:, idx].T
         _, V = torch.linalg.eigh(dd.T @ dd); d0 = V[:, -1]                                 # the axial mean direction

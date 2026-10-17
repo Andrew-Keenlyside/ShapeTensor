@@ -107,16 +107,17 @@ def calibrate(volumes, tissue=None, *, engine: str = "anatomix_enc2", engine_kwa
         v = st._to_torch(v, device, torch.float32)
         t = torch.ones_like(v, dtype=torch.bool) if t is None else st._to_torch(t, device) > 0.5
         F = cal.features(v) if F is None else F
+        Fp = cal.dictionary.prep(F); del F                                              # the averaged features, once for every reader
         d, gap = teacher(v, sigma, rho, truncate, spacing)
         inner = tuple(slice(margin, n - margin) for n in v.shape)
         w = torch.zeros_like(gap); wb = torch.zeros_like(gap)
         w[inner], wb[inner], nb = _calibration_weights(d[(slice(None),) + inner], gap[inner], t[inner])
         bins = max(bins, nb)
-        blocks.append((F, d, w)); bg.append((F, wb))
-    cal.dictionary.fit(blocks, n_sample, background=bg)
-    cal.readout.fit(blocks, n_sample)
-    cal.density_gain, cal.activation_gain = direction_gains(cal.dictionary, cal.readout, blocks)
-    cal.tau = activation_null(cal.dictionary, blocks, smooth=smooth, activation_gain=cal.activation_gain)
+        blocks.append((Fp, d, w)); bg.append((Fp, wb))
+    cal.dictionary.fit(blocks, n_sample, background=bg, prepped=True)
+    cal.readout.fit(blocks, n_sample, prepped=True)
+    cal.density_gain, cal.activation_gain = direction_gains(cal.dictionary, cal.readout, blocks, prepped=True)
+    cal.tau = activation_null(cal.dictionary, blocks, smooth=smooth, activation_gain=cal.activation_gain, prepped=True)
     cal.orientation_bins_occupied, cal.readout_overlap = bins, cal.readout.fit_overlap
     return cal
 
@@ -129,15 +130,17 @@ def _dominant_axis(d: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     return V[:, -1]
 
 
-def _candidates(cal: Calibration, F: torch.Tensor, reg: torch.Tensor, n: int, min_sep_deg: float, window: int = 64):
+def _candidates(cal: Calibration, Fp: torch.Tensor, reg: torch.Tensor, n: int, min_sep_deg: float, window: int = 64):
     """Candidate populations: the peaks of the block's orientation density and of every ``window``³ sub-window's (a
     block may hold regions of different orientation), gain-normalised, merged ``min_sep_deg`` apart, the block's
-    first and then the sub-windows' by their mass, at most ``n``."""
+    first and then the sub-windows' by their mass, at most ``n``. ``Fp``: the averaged features; one pass of the
+    readout gives the sub-window densities and, as their sum, the block's."""
     grid = cal.readout.grid; gain = cal.density_gain if cal.density_gain is not None else 1.0
-    dens = [cal.readout.density(F, reg) / gain]
     if window and window < max(reg.shape):
-        W = cal.readout.window_densities(F, reg, window) / gain
-        dens += [W[i] for i in torch.argsort(W.sum(1), descending=True) if float(W[i].sum()) > 0]
+        W = cal.readout.window_densities(Fp, reg, window, prepped=True) / gain
+        dens = [W.sum(0)] + [W[i] for i in torch.argsort(W.sum(1), descending=True) if float(W[i].sum()) > 0]
+    else:
+        dens = [cal.readout.density(Fp, reg, prepped=True) / gain]
     cos_sep = math.cos(math.radians(min_sep_deg)); cands = []
     for d in dens:
         m, h, k = modes_from_density(d, grid, rel=0.3, min_sep_deg=min_sep_deg, nmax=4, mass_floor=0.1)
@@ -154,17 +157,18 @@ def _normalised(cal, A, modes):
     return A / gain_at(cal.dictionary, cal.activation_gain, modes)[:, None, None, None]
 
 
-def _axes(cal, v, F, reg, modes, w_exc, spacing):
+def _axes(cal, v, Fp, reg, modes, w_exc, spacing, products=None):
     """Each mode's layer axis under a joint unmixing of ``modes``: the activation- and gap-weighted direction of its
-    population tensor (no activation floor: the pure activation decides)."""
-    A, _ = unmix(F, cal.dictionary, modes); A = _normalised(cal, A, modes); out = []
+    population tensor (no activation floor: the pure activation decides). ``Fp``: the averaged features;
+    ``products``: the image's gradient products."""
+    A, _ = unmix(Fp, cal.dictionary, modes, prepped=True); A = _normalised(cal, A, modes); out = []
     for k in range(modes.shape[0]):
-        _, dk, gk = population_tensor(v, A[k], cal.sigma, cal.rho, cal.truncate, w_exc, 0.0, spacing)
+        _, dk, gk = population_tensor(v, A[k], cal.sigma, cal.rho, cal.truncate, w_exc, 0.0, spacing, products)
         out.append(_dominant_axis(dk, (A[k].clamp_min(0) * gk) * reg))
     return out
 
 
-def _confirm(cal: Calibration, v, F, reg, cand, w_exc, nmax: int, min_sep_deg: float, iterations: int, spacing):
+def _confirm(cal: Calibration, v, Fp, reg, cand, w_exc, nmax: int, min_sep_deg: float, iterations: int, spacing, products=None):
     """The populations among the candidates, confirmed by their own layers. A candidate's population tensor — the
     image's gradients weighted by its activation — points where its fibres lie. First every candidate is unmixed
     *alone* against the background (well conditioned whatever their number, and fair to every orientation), and
@@ -185,12 +189,12 @@ def _confirm(cal: Calibration, v, F, reg, cand, w_exc, nmax: int, min_sep_deg: f
         return cand
     axes = []
     for k in range(cand.shape[0]):
-        axes += _axes(cal, v, F, reg, cand[k:k + 1], w_exc, spacing)
+        axes += _axes(cal, v, Fp, reg, cand[k:k + 1], w_exc, spacing, products)
     modes = distinct(axes, nmax + 1)
     for _ in range(iterations):
         if modes.shape[0] <= 1:
             break
-        modes = distinct(_axes(cal, v, F, reg, modes, w_exc, spacing), nmax)
+        modes = distinct(_axes(cal, v, Fp, reg, modes, w_exc, spacing, products), nmax)
     return modes[:nmax]
 
 
@@ -218,17 +222,19 @@ def apply(cal: Calibration, volume, tissue=None, *, nmax: int = 3, min_sep_deg: 
     v = st._to_torch(volume, device, torch.float32)
     tis = torch.ones_like(v, dtype=torch.bool) if tissue is None else st._to_torch(tissue, device) > 0.5
     F = cal.features(v) if features is None else features; mark("features")
+    Fp = cal.dictionary.prep(F); del F                                                  # the averaged features, once for every reader
     reg = torch.zeros_like(tis); inner = tuple(slice(cal.margin, max(cal.margin + 1, n - cal.margin)) for n in v.shape); reg[inner] = tis[inner]
     reg = reg if bool(reg.any()) else tis
     w_exc = st.excision_weights(v, mask=tis if tissue is not None else None, spacing=st.spacing_ratio(spacing))
+    prods = st.gradient_products(v, cal.sigma, cal.truncate, spacing=spacing)        # the image's gradient products, once for every tensor
     # candidates from the block's orientation density, confirmed by their own layers: a
     # candidate's population tensor points where its fibres lie; the shoulders of one population all point at it,
     # so the populations are the distinct layer axes (no activation floor here: the pure activation decides)
-    cand = _candidates(cal, F, reg, nmax + 3, min_sep_deg, window); n = cand.shape[0]
-    modes = _confirm(cal, v, F, reg, cand, w_exc, nmax, min_sep_deg, iterations, spacing)
+    cand = _candidates(cal, Fp, reg, nmax + 3, min_sep_deg, window); n = cand.shape[0]
+    modes = _confirm(cal, v, Fp, reg, cand, w_exc, nmax, min_sep_deg, iterations, spacing, prods)
     keep = list(range(modes.shape[0]))
     while keep:                                                                         # a population must own a mask
-        A, R = unmix(F, cal.dictionary, modes[keep]); A = _normalised(cal, A, modes[keep])
+        A, R = unmix(Fp, cal.dictionary, modes[keep], prepped=True); A = _normalised(cal, A, modes[keep])
         masks, _, _ = population_masks(A, cal.tau, cal.smooth)
         share = torch.stack([(m & tis).float().sum() / tis.float().sum().clamp_min(1) for m in masks])
         worst = int(share.argmin())
@@ -238,8 +244,8 @@ def apply(cal: Calibration, volume, tissue=None, *, nmax: int = 3, min_sep_deg: 
     modes = modes[keep]; mark("populations")
     S, dirs, gaps = [], [], []
     for k in range(len(keep)):
-        Sk, dk, gk = population_tensor(v, A[k], cal.sigma, cal.rho, cal.truncate, w_exc, tensor_floor * cal.tau, spacing); S.append(Sk); dirs.append(dk); gaps.append(gk)
-    S, dirs, gaps = torch.stack(S), torch.stack(dirs), torch.stack(gaps); mark("tensors")
+        Sk, dk, gk = population_tensor(v, A[k], cal.sigma, cal.rho, cal.truncate, w_exc, tensor_floor * cal.tau, spacing, prods); S.append(Sk); dirs.append(dk); gaps.append(gk)
+    S, dirs, gaps = torch.stack(S), torch.stack(dirs), torch.stack(gaps); del prods; mark("tensors")
     vec, vec_gap, weight = single_field(S, A, floor=0.1 * cal.tau); del S
     vecs, weights = multi_field(dirs, A)
     total = Fn.avg_pool3d(weight[None, None], cal.smooth, stride=1, padding=cal.smooth // 2)[0, 0] if cal.smooth > 1 else weight
@@ -288,7 +294,7 @@ def run_volume(src: str, dst: str, *, level: str | None = None, chunk=(192, 192,
     Z, Y, X = a.shape
     cz, cy, cx = chunk
     sigma, rho, truncate = calibration.get("sigma", 1.0), calibration.get("rho", 10.0), calibration.get("truncate", 4.0)
-    halo = int(truncate * (sigma + rho) + 0.5) + 24
+    reach = int(truncate * (sigma + rho) + 0.5); halo = reach + 24                       # the filters' reach, plus the engine's margin
     g = zarr.open_group(dst, mode="a")
     specs = {"vec": ((3, Z, Y, X), np.float16), "gap": ((Z, Y, X), np.float16), "weight": ((Z, Y, X), np.float16)}
     if multi:
@@ -316,7 +322,11 @@ def run_volume(src: str, dst: str, *, level: str | None = None, chunk=(192, 192,
             skipped += 1; continue
         blk = torch.as_tensor(raw.astype(np.float32), device=device); del raw
         try:
-            out = apply(cal, blk, None if tissue_threshold is None else blk >= tissue_threshold, nmax=nmax, spacing=spacing, device=device)
+            F = cal.features(blk)                                                              # the network needs the whole halo ...
+            cut = tuple(slice(max(0, c.start - reach), min(n, c.stop + reach)) for c, n in zip(core, blk.shape))   # ... stages 2-4 only the filters' reach
+            blk = blk[cut].contiguous(); F = F[(slice(None),) + cut].contiguous()
+            core = tuple(slice(c.start - k.start, c.stop - k.start) for c, k in zip(core, cut))
+            out = apply(cal, blk, None if tissue_threshold is None else blk >= tissue_threshold, nmax=nmax, spacing=spacing, features=F, device=device); del F
         except Exception as e:                                                                 # a chunk must not end a whole-volume run
             failed.append((z0, y0, x0)); log(f"[{rank}/{world}] chunk {i + 1}/{len(tiles)} ({z0}, {y0}, {x0}) FAILED: {e!r}"); del blk; torch.cuda.empty_cache(); continue
         g["vec"][(slice(None),) + out_sl] = out["vec"].flip(0)[(slice(None),) + core].half().cpu().numpy()

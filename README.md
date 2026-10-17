@@ -72,7 +72,7 @@ activation layer per population, the shape tensor's single field, and the first 
 - At a **tissue step** the plain structure tensor is dragged 35° into the boundary; the excision removes the
   effect, and the pipeline inherits it (the excision is inside every population tensor).
 - At a **crossing** the structure tensor reports the bisector, 24° from either population. The pipeline finds the
-  two populations on every seed; the first vector of its multi-vector field is 12° from the nearest population at
+  two populations on every seed; the first vector of its multi-vector field is 11° from the nearest population at
   the median, the stronger population's own tensor at each voxel. The pair is not resolved per voxel at this
   dispersion: the second vector is indicative.
 - On a **single bundle**, and on the real block where the structure tensor is confident, the single field
