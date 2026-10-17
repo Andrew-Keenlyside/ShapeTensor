@@ -15,9 +15,7 @@ dependencies = [
     "scipy",
     "torch",
     "zarr>=3",
-    "nibabel",
     "matplotlib",
-    "tifffile",
 ]
 
 [project.optional-dependencies]

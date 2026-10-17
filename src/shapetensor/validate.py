@@ -140,10 +140,12 @@ def figure(panels, grid: Grid, path, sigma: float, rho: float, setting: str = ""
         for j, k in enumerate(("structure tensor", "excised structure tensor", "shape tensor")):
             axs[i, 1 + j].imshow(dec_rgb(f[k][:, zs, y, xs].cpu().numpy()), origin="lower", interpolation="nearest"); axs[i, 1 + j].set_title(k, fontsize=10)
         V, W = f["shape tensor, multi"], f["weights"]
-        wmax = float(W[:, zs, :, xs].max().clamp_min(1e-6))
+        wref = float(W[0][zs, :, xs].float().quantile(0.99).clamp_min(1e-6))                 # one scale for every panel of the row
         for j in range(2):
             if j < V.shape[0]:
-                axs[i, 4 + j].imshow(dec_rgb(V[j][:, zs, y, xs].cpu().numpy(), (W[j][zs, y, xs] / wmax).cpu().numpy()), origin="lower", interpolation="nearest")
+                axs[i, 4 + j].imshow(dec_rgb(V[j][:, zs, y, xs].cpu().numpy(), (W[j][zs, y, xs] / wref).clamp(0, 1).cpu().numpy()), origin="lower", interpolation="nearest")
+            else:
+                axs[i, 4 + j].imshow(np.zeros((zs.stop - zs.start, xs.stop - xs.start, 3)), origin="lower")
             axs[i, 4 + j].set_title(cols[4 + j] + " (brightness = activation)", fontsize=10)
     for ax in axs.ravel():
         ax.set_xticks([]); ax.set_yticks([])

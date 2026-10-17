@@ -20,11 +20,13 @@ import torch
 from .tensors import direction_and_gap
 
 
-def single_field(S: torch.Tensor, A: torch.Tensor):
+def single_field(S: torch.Tensor, A: torch.Tensor, floor: float = 0.0):
     """``S (N, 6, Z, Y, X)`` the population tensors, ``A (N, Z, Y, X)`` the activations -> the direction ``(3, Z, Y, X)``
-    in (z, y, x), its gap and its weight (the total activation)."""
+    in (z, y, x), its gap and its weight (the total activation). ``floor`` is added to every activation in the
+    merge (a tenth of the null in the pipeline), so that where every activation is zero the field is the mean of
+    the population tensors rather than undefined."""
     Aw = A.clamp_min(0)
-    T = (S * (Aw / S[:, :3].sum(1).clamp_min(1e-12))[:, None]).sum(0)
+    T = (S * ((Aw + floor) / S[:, :3].sum(1).clamp_min(1e-12))[:, None]).sum(0)
     d, gap = direction_and_gap(T)
     return d, gap, Aw.sum(0)
 

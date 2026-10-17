@@ -14,12 +14,16 @@ import torch
 from . import st
 
 
-def population_tensor(v: torch.Tensor, a: torch.Tensor, sigma: float = 1.0, rho: float = 10.0, truncate: float = 4.0, excision=None, spacing=None):
+def population_tensor(v: torch.Tensor, a: torch.Tensor, sigma: float = 1.0, rho: float = 10.0, truncate: float = 4.0, excision=None, floor: float = 0.0, spacing=None):
     """The population's tensor: the image's structure tensor with the gradients weighted by the population's
-    activation ``a (Z, Y, X)`` (and by the excision weights, if given), normalised by the integrated weight —
-    ``S_r = G_ρ ∗ (a_r w ∇I ∇Iᵀ) / G_ρ ∗ (a_r w)``. Where the population is present its fibres' gradients make the
-    tensor; elsewhere the weight is at the noise level. Returns ``S (6, Z, Y, X)``, the direction (z, y, x) and the gap."""
-    w = a.clamp_min(0) if excision is None else a.clamp_min(0) * excision
+    activation ``a (Z, Y, X)`` plus ``floor`` (and by the excision weights, if given), normalised by the integrated
+    weight — ``S_r = G_ρ ∗ ((a_r + floor) w ∇I ∇Iᵀ) / G_ρ ∗ ((a_r + floor) w)``. Where the population is present its
+    fibres' gradients make the tensor; where its activation is below the floor (the activation null: no
+    information about the population) the tensor falls back to the excised structure tensor. Returns
+    ``S (6, Z, Y, X)``, the direction (z, y, x) and the gap."""
+    w = a.clamp_min(0) + floor
+    if excision is not None:
+        w = w * excision
     S = st.structure_tensor_3d(v, sigma, rho, truncate, weights=w, spacing=spacing)
     d, gap = direction_and_gap(S)
     return S, d, gap

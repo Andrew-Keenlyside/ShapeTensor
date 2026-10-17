@@ -1,104 +1,90 @@
 <div align="center">
 
-<img src="images/shapetensor_logo.png" alt="ShapeTensor" width="55%" />
+<img src="images/shapetensor_logo.png" alt="ShapeTensor" width="45%" />
 
 </div>
 
 # ShapeTensor
 
-Fibre orientation fields for high-resolution white-matter volumes (HiP-CT and similar), on the GPU. One package gives
-you the classic structure tensor, a boundary-robust version of it, several fibre directions per site, and the same
-quantities built from the gradients of learned "shape space" features instead of the intensity — plus the phantom
-suite that says which of these to trust where.
+Fibre orientation fields of high-resolution white-matter volumes (HiP-CT at 20 µm, serial histology, light-sheet)
+from a pretrained shape-feature space, on the GPU. One pipeline, four stages:
+
+1. **Shape features** — the block through a contrast-agnostic 3-D UNet (anatomix), read at the encoder layer
+   whose channels encode fibre orientation.
+2. **Separating populations in the shape space** — the orientation code is read without labels (the structure
+   tensor at confident sites is the teacher); the populations present are found, and every voxel is unmixed onto
+   their signatures: one **activation layer per population**, a full-volume image of that population's shape.
+3. **One tensor per population** — the image's structure tensor with the gradients weighted by the population's
+   activation.
+4. **Merging** — one vector per voxel from the merged population tensors, or every population's vector with its
+   activation as weight. No masks anywhere: the weights say where a population is present.
+
+The classic structure tensor and its boundary-robust (*excised*) form are the baseline, at the same σ and ρ as
+every tensor in the pipeline, so every comparison is like for like.
 
 ## Install
 
 ```bash
-git clone https://github.com/Andrew-Keenlyside/ShapeTensor.git
-cd ShapeTensor
-pip install -e .                 # numpy, scipy, torch (CUDA), zarr >= 3, nibabel, matplotlib
-pip install -e ".[anatomix]"     # + the anatomix feature engines (weights come from the HF hub on first use)
+git clone https://github.com/Andrew-Keenlyside/ShapeTensor.git && cd ShapeTensor
+pip install -e ".[anatomix]"       # torch (CUDA), numpy, scipy, zarr >= 3, matplotlib; anatomix + monai (weights from the HF hub)
 ```
-
-A CUDA GPU is assumed (everything is torch on `device="cuda"`); `envs/shapetensor-gpu.def` builds the container and
-`scripts/cluster/shapetensor_sge.sh` runs a volume on an H100 node, one process per GPU.
 
 ## Use
 
 ```python
-from shapetensor import np as st          # or: from shapetensor import cp as st   (cupy out, no copy)
+import shapetensor as st
 
-vec  = st.shapetensor(image, sigma=1.0, rho=16.0)                      # (3, Z, Y, X) fibre direction per voxel, (x, y, z); boundary-robust
-vec  = st.shapetensor(image, rho=16.0, excise=False)                   # the plain structure tensor's direction
-vec  = st.shapetensor(image, rho=16.0, engine="anatomix48")            # from shape-space features instead of the intensity
-dirs = st.shapetensor(image, rho=16.0, fixels=True)                    # (3, 3, Z, Y, X): up to three directions per voxel
+vec     = st.shapetensor(image, rho=10.0)                               # (3, Z, Y, X): one direction per voxel, (x, y, z)
+vecs, w = st.shapetensor(image, rho=10.0, multi=True, weights=True)     # (N, 3, Z, Y, X) + (N, Z, Y, X): every population, by activation
+vec     = st.structure_tensor(image, rho=10.0)                          # the excised structure tensor: the baseline
+out     = st.population_field(image, rho=10.0)                          # modes, activation layers, both fields, masks, the null
 ```
 
-`image` is a `(Z, Y, X)` numpy, cupy or torch array of grey levels; `sigma` and `rho` are the derivative and
-integration scales in voxels (at 20 µm, `rho=16` is 0.32 mm). Everything runs on the GPU. Engines: `intensity`
-(default), `jet` (a locally normalised derivative jet, no network), `anatomix16`, `anatomix48` (the block needs 64
-voxels of context per face). The pieces behind the call — `structure_tensor_3d` / `eig_special_3d` in the layout of
-the `structure-tensor` package, `excised_structure_tensor_3d`, `shape_structure_tensor_3d`, `fixels_3d` — are in
-`shapetensor.st`; the feature engines, the channel-resolved tensor and the TCA / CSD read-outs are in `features/`,
-`tensor.py` and `readout/`; `field.py` writes the orientation-field store (direction, boundary, quality, fixels on a
-coarse grid) a tractography pipeline samples.
+```bash
+shapetensor run brain.ome.zarr out.zarr --level 0 --rho 10        # a whole volume, chunked with halos, calibrated once
+shapetensor structure-tensor brain.ome.zarr st.zarr --rho 10      # the baseline in the structure-tensor package's layout
+shapetensor validate --out validation                              # the three phantoms, two texture settings
+```
 
-A whole zarr volume, chunked with halos, one process per GPU: `shapetensor volume in.ome.zarr --level 0 out.zarr
---rho 16 --rank 0 --world 4`. Phantoms and the validation suite: `shapetensor phantoms | run | report`. Tests:
-`python tests/test_core.py`, `tests/test_st.py`, `tests/test_anatomix.py`.
+`image` is a `(Z, Y, X)` numpy, cupy or torch array of grey levels; the result comes back as the same kind.
+`rho` is the integration window in voxels (0.2 mm at 20 µm). Documentation: `mkdocs serve` or the `docs/` pages.
 
-## How it fits together
+## What the phantoms show
+
+Three phantoms with truth, at 20 µm with the texture matched to a real HiP-CT crop — a single bundle, a crossing
+and a bundle across a tissue step — at two texture settings (tight bundles; the dispersion and texture level of
+the real crop):
 
 <div align="center">
-
-<img src="images/pipeline_overview.png" alt="ShapeTensor pipeline overview" width="100%" />
-
+<img src="docs/img/validation_coherent.png" alt="validation" width="100%" />
 </div>
 
-A block with context margins goes through a feature engine; the gradients of every channel, integrated over a window
-ρ, form the channel-resolved tensor `K = G_ρ ∗ (g gᵀ)` (the structure tensor when there is one channel) and the
-gradient-direction ODF; read-outs turn them into directions (the summed tensor's eigenvector, TCA's pieces paired into
-populations, CSD peaks, the excised tensor); the field carries the single direction, the boundary, a quality and up to
-three fixels per site. `figures/tca_field/graphical_abstract.png` shows the validation design beside it.
+- At a **tissue step** the plain structure tensor is dragged into the boundary; the excision removes the effect,
+  and the pipeline inherits it (the excision is inside every population tensor).
+- At a **crossing** the structure tensor reports the bisector. With tight bundles the pipeline finds the two
+  populations and gives each its own direction; with the real crop's fibre dispersion (20° within a population)
+  the populations are no longer separable per voxel, and the single field is at best a better bisector.
+- On a **single bundle** the single field reproduces the structure tensor.
 
-## What the validation found (20 µm phantoms calibrated to a real crop)
+The numbers are in `docs/validation.md`; the research behind every design decision, with all its numbers, in
+`notes/`.
 
-- The structure tensor's boundary failure is a step-to-texture-ratio effect: at the real crop's texture level it is
-  41 / 13 / 7° (ρ 8 / 16 / 32 voxels) next to a 40-level step, against 3–6° in clear tissue.
-- Shape-space TCA does not rescue it at this resolution; **gradient excision does** (5.4 / 2.9 / 2.1° at the step,
-  5.2 / 2.5 / 1.9° at the gyrus, 8.2 / 3.3 / 1.3° at a vessel; ungated, nothing lost in clear tissue), with the
-  coarse gradient magnitude as the boundary detector.
-- For several populations, **CSD of the gradient-direction ODF** is the rank-free estimator; the anatomix layer-58
-  features sharpen it on tight crossings (60° at 100% both within 15°, at a threshold that gives ≤ 2% false
-  populations on dispersed single-fibre texture). Near contrast interfaces a sheet deconvolves to a ring of
-  directions, so fixels are excluded there by the coarse-gradient gate; at the real crop's texture level the
-  read-out is a 90°-only detector.
-- Orientation is encoded in anatomix's *encoder* (block 2: selectivity up to 0.83), not its output; a small
-  phantom-trained head reads it per voxel at ±15–20°.
-- Anisotropic voxels (20 × 20 × 50 µm): not robust in general — the coarse axis destroys the across-fibre
-  contrast of fibres perpendicular to it, and physically correct per-axis filtering (`spacing=`) is right only
-  when the coarse axis still resolves the texture; isotropic sampling at the texture scale is the remedy.
-- Speed (RTX A6000, ρ 16): tensor + eigen 11.8 Mvoxel/s, 25–30× the `structure-tensor` package on one CPU; the
-  excision adds 6%; fixels at every voxel are 29× the tensor and belong on a site grid.
-
-Details and every number: `docs/TCA_FIELD_REVIEW.md` (§11 for the verdict), `docs/TCA_FIELD_RESULTS.md`; the
-explainer figures `figures/tca_field/tca_multi_explainer.png`, `shape_space_clusters.png`, `encoder_tuning.png`.
-
-## Package layout
+## Layout
 
 ```
 src/shapetensor/
-  st.py             the volume API above (structure_tensor_3d, eig_special_3d, excised / shape variants, fixels_3d, run_volume)
-  features/         engines: intensity | jet | anatomix16 | anatomix48      (make_engine(name))
-  filters.py        scipy-identical Gaussian / derivative filters on the GPU
-  tensor.py         K and the ODF on a site grid or a block; excision weights
-  odf.py            spherical harmonics, Funk-Radon, CSD, peaks
-  readout/          single (eigen, TCA, detectors), multi (CP, pairing, N selection), hybrid
-  field.py          the orientation-field store
-  phantoms/         P1-P9 phantom families with twins and truth; stats.py measures real crops to set them
-  validate/         the suite, scores and report
-  cli.py            shapetensor stats | phantoms | run | report | volume
+  __init__.py     shapetensor(), structure_tensor(), population_field()
+  features/       the engines: anatomix_enc2 (default), anatomix48, anatomix16, jet, intensity
+  separate.py     stage 2: the dictionary, the orientation readout, the unmixing, the null
+  tensors.py      stage 3: the population tensor
+  merge.py        stage 4: the single field, the multi-vector field, export
+  pipeline.py     calibrate / apply / population_field / run_volume
+  st.py           the structure tensor (plain, excised), eigen, the structure-tensor layout, run_volume
+  phantoms.py     bundle | crossing | interface, with truth
+  validate.py     the validation
+  tracking.py     a deterministic streamline tracker over multi-vector grids
+  viz.py, stats.py, filters.py, pca.py, cli.py
+  archive/        the ODF / fixel and TCA routes (importable, not maintained)
+tests/            pytest
+notes/            the research log, review and plans
 ```
-
-Everything here is a **prototype**. The pre-package study scripts, their docs and data paths are described in
-`docs/PROTOTYPES.md`.

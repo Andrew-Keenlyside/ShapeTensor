@@ -158,13 +158,13 @@ def apply(cal: Calibration, volume, tissue=None, *, nmax: int = 3, min_sep_deg: 
         A, _ = unmix(F, cal.dictionary, cand)
         axes = []
         for k in range(n):
-            _, dk, gk = population_tensor(v, A[k], cal.sigma, cal.rho, cal.truncate, w_exc, spacing)
+            _, dk, gk = population_tensor(v, A[k], cal.sigma, cal.rho, cal.truncate, w_exc, 0.0, spacing)            # no floor here: the pure activation decides
             axes.append(_dominant_axis(dk, (A[k].clamp_min(0) * gk) * reg))
         cos_sep = math.cos(math.radians(min_sep_deg)); keep = []
         for k in range(n):
             if all(float((axes[k] @ axes[j]).abs()) < cos_sep for j in keep):
                 keep.append(k)
-        modes = torch.stack([axes[k] for k in keep])
+        modes = torch.stack([axes[k] for k in keep])[:nmax]
     else:
         modes = cand
     keep = list(range(modes.shape[0]))
@@ -179,9 +179,9 @@ def apply(cal: Calibration, volume, tissue=None, *, nmax: int = 3, min_sep_deg: 
     modes = modes[keep]; mark("populations")
     S, dirs, gaps = [], [], []
     for k in range(len(keep)):
-        Sk, dk, gk = population_tensor(v, A[k], cal.sigma, cal.rho, cal.truncate, w_exc, spacing); S.append(Sk); dirs.append(dk); gaps.append(gk)
+        Sk, dk, gk = population_tensor(v, A[k], cal.sigma, cal.rho, cal.truncate, w_exc, 0.01 * cal.tau, spacing); S.append(Sk); dirs.append(dk); gaps.append(gk)
     S, dirs, gaps = torch.stack(S), torch.stack(dirs), torch.stack(gaps); mark("tensors")
-    vec, vec_gap, weight = single_field(S, A); del S
+    vec, vec_gap, weight = single_field(S, A, floor=0.1 * cal.tau); del S
     vecs, weights = multi_field(dirs, A)
     total = Fn.avg_pool3d(weight[None, None], cal.smooth, stride=1, padding=cal.smooth // 2)[0, 0] if cal.smooth > 1 else weight
     tissue_mask = total > cal.tau
