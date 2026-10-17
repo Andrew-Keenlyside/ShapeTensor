@@ -16,6 +16,7 @@ import zarr
 
 from shapetensor import DATA_ROOT
 from shapetensor.phantoms import make
+from shapetensor.viz import dec_activation_overlay
 
 FIGS = Path(__file__).resolve().parents[1] / "figures" / "tca_field"
 CROP = "/hdd/andrew/BRIDGE/atlas20/crops/S-21-46.ome.zarr"
@@ -39,7 +40,7 @@ def phantom_image(angles, seed):
 
 
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("--field", default="phantom_3pop"); ap.add_argument("--gamma", type=float, default=0.7)
+    ap = argparse.ArgumentParser(); ap.add_argument("--field", default="phantom_3pop"); ap.add_argument("--gamma", type=float, default=0.7); ap.add_argument("--mode", default="saturation", choices=["saturation", "opacity"])
     a = ap.parse_args()
     if a.field == "phantom_3pop":
         g = zarr.open_group(str(Path(DATA_ROOT) / "fields" / "phantom_3pop_population_field.zarr"), mode="r")
@@ -55,20 +56,15 @@ def main():
     im = img[crop[0], y, crop[1]]
     fig, axs = plt.subplots(1, N + 2, figsize=(6.2 * (N + 2), 6.4), dpi=100)
     axs[0].imshow(im, cmap="gray", origin="lower"); axs[0].set_title(f"{title}: intensity"); axs[0].set_xticks([]); axs[0].set_yticks([])
-    combined = np.zeros(im.shape + (3,)); wsum = np.zeros(im.shape)
+    acts = [A[k][crop[0], y, crop[1]] for k in range(N)]; dds = [D[k][:, crop[0], y, crop[1]] for k in range(N)]
     for k in range(N):
-        act = A[k][crop[0], y, crop[1]]; w = np.clip(act / max(np.percentile(act, 99), 1e-6), 0, 1) ** a.gamma
-        rgb = dec(D[k][:, crop[0], y, crop[1]])
-        ax = axs[1 + k]; ax.imshow(im, cmap="gray", origin="lower")
-        ax.imshow(np.concatenate([rgb, w[..., None]], -1), origin="lower", interpolation="nearest")
-        ax.set_title(f"population {k + 1}: DEC of its layer's direction, opacity = activation (p99-normalised, γ {a.gamma:g})", fontsize=10); ax.set_xticks([]); ax.set_yticks([])
-        combined += rgb * w[..., None]; wsum += w
-    ax = axs[N + 1]; ax.imshow(im, cmap="gray", origin="lower")
-    alpha = np.clip(wsum, 0, 1); rgbc = combined / np.maximum(wsum, 1e-6)[..., None]
-    ax.imshow(np.concatenate([np.clip(rgbc, 0, 1), alpha[..., None]], -1), origin="lower", interpolation="nearest")
-    ax.set_title("all populations: activation-weighted mean DEC, opacity = total activation", fontsize=10); ax.set_xticks([]); ax.set_yticks([])
-    fig.suptitle("DEC orientation of each population's layer, weighted by its activation, over the intensity image (R = |x|, G = |y|, B = |z|)", x=0.01, ha="left", fontsize=11)
-    fig.tight_layout(rect=[0, 0, 1, 0.94]); out = FIGS / f"dec_overlay_{a.field}.png"; fig.savefig(out); plt.close(fig); print("wrote", out)
+        ax = axs[1 + k]; ax.imshow(dec_activation_overlay(dds[k], acts[k], im, a.mode, a.gamma), origin="lower", interpolation="nearest")
+        ax.set_title(f"population {k + 1}: its layer's direction as hue everywhere, activation as {a.mode}", fontsize=10); ax.set_xticks([]); ax.set_yticks([])
+    best = np.argmax(np.stack(acts), 0); dboth = np.choose(best[None], dds) if N > 1 else dds[0]; aboth = np.max(np.stack(acts), 0)
+    ax = axs[N + 1]; ax.imshow(dec_activation_overlay(dboth, aboth, im, a.mode, a.gamma), origin="lower", interpolation="nearest")
+    ax.set_title(f"all populations: the most active layer's direction per voxel, activation as {a.mode}", fontsize=10); ax.set_xticks([]); ax.set_yticks([])
+    fig.suptitle(f"DEC orientation of each population's layer (hue, never masked) with its activation as {a.mode}, over the intensity image (R = |x|, G = |y|, B = |z|)", x=0.01, ha="left", fontsize=11)
+    fig.tight_layout(rect=[0, 0, 1, 0.94]); out = FIGS / f"dec_overlay_{a.field}_{a.mode}.png"; fig.savefig(out); plt.close(fig); print("wrote", out)
 
 
 if __name__ == "__main__":

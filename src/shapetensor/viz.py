@@ -74,3 +74,21 @@ def streamline_segments(ax, P, zsel, scale, lw=0.6, alpha=0.8, max_segments=6000
                 break
     if segs:
         ax.add_collection(LineCollection(np.concatenate(segs), colors=np.concatenate(cols), linewidths=lw, alpha=alpha))
+
+
+def dec_activation_overlay(d, act, img, mode: str = "saturation", gamma: float = 0.7, floor: float = 0.15, p: float = 99.0):
+    """An RGB image of a layer's orientation with its activation as *saturation* (default) or *opacity*: ``d (3, H, W)``
+    directions in (z, y, x), ``act (H, W)`` the activation, ``img (H, W)`` the intensity. The orientation is never
+    masked out -- where the activation is low the colour fades towards the grey image but keeps its hue."""
+    from matplotlib.colors import hsv_to_rgb, rgb_to_hsv
+    rgb = dec_rgb(d)
+    w = np.clip(act / max(np.percentile(act, p), 1e-6), 0, 1) ** gamma
+    w = floor + (1 - floor) * w
+    g = (img - img.min()) / max(img.max() - img.min(), 1e-6)
+    if mode == "saturation":
+        hsv = rgb_to_hsv(rgb)
+        hsv[..., 1] = hsv[..., 1] * w                                             # activation -> saturation
+        hsv[..., 2] = 0.35 + 0.65 * g                                             # intensity -> value
+        return hsv_to_rgb(hsv)
+    out = rgb * w[..., None] + np.stack([g] * 3, -1) * (1 - w)[..., None]         # activation -> opacity over the grey image
+    return np.clip(out, 0, 1)

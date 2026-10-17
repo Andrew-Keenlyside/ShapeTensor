@@ -18,7 +18,7 @@ from shapetensor.features.cache import cached_features
 from shapetensor.phantoms import make
 from shapetensor.readout.layers import SignatureDictionary, layer_tensor_direction, unmix
 from shapetensor.readout.orientation import OrientationReadoutDist, modes_from_density
-from shapetensor.viz import sticks
+from shapetensor.viz import dec_activation_overlay, sticks
 
 FIGS = Path(__file__).resolve().parents[1] / "figures" / "tca_field"
 CAT = ["#6250d6", "#e34948", "#eda100", "#2a9d8f"]
@@ -59,7 +59,7 @@ def teacher(v):
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--cross", type=float, nargs="+", default=[60.0, 90.0, 45.0]); ap.add_argument("--engine", default="anatomix_enc2")
-    ap.add_argument("--rho", type=float, default=10.0); ap.add_argument("--smooth", type=int, default=3)
+    ap.add_argument("--rho", type=float, default=10.0); ap.add_argument("--smooth", type=int, default=3); ap.add_argument("--overlay-mode", default="saturation", choices=["saturation", "opacity"])
     a = ap.parse_args(); t0 = time.time()
     tex = json.load(open(f"{DATA_ROOT}/results/tex_calibrated.json"))["texture"]; tex["widths"] = [tuple(w) for w in tex["widths"]]
     tex = make.TextureParams(**{**tex, "dispersion_deg": 8.0, "pitch_deg": 4.0})
@@ -139,18 +139,20 @@ def main():
         fig2, ax2 = plt.subplots(1, 4, figsize=(24, 6.3), dpi=100)
         ax2[0].imshow(img, cmap="gray", origin="lower"); ax2[0].set_title(f"{cross:.0f}° crossing: intensity")
         comb = np.zeros(img.shape + (3,)); wsum = np.zeros(img.shape)
+        acts, dds = [], []
         for k, r in enumerate(order):
-            act = A[k][row].cpu().numpy(); wgt = np.clip(act / max(np.percentile(act, 99), 1e-6), 0, 1) ** 0.7
-            dl, _ = layer_tensor_direction(A[k], SIGMA, a.rho, TR); dd = dl[(slice(None),) + row].cpu().numpy()
-            rgbk = np.clip(np.stack([np.abs(dd[2]), np.abs(dd[1]), np.abs(dd[0])], -1), 0, 1)
-            ax2[1 + k].imshow(img, cmap="gray", origin="lower"); ax2[1 + k].imshow(np.concatenate([rgbk, wgt[..., None]], -1), origin="lower", interpolation="nearest")
-            ax2[1 + k].set_title(f"population {k + 1}: DEC of its layer's direction, opacity = activation", fontsize=10)
-            comb += rgbk * wgt[..., None]; wsum += wgt
-        ax2[3].imshow(img, cmap="gray", origin="lower"); ax2[3].imshow(np.concatenate([np.clip(comb / np.maximum(wsum, 1e-6)[..., None], 0, 1), np.clip(wsum, 0, 1)[..., None]], -1), origin="lower", interpolation="nearest")
-        ax2[3].set_title("both: activation-weighted DEC, opacity = total activation", fontsize=10)
+            act = A[k][row].cpu().numpy(); dl, _ = layer_tensor_direction(A[k], SIGMA, a.rho, TR); dd = dl[(slice(None),) + row].cpu().numpy()
+            acts.append(act); dds.append(dd)
+            ax2[1 + k].imshow(dec_activation_overlay(dd, act, img, a.overlay_mode), origin="lower", interpolation="nearest")
+            ax2[1 + k].set_title(f"population {k + 1}: its layer's direction as hue everywhere, activation as {a.overlay_mode}", fontsize=10)
+        # both: the direction of the more active layer at each voxel, the activations summed
+        pick = (acts[1] > acts[0])[None] if len(acts) > 1 else np.zeros((1,) + img.shape, bool)
+        dboth = np.where(pick, dds[1] if len(dds) > 1 else dds[0], dds[0]); aboth = np.maximum.reduce(acts)
+        ax2[3].imshow(dec_activation_overlay(dboth, aboth, img, a.overlay_mode), origin="lower", interpolation="nearest")
+        ax2[3].set_title(f"both: the more active layer's direction at each voxel, activation as {a.overlay_mode}", fontsize=10)
         for ax in ax2: ax.set_xticks([]); ax.set_yticks([])
-        fig2.suptitle("DEC orientation per population, weighted by activation, over the image (R = |x|, G = |y|, B = |z|; fibres lie in the z–x plane: x = red, z = blue)", x=0.01, ha="left", fontsize=11)
-        fig2.tight_layout(rect=[0, 0, 1, 0.93]); fig2.savefig(FIGS / f"population_layers_dec_c{cross:.0f}.png"); plt.close(fig2)
+        fig2.suptitle(f"DEC orientation per population (hue, never masked) with activation as {a.overlay_mode}, over the image (R = |x|, G = |y|, B = |z|; fibres lie in the z–x plane: x = red, z = blue)", x=0.01, ha="left", fontsize=11)
+        fig2.tight_layout(rect=[0, 0, 1, 0.93]); fig2.savefig(FIGS / f"population_layers_dec_c{cross:.0f}_{a.overlay_mode}.png"); plt.close(fig2)
         out[f"c{cross:.0f}"] = res
         print(f"[{time.time() - t0:4.0f}s] {cross:.0f}°: {res}", flush=True)
         del F, A, R, S; torch.cuda.empty_cache()
