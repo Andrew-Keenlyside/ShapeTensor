@@ -130,6 +130,26 @@ def test_run_volume_pipeline(tmp_path):
     assert np.asarray(o["vecs"]).shape == (3, 3) + img.shape and o.attrs["tau"] > 0
 
 
+@pytest.mark.skipif(DEV != "cuda", reason="the pipeline needs a GPU")
+def test_run_volume_blend_is_seamless(tmp_path):
+    """A single bundle cut into eight chunks: the blended field agrees with one pass over the whole block, and has no
+    jump at the chunk faces (the angle between neighbouring planes across a seam is as small as away from it)."""
+    pytest.importorskip("anatomix")
+    import zarr
+    from shapetensor.pipeline import population_field, run_volume
+    g = Grid(core=(64, 32, 64), margin=(32, 32, 32))
+    img, _, _ = build("bundle", 0, g, angle=50.0, device=DEV); v = torch.as_tensor(img, device=DEV).float()
+    zarr.save(str(tmp_path / "in.zarr"), img.astype(np.float32))
+    run_volume(str(tmp_path / "in.zarr"), str(tmp_path / "out.zarr"), chunk=(64, 64, 64), calibration_size=96, blend=16, multi=False, device=DEV, log=lambda *a: None)
+    vec = torch.as_tensor(np.asarray(zarr.open_group(str(tmp_path / "out.zarr"), mode="r")["vec"]).astype(np.float32), device=DEV).flip(0)
+    one = population_field(v, device=DEV)["vec"]
+    inner = (slice(None), slice(32, 96), slice(32, 64), slice(32, 96))
+    e = torch.rad2deg(torch.arccos((vec[inner] * one[inner]).sum(0).abs().clamp(max=1)))
+    assert float(e.median()) < 5.0, float(e.median())
+    step = lambda z: float(torch.rad2deg(torch.arccos((vec[:, z, 32:64, 32:96] * vec[:, z + 1, 32:64, 32:96]).sum(0).abs().clamp(max=1))).median())
+    assert step(63) < 2 * max(step(50), step(76), 0.5) + 0.5, (step(63), step(50), step(76))
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

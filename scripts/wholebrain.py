@@ -14,7 +14,7 @@ import numpy as np
 
 SRC = "/hdd/andrew/BRIDGE/50um_scale_S_21_46/sub-test/micr/sub-test_sample-brain_acq-50um_XPCT.ome.zarr"
 LEVEL = "1"
-OUT_ROOT = Path("/hdd/andrew/shapetensor_runs/S-21-46_100um_chunkcal")
+OUT_ROOT = Path(__import__("os").environ.get("WHOLEBRAIN_OUT", "/hdd/andrew/shapetensor_runs/S-21-46_100um_chunkcal"))
 DOC = Path(__file__).resolve().parents[1] / "docs" / "img"
 RES = Path(__file__).resolve().parents[1] / "results"
 SIGMA, RHO, THRESH = 1.0, 10.0, 1.0
@@ -54,8 +54,8 @@ def figure():
                                  "weight_p50": round(float(np.percentile(w[tissue], 50)), 3), "tau": sh.attrs.get("tau")}
         axs[0, j].imshow(im, cmap="gray", origin="lower"); axs[0, j].set_title(f"S-21-46 at 100 µm, {name}", fontsize=11)
         axs[1, j].imshow(dec_rgb(v_st, tissue.astype(np.float32)), origin="lower", interpolation="nearest"); axs[1, j].set_title("excised structure tensor (ρ 1 mm)", fontsize=11)
-        axs[2, j].imshow(dec_rgb(v_sh, np.clip(w / wref, 0, 1) * tissue), origin="lower", interpolation="nearest")
-        axs[2, j].set_title(f"shape tensor, brightness = activation ({stats['planes'][name]['agreement_median_deg']}° from the tensor, {stats['planes'][name]['agreement_where_tensor_confident_deg']}° where confident)", fontsize=9.5)
+        axs[2, j].imshow(dec_rgb(v_sh, tissue.astype(np.float32)), origin="lower", interpolation="nearest")
+        axs[2, j].set_title(f"shape tensor, single field ({stats['planes'][name]['agreement_median_deg']}° from the tensor, {stats['planes'][name]['agreement_where_tensor_confident_deg']}° where it is confident)", fontsize=10)
     for ax in axs.ravel(): ax.set_xticks([]); ax.set_yticks([])
     fig.suptitle("A whole brain at 100 µm: the excised structure tensor and the shape tensor's single field, σ 1, ρ 10 voxels (DEC: R = |x|, G = |y|, B = |z|)", x=0.01, ha="left", fontsize=12)
     fig.savefig(DOC / "wholebrain_100um.png"); plt.close(fig)

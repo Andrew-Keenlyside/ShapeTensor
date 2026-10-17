@@ -36,18 +36,26 @@ They are outputs, not steps: nothing in the vectors depends on them.
 
 ## At a chunk seam, and what the weights mean
 
-The chunked driver finds the populations of every chunk with its halo, so the *set* of populations can change at
-a seam: the single field is continuous there (both sides see the same tensors), and the multi-vector field is
-ordered by activation at every voxel, so its first vector means the same on both sides. The activation weights are
-in the standardised feature's units, normalised per direction; `weight / tau` is the dimensionless presence (above
-1: present).
+The chunked driver finds the populations of every chunk, and calibrates every chunk on itself, so the merged tensor
+differs from its neighbour's near their common face even though every voxel's tensors are exact; written side by
+side, the two readings meet in a visible seam. `run_volume` therefore overlaps neighbouring chunks by `blend`
+voxels (32) on each side of every face, accumulates each chunk's merged tensor — it is linear in the activations —
+with linear ramps that sum to 1 across the seam, and takes the field from the blended tensor, so one reading turns
+into the next over 64 voxels. The network and the filters see enough beyond the overlap for every blended tensor to
+be exact. The multi-vector field is written per chunk without blending: it is ordered by activation at every voxel,
+so its first vector means the same on both sides of a seam, but the set of populations may not.
+
+The activation weights of `apply` are in the standardised feature's units, normalised per direction; `weight / tau`
+is the dimensionless presence (above 1: present). `run_volume` writes the weight already divided by the chunk's
+null, so that chunks calibrated on themselves are comparable, and zero where the volume has no data.
 
 ## Displaying the field
 
 The field is a direction and a weight at every voxel, and how it is drawn is a choice made at display time, not in
-the pipeline. The figures in this documentation use DEC colour (R = |x|, G = |y|, B = |z|) with the total
-activation as brightness on black; the same field can be drawn as orientation alone, with a compressed brightness,
-cut at the null, or over the grey image with the activation as opacity or as saturation (`shapetensor.viz.dec_rgb`,
+the pipeline. The figures in this documentation draw every direction field as plain DEC colour (R = |x|, G = |y|,
+B = |z|) at every voxel, the shape tensor's exactly as the structure tensor's, and show the activation as its own
+layers; the same field can also be drawn with the activation as brightness (linear or compressed), cut at the null,
+or over the grey image with the activation as opacity or as saturation (`shapetensor.viz.dec_rgb`,
 `dec_activation_overlay`; `scripts/renderings.py`, which redraws from a cached slice without the GPU):
 
 ![renderings](../img/renderings.png)

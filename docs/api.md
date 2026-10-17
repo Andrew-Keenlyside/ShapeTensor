@@ -21,7 +21,7 @@ out = st.population_field(image, rho=10.0)                                # ever
 | `calibrate(volumes, tissue=None, *, engine, sigma, rho, smooth, margin, n_sample)` | fit the stage-2 readers on a block or a list of blocks → `Calibration` |
 | `apply(cal, volume, tissue=None, *, nmax, min_sep_deg, min_mask_share, iterations, spacing)` | stages 2–4 on a block → dict |
 | `population_field(volume, tissue=None, **calibration)` | both on one block |
-| `run_volume(src, dst, *, level, chunk, nmax, tissue_threshold, calibration_size, multi, rank, world, **calibration)` | a whole zarr volume, chunked with halos |
+| `run_volume(src, dst, *, level, chunk, nmax, tissue_threshold, calibration_size, calibrate_chunks, min_bins, blend, multi, rank, world, **calibration)` | a whole zarr volume: every chunk calibrated on itself (the volume's as fallback), tensors ramp-blended across the chunk faces |
 
 `apply` returns, with vectors in (z, y, x): `modes (N, 3)`, `activation (N, Z, Y, X)`, `dirs (N, 3, Z, Y, X)` and
 `gap (N, Z, Y, X)` per population; `vec (3, Z, Y, X)`, `vec_gap`, `weight` (the single field); `vecs (N, 3, Z, Y, X)`,
@@ -48,7 +48,8 @@ out = st.population_field(image, rho=10.0)                                # ever
 
 ```
 shapetensor run <in.zarr> <out.zarr> [--level 0] [--rho 10] [--sigma 1] [--chunk 192 192 192] [--nmax 3]
-                [--tissue-threshold T] [--calibration-size 256] [--calibration-origin z y x] [--no-multi] [--rank r --world n]
+                [--tissue-threshold T] [--calibration-size 256] [--calibration-origin z y x] [--volume-calibration] [--min-bins 12]
+                [--blend 32] [--no-multi] [--rank r --world n]
 shapetensor block <in.npy|in.zarr> <out.zarr> [--rho 10] [--sigma 1] [--voxel-mm 0.02]
 shapetensor structure-tensor <in.zarr> <out.zarr> [--level 0] [--rho 10] [--sigma 1] [--no-excise] [--chunk 256 256 256]
 shapetensor validate [--out validation] [--seeds 0 1 2] [--rho 10] [--settings calibrated]
@@ -61,5 +62,6 @@ shapetensor stats <in.ome.zarr> [--level 0] [--threshold T] -o stats.json
 `run` and `block` take `--spacing dz dy dx`; `block` reads `.npy`, `.tif` / `.tiff` (tifffile), `.nii` / `.nii.gz`
 (nibabel) and zarr.
 
-`run` writes `vec (3, Z, Y, X)` in (x, y, z) as the `structure-tensor` package, `gap`, `weight`, and `vecs`,
-`weights`; `structure-tensor` writes `S`, `val`, `vec` in that package's layout.
+`run` writes `vec (3, Z, Y, X)` in (x, y, z) as the `structure-tensor` package, `gap`, `weight` (in multiples of
+the chunk's null, zero where the volume has no data), and `vecs`, `weights`; `structure-tensor` writes `S`, `val`,
+`vec` (or the `--arrays` asked for) in that package's layout.

@@ -148,15 +148,14 @@ def figure(panels, grid: Grid, path, sigma: float, rho: float, setting: str = ""
     fig, axs = plt.subplots(len(panels), cols, figsize=(4.2 * cols, 4.7 * len(panels) + 0.4), dpi=100, squeeze=False, constrained_layout=True)
     y = grid.shape[1] // 2; zs, _, xs = grid.inner; sl = (zs, y, xs); dsl = (slice(None),) + sl
     for i, (name, label, f, r) in enumerate(panels):
-        A, W = f["activation"], f["weight"]
-        aref = float(A[:, zs, :, xs].float().reshape(-1)[::53].quantile(0.99).clamp_min(1e-6)); wref = float(W[zs, :, xs].float().quantile(0.99).clamp_min(1e-6))
+        A = f["activation"]
+        aref = float(A[:, zs, :, xs].float().reshape(-1)[::53].quantile(0.99).clamp_min(1e-6))
         acts = [A[k][sl].cpu().numpy() for k in range(min(f["n_populations"], n_act))]
         extra = {k: _error_text(name, r, key) for k, key in (("st", "excised structure tensor"), ("single", "shape tensor"), ("first", "shape tensor, multi (first)"))}
         pipeline_row(axs[i], f["image"][sl].cpu().numpy(), f["excised structure tensor"][dsl].cpu().numpy(), f["shape space"], acts,
-                     f["shape tensor"][dsl].cpu().numpy(), (W[sl] / wref).clamp(0, 1).cpu().numpy(),
-                     f["shape tensor, multi (first)"][dsl].cpu().numpy(), (f["weights"][0][sl] / wref).clamp(0, 1).cpu().numpy(),
+                     f["shape tensor"][dsl].cpu().numpy(), f["shape tensor, multi (first)"][dsl].cpu().numpy(),
                      aref=aref, label=label.replace("bundle 60", "bundle at 60°").replace("crossing 60", "crossing at 60°").replace("interface 40", "interface, step 40"), extra=extra)
-    fig.suptitle(f"Phantom validation ({setting} texture), σ {sigma:g}, ρ {rho:g} voxels: DEC (R = |x|, G = |y|, B = |z|) on the mid plane, the shape tensor's brightness = activation; "
+    fig.suptitle(f"Phantom validation ({setting} texture), σ {sigma:g}, ρ {rho:g} voxels: every field as DEC (R = |x|, G = |y|, B = |z|) on the mid plane; "
                  "median error against the truth in brackets", x=0.01, ha="left", fontsize=12)
     fig.savefig(path); plt.close(fig)
 

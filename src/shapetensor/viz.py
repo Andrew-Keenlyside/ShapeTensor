@@ -98,13 +98,14 @@ def scatter_space(ax, P, rgb, coloured, title=None):
         ax.set_title(title, fontsize=10)
 
 
-def pipeline_row(axs, img, d_st, space, acts, vec, w, vec1, w1, *, aref=None, label="image", extra=None):
+def pipeline_row(axs, img, d_st, space, acts, vec, vec1, *, aref=None, label="image", extra=None):
     """One row of the standard figure: image | excised structure tensor | shape space | one activation layer per
-    population | shape tensor, single field (brightness = total activation) | multi-vector field, first vector
-    (brightness = its activation; say so in the figure's title). ``axs``: ``5 + n`` axes, ``n`` activation panels
-    (blank beyond the populations found). Slices ``(H, W)``; directions ``(3, H, W)`` in (z, y, x); ``space`` = ``(P, rgb, coloured)``; ``w``,
-    ``w1`` brightness in [0, 1]; ``aref`` the activation display maximum (the 99th percentile over the layers if
-    None); ``extra``: ``{"st" | "single" | "first": text}`` appended to those titles."""
+    population | shape tensor, single field | multi-vector field, first vector. Every direction field is drawn as
+    plain DEC at every voxel, the shape tensor's exactly as the structure tensor's; the activation appears only as
+    its own layers. ``axs``: ``5 + n`` axes, ``n`` activation panels (blank beyond the populations found). Slices
+    ``(H, W)``; directions ``(3, H, W)`` in (z, y, x); ``space`` = ``(P, rgb, coloured)``; ``aref`` the activation
+    display maximum (the 99th percentile over the layers if None); ``extra``: ``{"st" | "single" | "first": text}``
+    appended to those titles."""
     extra = extra or {}
     n = len(axs) - 5
     axs[0].imshow(img, cmap="gray", origin="lower"); axs[0].set_title(label, fontsize=10)
@@ -117,7 +118,7 @@ def pipeline_row(axs, img, d_st, space, acts, vec, w, vec1, w1, *, aref=None, la
             ax.imshow(acts[k], cmap=CMAPS[k % len(CMAPS)], vmin=0, vmax=aref, origin="lower", interpolation="nearest"); ax.set_title(f"activation layer: population {k + 1}", fontsize=10, color=POP[k % len(POP)])
         else:
             ax.imshow(np.full(img.shape, 1.0), cmap="gray", vmin=0, vmax=1, origin="lower"); ax.axis("off")
-    axs[3 + n].imshow(dec_rgb(vec, w), origin="lower", interpolation="nearest"); axs[3 + n].set_title(("shape tensor, single " + extra.get("single", "")).strip(), fontsize=10)
-    axs[4 + n].imshow(dec_rgb(vec1, w1), origin="lower", interpolation="nearest"); axs[4 + n].set_title(("multi-vector field, first vector " + extra.get("first", "")).strip(), fontsize=10)
+    axs[3 + n].imshow(dec_rgb(vec), origin="lower", interpolation="nearest"); axs[3 + n].set_title(("shape tensor, single " + extra.get("single", "")).strip(), fontsize=10)
+    axs[4 + n].imshow(dec_rgb(vec1), origin="lower", interpolation="nearest"); axs[4 + n].set_title(("multi-vector field, first vector " + extra.get("first", "")).strip(), fontsize=10)
     for ax in axs:
         ax.set_xticks([]); ax.set_yticks([])

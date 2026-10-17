@@ -20,7 +20,8 @@ one or two orientations, too few to calibrate on itself; a real block has them a
 
 Each row is one phantom in the package's standard layout: the image, the excised structure tensor, the shape space
 with the populations found in it, one activation layer per population, the shape tensor's single field and the
-first vector of its multi-vector field, with each field's median error against the truth in its title.
+first vector of its multi-vector field, every field as plain DEC at every voxel, with each field's median error
+against the truth in its title.
 `results/validation.json` has every seed and every band.
 
 ## What it shows

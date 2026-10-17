@@ -20,7 +20,7 @@ from shapetensor import st
 from shapetensor.pipeline import apply, calibrate, teacher
 from shapetensor.tracking import track
 from shapetensor.validate import angle_deg
-from shapetensor.viz import CMAPS, POP, dec_activation_overlay, dec_rgb, pipeline_row, scatter_space, shape_space, sticks, streamline_segments
+from shapetensor.viz import CMAPS, POP, dec_rgb, pipeline_row, scatter_space, shape_space, sticks, streamline_segments
 
 HIPCT = "/hdd/andrew/BRIDGE/atlas20/crops/S-21-46.ome.zarr"
 BIGBRAIN = Path.home() / "bridge_wmcov/shapetensor/bigbrain/bigbrain_20um_x2336_y3936_z2464_768.npy"
@@ -69,13 +69,12 @@ def _standard_row(path, label, v, d_st, out, space, sl, title):
     """One block in the standard layout: image | excised structure tensor | shape space | activation layers | shape
     tensor, single | multi-vector field, first vector."""
     N = min(out["modes"].shape[0], 3); dsl = (slice(None),) + sl; zs, _, xs = sl
-    A, W = out["activation"], out["weight"]
-    aref = float(A[:, zs, :, xs].float().reshape(-1)[::53].quantile(0.99).clamp_min(1e-6)); wref = float(W[zs, :, xs].float().quantile(0.99).clamp_min(1e-6))
+    A = out["activation"]
+    aref = float(A[:, zs, :, xs].float().reshape(-1)[::53].quantile(0.99).clamp_min(1e-6))
     fig, axs = plt.subplots(1, 5 + N, figsize=(4.2 * (5 + N), 4.9), dpi=100)
     pipeline_row(axs, v[sl].cpu().numpy(), d_st[dsl].cpu().numpy(), space, [A[k][sl].cpu().numpy() for k in range(N)],
-                 out["vec"][dsl].cpu().numpy(), (W[sl] / wref).clamp(0, 1).cpu().numpy(), out["vecs"][0][dsl].cpu().numpy(), (out["weights"][0][sl] / wref).clamp(0, 1).cpu().numpy(),
-                 aref=aref, label=label)
-    fig.suptitle(title + " (DEC: R = |x|, G = |y|, B = |z|; the shape tensor's brightness = activation)", x=0.01, ha="left", fontsize=11)
+                 out["vec"][dsl].cpu().numpy(), out["vecs"][0][dsl].cpu().numpy(), aref=aref, label=label)
+    fig.suptitle(title + " (every field as DEC: R = |x|, G = |y|, B = |z|)", x=0.01, ha="left", fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.93]); fig.savefig(path); plt.close(fig)
 
 
@@ -133,15 +132,14 @@ def fig_overview_real():
         if k < N:
             act = out["activation"][k][sl].cpu().numpy()
             axa.imshow(act, cmap=CMAPS[k], vmin=0, vmax=aref, origin="lower", interpolation="nearest"); (axa.set_title if k == 0 else axa.set_xlabel)(f"population {k + 1}", color=POP[k], fontsize=11, loc="left")
-            axd.imshow(dec_activation_overlay(out["dirs"][k][(slice(None),) + sl].cpu().numpy(), act, im, "opacity"), origin="lower", interpolation="nearest")
-            (axd.set_title if k == 0 else axd.set_xlabel)(f"population {k + 1}: DEC, opacity = activation", color=POP[k], fontsize=11, loc="left")
+            axd.imshow(dec_rgb(out["dirs"][k][(slice(None),) + sl].cpu().numpy()), origin="lower", interpolation="nearest")
+            (axd.set_title if k == 0 else axd.set_xlabel)(f"population {k + 1}: its tensor's direction, DEC", color=POP[k], fontsize=11, loc="left")
         else:
             for ax in (axa, axd): ax.text(0.5, 0.5, "one population found", ha="center", va="center", transform=ax.transAxes); ax.set_facecolor("0.95")
         for ax in (axa, axd):
             ax.set_xticks([]); ax.set_yticks([])
             for s in ax.spines.values(): s.set_edgecolor(POP[k]); s.set_linewidth(1.5)
-    wn = (out["weight"][sl] / out["weight"][sl].float().quantile(0.99)).clamp(0, 1).cpu().numpy()
-    _dec(stacked[2][0], out["vec"][(slice(None),) + sl].cpu().numpy(), "one vector per voxel: DEC, brightness = total activation", wn)
+    _dec(stacked[2][0], out["vec"][(slice(None),) + sl].cpu().numpy(), "one vector per voxel: the merged tensors' direction, DEC")
     c0, w_ = 64, 64; sl2 = (slice(c0, c0 + w_), 96, slice(c0, c0 + w_)); im2 = v[sl2].cpu().numpy(); ax = stacked[2][1]
     ax.imshow(im2, cmap="gray", origin="lower", alpha=0.75); step = 3
     cz, cx = np.meshgrid(np.arange(1, w_, step), np.arange(1, w_, step), indexing="ij"); cz, cx = cz.ravel(), cx.ravel()
@@ -153,7 +151,7 @@ def fig_overview_real():
     for ax in (ax_img, ax_ss, ax_sep): ax.set_xticks([]); ax.set_yticks([])
     heads = ("HiP-CT image", "Shape space", "Populations in the shape space", "Activation layers", "Per-population fields", "Combined fields")
     subs = ("S-21-46, 20 µm", "the voxels' shape features\n(two principal axes of 32 channels)", "found without labels, every voxel\nunmixed onto their signatures",
-            "one full-volume layer per population", "the image's tensor weighted\nby each population's activation", "one vector per voxel, or\nevery population with its weight")
+            "one full-volume layer per population", "the image's tensor weighted\nby each population's activation", "one vector per voxel, or\nevery population at every voxel")
     tops = [ax_img, ax_ss, ax_sep] + [s[0] for s in stacked]
     for ax, h, s in zip(tops, heads, subs):
         b = ax.get_position(); fig.text((b.x0 + b.x1) / 2, 0.955, h, ha="center", va="center", fontsize=15, weight="bold"); fig.text((b.x0 + b.x1) / 2, 0.905, s, ha="center", va="center", fontsize=10.5, color="0.35")

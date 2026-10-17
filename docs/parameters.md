@@ -2,10 +2,8 @@
 
 What each parameter does to the field, one at a time, on the HiP-CT block of [real data](data.md) (S-21-46, 20 µm,
 a 192³ block calibrated on the 384³ around it), the rest at their defaults. Every strip shows the shape tensor's
-single field as DEC colour (R = |x|, G = |y|, B = |z|) with brightness = total activation, on one brightness scale
-for every panel: a dimmer panel is lower activation, not a different display. The total activation is the sum over
-the populations found, so a run that finds one population where the default finds two is dimmer throughout. The
-titles give the populations found and the median angle of the field from the default run's over the tissue.
+single field as DEC colour (R = |x|, G = |y|, B = |z|) at every voxel. The titles give the populations found and the
+median angle of the field from the default run's over the tissue.
 
 ```bash
 python scripts/parameters.py                # docs/img/params_<name>.png, results/parameters.json

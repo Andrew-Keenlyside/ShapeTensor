@@ -75,15 +75,15 @@ def block(path, level, centre, cal=None):
     e = angle_deg(d_st, out["vec"]); conf = sel & (gap_st > gap_st[sel].quantile(0.75))
     space = shape_space(F, cal.dictionary, out["activation"], out["tau"], sel)[:3]; del F
     sl = (slice(M, N - M), N // 2, slice(M, N - M)); dsl = (slice(None),) + sl; zs, _, xs = sl
-    A, W = out["activation"], out["weight"]; n = min(out["modes"].shape[0], 3)
-    aref = float(A[:, zs, :, xs].float().reshape(-1)[::53].quantile(0.99).clamp_min(1e-6)); wref = float(W[zs, :, xs].float().quantile(0.99).clamp_min(1e-6))
+    A = out["activation"]; n = min(out["modes"].shape[0], 3)
+    aref = float(A[:, zs, :, xs].float().reshape(-1)[::53].quantile(0.99).clamp_min(1e-6))
     torch.cuda.synchronize()
     stats = {"n_populations": int(out["modes"].shape[0]), "tau": round(out["tau"], 3), "readout_bins": cal.orientation_bins_occupied, "tissue_above_null": out["confidence"]["tissue_above_null"],
              "agreement_median_deg": round(float(e[sel].median()), 1), "agreement_where_tensor_confident_deg": round(float(e[conf].median()), 1),
              "structure_tensor_gap_median": round(float(gap_st[sel].median()), 3), "seconds": round(time.perf_counter() - t0, 1)}
     panels = {"image": v[sl].cpu().numpy(), "st": d_st[dsl].cpu().numpy(), "space": space, "acts": [A[k][sl].cpu().numpy() for k in range(n)], "aref": aref,
-              "vec": out["vec"][dsl].cpu().numpy(), "w": (W[sl] / wref).clamp(0, 1).cpu().numpy(), "vec1": out["vecs"][0][dsl].cpu().numpy(), "w1": (out["weights"][0][sl] / wref).clamp(0, 1).cpu().numpy()}
-    del out, v, t, d_st, gap_st, A, W; torch.cuda.empty_cache()
+              "vec": out["vec"][dsl].cpu().numpy(), "vec1": out["vecs"][0][dsl].cpu().numpy()}
+    del out, v, t, d_st, gap_st, A; torch.cuda.empty_cache()
     return stats, panels, cal
 
 
@@ -116,11 +116,11 @@ def main(regions_only=False):
             label, p = rows[f"region: {key} ({mode})"]; r = rec[f"region: {key} ({mode})"]
             if i == 0:
                 axs[0, j].imshow(p["image"], cmap="gray", origin="lower"); axs[0, j].set_title(f"{label}: S-21-46, 20 µm, 192³ block", fontsize=11)
-            axs[1 + i, j].imshow(dec_rgb(p["vec"], p["w"]), origin="lower", interpolation="nearest")
+            axs[1 + i, j].imshow(dec_rgb(p["vec"]), origin="lower", interpolation="nearest")
             axs[1 + i, j].set_title(f"{'calibrated on the block' if i == 0 else 'deep-brain calibration'}: {r['n_populations']} population{'s' if r['n_populations'] != 1 else ''}, "
                                     f"{r['agreement_median_deg']:g}° from the tensor,\n{r['readout_bins']}/24 orientation bins, {100 * r['tissue_above_null']:.0f}% of tissue above the null", fontsize=9.5)
     for ax in axs.ravel(): ax.set_xticks([]); ax.set_yticks([])
-    fig.suptitle("Four regions at 20 µm: the image and the shape tensor's single field (DEC, brightness = total activation), calibrated on the block itself or once on the deep brain", x=0.01, ha="left", fontsize=12)
+    fig.suptitle("Four regions at 20 µm: the image and the shape tensor's single field (DEC), calibrated on the block itself or once on the deep brain", x=0.01, ha="left", fontsize=12)
     fig.savefig(OUT / "regions_20um.png"); plt.close(fig); print("wrote regions_20um.png")
     if regions_only:
         return
@@ -129,9 +129,9 @@ def main(regions_only=False):
     fig, axs = plt.subplots(len(keys), cols, figsize=(4.2 * cols, 4.7 * len(keys) + 0.4), dpi=100, squeeze=False, constrained_layout=True)
     for i, k in enumerate(keys):
         label, p = rows[k]; r = rec[k]
-        pipeline_row(axs[i], p["image"], p["st"], p["space"], p["acts"], p["vec"], p["w"], p["vec1"], p["w1"], aref=p["aref"], label=f"{label}: 192³ block, {0.192 * r['voxel_um']:g} mm",
+        pipeline_row(axs[i], p["image"], p["st"], p["space"], p["acts"], p["vec"], p["vec1"], aref=p["aref"], label=f"{label}: 192³ block, {0.192 * r['voxel_um']:g} mm",
                      extra={"single": f"({r['agreement_median_deg']:g}° from the tensor, {r['agreement_where_tensor_confident_deg']:g}° where it is confident)"})
-    fig.suptitle("HiP-CT across voxel sizes, σ 1, ρ 10 voxels at every scale (DEC: R = |x|, G = |y|, B = |z|; the shape tensor's brightness = activation)", x=0.01, ha="left", fontsize=12)
+    fig.suptitle("HiP-CT across voxel sizes, σ 1, ρ 10 voxels at every scale (every field as DEC: R = |x|, G = |y|, B = |z|)", x=0.01, ha="left", fontsize=12)
     fig.savefig(OUT / "scales.png"); plt.close(fig); print("wrote scales.png")
 
 

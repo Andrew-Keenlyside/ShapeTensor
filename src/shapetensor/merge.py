@@ -20,15 +20,22 @@ import torch
 from .tensors import direction_and_gap
 
 
-def single_field(S: torch.Tensor, A: torch.Tensor, floor: float = 0.0):
-    """``S (N, 6, Z, Y, X)`` the population tensors, ``A (N, Z, Y, X)`` the activations -> the direction ``(3, Z, Y, X)``
-    in (z, y, x), its gap and its weight (the total activation). ``floor`` is added to every activation in the
-    merge (a tenth of the null in the pipeline), so that where every activation is zero the field is the mean of
-    the population tensors rather than undefined."""
+def merged_tensor(S: torch.Tensor, A: torch.Tensor, floor: float = 0.0) -> torch.Tensor:
+    """``T (6, Z, Y, X) = Σ_r (a_r + floor) S_r / tr S_r``: the population tensors, each normalised to unit trace, weighted
+    by their activations. Linear in the activations, so tensors of overlapping blocks can be blended before the
+    eigensolution (the whole-volume driver does)."""
     Aw = A.clamp_min(0)
-    T = (S * ((Aw + floor) / S[:, :3].sum(1).clamp_min(1e-12))[:, None]).sum(0)
+    return (S * ((Aw + floor) / S[:, :3].sum(1).clamp_min(1e-12))[:, None]).sum(0)
+
+
+def single_field(S: torch.Tensor, A: torch.Tensor, floor: float = 0.0, return_tensor: bool = False):
+    """``S (N, 6, Z, Y, X)`` the population tensors, ``A (N, Z, Y, X)`` the activations -> the direction ``(3, Z, Y, X)``
+    in (z, y, x), its gap and its weight (the total activation), and with ``return_tensor`` the merged tensor too.
+    ``floor`` is added to every activation in the merge (a tenth of the null in the pipeline), so that where every
+    activation is zero the field is the mean of the population tensors rather than undefined."""
+    T = merged_tensor(S, A, floor)
     d, gap = direction_and_gap(T)
-    return d, gap, Aw.sum(0)
+    return (d, gap, A.clamp_min(0).sum(0), T) if return_tensor else (d, gap, A.clamp_min(0).sum(0))
 
 
 def multi_field(dirs: torch.Tensor, A: torch.Tensor):

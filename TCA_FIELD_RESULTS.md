@@ -111,3 +111,17 @@ Profiled on the HiP-CT block (192³ stages 2–4; 384³ calibration), synchronis
 - After: **2.7 s per 192³ block** (4.7×), calibration 10 s (features 4.9, readout fit 2.8, teacher 1.5). Validation
   unchanged within noise (crossing 2/2/2 populations, first vector 10.5° / 58%, interface 16.8° at the step).
   The remaining cost is the Gaussian integration of 12–13 population tensors (0.9 s) and the network.
+
+## 31. Seams, and plain DEC (2026-10-17)
+
+- The 100 µm whole brain showed chunk seams in the single field: each chunk's population set (and, with per-chunk
+  calibration, its readers) differs from its neighbour's, so the merged tensor jumps at the face although every
+  voxel's tensors are exact. Fix in `run_volume`: chunks overlap by `blend` (32) voxels per face, each chunk's
+  unit-trace merged tensor and its weight are accumulated with linear ramps summing to 1 across the seam
+  (`merge.merged_tensor` is linear in the activations), and the field is the eigensolution of the blended tensor;
+  the network sees overlap + reach + margin and stages 2–4 core + overlap + reach, so the blended tensors are exact.
+  Cost: 408³ instead of 344³ per 256³ core (1.65× the stage 2–4 work) and a read-add-write of the accumulators.
+  Test: a bundle in eight chunks, the blended field within 5° of one pass and no step at the faces.
+- The multi-vector field stays per chunk (no blending of population sets); documented.
+- Display: every direction field as plain DEC at every voxel, the shape tensor's exactly as the structure tensor's;
+  the activation shown only as its own layers (the renderings page keeps the alternatives).

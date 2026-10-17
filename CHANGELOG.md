@@ -22,6 +22,10 @@ population, the merged field — with the excised structure tensor as the baseli
   `st.run_volume` writes the arrays asked for (`vec gap` for a compact field) as float32 or float16 (`--arrays`, `--float16`,
   `--tissue-threshold` on `shapetensor structure-tensor`).
 - Docs: scales, regions and a whole brain (`scripts/scales.py`, `scripts/wholebrain.py`).
+- `run_volume`: every chunk calibrated on itself with the volume calibration as fallback (`calibrate_chunks`, `min_bins`);
+  neighbouring chunks' merged tensors ramp-blended over a `blend` overlap so the field has no seams; the weight written
+  in multiples of the chunk's null and zero where the volume has no data; `apply` returns the merged `tensor`.
+- Figures draw every direction field as plain DEC; the activation appears as its own layers.
 - Speed (a 192³ block's stages 2–4 from 12.8 s to 2.7 s, its calibration from 17 s to 10 s): a closed-form symmetric 3 × 3
   eigensolver in `st.eig_special_3d` (float64 internally, within 0.02° of cusolver, 10× faster); the non-negative
   least squares by coordinate descent (exact where 60 projected-gradient steps were 10% off on correlated signatures,

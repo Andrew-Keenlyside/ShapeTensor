@@ -4,7 +4,8 @@ The same pipeline, at the same settings (σ 1, ρ 10 voxels, calibration on the 
 grey level above zero), on HiP-CT at six voxel sizes, on four regions of one brain at 20 µm, and over a whole brain
 at 100 µm. There is no truth on real data; what is reported is what the pipeline finds, and how far its single field
 is from the excised structure tensor at the same scales, over the tissue and where the tensor is confident (its top
-quarter by orientation gap).
+quarter by orientation gap). Every direction field is drawn as plain DEC at every voxel, the shape tensor's exactly
+as the structure tensor's.
 
 ```bash
 python scripts/scales.py            # docs/img/scales.png, docs/img/regions_20um.png, results/scales.json
@@ -58,8 +59,9 @@ one calibration for the whole volume remains an option.
 ## A whole brain at 100 µm
 
 S-21-46 at 100 µm (1475 × 1493 × 1493 voxels, level 1 of its 50 µm scan), in 256³ chunks each calibrated on itself
-(the central 256³'s calibration as fallback), chunks without tissue skipped, and the excised structure tensor over
-the same volume at the same σ and ρ (1 mm integration). The weights are zero where the masked volume has no data;
-the vectors are never masked.
+(the central 256³'s calibration as fallback), the chunks' merged tensors ramp-blended over a 32-voxel overlap at
+every face, chunks without tissue skipped, and the excised structure tensor over the same volume at the same σ and
+ρ (1 mm integration). The weights are zero where the masked volume has no data; the vectors are never masked. Every
+field is drawn as plain DEC.
 
 ![whole brain](img/wholebrain_100um.png)

@@ -25,8 +25,8 @@
    "dispersion_deg": 20.0,
    "pitch_deg": 10.0,
    "texture": 0.5,
-   "tau": 0.5708343982696533,
-   "readout_overlap": 0.4048818051815033,
+   "tau": 0.5710616111755371,
+   "readout_overlap": 0.4047357141971588,
    "cases": {
     "bundle 60": {
      "per_seed": [
@@ -79,14 +79,14 @@
        },
        "shape tensor": {
         "all": {
-         "median_deg": 2.3,
+         "median_deg": 2.4,
          "within_15": 1.0,
          "n": 524288
         }
        },
        "shape tensor, multi (first)": {
         "all": {
-         "median_deg": 2.3,
+         "median_deg": 2.4,
          "within_15": 1.0,
          "n": 524288
         }
@@ -142,14 +142,14 @@
       },
       "shape tensor": {
        "all": {
-        "median_deg": 2.4,
+        "median_deg": 2.433,
         "within_15": 1.0,
         "n": 524288.0
        }
       },
       "shape tensor, multi (first)": {
        "all": {
-        "median_deg": 2.4,
+        "median_deg": 2.433,
         "within_15": 1.0,
         "n": 524288.0
        }
@@ -171,18 +171,18 @@
         "n": 524288
        },
        "shape tensor (nearest population)": {
-        "median_deg": 22.7,
-        "within_15": 0.286,
+        "median_deg": 22.6,
+        "within_15": 0.285,
         "n": 524288
        },
        "shape tensor, multi (first) (nearest population)": {
         "median_deg": 9.8,
-        "within_15": 0.587,
+        "within_15": 0.59,
         "n": 524288
        },
        "shape tensor, multi (pair)": {
         "median_deg": 15.4,
-        "within_15": 0.401,
+        "within_15": 0.412,
         "n": 524288,
         "both_within_15": 0.0
        }
@@ -200,20 +200,20 @@
         "n": 524288
        },
        "shape tensor (nearest population)": {
-        "median_deg": 23.1,
-        "within_15": 0.252,
+        "median_deg": 21.7,
+        "within_15": 0.144,
         "n": 524288
        },
        "shape tensor, multi (first) (nearest population)": {
-        "median_deg": 12.0,
-        "within_15": 0.585,
+        "median_deg": 15.2,
+        "within_15": 0.479,
         "n": 524288
        },
        "shape tensor, multi (pair)": {
-        "median_deg": 15.9,
-        "within_15": 0.335,
+        "median_deg": 16.1,
+        "within_15": 0.261,
         "n": 524288,
-        "both_within_15": 0.0
+        "both_within_15": 0.038
        }
       },
       {
@@ -229,20 +229,20 @@
         "n": 524288
        },
        "shape tensor (nearest population)": {
-        "median_deg": 22.1,
-        "within_15": 0.304,
+        "median_deg": 22.2,
+        "within_15": 0.301,
         "n": 524288
        },
        "shape tensor, multi (first) (nearest population)": {
-        "median_deg": 9.8,
-        "within_15": 0.579,
+        "median_deg": 9.9,
+        "within_15": 0.584,
         "n": 524288
        },
        "shape tensor, multi (pair)": {
-        "median_deg": 15.9,
-        "within_15": 0.295,
+        "median_deg": 15.7,
+        "within_15": 0.332,
         "n": 524288,
-        "both_within_15": 0.0
+        "both_within_15": 0.001
        }
       }
      ],
@@ -259,27 +259,27 @@
        "n": 524288.0
       },
       "shape tensor (nearest population)": {
-       "median_deg": 22.633,
-       "within_15": 0.281,
+       "median_deg": 22.167,
+       "within_15": 0.243,
        "n": 524288.0
       },
       "shape tensor, multi (first) (nearest population)": {
-       "median_deg": 10.533,
-       "within_15": 0.584,
+       "median_deg": 11.633,
+       "within_15": 0.551,
        "n": 524288.0
       },
       "shape tensor, multi (pair)": {
        "median_deg": 15.733,
-       "within_15": 0.344,
+       "within_15": 0.335,
        "n": 524288.0,
-       "both_within_15": 0.0
+       "both_within_15": 0.013
       }
      }
     },
     "interface 40": {
      "per_seed": [
       {
-       "n_populations": 1,
+       "n_populations": 2,
        "structure tensor": {
         "within 0.1 mm of the step": {
          "median_deg": 35.6,
@@ -316,35 +316,35 @@
        },
        "shape tensor": {
         "within 0.1 mm of the step": {
-         "median_deg": 16.8,
-         "within_15": 0.381,
+         "median_deg": 15.7,
+         "within_15": 0.481,
          "n": 40960
         },
         "0.1-0.5 mm": {
-         "median_deg": 16.6,
-         "within_15": 0.415,
+         "median_deg": 13.4,
+         "within_15": 0.55,
          "n": 163840
         },
         "beyond 0.5 mm": {
-         "median_deg": 17.1,
-         "within_15": 0.389,
+         "median_deg": 14.2,
+         "within_15": 0.525,
          "n": 319488
         }
        },
        "shape tensor, multi (first)": {
         "within 0.1 mm of the step": {
-         "median_deg": 16.8,
-         "within_15": 0.381,
+         "median_deg": 14.6,
+         "within_15": 0.517,
          "n": 40960
         },
         "0.1-0.5 mm": {
-         "median_deg": 16.6,
-         "within_15": 0.415,
+         "median_deg": 12.7,
+         "within_15": 0.536,
          "n": 163840
         },
         "beyond 0.5 mm": {
-         "median_deg": 17.1,
-         "within_15": 0.389,
+         "median_deg": 14.4,
+         "within_15": 0.508,
          "n": 319488
         }
        }
@@ -387,35 +387,35 @@
        },
        "shape tensor": {
         "within 0.1 mm of the step": {
-         "median_deg": 14.0,
-         "within_15": 0.569,
+         "median_deg": 14.4,
+         "within_15": 0.549,
          "n": 40960
         },
         "0.1-0.5 mm": {
-         "median_deg": 15.3,
-         "within_15": 0.482,
+         "median_deg": 15.7,
+         "within_15": 0.459,
          "n": 163840
         },
         "beyond 0.5 mm": {
-         "median_deg": 15.8,
-         "within_15": 0.447,
+         "median_deg": 16.3,
+         "within_15": 0.412,
          "n": 319488
         }
        },
        "shape tensor, multi (first)": {
         "within 0.1 mm of the step": {
-         "median_deg": 14.0,
-         "within_15": 0.569,
+         "median_deg": 14.4,
+         "within_15": 0.549,
          "n": 40960
         },
         "0.1-0.5 mm": {
-         "median_deg": 15.3,
-         "within_15": 0.482,
+         "median_deg": 15.7,
+         "within_15": 0.459,
          "n": 163840
         },
         "beyond 0.5 mm": {
-         "median_deg": 15.8,
-         "within_15": 0.447,
+         "median_deg": 16.3,
+         "within_15": 0.412,
          "n": 319488
         }
        }
@@ -469,7 +469,7 @@
         },
         "beyond 0.5 mm": {
          "median_deg": 18.1,
-         "within_15": 0.359,
+         "within_15": 0.358,
          "n": 319488
         }
        },
@@ -486,14 +486,14 @@
         },
         "beyond 0.5 mm": {
          "median_deg": 18.1,
-         "within_15": 0.359,
+         "within_15": 0.358,
          "n": 319488
         }
        }
       }
      ],
      "mean": {
-      "n_populations": 1.0,
+      "n_populations": 1.333,
       "structure tensor": {
        "within 0.1 mm of the step": {
         "median_deg": 35.333,
@@ -530,35 +530,35 @@
       },
       "shape tensor": {
        "within 0.1 mm of the step": {
-        "median_deg": 16.8,
-        "within_15": 0.426,
+        "median_deg": 16.567,
+        "within_15": 0.453,
         "n": 40960.0
        },
        "0.1-0.5 mm": {
-        "median_deg": 16.933,
-        "within_15": 0.408,
+        "median_deg": 16.0,
+        "within_15": 0.446,
         "n": 163840.0
        },
        "beyond 0.5 mm": {
-        "median_deg": 17.0,
-        "within_15": 0.398,
+        "median_deg": 16.2,
+        "within_15": 0.432,
         "n": 319488.0
        }
       },
       "shape tensor, multi (first)": {
        "within 0.1 mm of the step": {
-        "median_deg": 16.8,
-        "within_15": 0.426,
+        "median_deg": 16.2,
+        "within_15": 0.465,
         "n": 40960.0
        },
        "0.1-0.5 mm": {
-        "median_deg": 16.933,
-        "within_15": 0.408,
+        "median_deg": 15.767,
+        "within_15": 0.441,
         "n": 163840.0
        },
        "beyond 0.5 mm": {
-        "median_deg": 17.0,
-        "within_15": 0.398,
+        "median_deg": 16.267,
+        "within_15": 0.426,
         "n": 319488.0
        }
       }

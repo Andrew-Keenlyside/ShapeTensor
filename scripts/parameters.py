@@ -77,18 +77,18 @@ def main():
         fig, axs = plt.subplots(2 if two else 1, len(values), figsize=(4.5 * len(values), 9.2 if two else 4.8), dpi=100, squeeze=False)
         for j, val in enumerate(values):
             r, k = runs[(name, val)]; d = next(x for x in rec if x["parameter"] == name and x["value"] == val)
-            top = axs[0, j]; top.imshow(dec_rgb(k["vec"], np.clip(k["weight"] / wref, 0, 1)), origin="lower", interpolation="nearest")
+            top = axs[0, j]; top.imshow(dec_rgb(k["vec"]), origin="lower", interpolation="nearest")
             lab = f"{name} = {val}" + ("  (default)" if val == DEFAULT[name] else "")
             top.set_title(f"{lab}\n{k['N']} population{'s' if k['N'] != 1 else ''}, {d['to_default_deg']}° from the default", fontsize=10)
             if two and name in ("sigma", "rho"):
                 axs[1, j].imshow(dec_rgb(k["st"]), origin="lower", interpolation="nearest"); axs[1, j].set_title(f"excised structure tensor at the same σ, ρ ({d['to_structure_tensor_deg']}° apart)", fontsize=10)
             elif two:
                 if k["vec2"] is not None:
-                    axs[1, j].imshow(dec_rgb(k["vec2"], np.clip(k["w2"] / wref, 0, 1)), origin="lower", interpolation="nearest"); axs[1, j].set_title("second vector, brightness = its activation", fontsize=10)
+                    axs[1, j].imshow(dec_rgb(k["vec2"]), origin="lower", interpolation="nearest"); axs[1, j].set_title("second vector (DEC)", fontsize=10)
                 else:
                     axs[1, j].imshow(np.zeros(k["vec"].shape[1:] + (3,)), origin="lower"); axs[1, j].set_title("no second population", fontsize=10)
         for ax in axs.ravel(): ax.set_xticks([]); ax.set_yticks([])
-        fig.suptitle(f"{name}: the shape tensor's single field (DEC, brightness = total activation, one scale for all panels)", x=0.01, ha="left", fontsize=11)
+        fig.suptitle(f"{name}: the shape tensor's single field (DEC at every voxel)", x=0.01, ha="left", fontsize=11)
         fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(OUT / f"params_{name}.png"); plt.close(fig); print("wrote", f"params_{name}.png", flush=True)
 
 

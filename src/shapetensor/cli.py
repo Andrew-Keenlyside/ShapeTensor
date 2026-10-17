@@ -53,6 +53,7 @@ def main(argv=None):
     r.add_argument("--no-multi", action="store_true"); r.add_argument("--rank", type=int, default=0); r.add_argument("--world", type=int, default=1)
     r.add_argument("--volume-calibration", action="store_true", help="one calibration for the whole volume (default: every chunk on itself, the volume's as fallback)")
     r.add_argument("--min-bins", type=int, default=12, help="orientation bins (of 24) a chunk's teacher must cover to use its own calibration")
+    r.add_argument("--blend", type=int, default=32, help="overlap band (voxels) over which neighbouring chunks' tensors are ramp-blended; 0 = none")
     r.add_argument("--spacing", type=float, nargs=3, default=None, help="voxel size per axis (dz dy dx) for anisotropic data")
 
     b = sub.add_parser("block", help="the pipeline on one block (.npy or a zarr array), exported with its layers")
@@ -89,7 +90,7 @@ def main(argv=None):
     if a.cmd == "run":
         from .pipeline import run_volume
         run_volume(a.src, a.dst, level=a.level, chunk=tuple(a.chunk), nmax=a.nmax, tissue_threshold=a.tissue_threshold, calibration_size=a.calibration_size,
-                   calibration_origin=a.calibration_origin, calibrate_chunks=not a.volume_calibration, min_bins=a.min_bins, multi=not a.no_multi, spacing=a.spacing,
+                   calibration_origin=a.calibration_origin, calibrate_chunks=not a.volume_calibration, min_bins=a.min_bins, blend=a.blend, multi=not a.no_multi, spacing=a.spacing,
                    rank=a.rank, world=a.world, device=a.device, sigma=a.sigma, rho=a.rho, engine=a.engine)
     elif a.cmd == "block":
         import numpy as np, torch
