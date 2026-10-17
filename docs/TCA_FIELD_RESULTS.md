@@ -825,3 +825,28 @@ On the real block (S-21-46 192³, two populations, smooth 3; `transform_real_S21
   stage; a root or a log only rescales them; and the alternative to a larger `smooth` is a feature that is itself
   phase-invariant at the fascicle scale, or the integration over ρ that the layer tensor already does.
 
+
+## 26. The orientation dictionary is (nearly) a degree-2 code — what that fixes about the separation
+
+A least-squares fit of the 160-direction encoder-2 dictionary (32 channels, smooth 3) by the symmetric monomials of
+the direction u, i.e. by the orientation dyad u uᵀ (degree 2, 7 terms with the intercept), then degree 4 (22) and 6
+(50): variance explained, and the median cosine between the fitted and the actual signature.
+
+| dictionary | degree 2 (dyad) | degree 4 | degree 6 |
+|---|---|---|---|
+| phantom, 31 in-plane directions | R² 0.976, cos 0.992 | 0.999, 1.000 | 1.000 |
+| S-21-46, 160 directions (self-calibrated) | R² 0.788, cos 0.919 | 0.925, 0.981 | 0.973, 0.992 |
+
+- On the clean phantom the orientation code is a linear image of the dyad to 98%: the feature vector of an oriented
+  voxel is x ≈ W·vec(d dᵀ) + c, times an amplitude. That is the same orientation content as a structure tensor at
+  the 16-voxel receptive field (five numbers), with a learned amplitude — which is why two populations unmix per
+  voxel (two dyads span the plane), a 50/50 mixture at Δθ is indistinguishable from a single population at the
+  bisector (the sum of two dyads), and a third population is linearly dependent (§23). The degree-4 part (the only
+  per-voxel evidence that could separate three) is 2% of the dictionary here.
+- On the real block the dyad explains 79% and degree 4 another 14%; the centred dictionary's singular values fall
+  as 48 / 26 / 11 / 6 / 3% (the five-dimensional degree-2 space holds 94%). Part of the remainder is the
+  dictionary's own noise on sparsely populated directions.
+- Consequence for a parameter-free form of the stage: the dictionary needs only a 32 × 6 linear map (one least
+  squares fit) instead of 160 kernel-interpolated signatures; the population layers are the non-negative
+  decomposition of each voxel's dyad coefficients onto the window's modes, which has no parameter; and the only
+  scale left is the window (ρ), which the image tensor already carries.
