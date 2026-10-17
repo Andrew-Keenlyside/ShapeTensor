@@ -135,6 +135,22 @@ def main():
             ax.set_xticks([]); ax.set_yticks([])
         fig.suptitle(f"Per-population layers of the shape space ({a.engine}): signature dictionary (label-free) → per-voxel non-negative unmixing onto the modes' signatures → one activation volume per population → that layer's own structure tensor", x=0.01, ha="left", fontsize=11)
         fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(FIGS / f"population_layers_c{cross:.0f}.png"); plt.close(fig)
+        # the DEC overlay test: each layer's direction as colour, its activation as opacity, over the intensity image
+        fig2, ax2 = plt.subplots(1, 4, figsize=(24, 6.3), dpi=100)
+        ax2[0].imshow(img, cmap="gray", origin="lower"); ax2[0].set_title(f"{cross:.0f}° crossing: intensity")
+        comb = np.zeros(img.shape + (3,)); wsum = np.zeros(img.shape)
+        for k, r in enumerate(order):
+            act = A[k][row].cpu().numpy(); wgt = np.clip(act / max(np.percentile(act, 99), 1e-6), 0, 1) ** 0.7
+            dl, _ = layer_tensor_direction(A[k], SIGMA, a.rho, TR); dd = dl[(slice(None),) + row].cpu().numpy()
+            rgbk = np.clip(np.stack([np.abs(dd[2]), np.abs(dd[1]), np.abs(dd[0])], -1), 0, 1)
+            ax2[1 + k].imshow(img, cmap="gray", origin="lower"); ax2[1 + k].imshow(np.concatenate([rgbk, wgt[..., None]], -1), origin="lower", interpolation="nearest")
+            ax2[1 + k].set_title(f"population {k + 1}: DEC of its layer's direction, opacity = activation", fontsize=10)
+            comb += rgbk * wgt[..., None]; wsum += wgt
+        ax2[3].imshow(img, cmap="gray", origin="lower"); ax2[3].imshow(np.concatenate([np.clip(comb / np.maximum(wsum, 1e-6)[..., None], 0, 1), np.clip(wsum, 0, 1)[..., None]], -1), origin="lower", interpolation="nearest")
+        ax2[3].set_title("both: activation-weighted DEC, opacity = total activation", fontsize=10)
+        for ax in ax2: ax.set_xticks([]); ax.set_yticks([])
+        fig2.suptitle("DEC orientation per population, weighted by activation, over the image (R = |x|, G = |y|, B = |z|; fibres lie in the z–x plane: x = red, z = blue)", x=0.01, ha="left", fontsize=11)
+        fig2.tight_layout(rect=[0, 0, 1, 0.93]); fig2.savefig(FIGS / f"population_layers_dec_c{cross:.0f}.png"); plt.close(fig2)
         out[f"c{cross:.0f}"] = res
         print(f"[{time.time() - t0:4.0f}s] {cross:.0f}°: {res}", flush=True)
         del F, A, R, S; torch.cuda.empty_cache()

@@ -71,7 +71,7 @@ def teacher(v):
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--model", default="mlp", choices=["ridge", "mlp", "dist"]); ap.add_argument("--kappa", type=float, default=25.0)
-    ap.add_argument("--mass-floor", type=float, default=0.15); ap.add_argument("--field-smooth", type=int, default=5); ap.add_argument("--conf-q", type=float, default=0.5); args = ap.parse_args()
+    ap.add_argument("--mass-floor", type=float, default=0.15); ap.add_argument("--field-smooth", type=int, default=5); ap.add_argument("--conf-q", type=float, default=0.5); ap.add_argument("--smooth", type=int, default=3); args = ap.parse_args()
     t0 = time.time()
     tex = json.load(open(f"{DATA_ROOT}/results/tex_calibrated.json"))["texture"]; tex["widths"] = [tuple(w) for w in tex["widths"]]
     tex = make.TextureParams(**{**tex, "dispersion_deg": 8.0, "pitch_deg": 4.0})
@@ -88,7 +88,7 @@ def main():
             F = cached_features(eng, v); d, gap = teacher(v)
             w = torch.zeros_like(gap); w[inner] = (gap[inner] > torch.quantile(gap[inner], 0.7)).float() * fib[inner].float()
             blocks.append((F, d, w))
-        ro = ({"mlp": OrientationReadoutMLP(smooth=3), "dist": OrientationReadoutDist(smooth=3)}.get(args.model) or OrientationReadout(smooth=3, ridge=1.0)).fit(blocks, n_sample=240_000)
+        ro = ({"mlp": OrientationReadoutMLP(smooth=args.smooth), "dist": OrientationReadoutDist(smooth=args.smooth)}.get(args.model) or OrientationReadout(smooth=args.smooth, ridge=1.0)).fit(blocks, n_sample=240_000)
         del blocks; torch.cuda.empty_cache()
         r = {"fit_r2": round(ro.fit_r2, 3)}
         # --- test on seed B single fibres: per-voxel error on fibre voxels, teacher error for reference
@@ -180,9 +180,9 @@ def main():
                 ax.set_title(f"windows: N=2 at {r[cname]['found2_share']:.0%}, both within 15°: {r[cname]['both_within_15_share']:.0%}", fontsize=10); ax.set_xlabel("per-voxel orientation (deg)"); ax.set_yticks([])
             del F, G; torch.cuda.empty_cache()
         res[sname] = r
-        json.dump({"model": args.model, "kappa_deg": args.kappa, "mass_floor": args.mass_floor, "field_smooth": args.field_smooth, "conf_q": args.conf_q, **res}, open(f"{DATA_ROOT}/results/orientation_readout_{args.model}.json", "w"), indent=1)
+        json.dump({"model": args.model, "kappa_deg": args.kappa, "mass_floor": args.mass_floor, "field_smooth": args.field_smooth, "conf_q": args.conf_q, **res}, open(f"{DATA_ROOT}/results/orientation_readout_{args.model}_s{args.smooth}.json", "w"), indent=1)
     fig.suptitle("Stage 2 by a self-calibrated orientation readout of the shape space (teacher: the excised tensor on confident single-fibre voxels; no labels)", x=0.01, ha="left", fontsize=11)
-    fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(FIGS / f"orientation_readout_crossing_{args.model}.png"); plt.close(fig)
+    fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(FIGS / f"orientation_readout_crossing_{args.model}_s{args.smooth}.png"); plt.close(fig)
     print("ORIENTATION READOUT DONE", flush=True)
 
 
