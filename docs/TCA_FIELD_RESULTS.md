@@ -720,3 +720,29 @@ The 3-population field is exported (`fields/phantom_3pop_population_field.zarr`:
 builder, kept as a later step.
 
 ![N populations](../img/n_populations.png)
+
+## 24. What sets the activation's resolution: the feature average (`--smooth` 1 / 3 / 5; seed 0, ρ 10)
+
+The activation image is read voxel by voxel from the encoder-2 features (no spatial coupling in the unmixing), so
+its resolution is the features' — a receptive field of **16 voxels** (three 3³ convolutions, a 2× pool, two more
+3³ convolutions at stride 2; 0.32 mm), sampled every 2 voxels and upsampled — plus the `smooth`³ box average the
+read-out applies before standardising. The sweep over that average:
+
+| smooth | single fibres per voxel (median; within 15°) | 90° crossing: windows both ≤ 15° · pair error | 60° | 45° | layers at 60°: own-tensor error, layer 1 / layer 2 | at 90° | at 45° | residual |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 11.9°; 57% | 78% · 4.4° | 14% · 23° | 10% | 22.3° / 6.3° | 5.7° / 8.5° | 9.9° / 15.0° | 0.76–0.78 |
+| 3 | 10.0°; 66% | 70% · 5.2° | 11% · 23° | 15% | 19.9° / 6.4° | 5.9° / 9.3° | 10.2° / 13.2° | 0.72–0.75 |
+| 5 | 8.2°; 75% | 73% · 5.5° | 14% · 22° | 7% | 11.7° / 17.6° | 6.7° / 14.6° | 10.8° / 15.1° | 0.67–0.72 |
+
+- The average helps the per-voxel readout on single fibres (57 → 75% within 15°) and does nothing for the crossing
+  separation (the 60° pair stays at 22–23°, 11–14% of windows): the 60° limit is the feature's own mixing over its
+  16-voxel receptive field, not per-voxel noise.
+- On the layers it is a trade: a larger average rescues the weaker layer at 60° (22 → 12°) and degrades the
+  stronger one (6 → 18°); 3 is the balance, and 90° / 45° are insensitive (6–15°).
+- A sharper activation therefore needs a sharper *feature* — encoder block 1 (receptive field 7 voxels, full
+  resolution) stacked with block 2 — not a smaller average.
+
+The DEC-by-activation overlay (each layer's direction as colour, its activation as opacity, over the image;
+`population_layers_dec_c60.png`, `fig_dec_overlay.py`) shows the two layers of the 60° crossing in two colours
+where they separate, and on the real block shows at a glance that one of the two layers is a coherent direction
+(one colour) and the other is not (a patchwork) — a layer-coherence check without a number.
