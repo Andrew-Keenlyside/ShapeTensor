@@ -30,14 +30,14 @@ against the truth in its title.
   because the activation weighting discounts the voxels between fibres.
 - **At the crossing** the structure tensor reports the bisector (24° from either population, 10% of voxels within
   15°). The pipeline finds two populations on every seed. Its single field is also near the bisector (23°), as a
-  merged tensor must be, but the **first vector of the multi-vector field** is 10.5° from the nearest population
-  with 58% of voxels within 15°: at each voxel the stronger population's own tensor. The pair is not resolved per
-  voxel (both vectors within 15° at 0% of voxels): with 20° of dispersion within each population the two
+  merged tensor must be, but the **first vector of the multi-vector field** is 11.6° from the nearest population
+  with 55% of voxels within 15°: at each voxel the stronger population's own tensor. The pair is not resolved per
+  voxel (both vectors within 15° at 1% of voxels): with 20° of dispersion within each population the two
   activation layers overlap, and the second vector is indicative only.
 - **At the interface** the plain structure tensor is dragged 35° into the step within 0.1 mm of it; the excision
   removes this (6°), and the pipeline inherits the excision. The shape tensor is nonetheless the noisier field here
-  (17° against 6°, in every band): three bands at different angles to the step are read as one population, and
-  one population's activation weighting cannot sharpen three directions. Where a block holds one coherent
+  (17° against 6°, in every band): three bands at different angles to the step are read as one or two
+  populations, and their activation weighting cannot sharpen three directions. Where a block holds one coherent
   direction the pipeline matches the excised tensor; where it holds several, the population count per region is
   the lever, not the weights (`notes/results_log.md` §27).
 

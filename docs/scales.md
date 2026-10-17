@@ -26,7 +26,7 @@ centred on the same thalamic site. The parameters are in voxels, so the integrat
   of the excised tensor where the tensor is confident (6° to 12° over the block). At 50 µm the activation layers
   follow the fascicles that are visible in the image, one layer per direction of fibre bundle.
 - **At 200 µm** the receptive field is 3 mm and the three "populations" are tissue classes: a band of white matter,
-  the oriented edge of the ventricle, the rest. The field still agrees with the tensor (10°, 6° where confident),
+  the oriented edge of the ventricle, the rest. The field still agrees with the tensor (14°, 7° where confident),
   because both are now reading anatomy, not fibres.
 - **At 2.2 µm and 10 µm** the voxels resolve cells, vessels and single axons. The features are read at a receptive
   field of 35 µm and 160 µm, the readers calibrate on whatever is oriented at that scale (a vessel is one of the
@@ -47,8 +47,8 @@ Two things the figure settles about calibration.
   null rises until a third of the tissue is above it. The field is then the excised tensor weighted by a degenerate
   activation (2.5° from the tensor, weights that mean little).
 - **A calibration does not travel.** The third row applies the deep-brain block's calibration to the other three
-  regions: the cortex block goes from 13° to 33° from the tensor with 44% of its tissue above the null, the
-  brainstem from 2.5° to 15° with 14% above, the cerebellum keeps its 23°. The readers are specific to the local
+  regions: the cortex block goes from 13° to 32° from the tensor with 45% of its tissue above the null, the
+  brainstem from 2.5° to 18° with 9% above, the cerebellum stays at 19° to 25°. The readers are specific to the local
   texture (its feature statistics, its signatures); a calibration from elsewhere in the same brain reads a region's
   populations poorly.
 

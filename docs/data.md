@@ -16,8 +16,8 @@ The same columns as every figure in the package: the image, the excised structur
 the populations found in it, their activation layers, the single field and the first vector of the multi-vector
 field. The block's own structure tensor is the pipeline's teacher: calibrated on the 384³ around the block, the
 readout covers 18 of 24 orientation bins and two populations are found. The single field and the excised
-structure tensor agree to 7° where the tensor is confident (the top quarter by gap; 93% of those voxels within
-15°) and to 12° over the whole block, which is low-coherence tissue (median gap 0.2) — the activation weights are
+structure tensor agree to 7° where the tensor is confident (the top quarter by gap; 92% of those voxels within
+15°) and to 13° over the whole block, which is low-coherence tissue (median gap 0.2) — the activation weights are
 what tells a consumer which voxels to trust. The population count on this block is sensitive to the detection
 settings ([parameters](parameters.md)): the two readings of the tissue differ by 8° at the median.
 
