@@ -65,3 +65,13 @@ every face, chunks without tissue skipped, and the excised structure tensor over
 field is drawn as plain DEC.
 
 ![whole brain](img/wholebrain_100um.png)
+
+121 chunks of 256³ held tissue, 95 were air and skipped; 114 chunks used their own calibration and 7 the volume's
+(a teacher with too few orientations, or too little oriented tissue to fit on). No chunk failed, and the field has
+no seams. On the three mid planes the single field is 8° from the excised tensor over the tissue and 4° where the
+tensor is confident. The shape pass took 2 hours at a median of 62 s per chunk (the per-chunk calibration, the
+overlap and the accumulators on top of the 26 s of stages 2–4), the blended write 6 minutes and the structure
+tensor 5 minutes. The two fields agree on the large structure, the corpus callosum, the internal capsule, the
+cerebellar peduncles; the shape tensor is the finer-grained of the two, following the gyral white matter and the
+cortex at the scale of its receptive field (1.6 mm here) where the structure tensor's 1 mm window has already
+averaged it.

@@ -125,3 +125,9 @@ Profiled on the HiP-CT block (192³ stages 2–4; 384³ calibration), synchronis
 - The multi-vector field stays per chunk (no blending of population sets); documented.
 - Display: every direction field as plain DEC at every voxel, the shape tensor's exactly as the structure tensor's;
   the activation shown only as its own layers (the renderings page keeps the alternatives).
+- **Whole brain at 100 µm, blended and per-chunk calibrated** (`/hdd/andrew/shapetensor_runs/S-21-46_100um_chunkcal`):
+  121 tissue chunks, 114 own-calibrated, 7 on the volume calibration (4 of them because their own fit failed on
+  too little oriented tissue — now caught and logged), 0 failed; median 62 s per chunk (26 s of stages 2–4 on the
+  408³ block + calibration + accumulator I/O), 2 h 3 min for the shape pass, 6 min for the blended write, 4.5 min
+  for the structure tensor. Agreement with the excised tensor on the mid planes 7.9 / 8.5 / 8.2° (4.3 / 4.5 / 3.5°
+  where confident). No seams visible. The single-calibration run (9.4 + 7.8 GB) deleted.
