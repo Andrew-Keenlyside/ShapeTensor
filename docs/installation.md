@@ -18,7 +18,9 @@ huggingface_hub`. The weights (`neeldey/anatomix`) are cached under `HF_HOME`.
 ## Memory
 
 The feature engine runs the network on tiles of 256³ with 64 voxels of context; a pass needs about 10 GB at the
-encoder layer the pipeline reads. The pipeline on a 192³ block peaks at about 10 GB, on 256³ at about 22 GB.
+encoder layer the pipeline reads. The pipeline on a 192³ block peaks at about 10 GB, on 256³ at about 22 GB. On a
+24 GB card use `--chunk 128 128 128 --calibration-size 192`; `shapetensor bench` reports the times and the peak
+memory on your GPU. There is no CPU fallback.
 
 ## Container
 
@@ -37,4 +39,8 @@ Phantoms and results of the validation go under `SHAPETENSOR_DATA` (default `~/s
 
 ```bash
 pytest tests          # the structure tensor against scipy; the pipeline's pieces; the whole pipeline on a phantom (GPU)
+shapetensor demo      # the install check: a crossing phantom through the whole pipeline
 ```
+
+Seeds are fixed, but the readout's training steps on the GPU are not bit-reproducible, so a borderline population
+decision can differ between two runs on the same block.

@@ -22,7 +22,7 @@ import torch.nn.functional as Fn
 from . import st
 from .features import make_engine
 from .merge import multi_field, single_field
-from .separate import OrientationReadout, SignatureDictionary, activation_null, hemisphere, modes_from_density, population_masks, unmix
+from .separate import (OrientationReadout, SignatureDictionary, activation_null, direction_gains, gain_at, hemisphere, modes_from_density, population_masks, unmix)
 from .tensors import population_tensor
 
 
@@ -78,6 +78,8 @@ class Calibration:
     readout: OrientationReadout
     tau: float
     margin: int = 24
+    density_gain: torch.Tensor = None
+    activation_gain: torch.Tensor = None
     orientation_bins_occupied: int = 0
     readout_overlap: float = 0.0
     _eng: object = field(default=None, repr=False)
@@ -113,7 +115,8 @@ def calibrate(volumes, tissue=None, *, engine: str = "anatomix_enc2", engine_kwa
         blocks.append((F, d, w)); bg.append((F, wb))
     cal.dictionary.fit(blocks, n_sample, background=bg)
     cal.readout.fit(blocks, n_sample)
-    cal.tau = activation_null(cal.dictionary, blocks, smooth=smooth)
+    cal.density_gain, cal.activation_gain = direction_gains(cal.dictionary, cal.readout, blocks)
+    cal.tau = activation_null(cal.dictionary, blocks, smooth=smooth, activation_gain=cal.activation_gain)
     cal.orientation_bins_occupied, cal.readout_overlap = bins, cal.readout.fit_overlap
     return cal
 
@@ -126,14 +129,71 @@ def _dominant_axis(d: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     return V[:, -1]
 
 
-def apply(cal: Calibration, volume, tissue=None, *, nmax: int = 3, min_sep_deg: float = 25.0, min_mask_share: float = 0.05, features=None,
-          spacing=None, timings: dict | None = None, device: str = "cuda") -> dict:
+def _candidates(cal: Calibration, F: torch.Tensor, reg: torch.Tensor, n: int, min_sep_deg: float):
+    """Candidate populations: the peaks of the block's orientation density (gain-normalised), at most ``n`` of
+    them, ``min_sep_deg`` apart, each owning a tenth of the density."""
+    gain = cal.density_gain if cal.density_gain is not None else 1.0
+    dens = cal.readout.density(F, reg) / gain
+    m, h, k = modes_from_density(dens, cal.readout.grid, rel=0.3, min_sep_deg=min_sep_deg, nmax=n, mass_floor=0.1)
+    return m[:k]
+
+
+def _normalised(cal, A, modes):
+    """Activations divided by the gain of their mode's direction (every direction counts alike)."""
+    if cal.activation_gain is None:
+        return A
+    return A / gain_at(cal.dictionary, cal.activation_gain, modes)[:, None, None, None]
+
+
+def _axes(cal, v, F, reg, modes, w_exc, spacing):
+    """Each mode's layer axis under a joint unmixing of ``modes``: the activation- and gap-weighted direction of its
+    population tensor (no activation floor: the pure activation decides)."""
+    A, _ = unmix(F, cal.dictionary, modes); A = _normalised(cal, A, modes); out = []
+    for k in range(modes.shape[0]):
+        _, dk, gk = population_tensor(v, A[k], cal.sigma, cal.rho, cal.truncate, w_exc, 0.0, spacing)
+        out.append(_dominant_axis(dk, (A[k].clamp_min(0) * gk) * reg))
+    return out
+
+
+def _confirm(cal: Calibration, v, F, reg, cand, w_exc, nmax: int, min_sep_deg: float, iterations: int, spacing):
+    """The populations among the candidates, confirmed by their own layers. A candidate's population tensor — the
+    image's gradients weighted by its activation — points where its fibres lie. First every candidate is unmixed
+    *alone* against the background (well conditioned whatever their number, and fair to every orientation), and
+    the distinct axes (``min_sep_deg`` apart) are kept; then the kept axes are unmixed *together* and the distinct
+    axes kept again (``iterations`` passes): under a joint unmixing the shoulders of one population lose their
+    shared voxels to it and collapse onto its axis, while a real second population keeps its own. The joint pass
+    stays within the rank of the orientation code (at most ``nmax + 1`` signatures)."""
+    cos_sep = math.cos(math.radians(min_sep_deg))
+
+    def distinct(axes, cap):
+        keep = []
+        for k in range(len(axes)):
+            if all(float((axes[k] @ axes[j]).abs()) < cos_sep for j in keep):
+                keep.append(k)
+        return torch.stack([axes[k] for k in keep])[:cap]
+
+    if cand.shape[0] <= 1:
+        return cand
+    axes = []
+    for k in range(cand.shape[0]):
+        axes += _axes(cal, v, F, reg, cand[k:k + 1], w_exc, spacing)
+    modes = distinct(axes, nmax + 1)
+    for _ in range(iterations):
+        if modes.shape[0] <= 1:
+            break
+        modes = distinct(_axes(cal, v, F, reg, modes, w_exc, spacing), nmax)
+    return modes[:nmax]
+
+
+def apply(cal: Calibration, volume, tissue=None, *, nmax: int = 3, min_sep_deg: float = 25.0, min_mask_share: float = 0.05, iterations: int = 2,
+          features=None, spacing=None, timings: dict | None = None, device: str = "cuda") -> dict:
     """Stages 2–4 on ``volume (Z, Y, X)`` with a calibration. Returns a dict (vectors in (z, y, x), no masks applied):
 
     ``modes (N, 3)`` the populations' directions; ``activation (N, Z, Y, X)`` their layers; ``dirs (N, 3, Z, Y, X)`` and
     ``gap (N, Z, Y, X)`` each layer's own direction and its uniqueness; ``vec (3, Z, Y, X)``, ``vec_gap`` and ``weight``
     the single field (the merged population tensors, the total activation as weight); ``vecs (N, 3, Z, Y, X)`` and
     ``weights`` the multi-vector field (every population everywhere, ordered by activation); ``masks (N, Z, Y, X)``
+    (``iterations``: joint refinements of the populations from their own layers; ``nmax``: at most this many);
     where each population's smoothed activation exceeds the null ``tau``, ``tissue_mask`` where the smoothed *total*
     activation does, ``strongest`` (int8, 1 + index inside the tissue mask); ``residual``, ``tau``, ``n_candidates``.
     ``timings``: a dict that receives the seconds per stage."""
@@ -148,28 +208,15 @@ def apply(cal: Calibration, volume, tissue=None, *, nmax: int = 3, min_sep_deg: 
     F = cal.features(v) if features is None else features; mark("features")
     reg = torch.zeros_like(tis); inner = tuple(slice(cal.margin, max(cal.margin + 1, n - cal.margin)) for n in v.shape); reg[inner] = tis[inner]
     reg = reg if bool(reg.any()) else tis
-    dens = cal.readout.density(F, reg)
-    cand, h, n = modes_from_density(dens, cal.readout.grid, rel=0.3, min_sep_deg=min_sep_deg, nmax=nmax + 1, mass_floor=0.1)
     w_exc = st.excision_weights(v, mask=tis if tissue is not None else None, spacing=st.spacing_ratio(spacing))
-    # the candidates are confirmed by their own layers: a candidate's population tensor points where its fibres
-    # lie; the shoulders of one population all point at it, so the populations are the distinct layer axes
-    cand = cand[:n]
-    if n > 1:
-        A, _ = unmix(F, cal.dictionary, cand)
-        axes = []
-        for k in range(n):
-            _, dk, gk = population_tensor(v, A[k], cal.sigma, cal.rho, cal.truncate, w_exc, 0.0, spacing)            # no floor here: the pure activation decides
-            axes.append(_dominant_axis(dk, (A[k].clamp_min(0) * gk) * reg))
-        cos_sep = math.cos(math.radians(min_sep_deg)); keep = []
-        for k in range(n):
-            if all(float((axes[k] @ axes[j]).abs()) < cos_sep for j in keep):
-                keep.append(k)
-        modes = torch.stack([axes[k] for k in keep])[:nmax]
-    else:
-        modes = cand
+    # candidates from the block's orientation density, confirmed by their own layers: a
+    # candidate's population tensor points where its fibres lie; the shoulders of one population all point at it,
+    # so the populations are the distinct layer axes (no activation floor here: the pure activation decides)
+    cand = _candidates(cal, F, reg, nmax + 3, min_sep_deg); n = cand.shape[0]
+    modes = _confirm(cal, v, F, reg, cand, w_exc, nmax, min_sep_deg, iterations, spacing)
     keep = list(range(modes.shape[0]))
     while keep:                                                                         # a population must own a mask
-        A, R = unmix(F, cal.dictionary, modes[keep])
+        A, R = unmix(F, cal.dictionary, modes[keep]); A = _normalised(cal, A, modes[keep])
         masks, _, _ = population_masks(A, cal.tau, cal.smooth)
         share = torch.stack([(m & tis).float().sum() / tis.float().sum().clamp_min(1) for m in masks])
         worst = int(share.argmin())
@@ -211,7 +258,7 @@ def population_field(volume, tissue=None, *, nmax: int = 3, timings: dict | None
 # ---------------------------------------------------------------------------------------------------------------
 
 def run_volume(src: str, dst: str, *, level: str | None = None, chunk=(192, 192, 192), nmax: int = 3, tissue_threshold: float | None = None,
-               calibration_size: int = 256, calibration_origin=None, multi: bool = True, rank: int = 0, world: int = 1,
+               calibration_size: int = 256, calibration_origin=None, multi: bool = True, spacing=None, rank: int = 0, world: int = 1,
                device: str = "cuda", log=print, **calibration) -> str:
     """The pipeline over a whole zarr volume, chunk by chunk with halos (the filters' reach plus the engine's
     margin), one process per GPU (``rank`` / ``world`` split the chunk list). Calibrated once on a
@@ -237,7 +284,7 @@ def run_volume(src: str, dst: str, *, level: str | None = None, chunk=(192, 192,
     n = min(calibration_size, Z, Y, X)
     o = tuple((s - n) // 2 for s in (Z, Y, X)) if calibration_origin is None else tuple(calibration_origin)
     vc = torch.as_tensor(np.asarray(a[o[0]:o[0] + n, o[1]:o[1] + n, o[2]:o[2] + n]).astype(np.float32), device=device)
-    cal = calibrate(vc, None if tissue_threshold is None else vc >= tissue_threshold, device=device, **calibration); del vc
+    cal = calibrate(vc, None if tissue_threshold is None else vc >= tissue_threshold, spacing=spacing, device=device, **calibration); del vc
     g.attrs.update({"sigma": sigma, "rho": rho, "nmax": nmax, "halo": halo, "tau": cal.tau, "engine": cal.engine, "calibration_origin": list(o),
                     "calibration_size": n, "layout": "vec in (x, y, z); vecs ordered by activation, zero where absent"})
     log(f"[{rank}/{world}] calibrated on {n}^3 at {o}: orientation bins {cal.orientation_bins_occupied}/24, readout overlap {cal.readout_overlap:.2f}, tau {cal.tau:.3f}")
@@ -249,7 +296,7 @@ def run_volume(src: str, dst: str, *, level: str | None = None, chunk=(192, 192,
         lo = (max(0, z0 - halo), max(0, y0 - halo), max(0, x0 - halo)); hi = (min(Z, z1 + halo), min(Y, y1 + halo), min(X, x1 + halo))
         blk = torch.as_tensor(np.asarray(a[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]).astype(np.float32), device=device)
         core = (slice(z0 - lo[0], z1 - lo[0]), slice(y0 - lo[1], y1 - lo[1]), slice(x0 - lo[2], x1 - lo[2])); out_sl = (slice(z0, z1), slice(y0, y1), slice(x0, x1))
-        out = apply(cal, blk, None if tissue_threshold is None else blk >= tissue_threshold, nmax=nmax, device=device)
+        out = apply(cal, blk, None if tissue_threshold is None else blk >= tissue_threshold, nmax=nmax, spacing=spacing, device=device)
         g["vec"][(slice(None),) + out_sl] = out["vec"].flip(0)[(slice(None),) + core].half().cpu().numpy()
         g["gap"][out_sl] = out["vec_gap"][core].half().cpu().numpy(); g["weight"][out_sl] = out["weight"][core].half().cpu().numpy()
         if multi:

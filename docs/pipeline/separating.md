@@ -24,13 +24,19 @@ blocks (phantoms at several orientations), and both are applied unchanged to any
 
 ## Which populations: candidates confirmed by their layers
 
-The density's peaks over-count: a single population with dispersed fibres has shoulders that a peak finder reads
-as further populations. The pipeline therefore takes up to four candidates and lets stage 3 judge them: each
-candidate is unmixed into its activation layer (below), and the layer's own population tensor — the image's
-gradients weighted by that activation — gives the direction its fibres actually have. The shoulders of one
-population all point at that population; a real second population points elsewhere. The populations are the
-*distinct* layer axes (25° apart), each refined to its layer's direction, and a population must also own at least
-5% of the tissue above the activation null.
+The readers do not respond equally to every direction (the network's filters are not isotropic), so both are
+gain-normalised per direction against the teacher on the calibration block: the density by the ratio of what the
+readout reports to the teacher's own orientation histogram, the activations by what a sample reaches on its own
+direction's signature. Every direction then counts alike.
+
+The density's peaks still over-count: a single population with dispersed fibres has shoulders that a peak finder
+reads as further populations. The pipeline therefore takes up to four candidates and lets stage 3 judge them:
+the candidates are unmixed together into their activation layers (below), and each layer's own population
+tensor — the image's gradients weighted by that activation — gives the direction its fibres actually have. The
+shoulders of one population all point at that population; a real second population points elsewhere. The
+populations are the *distinct* layer axes (25° apart), refined once from their own layers, and a population must
+also own at least 5% of the tissue above the activation null. The joint unmixing is kept to at most four
+signatures, within the rank of the orientation code.
 
 ## Where each population is: the activation layers
 

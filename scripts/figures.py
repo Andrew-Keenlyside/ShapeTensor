@@ -104,18 +104,19 @@ def fig_tracks(v=None, t=None, d_st=None, out=None):
     def sites(d):
         return d[:, b // 2::b, b // 2::b, b // 2::b].contiguous()
     mask = pool(t[None].float())[0] > 0.5
-    fields = {"excised structure tensor": sites(d_st)[None], "shape tensor, single": sites(out["vec"])[None], "shape tensor, multi": torch.stack([sites(out["vecs"][k]) for k in range(out["vecs"].shape[0])])}
+    fields = {"excised structure tensor": (sites(d_st)[None], None), "shape tensor, single": (sites(out["vec"])[None], None),
+              "shape tensor, multi": (torch.stack([sites(out["vecs"][k]) for k in range(out["vecs"].shape[0])]), torch.stack([sites(out["weights"][k][None])[0] for k in range(out["weights"].shape[0])]))}
     gen = torch.Generator(device=dev).manual_seed(0)
     idx = mask.nonzero(); seeds = idx[torch.randperm(len(idx), generator=gen, device=dev)[:1500]].float()
     fig, axs = plt.subplots(1, 3, figsize=(16, 5.6), dpi=100)
     nz, ny, nx = mask.shape; im = v[:, 96].cpu().numpy()
-    for ax, (name, D) in zip(axs, fields.items()):
-        r = track(D, mask, seeds, step=0.5, max_angle_deg=30.0, max_steps=300)
+    for ax, (name, (D, W)) in zip(axs, fields.items()):
+        r = track(D, mask, seeds, step=0.5, max_angle_deg=30.0, max_steps=300, weights=W, min_weight=out["tau"] if W is not None else 0.0)
         P = r["points"].cpu().numpy()
         ax.imshow(im, cmap="gray", origin="lower", extent=(0, nx * b, 0, nz * b), alpha=0.6)
         streamline_segments(ax, P, lambda q: abs(q[:, 1].mean() - ny / 2) < 4, b, lw=0.8)
         L = r["length"].float(); ax.set_title(f"{name}: streamlines (median length {float(L.median()) * b:.0f} voxels)", fontsize=10); ax.set_xticks([]); ax.set_yticks([]); ax.set_xlim(0, nx * b); ax.set_ylim(0, nz * b)
-    fig.suptitle("Deterministic streamlines from the same seeds on each field (a slab around the mid plane; colour = segment direction)", x=0.01, ha="left", fontsize=11)
+    fig.suptitle("Deterministic streamlines from the same seeds on each field (a slab around the mid plane; colour = segment direction; the multi-vector field followed only where a population's activation exceeds the null)", x=0.01, ha="left", fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.93]); fig.savefig(OUT / "real_S2146_tracks.png"); plt.close(fig); print("wrote real_S2146_tracks.png")
 
 

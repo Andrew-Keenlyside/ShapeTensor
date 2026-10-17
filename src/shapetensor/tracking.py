@@ -19,8 +19,10 @@ REASONS = ("running", "mask", "angle", "absent", "max_steps")
 
 
 def track(dirs: torch.Tensor, mask: torch.Tensor, seeds: torch.Tensor, *, step: float = 0.5, max_angle_deg: float = 30.0,
-          max_steps: int = 1000, device: str | None = None) -> dict:
-    """``dirs (K, 3, nz, ny, nx)``, ``mask (nz, ny, nx)`` bool, ``seeds (N, 3)`` site coordinates (z, y, x).
+          max_steps: int = 1000, weights: torch.Tensor | None = None, min_weight: float = 0.0, device: str | None = None) -> dict:
+    """``dirs (K, 3, nz, ny, nx)``, ``mask (nz, ny, nx)`` bool, ``seeds (N, 3)`` site coordinates (z, y, x). With
+    ``weights (K, nz, ny, nx)`` (the activations of a no-mask multi-vector field) a vector is followed only where
+    its weight is at least ``min_weight`` (the activation null ``tau`` is the natural choice).
 
     Returns ``points (N, 2, max_steps + 1, 3)`` (NaN after termination; index 1 is the backward half), ``n_steps
     (N, 2)``, ``reason (N, 2)`` (index into :data:`REASONS`), ``used_secondary (N, 2)`` (steps taken on a fixel other
@@ -34,6 +36,8 @@ def track(dirs: torch.Tensor, mask: torch.Tensor, seeds: torch.Tensor, *, step: 
     shape = torch.tensor([nz, ny, nx], device=dev)
     Df = D.permute(2, 3, 4, 0, 1).reshape(-1, K, 3)                       # (S, K, 3) per site
     valid = (Df.norm(dim=-1) > 0.5)                                        # (S, K)
+    if weights is not None:
+        valid &= weights.to(dev).float().permute(1, 2, 3, 0).reshape(-1, K) >= min_weight
     Mf = M.reshape(-1)
 
     def at(p):

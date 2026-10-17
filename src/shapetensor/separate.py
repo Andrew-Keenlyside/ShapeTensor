@@ -234,8 +234,41 @@ def unmix(F: torch.Tensor, dictionary: SignatureDictionary, modes: torch.Tensor,
     return A_out, R_out
 
 
+def direction_gains(dictionary: SignatureDictionary, readout: OrientationReadout, blocks, per: int = 60_000, seed: int = 0, floor: float = 0.2):
+    """The response of the readers per direction, measured on the calibration samples against the teacher, so
+    that every direction counts alike: ``density_gain (n_dirs,)`` = the readout's density of the samples over the
+    teacher's own kernel-smoothed histogram, and ``activation_gain (n_dirs,)`` = the mean activation a sample reaches
+    on its own direction's signature. Both are kernel-smoothed over the grid, normalised to a mean of 1 and
+    floored at ``floor``."""
+    g = torch.Generator().manual_seed(seed)
+    u = dictionary.grid; Xs, Ds, Ps = [], [], []
+    for F, d, w in blocks:
+        f = dictionary.prep(F)
+        idx = sample_idx(w.reshape(-1).float().cpu(), per, g).to(F.device)
+        Xs.append(dictionary.standardise(f.reshape(f.shape[0], -1)[:, idx].T)); Ds.append(d.reshape(3, -1)[:, idx].T)
+        fr = readout.prep(F)
+        with torch.no_grad():
+            Ps.append(torch.softmax(readout.net((fr.reshape(fr.shape[0], -1)[:, idx].T - readout.mean) / readout.std), 1))
+    Xn, D, P = torch.cat(Xs), torch.cat(Ds), torch.cat(Ps)
+    K = dictionary._kernel((D @ u.T) ** 2)                                                 # (n, n_dirs): each sample's kernel on the grid
+    hist = K.sum(0); dens = P.sum(0)
+    density_gain = (dens / hist.clamp_min(1e-6))
+    # the activation on the own signature: samples grouped by nearest grid direction
+    j = ((D @ u.T) ** 2).argmax(1); act = torch.zeros(len(u), device=u.device); cnt = torch.zeros(len(u), device=u.device)
+    for jj in j.unique():
+        sel = j == jj
+        S = torch.stack([dictionary.D[jj], dictionary.background], 1) if dictionary.background is not None else dictionary.D[jj][:, None]
+        a = nnls_batched(S, Xn[sel])[:, 0]
+        act[jj] = a.mean(); cnt[jj] = sel.sum()
+    Kg = dictionary._kernel((u @ u.T) ** 2)                                                # smoothing over the grid
+    def smooth(x, wgt):
+        y = (Kg * (x * wgt)[None]).sum(1) / (Kg * wgt[None]).sum(1).clamp_min(1e-6)
+        return (y / y.mean().clamp_min(1e-9)).clamp_min(floor)
+    return smooth(density_gain, hist), smooth(act, cnt)
+
+
 def activation_null(dictionary: SignatureDictionary, blocks, offsets_deg=(45.0, 60.0, 75.0), q: float = 0.8, per: int = 60_000,
-                    smooth: int = 3, seed: int = 0) -> float:
+                    smooth: int = 3, seed: int = 0, activation_gain: torch.Tensor | None = None) -> float:
     """The activation a *wrong* population's signature reaches on single-population voxels: each calibration block's
     confident voxels are unmixed onto their own direction's signature, signatures rotated by ``offsets_deg`` in the
     fibre plane, and the background; the ``q`` quantile of the rotated activations (after a ``smooth``³ average) is
@@ -252,12 +285,20 @@ def activation_null(dictionary: SignatureDictionary, blocks, offsets_deg=(45.0, 
         e2 = torch.linalg.cross(d0, ref); e2 = e2 / e2.norm().clamp_min(1e-9)
         dirs = torch.stack([d0] + [math.cos(math.radians(o)) * d0 + math.sin(math.radians(o)) * e2 for o in offsets_deg])
         a = nnls_batched(dictionary.matrix(dirs), Xn)
+        if activation_gain is not None:
+            a = a.clone(); a[:, :len(dirs)] = a[:, :len(dirs)] / gain_at(dictionary, activation_gain, dirs)[None]
         vals.append(a[:, 1:1 + len(offsets_deg)].reshape(-1))
     v = torch.cat(vals)
     if smooth > 1:                                                                        # the null of the averaged activation
         n = smooth ** 3; m = (len(v) // n) * n
         v = v[torch.randperm(len(v), device=v.device)[:m]].reshape(-1, n).mean(1)
     return float(torch.quantile(v, q))
+
+
+def gain_at(dictionary: SignatureDictionary, gain: torch.Tensor, directions: torch.Tensor) -> torch.Tensor:
+    """A per-direction gain ``(n_dirs,)`` interpolated at ``directions (N, 3)`` (the dictionary's kernel)."""
+    w = dictionary._kernel((directions @ dictionary.grid.T) ** 2)                            # (N, n_dirs)
+    return (w * gain[None]).sum(1) / w.sum(1).clamp_min(1e-6)
 
 
 def population_masks(A: torch.Tensor, tau: float, smooth: int = 3):

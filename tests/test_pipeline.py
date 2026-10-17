@@ -85,6 +85,34 @@ def test_pipeline_on_a_crossing():
     assert out["tissue_mask"].dtype == torch.bool and 0.0 < out["tau"] < 5.0
 
 
+def test_read_volume_formats(tmp_path):
+    from shapetensor.cli import read_volume
+    import zarr
+    rng = np.random.default_rng(0); vol = (120 + 20 * rng.normal(size=(12, 10, 14))).astype(np.float32)
+    np.save(tmp_path / "v.npy", vol); zarr.save(str(tmp_path / "v.zarr"), vol)
+    assert np.allclose(read_volume(str(tmp_path / "v.npy")), vol) and np.allclose(read_volume(str(tmp_path / "v.zarr")), vol)
+    try:
+        import tifffile
+        tifffile.imwrite(tmp_path / "v.tif", vol); assert np.allclose(read_volume(str(tmp_path / "v.tif")), vol)
+    except ImportError:
+        pass
+
+
+@pytest.mark.skipif(DEV != "cuda", reason="the pipeline needs a GPU")
+def test_run_volume_pipeline(tmp_path):
+    pytest.importorskip("anatomix")
+    import zarr
+    from shapetensor.pipeline import run_volume
+    g = Grid(core=(64, 32, 64), margin=(32, 32, 32))
+    img, _, _ = build("crossing", 0, g, cross_deg=90.0, device=DEV)
+    zarr.save(str(tmp_path / "in.zarr"), img.astype(np.float32))
+    run_volume(str(tmp_path / "in.zarr"), str(tmp_path / "out.zarr"), chunk=(64, 64, 64), calibration_size=96, nmax=3, device=DEV, log=lambda *a: None)
+    o = zarr.open_group(str(tmp_path / "out.zarr"), mode="r")
+    vec = np.asarray(o["vec"]); assert vec.shape == (3,) + img.shape and np.isfinite(vec).all()
+    assert np.allclose(np.linalg.norm(vec[:, 40:-40, 40:-40, 40:-40], axis=0), 1.0, atol=1e-2)
+    assert np.asarray(o["vecs"]).shape == (3, 3) + img.shape and o.attrs["tau"] > 0
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

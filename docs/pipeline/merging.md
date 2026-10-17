@@ -34,9 +34,18 @@ For node sampling or display, `tissue_mask` is where the smoothed *total* activa
 where each population's does, and `strongest` the index of the most active population inside the tissue mask.
 They are outputs, not steps: nothing in the vectors depends on them.
 
+## At a chunk seam, and what the weights mean
+
+The chunked driver finds the populations of every chunk with its halo, so the *set* of populations can change at
+a seam: the single field is continuous there (both sides see the same tensors), and the multi-vector field is
+ordered by activation at every voxel, so its first vector means the same on both sides. The activation weights are
+in the standardised feature's units, normalised per direction; `weight / tau` is the dimensionless presence (above
+1: present).
+
 ## Following the field
 
 `shapetensor.tracking.track` is a deterministic streamline tracker over a multi-vector grid (nearest-vector,
 curvature-limited), the same code for every field, so that fields can be compared by their streamlines rather than
-by their vectors. [Real data](../data.md) shows the structure tensor's and the shape tensor's streamlines on the
+by their vectors. Given the no-mask field's `weights` and a `min_weight` (the null `tau`), it follows a vector only
+where its population is present. [Real data](../data.md) shows the structure tensor's and the shape tensor's streamlines on the
 same HiP-CT block.

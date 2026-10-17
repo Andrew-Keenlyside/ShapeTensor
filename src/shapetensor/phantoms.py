@@ -183,8 +183,9 @@ def bundle(grid: Grid, tex: TextureParams, rng, angle: float = 60.0, device="cud
 
 
 def crossing(grid: Grid, tex: TextureParams, rng, cross_deg: float = 60.0, ratio: float = 1.0, device="cuda"):
-    """Two populations symmetric about the z axis (angles 90 ± cross/2), densities in the ratio ``ratio`` : 1."""
-    a1, a2 = 90.0 + cross_deg / 2, 90.0 - cross_deg / 2
+    """Two populations symmetric about the diagonal (angles 45 ± cross/2, so a 90° crossing is z against x and the
+    two have distinct DEC colours), densities in the ratio ``ratio`` : 1."""
+    a1, a2 = 45.0 + cross_deg / 2, 45.0 - cross_deg / 2
     f1 = ratio / (1 + ratio)
     sp = Splat(grid, tex, rng, device)
     add_population(sp, a1, 2 * f1); add_population(sp, a2, 2 * (1 - f1))

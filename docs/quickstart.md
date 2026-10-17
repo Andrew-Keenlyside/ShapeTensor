@@ -62,6 +62,10 @@ calibrates once on a central 256³ block, then runs every chunk with halos and w
 
 ```bash
 shapetensor structure-tensor brain_20um.ome.zarr st.zarr --level 0 --rho 10        # the baseline, same layout
-shapetensor block block.npy block_field.zarr --rho 10                               # one block, with its layers
+shapetensor block block.tif block_field.zarr --rho 10                               # one block (.npy, .tif, .nii, zarr), with its layers
+shapetensor demo                                                                     # a crossing phantom through the pipeline: no data needed
+shapetensor bench --size 192 256                                                     # the structure tensor and the pipeline timed on this GPU
 shapetensor validate --out validation                                                # the three phantoms
 ```
+
+Anisotropic voxels: `--spacing dz dy dx` (or `spacing=` in the API), for example `2.5 1 1` for 50 × 20 × 20 µm.

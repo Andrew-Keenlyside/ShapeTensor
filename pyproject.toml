@@ -10,6 +10,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Andrew Keenlyside" }]
 license = { text = "MIT" }
+keywords = ["white matter", "fibre orientation", "structure tensor", "HiP-CT", "microscopy", "tractography"]
+classifiers = ["Programming Language :: Python :: 3", "License :: OSI Approved :: MIT License", "Topic :: Scientific/Engineering :: Image Processing", "Environment :: GPU :: NVIDIA CUDA"]
 dependencies = [
     "numpy",
     "scipy",
@@ -21,7 +23,12 @@ dependencies = [
 [project.optional-dependencies]
 # The anatomix engines. Weights come from the HF hub (neeldey/anatomix) on first use.
 anatomix = ["anatomix @ git+https://github.com/neel-dey/anatomix.git", "monai"]
-dev = ["pytest"]
+dev = ["pytest", "mkdocs>=1.5", "pymdown-extensions>=10"]
+readers = ["tifffile", "nibabel"]
+
+[project.urls]
+Homepage = "https://github.com/Andrew-Keenlyside/ShapeTensor"
+Documentation = "https://github.com/Andrew-Keenlyside/ShapeTensor/tree/main/docs"
 
 [project.scripts]
 shapetensor = "shapetensor.cli:main"
