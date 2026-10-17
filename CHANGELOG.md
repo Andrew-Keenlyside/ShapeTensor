@@ -18,6 +18,10 @@ population, the merged field — with the excised structure tensor as the baseli
 - The ODF / fixel and TCA routes archived under `shapetensor.archive`; the research record under `notes/`.
 - Docs: a parameters page (every parameter varied on the HiP-CT block, `scripts/parameters.py`) and the pipeline
   illustration's partner on real data (`scripts/figures.py overview`).
+- Whole-volume drivers: chunks without tissue are skipped and a failed chunk is logged and left zero (`pipeline.run_volume`);
+  `st.run_volume` writes the arrays asked for (`vec gap` for a compact field) as float32 or float16 (`--arrays`, `--float16`,
+  `--tissue-threshold` on `shapetensor structure-tensor`).
+- Docs: scales, regions and a whole brain (`scripts/scales.py`, `scripts/wholebrain.py`).
 
 ## 0.1.0 — 2026-10
 

@@ -17,6 +17,7 @@ nav:
   - The structure tensor, the baseline: structure_tensor.md
   - Validation on phantoms: validation.md
   - Real data: data.md
+  - Scales and regions: scales.md
   - API and command line: api.md
 markdown_extensions:
   - admonition

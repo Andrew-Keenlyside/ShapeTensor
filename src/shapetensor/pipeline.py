@@ -279,7 +279,8 @@ def run_volume(src: str, dst: str, *, level: str | None = None, chunk=(192, 192,
     ``calibration_size``³ block at ``calibration_origin`` (default: the centre). ``dst`` receives ``vec (3, Z, Y, X)``
     float16 in (x, y, z) component order (as the ``structure-tensor`` package), ``gap`` and ``weight`` (Z, Y, X), and
     with ``multi`` also ``vecs (nmax, 3, Z, Y, X)`` and ``weights`` (zero rows where a chunk found fewer populations).
-    ``tissue_threshold``: the grey level above which a voxel is tissue (None: all)."""
+    ``tissue_threshold``: the grey level above which a voxel is tissue (None: all); chunks whose core holds less than
+    1% tissue are skipped and stay zero, and a chunk that fails is logged, left zero and listed in the attributes."""
     import zarr
     a = zarr.open(src, mode="r")
     if level is not None:
@@ -303,14 +304,21 @@ def run_volume(src: str, dst: str, *, level: str | None = None, chunk=(192, 192,
                     "calibration_size": n, "layout": "vec in (x, y, z); vecs ordered by activation, zero where absent"})
     log(f"[{rank}/{world}] calibrated on {n}^3 at {o}: orientation bins {cal.orientation_bins_occupied}/24, readout overlap {cal.readout_overlap:.2f}, tau {cal.tau:.3f}")
     tiles = [(z0, y0, x0) for z0 in range(0, Z, cz) for y0 in range(0, Y, cy) for x0 in range(0, X, cx)]
+    skipped, failed = 0, []
     for i, (z0, y0, x0) in enumerate(tiles):
         if i % world != rank:
             continue
         z1, y1, x1 = min(Z, z0 + cz), min(Y, y0 + cy), min(X, x0 + cx)
         lo = (max(0, z0 - halo), max(0, y0 - halo), max(0, x0 - halo)); hi = (min(Z, z1 + halo), min(Y, y1 + halo), min(X, x1 + halo))
-        blk = torch.as_tensor(np.asarray(a[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]).astype(np.float32), device=device)
+        raw = np.asarray(a[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]])
         core = (slice(z0 - lo[0], z1 - lo[0]), slice(y0 - lo[1], y1 - lo[1]), slice(x0 - lo[2], x1 - lo[2])); out_sl = (slice(z0, z1), slice(y0, y1), slice(x0, x1))
-        out = apply(cal, blk, None if tissue_threshold is None else blk >= tissue_threshold, nmax=nmax, spacing=spacing, device=device)
+        if tissue_threshold is not None and (raw[core] >= tissue_threshold).mean() < 0.01:     # no tissue in the core: stays zero
+            skipped += 1; continue
+        blk = torch.as_tensor(raw.astype(np.float32), device=device); del raw
+        try:
+            out = apply(cal, blk, None if tissue_threshold is None else blk >= tissue_threshold, nmax=nmax, spacing=spacing, device=device)
+        except Exception as e:                                                                 # a chunk must not end a whole-volume run
+            failed.append((z0, y0, x0)); log(f"[{rank}/{world}] chunk {i + 1}/{len(tiles)} ({z0}, {y0}, {x0}) FAILED: {e!r}"); del blk; torch.cuda.empty_cache(); continue
         g["vec"][(slice(None),) + out_sl] = out["vec"].flip(0)[(slice(None),) + core].half().cpu().numpy()
         g["gap"][out_sl] = out["vec_gap"][core].half().cpu().numpy(); g["weight"][out_sl] = out["weight"][core].half().cpu().numpy()
         if multi:
@@ -321,4 +329,7 @@ def run_volume(src: str, dst: str, *, level: str | None = None, chunk=(192, 192,
             g["weights"][(slice(None),) + out_sl] = wts[(slice(None),) + core].half().cpu().numpy()
         npop = int(out["modes"].shape[0]); del out, blk; torch.cuda.empty_cache()
         log(f"[{rank}/{world}] chunk {i + 1}/{len(tiles)} ({z0}, {y0}, {x0}): {npop} populations")
+    if skipped or failed:
+        log(f"[{rank}/{world}] {skipped} chunks without tissue skipped; {len(failed)} failed: {failed}")
+    g.attrs.update({"failed_chunks": [list(f) for f in failed]})
     return dst

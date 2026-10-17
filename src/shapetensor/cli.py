@@ -2,7 +2,7 @@
 
     shapetensor run <in.zarr> <out.zarr> [--level 0] [--rho 10] [--sigma 1] [--chunk 192 192 192] [--tissue-threshold T]
     shapetensor block <in.npy> <out.zarr> [--rho 10] [--sigma 1] [--voxel-mm 0.02]
-    shapetensor structure-tensor <in.zarr> <out.zarr> [--level 0] [--rho 10] [--sigma 1] [--no-excise]
+    shapetensor structure-tensor <in.zarr> <out.zarr> [--level 0] [--rho 10] [--sigma 1] [--no-excise] [--arrays vec gap] [--float16]
     shapetensor validate [--out validation] [--seeds 0 1 2] [--rho 10] [--settings calibrated]
     shapetensor phantom <bundle|crossing|interface> <out.npz> [--seed 0] [--cross-deg 60] [--step 40] [--angle 60]
     shapetensor demo [--out field.zarr]              # a crossing phantom through the whole pipeline, no data needed
@@ -61,6 +61,8 @@ def main(argv=None):
     s = sub.add_parser("structure-tensor", help="the (excised) structure tensor over a whole zarr volume")
     s.add_argument("src"); s.add_argument("dst"); s.add_argument("--level", default=None); _scales(s)
     s.add_argument("--chunk", type=int, nargs=3, default=[256, 256, 256]); s.add_argument("--no-excise", action="store_true")
+    s.add_argument("--arrays", nargs="+", default=["S", "val", "vec"], choices=["S", "val", "vec", "gap"], help="what to write (vec gap for a compact field)")
+    s.add_argument("--float16", action="store_true"); s.add_argument("--tissue-threshold", type=float, default=None, help="skip chunks with no voxel at or above it")
     s.add_argument("--rank", type=int, default=0); s.add_argument("--world", type=int, default=1)
 
     v = sub.add_parser("validate", help="the three phantoms: structure tensor against shape tensor")
@@ -96,7 +98,9 @@ def main(argv=None):
         print(f"wrote {a.dst}: {int(out['modes'].shape[0])} populations, tau {out['tau']:.3f}")
     elif a.cmd == "structure-tensor":
         from .st import run_volume
-        run_volume(a.src, a.dst, sigma=a.sigma, rho=a.rho, chunk=tuple(a.chunk), excise=not a.no_excise, level=a.level, rank=a.rank, world=a.world, device=a.device)
+        import numpy as np
+        run_volume(a.src, a.dst, sigma=a.sigma, rho=a.rho, chunk=tuple(a.chunk), excise=not a.no_excise, level=a.level, arrays=tuple(a.arrays),
+                   dtype=np.float16 if a.float16 else np.float32, tissue_threshold=a.tissue_threshold, rank=a.rank, world=a.world, device=a.device)
     elif a.cmd == "validate":
         from .validate import run
         run(a.out, seeds=tuple(a.seeds), sigma=a.sigma, rho=a.rho, engine=a.engine, settings=tuple(a.settings), device=a.device)

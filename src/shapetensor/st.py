@@ -211,11 +211,13 @@ def _tensor(image, sigma, rho, truncate, excise, mask, spacing, device):
 # ---------------------------------------------------------------------------------------------------------------
 
 def run_volume(src: str, dst: str, *, sigma: float = 1.0, rho: float = 10.0, truncate: float = 4.0, chunk=(256, 256, 256),
-               excise: bool = True, excise_factor: float = 3.0, level: str | None = None, rank: int = 0, world: int = 1,
-               spacing=None, device: str = "cuda", log=print):
+               excise: bool = True, excise_factor: float = 3.0, level: str | None = None, arrays=("S", "val", "vec"), dtype=np.float32,
+               tissue_threshold: float | None = None, rank: int = 0, world: int = 1, spacing=None, device: str = "cuda", log=print):
     """The structure tensor over a whole zarr volume, chunk by chunk with halos, on one GPU; several processes split
-    the chunk list by ``rank`` / ``world``. ``dst`` receives ``S (6, Z, Y, X)``, ``val (3, ...)`` and ``vec (3, ...)``
-    (the direction in (x, y, z)); every chunk's output equals a one-pass computation."""
+    the chunk list by ``rank`` / ``world``. ``dst`` receives the ``arrays`` asked for among ``S (6, Z, Y, X)``,
+    ``val (3, ...)``, ``vec (3, ...)`` (the direction in (x, y, z)) and ``gap`` (the orientation gap, ``(Z, Y, X)``),
+    as ``dtype``; every chunk's output equals a one-pass computation. ``tissue_threshold``: chunks whose core holds
+    no voxel at or above it are skipped and stay zero."""
     import zarr
     a = zarr.open(src, mode="r")
     if level is not None:
@@ -224,24 +226,33 @@ def run_volume(src: str, dst: str, *, sigma: float = 1.0, rho: float = 10.0, tru
     g = zarr.open_group(dst, mode="a")
     cz, cy, cx = chunk
     halo = int(truncate * (sigma + rho) + 0.5) + (int(3.0 * truncate + 0.5) if excise else 0)
-    for name, shape in (("S", (6, Z, Y, X)), ("val", (3, Z, Y, X)), ("vec", (3, Z, Y, X))):
+    shapes = {"S": (6, Z, Y, X), "val": (3, Z, Y, X), "vec": (3, Z, Y, X), "gap": (Z, Y, X)}
+    for name in arrays:
         if name not in g:
-            g.create_array(name, shape=shape, dtype=np.float32, chunks=(shape[:-3] + (cz, cy, cx)))
+            g.create_array(name, shape=shapes[name], dtype=dtype, chunks=(shapes[name][:-3] + (cz, cy, cx)))
     g.attrs.update({"sigma": sigma, "rho": rho, "truncate": truncate, "excised": excise, "excise_factor": excise_factor, "halo": halo,
-                    "layout": "S = [xx, yy, zz, xy, xz, yz], x = last axis; vec in (x, y, z)"})
+                    "layout": "S = [xx, yy, zz, xy, xz, yz], x = last axis; vec in (x, y, z)", "tissue_threshold": tissue_threshold})
     tiles = [(z0, y0, x0) for z0 in range(0, Z, cz) for y0 in range(0, Y, cy) for x0 in range(0, X, cx)]
+    skipped = 0
     for i, (z0, y0, x0) in enumerate(tiles):
         if i % world != rank:
             continue
         z1, y1, x1 = min(Z, z0 + cz), min(Y, y0 + cy), min(X, x0 + cx)
         lo = (max(0, z0 - halo), max(0, y0 - halo), max(0, x0 - halo)); hi = (min(Z, z1 + halo), min(Y, y1 + halo), min(X, x1 + halo))
-        blk = torch.as_tensor(np.asarray(a[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]).astype(np.float32), device=device)
+        raw = np.asarray(a[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]])
         core = (slice(z0 - lo[0], z1 - lo[0]), slice(y0 - lo[1], y1 - lo[1]), slice(x0 - lo[2], x1 - lo[2])); out_sl = (slice(z0, z1), slice(y0, y1), slice(x0, x1))
+        if tissue_threshold is not None and not (raw[core] >= tissue_threshold).any():
+            skipped += 1; continue
+        blk = torch.as_tensor(raw.astype(np.float32), device=device); del raw
         S = (excised_structure_tensor_3d(blk, sigma, rho, truncate, factor=excise_factor, spacing=spacing, device=device) if excise
              else structure_tensor_3d(blk, sigma, rho, truncate, spacing=spacing, device=device))
         Sc = S[(slice(None),) + core].contiguous(); del S
         val, vec = eig_special_3d(Sc, device=device)
-        g["S"][(slice(None),) + out_sl] = Sc.cpu().numpy(); g["val"][(slice(None),) + out_sl] = val.cpu().numpy(); g["vec"][(slice(None),) + out_sl] = vec.cpu().numpy()
-        del Sc, val, vec, blk; torch.cuda.empty_cache()
+        out = {"S": Sc, "val": val, "vec": vec, "gap": ((val[1] - val[2]) / val[1].clamp_min(1e-12)).clamp(0, 1)}
+        for name in arrays:
+            g[name][((slice(None),) if name != "gap" else ()) + out_sl] = out[name].to(torch.from_numpy(np.zeros(1, dtype)).dtype).cpu().numpy()
+        del Sc, val, vec, blk, out; torch.cuda.empty_cache()
         log(f"[{rank}/{world}] chunk {i + 1}/{len(tiles)} ({z0}, {y0}, {x0}) done")
+    if skipped:
+        log(f"[{rank}/{world}] {skipped} chunks without tissue skipped")
     return dst

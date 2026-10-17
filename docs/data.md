@@ -33,6 +33,11 @@ downloads it.
 
 ![BigBrain: structure tensor and shape tensor](img/bigbrain.png)
 
+## Other scales, other regions, a whole brain
+
+[Scales and regions](scales.md): the same pipeline on HiP-CT from 2.2 µm to 200 µm voxels, on four regions of
+S-21-46 at 20 µm, and over a whole brain at 100 µm.
+
 ## Anisotropic voxels
 
 Both the structure tensor and the pipeline take `spacing=(dz, dy, dx)`; the shape engine resamples the block to
