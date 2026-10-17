@@ -19,6 +19,7 @@ import math
 import torch
 import torch.nn.functional as Fn
 
+from .common import eigh
 from .orientation import _sample_idx, hemisphere
 
 
@@ -192,7 +193,8 @@ def export_population_field(path, modes: torch.Tensor, A: torch.Tensor, dirs: to
     """Write the population field as a zarr group: ``modes (N, 3)`` (z, y, x), ``activation (N, Z, Y, X)`` float16,
     ``dirs (N, 3, Z, Y, X)`` float16 (each layer's own tensor direction, (z, y, x)), ``gap (N, Z, Y, X)``,
     ``masks (N, Z, Y, X)`` bool (where that population's vectors go), ``union_mask (Z, Y, X)`` bool (any population:
-    a node-sampling mask), ``strongest (Z, Y, X)`` int8 (1 + the index of the strongest population, 0 outside)."""
+    a node-sampling mask), ``strongest (Z, Y, X)`` int8 (1 + the index of the strongest population, 0 outside); ``vec_combined (3, Z, Y, X)``
+    and ``weight_combined`` — the activation-weighted average vector per voxel (:func:`combined_field`, unmasked)."""
     import numpy as np, zarr
     g = zarr.open_group(str(path), mode="w")
     g.create_array("modes", data=modes.cpu().numpy().astype(np.float32))
@@ -200,5 +202,27 @@ def export_population_field(path, modes: torch.Tensor, A: torch.Tensor, dirs: to
     g.create_array("dirs", data=dirs.cpu().numpy().astype(np.float16))
     g.create_array("gap", data=gaps.cpu().numpy().astype(np.float16))
     g.create_array("masks", data=masks.cpu().numpy()); g.create_array("union_mask", data=union.cpu().numpy()); g.create_array("strongest", data=strongest.cpu().numpy())
+    vec, wgt = combined_field(dirs, A)                                                      # the single-field alternative to the structure tensor, unmasked
+    g.create_array("vec_combined", data=vec.cpu().numpy().astype(np.float16)); g.create_array("weight_combined", data=wgt.cpu().numpy().astype(np.float16))
     g.attrs.update({"voxel_mm": voxel_mm, "n_populations": int(modes.shape[0]), "component_order": "zyx", **(attrs or {})})
     return path
+
+
+def combined_field(dirs: torch.Tensor, A: torch.Tensor, mask_threshold: float | None = None, smooth: int = 3):
+    """One vector per voxel from the population layers: the activation-weighted axial average of the populations'
+    directions (the principal eigenvector of ``Σ_r a_r d_r d_rᵀ``), with the total activation as its weight — the
+    alternative to the single-vector structure tensor. ``dirs (N, 3, Z, Y, X)`` (z, y, x), ``A (N, Z, Y, X)``.
+    With ``mask_threshold`` a voxel keeps its vector only where some population's ``smooth``³-averaged activation
+    exceeds it (zero vector elsewhere); None keeps every voxel. Returns ``vec (3, Z, Y, X)``, ``weight (Z, Y, X)``."""
+    from .orientation import outer6, tensor_from6
+    N, _, Z, Y, X = dirs.shape
+    Aw = A.clamp_min(0)
+    T6 = (outer6(dirs.permute(0, 2, 3, 4, 1)) * Aw[..., None]).sum(0)                        # (Z, Y, X, 6)
+    lam, V = eigh(tensor_from6(T6.reshape(-1, 6)))
+    vec = V[..., :, 2].T.reshape(3, Z, Y, X)
+    weight = Aw.sum(0)
+    if mask_threshold is not None:
+        As = Fn.avg_pool3d(Aw[None], smooth, stride=1, padding=smooth // 2)[0] if smooth > 1 else Aw
+        keep = (As > mask_threshold).any(0)
+        vec = vec * keep[None]; weight = weight * keep
+    return vec, weight

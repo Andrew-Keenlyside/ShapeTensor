@@ -1,0 +1,23 @@
+{
+ "smooth": 3,
+ "intensity_share": 0.6848248349622771,
+ "union_share": 0.7537331077460563,
+ "dice": 0.7293027535024355,
+ "union_covers_intensity": 0.765994612876282,
+ "union_outside_intensity_share_of_union": 0.30403463911296147,
+ "gm_median_both_onlyI_onlyU": [
+  1.114905834197998,
+  1.1076374053955078,
+  1.3667491674423218
+ ],
+ "gap_median_both_onlyI_onlyU": [
+  0.21013875305652618,
+  0.19696910679340363,
+  0.23740138113498688
+ ],
+ "intensity_median_both_onlyI_onlyU": [
+  161.0,
+  158.0,
+  132.0
+ ]
+}

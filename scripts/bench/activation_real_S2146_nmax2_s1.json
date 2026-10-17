@@ -1,0 +1,39 @@
+{
+ "calib": 384,
+ "block": 192,
+ "rho": 10.0,
+ "tau": 0.5210230350494385,
+ "n_candidates": 2,
+ "N": 2,
+ "residual_median": 0.843,
+ "union_share_of_tissue": 0.797,
+ "window_N_shares": [
+  0.0,
+  0.473,
+  0.154,
+  0.373,
+  0.0
+ ],
+ "layers": [
+  {
+   "mask_share": 0.415,
+   "layer_vs_image_tensor_in_mask_deg": 72.9,
+   "layer_vs_mode_in_mask_deg": 71.6,
+   "mode_zyx": [
+    0.916,
+    -0.105,
+    0.388
+   ]
+  },
+  {
+   "mask_share": 0.596,
+   "layer_vs_image_tensor_in_mask_deg": 19.4,
+   "layer_vs_mode_in_mask_deg": 18.5,
+   "mode_zyx": [
+    0.653,
+    -0.384,
+    0.653
+   ]
+  }
+ ]
+}
