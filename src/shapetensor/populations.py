@@ -15,7 +15,7 @@ import torch.nn.functional as Fn
 
 from . import st
 from .features import make_engine
-from .readout.layers import (SignatureDictionary, activation_null, combined_field, layer_tensor_direction, population_masks, unmix)
+from .readout.layers import (SignatureDictionary, activation_null, combined_field, combined_tensor_field, layer_tensor_direction, multi_vector_field, population_masks, unmix)
 from .readout.orientation import OrientationReadoutDist, hemisphere, modes_from_density
 
 
@@ -39,22 +39,32 @@ def _q(x, q, n=2_000_000):
 
 def population_field(volume, *, engine: str = "anatomix_enc2", rho: float = 10.0, sigma: float = 1.0, truncate: float = 4.0,
                      rho_teacher: float = 8.0, tissue=None, nmax: int = 3, smooth: int = 3, margin: int = 24, mask_threshold: float | None = None,
-                     min_mask_share: float = 0.05, engine_kwargs: dict | None = None, device: str = "cuda") -> dict:
+                     min_mask_share: float = 0.05, engine_kwargs: dict | None = None, device: str = "cuda", timings: dict | None = None) -> dict:
     """``volume (Z, Y, X)``; ``tissue`` an optional bool mask of the tissue to read (default: all). Returns a dict:
     ``modes (N, 3)``, ``activation (N, Z, Y, X)``, ``dirs (N, 3, Z, Y, X)``, ``gap (N, Z, Y, X)``, ``masks (N, Z, Y, X)``,
-    ``union_mask``, ``strongest``, ``vec_combined (3, Z, Y, X)``, ``weight_combined``, ``residual``, ``tau``, ``n_candidates``."""
+    ``union_mask``, ``strongest``, ``vec_combined (3, Z, Y, X)`` (the merge of the population tensors, Σ a_r S_r / tr S_r) with
+    ``gap_combined`` and ``weight_combined``, ``vec_average`` (the activation-weighted average of the layers' directions), ``vec_multi (N, 3, Z, Y, X)``,
+    ``weight_multi``, ``n_vectors``, ``residual``, ``tau``, ``n_candidates``. ``timings``: a dict that receives the seconds of
+    each stage (features, teacher, calibration, populations, layers, fields) when given."""
+    import time
+    marks = []
+
+    def mark(name):
+        if timings is not None:
+            torch.cuda.synchronize(); marks.append((name, time.perf_counter()))
+    mark("start")
     v = st._to_torch(volume, device, torch.float32)
     tis = torch.ones_like(v, dtype=torch.bool) if tissue is None else st._to_torch(tissue, device) > 0.5
-    F = make_engine(engine, **({"nyquist": "none"} | (engine_kwargs or {})))(v)
+    F = make_engine(engine, **({"nyquist": "none"} | (engine_kwargs or {})))(v); mark("features")
     # the teacher and the calibration sets, on this block
     S = st.excised_structure_tensor_3d(v, sigma, rho_teacher, truncate, device=device)
     val, vec = st.eig_special_3d(S, device=device); d = vec.flip(0); gap = ((val[1] - val[2]) / val[1].clamp_min(1e-12)).clamp(0, 1); del S
     inner = tuple(slice(margin, n - margin) for n in v.shape)
     w = torch.zeros_like(gap); w[inner] = _stratified_weights(d[(slice(None),) + inner], gap[inner], tis[inner])
-    wb = torch.zeros_like(gap); wb[inner] = ((gap[inner] < _q(gap[inner][tis[inner]], 0.3)) & tis[inner]).float()
+    wb = torch.zeros_like(gap); wb[inner] = ((gap[inner] < _q(gap[inner][tis[inner]], 0.3)) & tis[inner]).float(); mark("teacher")
     dic = SignatureDictionary(smooth=smooth).fit([(F, d, w)], background=[(F, wb)])
     ro = OrientationReadoutDist(smooth=smooth).fit([(F, d, w)], n_sample=240_000)
-    tau = activation_null(dic, [(F, d, w)])
+    tau = activation_null(dic, [(F, d, w)]); mark("calibration")
     # the populations: modes of the block's summed per-voxel distribution, confirmed by their masks
     P = ro.predict_dist(F)
     dens = (P * tis.float()[None]).reshape(P.shape[0], -1).sum(1); del P
@@ -68,11 +78,17 @@ def population_field(volume, *, engine: str = "anatomix_enc2", rho: float = 10.0
         if float(share[worst]) >= min_mask_share or len(keep) == 1:
             break
         keep.pop(worst)
-    modes = modes[keep]
-    dirs, gaps = [], []
+    modes = modes[keep]; mark("populations")
+    dirs, gaps, tens = [], [], []
     for k in range(len(keep)):
-        dl, gl = layer_tensor_direction(A[k], sigma, rho, truncate); dirs.append(dl); gaps.append(gl)
-    dirs = torch.stack(dirs); gaps = torch.stack(gaps)
-    vec_c, wgt_c = combined_field(dirs, A, mask_threshold if mask_threshold is None else mask_threshold, smooth=3)
+        dl, gl, Sl = layer_tensor_direction(A[k], sigma, rho, truncate, return_tensor=True); dirs.append(dl); gaps.append(gl); tens.append(Sl)
+    dirs = torch.stack(dirs); gaps = torch.stack(gaps); tens = torch.stack(tens); mark("layers")
+    vec_c, gap_c, wgt_c = combined_tensor_field(tens, A, mask_threshold, smooth=3); del tens            # the merge of the population tensors
+    vec_a, wgt_a = combined_field(dirs, A, mask_threshold, smooth=3)                                    # the activation-weighted average of the layers' directions
+    vec_m, wgt_m, cnt = multi_vector_field(dirs, A, masks); mark("fields")
+    if timings is not None:
+        timings.update({b: round(tb - ta, 3) for (_, ta), (b, tb) in zip(marks[:-1], marks[1:])}); timings["total"] = round(marks[-1][1] - marks[0][1], 3)
     return {"modes": modes, "activation": A, "dirs": dirs, "gap": gaps, "masks": masks, "union_mask": union, "strongest": strongest,
-            "vec_combined": vec_c, "weight_combined": wgt_c, "residual": R, "tau": tau, "n_candidates": int(n)}
+            "vec_combined": vec_c, "gap_combined": gap_c, "weight_combined": wgt_c, "vec_average": vec_a, "weight_average": wgt_a,
+            "vec_multi": vec_m, "weight_multi": wgt_m, "n_vectors": cnt,
+            "residual": R, "tau": tau, "n_candidates": int(n)}

@@ -29,7 +29,30 @@ vec  = st.cp.shapetensor(image, rho=10.0)                     # the single direc
 dirs = st.cp.shapetensor(image, rho=16.0, fixels=True)        # (3, 3, Z, Y, X), strongest first, zero where absent
 ```
 
-## Three rules of the merge
+## From the population layers (the current form)
+
+With the populations as activation layers (stage 2, the current form) the merge has two outputs, neither needing a
+threshold:
+
+- **One vector per voxel** — the activation-weighted axial average of the layers' directions, the principal
+  eigenvector of Σ a_r d_r d_rᵀ with the total activation as its weight (`vec_combined`, `weight_combined`). This is
+  the shape tensor's single field, the like-for-like alternative to the structure tensor's eigenvector; an
+  optional `mask_threshold` zeroes it where no population's activation reaches the threshold.
+- **Several vectors per voxel** — where two or more population masks intersect, every covering population's
+  vector; where one or none does, the strongest activated population's vector alone (`vec_multi`, ordered by
+  activation, `weight_multi`, `n_vectors`). The masks come from the activation null calibrated on the block itself,
+  so no argument is needed.
+
+```python
+out = shapetensor.populations.population_field(image, rho=10.0)        # stages 2–4 on a block, self-calibrated
+vec, w = out["vec_combined"], out["weight_combined"]                    # (3, Z, Y, X) and (Z, Y, X)
+vecs, n = out["vec_multi"], out["n_vectors"]                            # (N, 3, Z, Y, X) and (Z, Y, X)
+```
+
+`scripts/bench/single_vs_multi.py` compares the two with the structure tensor on the crossing phantoms and the
+real block (results log §27), and times the two pipelines.
+
+## Three rules of the merge (the archived fixel form)
 
 1. **Interfaces carry no fixels.** Sites whose coarse gradient exceeds 3× the median report `npop = 0` — the same
    scale criterion as the excision. A contrast sheet deconvolves to a ring of directions, so fixels there are false

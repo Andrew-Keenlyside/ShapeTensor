@@ -93,3 +93,19 @@ shapetensor volume SRC DST [--level L] [--sigma 1] [--rho 16] [--truncate 4] [--
 - `populations.separate_sites(F, G, centers, rho)` — the principal-signature division of a window's voxel cloud with a
   membership-weighted tensor per signature (the first form; superseded by the readout).
 - `features.cache.cached_features(engine, vol, tag)` — engine outputs cached on disk by engine configuration and volume hash.
+
+## Stages 2–4 in one call: `shapetensor.populations.population_field`
+
+```python
+out = shapetensor.populations.population_field(image, rho=10.0, sigma=1.0, engine="anatomix_enc2", nmax=3, smooth=3, mask_threshold=None)
+```
+
+Self-calibrated on the block (the teacher is the excised tensor at `rho_teacher` on confident sites; no labels).
+Returns a dict: `modes (N, 3)` (z, y, x), `activation (N, Z, Y, X)` (one layer per population), `dirs (N, 3, Z, Y, X)`
+(each layer's own tensor direction) and `gap`, `masks (N, Z, Y, X)`, `union_mask`, `strongest` (int8, 1 + index; 0
+outside), `vec_combined (3, Z, Y, X)` and `weight_combined` (the single field), `vec_multi (N, 3, Z, Y, X)`,
+`weight_multi` and `n_vectors` (both where the masks intersect, else the strongest), `residual`, `tau`,
+`n_candidates`. Pass `timings={}` to receive the seconds per stage. `readout.layers.export_population_field` writes
+the same arrays to a zarr group. The pieces are `readout.layers.SignatureDictionary`, `unmix`, `activation_null`,
+`population_masks`, `layer_tensor_direction`, `combined_field`, `multi_vector_field`, `compress_activation`.
+

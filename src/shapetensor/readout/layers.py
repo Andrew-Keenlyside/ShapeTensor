@@ -91,7 +91,7 @@ def nnls_batched(A: torch.Tensor, Y: torch.Tensor, iters: int = 60) -> torch.Ten
     by projected gradient with the exact Lipschitz step (small N, so this converges in tens of iterations)."""
     AtA = A.T @ A; AtY = Y @ A                                                              # (N, N), (M, N)
     L = float(torch.linalg.eigvalsh(AtA).max().clamp_min(1e-9))
-    X = torch.linalg.lstsq(A, Y.T).solution.T.clamp_min(0)                                 # a warm start from the unconstrained solution
+    X = (AtY @ torch.linalg.pinv(AtA)).clamp_min(0)                                        # a warm start from the unconstrained (normal-equation) solution
     for _ in range(iters):
         X = (X - (X @ AtA - AtY) / L).clamp_min(0)
     return X
@@ -131,13 +131,34 @@ def compress_activation(A: torch.Tensor, how: str = "none") -> torch.Tensor:
     raise ValueError(f"unknown activation compression {how!r}")
 
 
-def layer_tensor_direction(a: torch.Tensor, sigma: float, rho: float, truncate: float = 4.0):
+def layer_tensor_direction(a: torch.Tensor, sigma: float, rho: float, truncate: float = 4.0, return_tensor: bool = False):
     """The structure tensor of one activation volume ``a (Z, Y, X)`` -> its direction field ``(3, Z, Y, X)`` in
-    (z, y, x) order and the orientation gap: the population's direction from its own layer's gradients."""
+    (z, y, x) order and the orientation gap: the population's direction from its own layer's gradients. With
+    ``return_tensor`` also the tensor itself ``(6, Z, Y, X)`` [xx, yy, zz, xy, xz, yz]."""
     from .. import st
     S = st.structure_tensor_3d(a, sigma, rho, truncate)
     val, vec = st.eig_special_3d(S)
-    return vec.flip(0), ((val[1] - val[2]) / val[1].clamp_min(1e-12)).clamp(0, 1)
+    d, gap = vec.flip(0), ((val[1] - val[2]) / val[1].clamp_min(1e-12)).clamp(0, 1)
+    return (d, gap, S) if return_tensor else (d, gap)
+
+
+def combined_tensor_field(S: torch.Tensor, A: torch.Tensor, mask_threshold: float | None = None, smooth: int = 3):
+    """The merge of the population tensors: ``S (N, 6, Z, Y, X)`` the layers' structure tensors, ``A (N, Z, Y, X)``
+    the activations -> the single direction ``(3, Z, Y, X)`` (z, y, x) of ``Σ_r a_r S_r / tr(S_r)``, its gap and its
+    weight (the total activation). An incoherent layer has a near-isotropic tensor and adds no direction, so it
+    is discounted without a rule; this is the shape tensor's single field. ``mask_threshold`` as in
+    :func:`combined_field`."""
+    from .. import st
+    Aw = A.clamp_min(0)
+    tr = S[:, :3].sum(1).clamp_min(1e-12)
+    T = (S * (Aw / tr)[:, None]).sum(0)
+    val, vec = st.eig_special_3d(T)
+    d, gap = vec.flip(0), ((val[1] - val[2]) / val[1].clamp_min(1e-12)).clamp(0, 1)
+    weight = Aw.sum(0)
+    if mask_threshold is not None:
+        keep = (Fn.avg_pool3d(Aw[None], smooth, stride=1, padding=smooth // 2)[0] > mask_threshold).any(0)
+        d = d * keep; weight = weight * keep; gap = gap * keep
+    return d, gap, weight
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -222,7 +243,8 @@ def export_population_field(path, modes: torch.Tensor, A: torch.Tensor, dirs: to
     ``dirs (N, 3, Z, Y, X)`` float16 (each layer's own tensor direction, (z, y, x)), ``gap (N, Z, Y, X)``,
     ``masks (N, Z, Y, X)`` bool (where that population's vectors go), ``union_mask (Z, Y, X)`` bool (any population:
     a node-sampling mask), ``strongest (Z, Y, X)`` int8 (1 + the index of the strongest population, 0 outside); ``vec_combined (3, Z, Y, X)``
-    and ``weight_combined`` — the activation-weighted average vector per voxel (:func:`combined_field`, unmasked)."""
+    and ``weight_combined`` — the activation-weighted average vector per voxel (:func:`combined_field`, unmasked);
+    ``vec_multi (N, 3, Z, Y, X)``, ``weight_multi`` and ``n_vectors`` — :func:`multi_vector_field`."""
     import numpy as np, zarr
     g = zarr.open_group(str(path), mode="w")
     g.create_array("modes", data=modes.cpu().numpy().astype(np.float32))
@@ -232,11 +254,27 @@ def export_population_field(path, modes: torch.Tensor, A: torch.Tensor, dirs: to
     g.create_array("masks", data=masks.cpu().numpy()); g.create_array("union_mask", data=union.cpu().numpy()); g.create_array("strongest", data=strongest.cpu().numpy())
     vec, wgt = combined_field(dirs, A)                                                      # the single-field alternative to the structure tensor, unmasked
     g.create_array("vec_combined", data=vec.cpu().numpy().astype(np.float16)); g.create_array("weight_combined", data=wgt.cpu().numpy().astype(np.float16))
+    vm, wm, cnt = multi_vector_field(dirs, A, masks)                                        # several vectors per voxel: both where the masks intersect, else the strongest
+    g.create_array("vec_multi", data=vm.cpu().numpy().astype(np.float16)); g.create_array("weight_multi", data=wm.cpu().numpy().astype(np.float16)); g.create_array("n_vectors", data=cnt.cpu().numpy())
     g.attrs.update({"voxel_mm": voxel_mm, "n_populations": int(modes.shape[0]), "component_order": "zyx", **(attrs or {})})
     return path
 
 
-def combined_field(dirs: torch.Tensor, A: torch.Tensor, mask_threshold: float | None = None, smooth: int = 3):
+def multi_vector_field(dirs: torch.Tensor, A: torch.Tensor, masks: torch.Tensor):
+    """Several vectors per voxel from the population layers, with no threshold argument: where two or more
+    population masks cover a voxel, every covering population's vector; where one or none does, the strongest
+    activated population's vector alone. ``dirs (N, 3, Z, Y, X)``, ``A (N, Z, Y, X)``, ``masks (N, Z, Y, X)`` bool ->
+    ``vec (N, 3, Z, Y, X)`` ordered by activation (zero where absent), ``weight (N, Z, Y, X)`` (the activation) and
+    ``count (Z, Y, X)`` int8, the number of vectors at the voxel (always >= 1)."""
+    Aw = A.clamp_min(0)
+    order = Aw.argsort(0, descending=True)                                                    # (N, Z, Y, X)
+    As = Aw.gather(0, order); Ms = masks.gather(0, order)
+    Ds = dirs.gather(0, order[:, None].expand(-1, 3, -1, -1, -1))
+    keep = Ms & (masks.sum(0) >= 2)[None]; keep[0] = True
+    return Ds * keep[:, None], As * keep, keep.sum(0).to(torch.int8)
+
+
+def combined_field(dirs: torch.Tensor, A: torch.Tensor, mask_threshold: float | None = None, smooth: int = 3, gaps: torch.Tensor | None = None):
     """One vector per voxel from the population layers: the activation-weighted axial average of the populations'
     directions (the principal eigenvector of ``Σ_r a_r d_r d_rᵀ``), with the total activation as its weight — the
     alternative to the single-vector structure tensor. ``dirs (N, 3, Z, Y, X)`` (z, y, x), ``A (N, Z, Y, X)``.
@@ -244,7 +282,7 @@ def combined_field(dirs: torch.Tensor, A: torch.Tensor, mask_threshold: float | 
     exceeds it (zero vector elsewhere); None keeps every voxel. Returns ``vec (3, Z, Y, X)``, ``weight (Z, Y, X)``."""
     from .orientation import outer6, tensor_from6
     N, _, Z, Y, X = dirs.shape
-    Aw = A.clamp_min(0)
+    Aw = A.clamp_min(0) * (gaps.clamp(0, 1) if gaps is not None else 1.0)                     # ``gaps``: weight each layer also by its own coherence
     T6 = (outer6(dirs.permute(0, 2, 3, 4, 1)) * Aw[..., None]).sum(0)                        # (Z, Y, X, 6)
     lam, V = eigh(tensor_from6(T6.reshape(-1, 6)))
     vec = V[..., :, 2].T.reshape(3, Z, Y, X)
