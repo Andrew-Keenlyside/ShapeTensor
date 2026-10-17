@@ -83,9 +83,59 @@ the work it called for. The validation numbers are in `docs/validation.md` and `
 22. Reproducibility: seeds are fixed, but the readout's Adam steps on the GPU are not bit-reproducible; borderline
     population decisions (item 2) can differ between runs. Documented; item 2 reduces it.
 
+### Outcome of pass 1
+
+Items 2, 3, 6, 9, 13, 15, 16, 17, 18, 19, 20, 21, 22 done; item 1 tried and dropped (sub-window candidates fed too
+many signatures into the joint unmixing, see below); items 4, 5, 8, 11, 12, 14 documented. Two findings changed the
+design:
+
+- **The joint unmixing is degenerate beyond three or four signatures.** The orientation code of the features has
+  rank five, so unmixing a voxel onto six candidate signatures lets every layer become a mixture and every layer
+  axis collapse onto the bisector. The confirmation therefore unmixes each candidate *alone* first (always well
+  conditioned), keeps the distinct axes, and only then unmixes the kept axes together (two passes), where the
+  shoulders of one population lose their shared voxels and collapse onto it. Rank-safe and robust to the number
+  of candidates.
+- **The readers respond unequally to orientations.** On a crossing of a population along x with one along z the
+  readout's density and the dictionary's activations are about twice as strong for x. A per-direction gain for
+  each reader, measured on the calibration block against the teacher (density over the teacher's histogram;
+  activation on the own signature), normalises the candidates and the weights. It does not normalise the
+  per-voxel layers, and the validation (x against z crossing) shows the second population's vector drawn towards
+  the first: pair error 16° at 90° with both populations within 15° at 12% of voxels, against 10° and 96% on a
+  crossing symmetric about the diagonal with the same code. This is the first item of pass 2.
+
 ## Pass 2
 
-(after the pass-1 work)
+### Correctness
+
+1. **Per-voxel orientation dependence of the layers.** Candidate remedy: symmetry averaging — run stage 2 on the
+   block and on its grid symmetries (the axis swap z ↔ x and the x flip give four variants in the fibre plane;
+   the 24 rotations of the cube in general), each variant unmixed in the network's own frame, the layers mapped
+   back and averaged. Equivariant by construction, no channel mixing, four times the feature and unmixing cost
+   (about 3 s on a 192³ block). To validate on the x–z crossing against the diagonal one.
+2. **The single field on single-population tissue** is noisier than the excised tensor where the population's
+   activation is low (the three-band interface: 6–15° against 2–6°). Candidate remedies: a larger floor on the
+   population tensor's weight (0.1 of the null cost 5% of the 60° pair accuracy in an earlier test), or
+   populations per sub-window with a rank-safe confirmation.
+3. The population count at the calibrated texture (20° dispersion) is right on bundles and wrong on crossings
+   (three found at 90°). The multi-vector field should carry a per-block confidence so a consumer can fall back
+   to the single field: the readout overlap and the share of tissue above the null are the candidates.
+
+### Peer review, speed, clarity, downstream, validation, release
+
+4. The validation page now states the orientation dependence and the single-population weighting as open
+   limitations with their numbers; every claim remains tied to a measured row.
+5. Speed is unchanged (a 192³ block in about 6 s); symmetry averaging would make it about 10 s.
+6. The notes' results log stops at §26; a §27 should record the pass-1 findings (rank, gains, the two-pass rule)
+   with the numbers from the debug runs.
+7. Downstream: the tracker follows the multi-vector field only above the null; BRIDGE reads `vec` and
+   `tissue_mask`. A per-block confidence (item 3) is the remaining downstream need.
+8. Testing: 16 tests through the stand-in; `pytest` still to be installed by the user. A test of the chunked
+   pipeline driver exists; a test that the gains flatten the response on a bundle at two orientations would guard
+   item 1's fix.
+
+## Pass 3
+
+(after the pass-2 work)
 
 ## Pass 3
 

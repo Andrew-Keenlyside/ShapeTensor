@@ -23,44 +23,52 @@ one or two orientations, too few to calibrate on itself; a real block has them a
 
 ![coherent](img/validation_coherent.png)
 
-With coherent bundles, the structure tensor is the bisector at a crossing (the red–blue patches at 90° are its
-flips between the two directions), while the shape tensor's multi-vector field carries both populations: at 60°,
-where the single tensor is 26° from either population, the pair is within 10° of both at 96% of voxels. On the
-single bundle and across the interface bands the shape tensor reproduces the structure tensor.
+With coherent bundles the pipeline finds the right number of populations on every phantom (one on the bundle
+and across the interface, two on both crossings), and at a crossing the structure tensor is the bisector while
+the multi-vector field carries two directions. The directions of the second population are still inaccurate on
+this crossing (below), which is the one thing pass two of the release review addresses first.
 
 ![calibrated](img/validation_calibrated.png)
 
 At the calibrated texture the step drags the plain structure tensor by 35° within 0.1 mm of the boundary; the
-excision removes this (6°), and the shape tensor inherits the excision. The crossings, however, are no longer
-separable per voxel: the fibres within a population spread over 20°, the per-voxel orientation code of the features
-is of second order, and the window's orientation density no longer shows two populations. The shape tensor is then
-no better than the structure tensor at crossings, and on the three-band interface phantom, where the block-level
-detection finds one population for three bands, it is noisier than the excised tensor (15° against 6°).
+excision removes this (6°), and the shape tensor inherits the excision. The crossings are no longer separable per
+voxel: the fibres within a population spread over 20°, the per-voxel orientation code of the features is of
+second order, and the populations found are not the two bundles. The shape tensor is then no better than the
+structure tensor at crossings, and on the three-band interface phantom, where one population is found for three
+bands, its single field is noisier than the excised tensor (15° against 6°).
 
 ## The numbers
 
-Median axial error in degrees (share within 15° in brackets), mean over seeds.
+Median axial error in degrees (share within 15° in brackets), mean over seeds; `results/validation.json` has every
+seed.
 
 | case | plain structure tensor | excised structure tensor | shape tensor, single | shape tensor, multi (pair) |
 |---|---|---|---|---|
 | coherent: bundle | 1.4 (1.00) | 1.4 (1.00) | 1.3 (1.00) | — |
-| coherent: crossing 90° | 10.4 to the nearest (0.65) | 10.4 (0.65) | 12.4 (0.60) | 16.8 (0.65); both within 15° at 55% |
-| coherent: crossing 60° | 26.2 (0.00) | 26.2 (0.00) | 17.1 (0.40) | 10.4 (1.00); both within 15° at 96% |
-| coherent: interface, within 0.1 mm of the step | 5.2 (0.93) | 4.4 (0.94) | 6.1 (0.80) | — |
-| calibrated: bundle | 3.9 (1.00) | 3.9 (1.00) | 2.5 (1.00) | — |
-| calibrated: crossing 90° | 20.2 (0.37) | 20.2 (0.37) | 33.6 (0.08) | 31.5 (0.00) |
-| calibrated: crossing 60° | 23.8 (0.08) | 23.8 (0.08) | 22.6 (0.01) | not found |
-| calibrated: interface, within 0.1 mm of the step | 35.4 (0.13) | 6.3 (0.93) | 14.9 (0.47) | — |
-| calibrated: interface, beyond 0.5 mm | 5.5 (0.94) | 5.5 (0.94) | 14.5 (0.49) | — |
+| coherent: crossing 90° | 9.6 to the nearest (0.68) | 9.6 (0.68) | 19.3 (0.29) | 15.9 (0.37); both within 15° at 12% |
+| coherent: crossing 60° | 25.1 (0.03) | 25.1 (0.03) | 20.9 (0.32) | 14.9 (0.52); both within 15° at 0% |
+| coherent: interface, within 0.1 mm of the step | 5.2 (0.93) | 4.4 (0.94) | 6.7 (0.76) | — |
+| calibrated: bundle | 3.9 (1.00) | 3.9 (1.00) | 3.5 (1.00) | — |
+| calibrated: crossing 90° | 20.8 (0.35) | 20.9 (0.35) | 24.6 (0.33) | 35.6 (0.00) |
+| calibrated: crossing 60° | 24.3 (0.10) | 24.2 (0.10) | 24.5 (0.16) | 15.4 (0.40) |
+| calibrated: interface, within 0.1 mm of the step | 35.4 (0.13) | 6.3 (0.93) | 14.7 (0.49) | — |
+| calibrated: interface, beyond 0.5 mm | 5.5 (0.94) | 5.5 (0.94) | 15.2 (0.49) | — |
 
 ## What to take from it
 
 - The excision is the remedy for interfaces, at any texture; it is in the baseline and inside every population
   tensor.
-- Separating populations in the shape space works where the fibres within a population are coherent and the
-  crossing is not too tight; it is the one thing the structure tensor cannot do at all, and the multi-vector field
-  is where to look for it. Where the data's dispersion is that of the HiP-CT crop, the pipeline finds one
-  population and its single field is the (excised) structure tensor with the population's weighting.
-- The remaining weakness is spatial: populations are found per block, so a block holding regions of different
-  orientation is read as one population and the other regions get a weakly activated tensor. Detection per
-  sub-window is the next step (`notes/release_plan.md`).
+- Finding the populations works where the fibres within a population are coherent: one on a bundle, two on a
+  90° or 60° crossing, on every seed. Giving each its direction per voxel does not yet: the features respond
+  unequally to orientations relative to the voxel grid (the readers are gain-normalised for that, but the
+  per-voxel layers are not), and on this crossing — one population along the grid's x axis, one along z — the
+  second population's vector is drawn towards the first. On a crossing symmetric about the diagonal the same
+  pipeline reached 10° for the pair with both populations within 15° at 96% of voxels (`notes/release_plan.md`).
+  Until that is fixed, trust the single field, the population count and the activation weights; take the
+  second vector's direction as indicative.
+- Where the data's dispersion is that of the HiP-CT crop, the pipeline finds one population on bundles and its
+  single field is the (excised) structure tensor with the population's weighting; crossings are not resolved.
+- The remaining weakness on single-population tissue is the weighting itself: where a population's activation is
+  low (a band of another orientation, read as the same population), its tensor is built from few gradients and
+  the single field is noisier than the excised tensor. A larger floor on the weight, or populations per sub-window,
+  are the candidate remedies (`notes/release_plan.md`).
