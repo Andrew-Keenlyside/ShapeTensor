@@ -60,3 +60,64 @@ def streamline_segments(ax, P, zsel, scale, lw=0.6, alpha=0.8, max_segments=6000
                 break
     if segs:
         ax.add_collection(LineCollection(np.concatenate(segs), colors=np.concatenate(cols), linewidths=lw, alpha=alpha))
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# the standard figure row
+# ---------------------------------------------------------------------------------------------------------------
+
+POP = ("#2f6db5", "#4e9a3f", "#c2571f")                          # population colours (blue, green, orange)
+CMAPS = ("Blues", "Greens", "Oranges")
+
+
+def shape_space(F, dictionary, A, tau, region, n: int = 12000, seed: int = 0):
+    """A two-dimensional view of the shape space with the populations in it: the standardised (averaged) features
+    of ``n`` voxels of the bool ``region`` on their two principal axes. Returns ``P (n, 2)``, ``rgb (n, 3)`` (the
+    population whose activation is largest where it exceeds ``tau``, grey elsewhere), ``coloured (n,)`` and the
+    flat indices ``pick`` of the voxels drawn."""
+    import torch
+    from matplotlib.colors import to_rgb
+    flat = region.reshape(-1).nonzero(as_tuple=True)[0]
+    g = torch.Generator(device=flat.device).manual_seed(seed)
+    pick = flat[torch.randperm(len(flat), generator=g, device=flat.device)[:n]]
+    f = dictionary.prep(F); X = dictionary.standardise(f.reshape(f.shape[0], -1)[:, pick].T); del f
+    _, _, V = torch.pca_lowrank(X, q=4, center=True); P = ((X - X.mean(0)) @ V[:, :2]).cpu().numpy()
+    Ap = A.reshape(A.shape[0], -1)[:, pick]; lab = Ap.argmax(0).cpu().numpy(); above = (Ap.max(0).values > tau).cpu().numpy()
+    rgb = np.full((len(pick), 3), 0.82)
+    for k in range(min(A.shape[0], len(POP))):
+        rgb[(lab == k) & above] = to_rgb(POP[k])
+    return P, rgb, above, pick
+
+
+def scatter_space(ax, P, rgb, coloured, title=None):
+    """The shape-space scatter, grey points under the coloured ones, square, no ticks."""
+    order = np.argsort(coloured, kind="stable")
+    ax.scatter(P[order, 0], P[order, 1], c=rgb[order], s=2.0, linewidths=0, rasterized=True)
+    ax.set_xticks([]); ax.set_yticks([]); ax.set_box_aspect(1)
+    if title:
+        ax.set_title(title, fontsize=10)
+
+
+def pipeline_row(axs, img, d_st, space, acts, vec, w, vec1, w1, *, aref=None, label="image", extra=None):
+    """One row of the standard figure: image | excised structure tensor | shape space | one activation layer per
+    population | shape tensor, single field (brightness = total activation) | multi-vector field, first vector
+    (brightness = its activation; say so in the figure's title). ``axs``: ``5 + n`` axes, ``n`` activation panels
+    (blank beyond the populations found). Slices ``(H, W)``; directions ``(3, H, W)`` in (z, y, x); ``space`` = ``(P, rgb, coloured)``; ``w``,
+    ``w1`` brightness in [0, 1]; ``aref`` the activation display maximum (the 99th percentile over the layers if
+    None); ``extra``: ``{"st" | "single" | "first": text}`` appended to those titles."""
+    extra = extra or {}
+    n = len(axs) - 5
+    axs[0].imshow(img, cmap="gray", origin="lower"); axs[0].set_title(label, fontsize=10)
+    axs[1].imshow(dec_rgb(d_st), origin="lower", interpolation="nearest"); axs[1].set_title(("excised structure tensor " + extra.get("st", "")).strip(), fontsize=10)
+    scatter_space(axs[2], *space[:3], title=f"shape space: {len(acts)} population{'s' if len(acts) != 1 else ''} found")
+    aref = aref if aref is not None else max(float(np.percentile(np.stack(acts), 99)), 1e-6)
+    for k in range(n):
+        ax = axs[3 + k]
+        if k < len(acts):
+            ax.imshow(acts[k], cmap=CMAPS[k % len(CMAPS)], vmin=0, vmax=aref, origin="lower", interpolation="nearest"); ax.set_title(f"activation layer: population {k + 1}", fontsize=10, color=POP[k % len(POP)])
+        else:
+            ax.imshow(np.full(img.shape, 1.0), cmap="gray", vmin=0, vmax=1, origin="lower"); ax.axis("off")
+    axs[3 + n].imshow(dec_rgb(vec, w), origin="lower", interpolation="nearest"); axs[3 + n].set_title(("shape tensor, single " + extra.get("single", "")).strip(), fontsize=10)
+    axs[4 + n].imshow(dec_rgb(vec1, w1), origin="lower", interpolation="nearest"); axs[4 + n].set_title(("multi-vector field, first vector " + extra.get("first", "")).strip(), fontsize=10)
+    for ax in axs:
+        ax.set_xticks([]); ax.set_yticks([])

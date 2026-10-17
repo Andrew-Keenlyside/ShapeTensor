@@ -13,6 +13,7 @@ nav:
       - 2. Separating populations: pipeline/separating.md
       - 3. One tensor per population: pipeline/tensors.md
       - 4. Merging the fields: pipeline/merging.md
+  - Parameters: parameters.md
   - The structure tensor, the baseline: structure_tensor.md
   - Validation on phantoms: validation.md
   - Real data: data.md

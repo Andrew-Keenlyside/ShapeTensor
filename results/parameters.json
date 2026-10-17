@@ -1,0 +1,272 @@
+[
+ {
+  "parameter": "default",
+  "value": null,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 18.2,
+  "to_structure_tensor_deg": 11.8,
+  "tissue_above_null": 0.898,
+  "to_default_deg": 0.0
+ },
+ {
+  "parameter": "sigma",
+  "value": 0.5,
+  "n_populations": 2,
+  "tau": 0.434,
+  "seconds": 11.9,
+  "to_structure_tensor_deg": 7.6,
+  "tissue_above_null": 0.951,
+  "to_default_deg": 23.0
+ },
+ {
+  "parameter": "sigma",
+  "value": 1.0,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 18.2,
+  "to_structure_tensor_deg": 11.8,
+  "tissue_above_null": 0.898,
+  "to_default_deg": 0.0
+ },
+ {
+  "parameter": "sigma",
+  "value": 2.0,
+  "n_populations": 1,
+  "tau": 0.366,
+  "seconds": 9.8,
+  "to_structure_tensor_deg": 9.7,
+  "tissue_above_null": 0.458,
+  "to_default_deg": 8.4
+ },
+ {
+  "parameter": "rho",
+  "value": 5.0,
+  "n_populations": 2,
+  "tau": 0.269,
+  "seconds": 11.9,
+  "to_structure_tensor_deg": 12.8,
+  "tissue_above_null": 0.81,
+  "to_default_deg": 9.2
+ },
+ {
+  "parameter": "rho",
+  "value": 10.0,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 18.2,
+  "to_structure_tensor_deg": 11.8,
+  "tissue_above_null": 0.898,
+  "to_default_deg": 0.0
+ },
+ {
+  "parameter": "rho",
+  "value": 20.0,
+  "n_populations": 1,
+  "tau": 1.593,
+  "seconds": 9.1,
+  "to_structure_tensor_deg": 7.0,
+  "tissue_above_null": 0.409,
+  "to_default_deg": 9.4
+ },
+ {
+  "parameter": "smooth",
+  "value": 1,
+  "n_populations": 1,
+  "tau": 0.262,
+  "seconds": 11.5,
+  "to_structure_tensor_deg": 11.9,
+  "tissue_above_null": 0.495,
+  "to_default_deg": 9.8
+ },
+ {
+  "parameter": "smooth",
+  "value": 3,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 18.2,
+  "to_structure_tensor_deg": 11.8,
+  "tissue_above_null": 0.898,
+  "to_default_deg": 0.0
+ },
+ {
+  "parameter": "smooth",
+  "value": 5,
+  "n_populations": 2,
+  "tau": 0.28,
+  "seconds": 12.1,
+  "to_structure_tensor_deg": 7.4,
+  "tissue_above_null": 0.941,
+  "to_default_deg": 7.0
+ },
+ {
+  "parameter": "nmax",
+  "value": 1,
+  "n_populations": 1,
+  "tau": 0.37,
+  "seconds": 7.7,
+  "to_structure_tensor_deg": 9.2,
+  "tissue_above_null": 0.507,
+  "to_default_deg": 14.5
+ },
+ {
+  "parameter": "nmax",
+  "value": 2,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 11.1,
+  "to_structure_tensor_deg": 8.2,
+  "tissue_above_null": 0.874,
+  "to_default_deg": 8.1
+ },
+ {
+  "parameter": "nmax",
+  "value": 3,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 18.2,
+  "to_structure_tensor_deg": 11.8,
+  "tissue_above_null": 0.898,
+  "to_default_deg": 0.0
+ },
+ {
+  "parameter": "min_sep_deg",
+  "value": 15.0,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 12.0,
+  "to_structure_tensor_deg": 8.2,
+  "tissue_above_null": 0.874,
+  "to_default_deg": 8.1
+ },
+ {
+  "parameter": "min_sep_deg",
+  "value": 25.0,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 18.2,
+  "to_structure_tensor_deg": 11.8,
+  "tissue_above_null": 0.898,
+  "to_default_deg": 0.0
+ },
+ {
+  "parameter": "min_sep_deg",
+  "value": 40.0,
+  "n_populations": 1,
+  "tau": 0.37,
+  "seconds": 6.7,
+  "to_structure_tensor_deg": 10.6,
+  "tissue_above_null": 0.519,
+  "to_default_deg": 11.9
+ },
+ {
+  "parameter": "window",
+  "value": 0,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 9.8,
+  "to_structure_tensor_deg": 8.2,
+  "tissue_above_null": 0.874,
+  "to_default_deg": 8.1
+ },
+ {
+  "parameter": "window",
+  "value": 64,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 18.2,
+  "to_structure_tensor_deg": 11.8,
+  "tissue_above_null": 0.898,
+  "to_default_deg": 0.0
+ },
+ {
+  "parameter": "window",
+  "value": 96,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 12.8,
+  "to_structure_tensor_deg": 11.8,
+  "tissue_above_null": 0.898,
+  "to_default_deg": 0.0
+ },
+ {
+  "parameter": "tensor_floor",
+  "value": 0.0,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 12.8,
+  "to_structure_tensor_deg": 11.9,
+  "tissue_above_null": 0.898,
+  "to_default_deg": 0.0
+ },
+ {
+  "parameter": "tensor_floor",
+  "value": 0.01,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 18.2,
+  "to_structure_tensor_deg": 11.8,
+  "tissue_above_null": 0.898,
+  "to_default_deg": 0.0
+ },
+ {
+  "parameter": "tensor_floor",
+  "value": 0.1,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 12.8,
+  "to_structure_tensor_deg": 11.5,
+  "tissue_above_null": 0.898,
+  "to_default_deg": 0.3
+ },
+ {
+  "parameter": "iterations",
+  "value": 1,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 11.1,
+  "to_structure_tensor_deg": 12.7,
+  "tissue_above_null": 0.926,
+  "to_default_deg": 3.9
+ },
+ {
+  "parameter": "iterations",
+  "value": 2,
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 18.2,
+  "to_structure_tensor_deg": 11.8,
+  "tissue_above_null": 0.898,
+  "to_default_deg": 0.0
+ },
+ {
+  "parameter": "iterations",
+  "value": 4,
+  "n_populations": 1,
+  "tau": 0.37,
+  "seconds": 13.8,
+  "to_structure_tensor_deg": 13.0,
+  "tissue_above_null": 0.543,
+  "to_default_deg": 8.1
+ },
+ {
+  "parameter": "tissue",
+  "value": "threshold",
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 18.2,
+  "to_structure_tensor_deg": 11.8,
+  "tissue_above_null": 0.898,
+  "to_default_deg": 0.0
+ },
+ {
+  "parameter": "tissue",
+  "value": "none",
+  "n_populations": 2,
+  "tau": 0.37,
+  "seconds": 12.8,
+  "to_structure_tensor_deg": 11.0,
+  "tissue_above_null": 0.92,
+  "to_default_deg": 2.7
+ }
+]

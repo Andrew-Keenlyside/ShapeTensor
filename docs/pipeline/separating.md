@@ -53,7 +53,8 @@ stage 4 uses as weights. The *null* $\tau$ — the activation a wrong population
 single-population voxels, calibrated on the block — is exported with every field; it is never applied to the
 vectors.
 
-![activation layers on a crossing phantom](../img/layers_phantom.png)
+The crossing row of the [validation](../validation.md) figure shows the layers on a phantom; the
+[real data](../data.md) figures show them on HiP-CT and BigBrain.
 
 ## What this stage cannot do
 

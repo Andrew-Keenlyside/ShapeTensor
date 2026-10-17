@@ -36,3 +36,29 @@ Measured on the three phantoms (`shapetensor.phantoms`), 192³ blocks, calibrati
 - **On the real block** (S-21-46, 192³, calibrated on 384³) the pipeline finds two populations and its single
   field agrees with the excised structure tensor to 8° over the block and 6° where the tensor is confident
   (95% within 15°).
+
+## 28. The figures and the parameters, after the review (2026-10-17)
+
+- **One figure layout everywhere**: image | excised structure tensor | shape space (the voxels' standardised
+  features on two principal axes, coloured by the population whose activation is largest above the null) | one
+  activation layer per population | the shape tensor's single field | the first vector of the multi-vector field
+  (`viz.pipeline_row`). The validation, the HiP-CT block and BigBrain use it; the illustration's partner on the
+  HiP-CT block (`figures.py overview`) mirrors the illustration's six columns instead.
+- **The coherent texture setting is no longer the default validation.** It was introduced when detection failed
+  at the calibrated texture, to show stage 2 working on tight bundles (8° dispersion); it is not the regime of the
+  HiP-CT crop and its results (per-voxel separation on diagonal crossings, see §27) overstated what the data
+  allows. The validation is now the calibrated texture only, on bundle 60°, crossing 60° and interface 40 (the
+  90° crossing dropped); `--settings coherent` keeps the setting runnable.
+- **The first vector of the multi-vector field is the useful crossing output at the calibrated texture**: 11.5°
+  to the nearest population (58% within 15°) against 23° for the single field and 24° for the structure tensor;
+  the pair is still unresolved (both within 15° at 0%).
+- **Parameter sweep on the HiP-CT block** (`scripts/parameters.py`, `results/parameters.json`): the field's
+  direction is set by the scales and by which populations are found; `tensor_floor` (0.3° between 0 and 0.1),
+  `tissue` (2.7°) and `window` 64 vs 96 (0°) leave it; `nmax` 2, `min_sep_deg` 15 and `window` 0 all find the
+  same alternative pair, 8.1° from the default's; `iterations` 4 and `min_sep_deg` 40 merge to one population;
+  `smooth` 1 loses the second population (the null drops with the spiky activations); `sigma` 0.5 changes the
+  teacher and the field (23°); `rho` 20 gives one population and a null four times larger.
+- **Run-to-run variation**: the same block, calibration and settings gave 8.3° / 6.3° (§27) and 11.8° / 7.2°
+  (block / where the tensor is confident) agreement with the excised tensor on two days; the readout's fit on the
+  GPU is not bit-reproducible and the population pair found can differ. Worth a seeded, deterministic fit before
+  release.

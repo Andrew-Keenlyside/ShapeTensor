@@ -3,7 +3,7 @@
     shapetensor run <in.zarr> <out.zarr> [--level 0] [--rho 10] [--sigma 1] [--chunk 192 192 192] [--tissue-threshold T]
     shapetensor block <in.npy> <out.zarr> [--rho 10] [--sigma 1] [--voxel-mm 0.02]
     shapetensor structure-tensor <in.zarr> <out.zarr> [--level 0] [--rho 10] [--sigma 1] [--no-excise]
-    shapetensor validate [--out validation] [--seeds 0 1 2] [--rho 10] [--settings coherent calibrated]
+    shapetensor validate [--out validation] [--seeds 0 1 2] [--rho 10] [--settings calibrated]
     shapetensor phantom <bundle|crossing|interface> <out.npz> [--seed 0] [--cross-deg 60] [--step 40] [--angle 60]
     shapetensor demo [--out field.zarr]              # a crossing phantom through the whole pipeline, no data needed
     shapetensor bench [--size 192 256]               # the structure tensor and the pipeline timed on this GPU
@@ -65,7 +65,7 @@ def main(argv=None):
 
     v = sub.add_parser("validate", help="the three phantoms: structure tensor against shape tensor")
     v.add_argument("--out", default="validation"); v.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2]); _scales(v)
-    v.add_argument("--engine", default="anatomix_enc2"); v.add_argument("--settings", nargs="+", default=["coherent", "calibrated"], choices=["coherent", "calibrated"])
+    v.add_argument("--engine", default="anatomix_enc2"); v.add_argument("--settings", nargs="+", default=["calibrated"], choices=["calibrated", "coherent"])
 
     p = sub.add_parser("phantom", help="build one phantom with its truth")
     p.add_argument("name", choices=["bundle", "crossing", "interface"]); p.add_argument("out"); p.add_argument("--seed", type=int, default=0)

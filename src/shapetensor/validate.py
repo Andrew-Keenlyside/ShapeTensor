@@ -1,15 +1,17 @@
 """The validation: the structure tensor (plain and excised) against the shape tensor's single and multi-vector
 fields on the three phantoms, at the same ``sigma`` and ``rho``, over several seeds; a JSON of the scores and one
-figure of DEC maps.
+figure in the package's standard layout (image | excised structure tensor | shape space | activation layers |
+shape tensor | multi-vector field, first vector).
 
     shapetensor validate --out results/validation     (or: python -m shapetensor.validate)
 
-Scores (degrees, axial): on the bundle the error to the population's direction; on the crossing the error of the
-single field to the *nearest* population and, for the multi-vector field, the error of the two strongest vectors
-matched to the two populations (and the share of voxels where both are within 15°); on the interface the error to
-the population's direction by distance from the step (within 0.1 mm, 0.1–0.5 mm, beyond 0.5 mm). The shape
-pipeline is calibrated once on single-population bundles at twelve orientations (a phantom's own teacher would
-have one orientation only).
+Scores (degrees, axial): on the bundle the error to the population's direction; on the crossing the error of each
+field to the *nearest* population and, for the multi-vector field, the error of the two strongest vectors matched
+to the two populations (and the share of voxels where both are within 15°); on the interface the error to the
+population's direction by distance from the step (within 0.1 mm, 0.1–0.5 mm, beyond 0.5 mm). The shape pipeline is
+calibrated once on single-population bundles at twelve orientations (a phantom's own teacher would have one
+orientation only). The texture is the one matched to the real HiP-CT crop (``calibrated``); ``coherent`` (tight
+bundles at the full texture level) is kept as an option.
 """
 from __future__ import annotations
 
@@ -23,10 +25,13 @@ import torch
 from . import st
 from .phantoms import Grid, TextureParams, build, truth_field
 from .pipeline import apply, calibrate
-from .viz import dec_rgb
+from .viz import pipeline_row, shape_space
 
 ANGLES = np.arange(0, 180, 15.0)
-CASES = (("bundle", {"angle": 60.0}), ("crossing", {"cross_deg": 90.0}), ("crossing", {"cross_deg": 60.0}), ("interface", {"step": 40.0}))
+CASES = (("bundle", {"angle": 60.0}), ("crossing", {"cross_deg": 60.0}), ("interface", {"step": 40.0}))
+FIELDS = ("structure tensor", "excised structure tensor", "shape tensor", "shape tensor, multi (first)")
+SETTINGS = {"calibrated": {"dispersion_deg": 20.0, "pitch_deg": 10.0, "texture": 0.5},    # the dispersion and texture level matched to the real crop
+            "coherent": {"dispersion_deg": 8.0, "pitch_deg": 4.0, "texture": 1.0}}        # tight bundles at the full texture level (optional)
 
 
 def angle_deg(d: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
@@ -39,13 +44,15 @@ def _summary(e: torch.Tensor, sel: torch.Tensor) -> dict:
     return {"median_deg": round(float(e.median()), 1), "within_15": round(float((e <= 15).float().mean()), 3), "n": int(e.numel())}
 
 
-def _fields(img: np.ndarray, cal, sigma: float, rho: float, device: str) -> dict:
+def _fields(img: np.ndarray, cal, sigma: float, rho: float, region: torch.Tensor, device: str) -> dict:
     v = torch.as_tensor(img, device=device).float()
     d_plain = st.structure_tensor(v, sigma=sigma, rho=rho, excise=False, order="zyx", device=device)
     d_exc = st.structure_tensor(v, sigma=sigma, rho=rho, excise=True, order="zyx", device=device)
-    out = apply(cal, v, device=device)
+    F = cal.features(v); out = apply(cal, v, features=F, device=device)
+    space = shape_space(F, cal.dictionary, out["activation"], out["tau"], region)[:3]; del F
     return {"image": v, "structure tensor": d_plain, "excised structure tensor": d_exc, "shape tensor": out["vec"], "weight": out["weight"],
-            "shape tensor, multi": out["vecs"], "weights": out["weights"], "n_populations": int(out["modes"].shape[0])}
+            "shape tensor, multi": out["vecs"], "shape tensor, multi (first)": out["vecs"][0], "weights": out["weights"], "activation": out["activation"],
+            "shape space": space, "n_populations": int(out["modes"].shape[0])}
 
 
 def score(name: str, tr: dict, f: dict, inner, vox: float) -> dict:
@@ -55,7 +62,7 @@ def score(name: str, tr: dict, f: dict, inner, vox: float) -> dict:
     r = {"n_populations": f["n_populations"]}
     if name == "crossing":
         t2 = truth_field(tr, "dir2", ny).to(dev)
-        for k in ("structure tensor", "excised structure tensor", "shape tensor"):
+        for k in FIELDS:
             r[k + " (nearest population)"] = _summary(torch.minimum(angle_deg(f[k], t1), angle_deg(f[k], t2)), sel)
         V = f["shape tensor, multi"]
         if V.shape[0] >= 2:
@@ -70,22 +77,19 @@ def score(name: str, tr: dict, f: dict, inner, vox: float) -> dict:
         if name == "interface":
             dist = torch.as_tensor(tr["dist"], device=dev)[:, None, :].expand_as(sel)
             bands = {"within 0.1 mm of the step": sel & (dist < 0.1), "0.1-0.5 mm": sel & (dist >= 0.1) & (dist < 0.5), "beyond 0.5 mm": sel & (dist >= 0.5)}
-        for k in ("structure tensor", "excised structure tensor", "shape tensor"):
+        for k in FIELDS:
             e = angle_deg(f[k], t1)
             r[k] = {b: _summary(e, s) for b, s in bands.items()}
     return r
 
 
-SETTINGS = {"coherent": {"dispersion_deg": 8.0, "pitch_deg": 4.0, "texture": 1.0},        # tight bundles at the full texture level
-            "calibrated": {"dispersion_deg": 20.0, "pitch_deg": 10.0, "texture": 0.5}}    # the dispersion and texture level matched to the real crop
-
-
 def run(out_dir=None, seeds=(0, 1, 2), sigma: float = 1.0, rho: float = 10.0, engine: str = "anatomix_enc2", grid: Grid | None = None,
-        settings=("coherent", "calibrated"), device: str = "cuda", log=print) -> dict:
-    """The validation at each texture setting: a calibration on twelve bundles, then the four cases over the seeds.
+        settings=("calibrated",), device: str = "cuda", log=print) -> dict:
+    """The validation at each texture setting: a calibration on twelve bundles, then the three cases over the seeds.
     Returns the scores; writes ``validation.json`` and one figure per setting into ``out_dir``."""
     t0 = time.time()
     grid = grid or Grid()
+    region = torch.zeros(grid.shape, dtype=torch.bool, device=device); region[grid.inner] = True
     res = {"sigma": sigma, "rho": rho, "engine": engine, "seeds": list(seeds), "grid": {"core": grid.core, "margin": grid.margin, "vox": grid.vox}, "settings": {}}
     for setting in settings:
         p = SETTINGS[setting]; tex = TextureParams(dispersion_deg=p["dispersion_deg"], pitch_deg=p["pitch_deg"]); texture = p["texture"]
@@ -99,10 +103,10 @@ def run(out_dir=None, seeds=(0, 1, 2), sigma: float = 1.0, rho: float = 10.0, en
             per_seed = []
             for s in seeds:
                 img, tr, meta = build(name, s, grid, tex, texture=texture, device=device, **kw)
-                f = _fields(img, cal, sigma, rho, device)
+                f = _fields(img, cal, sigma, rho, region, device)
                 per_seed.append(score(name, tr, f, grid.inner, grid.vox))
                 if s == seeds[0]:
-                    panels.append((label, f, tr))
+                    panels.append((name, label, f, per_seed[-1]))
                 log(f"[{time.time() - t0:4.0f}s] {setting} {label} seed {s}: {json.dumps(per_seed[-1])}")
             cases[label] = {"per_seed": per_seed, "mean": _mean_over_seeds(per_seed)}
         res["settings"][setting] = {**p, "tau": cal.tau, "readout_overlap": cal.readout_overlap, "cases": cases}
@@ -126,31 +130,35 @@ def _mean_over_seeds(rows: list) -> dict:
     return rec(rows)
 
 
+def _error_text(name: str, r: dict, key: str) -> str:
+    """The panel's median error against the truth, from one seed's scores."""
+    if name == "crossing":
+        return f"({r[key + ' (nearest population)']['median_deg']:g}° to the nearest)"
+    if name == "interface":
+        return f"({r[key]['within 0.1 mm of the step']['median_deg']:g}° at the step)"
+    return f"({r[key]['all']['median_deg']:g}°)"
+
+
 def figure(panels, grid: Grid, path, sigma: float, rho: float, setting: str = ""):
-    """DEC maps on the mid-y plane of the scored core: image, plain and excised structure tensor, the shape tensor's
-    single field, and the two strongest vectors of its multi-vector field with their activation as brightness."""
+    """The standard row per case on the mid-y plane of the scored core, with each field's median error in its title."""
     import matplotlib; matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    cols = ["image", "structure tensor", "excised structure tensor", "shape tensor", "multi-vector field: strongest", "multi-vector field: second"]
-    fig, axs = plt.subplots(len(panels), len(cols), figsize=(4.2 * len(cols), 4.4 * len(panels)), dpi=100)
-    y = grid.shape[1] // 2; zs, _, xs = grid.inner
-    for i, (label, f, tr) in enumerate(panels):
-        im = f["image"][zs, y, xs].cpu().numpy()
-        axs[i, 0].imshow(im, cmap="gray", origin="lower"); axs[i, 0].set_title(f"{label}: image", fontsize=10)
-        for j, k in enumerate(("structure tensor", "excised structure tensor", "shape tensor")):
-            axs[i, 1 + j].imshow(dec_rgb(f[k][:, zs, y, xs].cpu().numpy()), origin="lower", interpolation="nearest"); axs[i, 1 + j].set_title(k, fontsize=10)
-        V, W = f["shape tensor, multi"], f["weights"]
-        wref = float(W[0][zs, :, xs].float().quantile(0.99).clamp_min(1e-6))                 # one scale for every panel of the row
-        for j in range(2):
-            if j < V.shape[0]:
-                axs[i, 4 + j].imshow(dec_rgb(V[j][:, zs, y, xs].cpu().numpy(), (W[j][zs, y, xs] / wref).clamp(0, 1).cpu().numpy()), origin="lower", interpolation="nearest")
-            else:
-                axs[i, 4 + j].imshow(np.zeros((zs.stop - zs.start, xs.stop - xs.start, 3)), origin="lower")
-            axs[i, 4 + j].set_title(cols[4 + j] + " (brightness = activation)", fontsize=10)
-    for ax in axs.ravel():
-        ax.set_xticks([]); ax.set_yticks([])
-    fig.suptitle(f"Phantom validation, {setting} texture, σ {sigma:g}, ρ {rho:g} voxels: DEC of each field (R = |x|, G = |y|, B = |z|) on the mid plane", x=0.01, ha="left", fontsize=12)
-    fig.tight_layout(rect=[0, 0, 1, 0.97]); fig.savefig(path); plt.close(fig)
+    n_act = min(max(max(f["n_populations"] for _, _, f, _ in panels), 1), 3)
+    cols = 5 + n_act
+    fig, axs = plt.subplots(len(panels), cols, figsize=(4.2 * cols, 4.7 * len(panels) + 0.4), dpi=100, squeeze=False, constrained_layout=True)
+    y = grid.shape[1] // 2; zs, _, xs = grid.inner; sl = (zs, y, xs); dsl = (slice(None),) + sl
+    for i, (name, label, f, r) in enumerate(panels):
+        A, W = f["activation"], f["weight"]
+        aref = float(A[:, zs, :, xs].float().reshape(-1)[::53].quantile(0.99).clamp_min(1e-6)); wref = float(W[zs, :, xs].float().quantile(0.99).clamp_min(1e-6))
+        acts = [A[k][sl].cpu().numpy() for k in range(min(f["n_populations"], n_act))]
+        extra = {k: _error_text(name, r, key) for k, key in (("st", "excised structure tensor"), ("single", "shape tensor"), ("first", "shape tensor, multi (first)"))}
+        pipeline_row(axs[i], f["image"][sl].cpu().numpy(), f["excised structure tensor"][dsl].cpu().numpy(), f["shape space"], acts,
+                     f["shape tensor"][dsl].cpu().numpy(), (W[sl] / wref).clamp(0, 1).cpu().numpy(),
+                     f["shape tensor, multi (first)"][dsl].cpu().numpy(), (f["weights"][0][sl] / wref).clamp(0, 1).cpu().numpy(),
+                     aref=aref, label=label.replace("bundle 60", "bundle at 60°").replace("crossing 60", "crossing at 60°").replace("interface 40", "interface, step 40"), extra=extra)
+    fig.suptitle(f"Phantom validation ({setting} texture), σ {sigma:g}, ρ {rho:g} voxels: DEC (R = |x|, G = |y|, B = |z|) on the mid plane, the shape tensor's brightness = activation; "
+                 "median error against the truth in brackets", x=0.01, ha="left", fontsize=12)
+    fig.savefig(path); plt.close(fig)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
 {
- "calibration_s": 30.4,
+ "calibration_s": 32.1,
  "n_populations": 2,
- "tau": 0.37,
+ "tau": 0.364,
  "readout_bins": 18,
- "agreement_median_deg": 8.3,
- "agreement_where_tensor_confident_deg": 6.3,
- "agreement_within_15_where_confident": 0.954,
+ "agreement_median_deg": 11.9,
+ "agreement_where_tensor_confident_deg": 7.2,
+ "agreement_within_15_where_confident": 0.934,
  "structure_tensor_gap_median": 0.205
 }

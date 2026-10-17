@@ -16,6 +16,8 @@ population, the merged field — with the excised structure tensor as the baseli
 - Three phantoms (bundle, crossing, interface) and a validation at two texture settings; a chunked driver for
   whole zarr volumes; a CLI (`run`, `block`, `structure-tensor`, `validate`, `phantom`, `demo`, `bench`, `stats`).
 - The ODF / fixel and TCA routes archived under `shapetensor.archive`; the research record under `notes/`.
+- Docs: a parameters page (every parameter varied on the HiP-CT block, `scripts/parameters.py`) and the pipeline
+  illustration's partner on real data (`scripts/figures.py overview`).
 
 ## 0.1.0 — 2026-10
 

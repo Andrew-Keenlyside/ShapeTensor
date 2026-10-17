@@ -12,7 +12,7 @@ out = st.population_field(image, rho=10.0)                                # ever
 
 `image` is a `(Z, Y, X)` numpy, cupy or torch array; the result is the same kind. `shapetensor.np` and
 `shapetensor.cp` force numpy or cupy. Keywords: `rho`, `sigma`, `multi`, `weights`, `tissue`, `order` (`"xyz"` /
-`"zyx"`), `engine`, `nmax`, `smooth`, `device`.
+`"zyx"`), `engine`, `nmax`, `smooth`, `device`. What each does to the field: [parameters](parameters.md).
 
 ## The pipeline: `shapetensor.pipeline`
 
@@ -51,7 +51,7 @@ shapetensor run <in.zarr> <out.zarr> [--level 0] [--rho 10] [--sigma 1] [--chunk
                 [--tissue-threshold T] [--calibration-size 256] [--calibration-origin z y x] [--no-multi] [--rank r --world n]
 shapetensor block <in.npy|in.zarr> <out.zarr> [--rho 10] [--sigma 1] [--voxel-mm 0.02]
 shapetensor structure-tensor <in.zarr> <out.zarr> [--level 0] [--rho 10] [--sigma 1] [--no-excise] [--chunk 256 256 256]
-shapetensor validate [--out validation] [--seeds 0 1 2] [--rho 10] [--settings coherent calibrated]
+shapetensor validate [--out validation] [--seeds 0 1 2] [--rho 10] [--settings calibrated]
 shapetensor phantom <bundle|crossing|interface> <out.npz> [--seed 0] [--angle 60] [--cross-deg 60] [--step 40]
 shapetensor demo [--out field.zarr] [--cross-deg 90]
 shapetensor bench [--size 192 256]

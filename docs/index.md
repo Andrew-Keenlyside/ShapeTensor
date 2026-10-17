@@ -20,7 +20,8 @@ ShapeTensor replaces the intensity with a pretrained 3-D network's shape feature
    tensor at confident sites is the teacher), the populations present are the modes of the window's orientation
    distribution, and every voxel is unmixed onto their signatures: one **activation layer per population**, a
    full-volume image of that population's shape.
-3. **One tensor per population** — the structure tensor of each layer.
+3. **One tensor per population** — the image's structure tensor with the gradients weighted by the population's
+   activation.
 4. **Merging** — one vector per voxel from the merged population tensors, or every population's vector with its
    activation as weight. No masks: the weights say where a population is present.
 
@@ -36,8 +37,14 @@ boundary-robust (*excised*) structure tensor is the package's baseline and the p
 
 ![pipeline overview](img/pipeline_overview.png)
 
-Read [the pipeline](pipeline/index.md) for each stage, [validation](validation.md) for what the phantoms show, and
-[real data](data.md) for HiP-CT and BigBrain.
+![the pipeline on a HiP-CT block](img/overview_S2146.png)
+
+The idea, and the same stages on a 192³ block of HiP-CT: the image, its voxels in the shape space, the populations
+found there, their activation layers, each population's field, and the combined fields.
+
+Read [the pipeline](pipeline/index.md) for each stage, [parameters](parameters.md) for what each setting does to
+the field, [validation](validation.md) for what the phantoms show, and [real data](data.md) for HiP-CT and
+BigBrain.
 
 !!! note "Status"
     Version 0.2. The research notes behind every design decision, with all the numbers, are in the repository's

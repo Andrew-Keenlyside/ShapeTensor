@@ -22,6 +22,14 @@ from a pretrained shape-feature space, on the GPU. One pipeline, four stages:
 The classic structure tensor and its boundary-robust (*excised*) form are the baseline, at the same σ and ρ as
 every tensor in the pipeline, so every comparison is like for like.
 
+<div align="center">
+<img src="docs/img/pipeline_overview.png" alt="the pipeline" width="100%" />
+<img src="docs/img/overview_S2146.png" alt="the pipeline on a HiP-CT block" width="100%" />
+</div>
+
+The idea, and the same stages on a 192³ block of HiP-CT (S-21-46, 20 µm): the image, its voxels in the shape
+space, the two populations found there, their activation layers, each population's field, and the combined fields.
+
 ## Install
 
 ```bash
@@ -43,29 +51,30 @@ out     = st.population_field(image, rho=10.0)                          # modes,
 ```bash
 shapetensor run brain.ome.zarr out.zarr --level 0 --rho 10        # a whole volume, chunked with halos, calibrated once
 shapetensor structure-tensor brain.ome.zarr st.zarr --rho 10      # the baseline in the structure-tensor package's layout
-shapetensor validate --out validation                              # the three phantoms, two texture settings
+shapetensor validate --out validation                              # the three phantoms at the texture of the real crop
 ```
 
 `image` is a `(Z, Y, X)` numpy, cupy or torch array of grey levels; the result comes back as the same kind.
-`rho` is the integration window in voxels (0.2 mm at 20 µm). Documentation: `mkdocs serve` or the `docs/` pages.
+`rho` is the integration window in voxels (0.2 mm at 20 µm); `docs/parameters.md` shows what each parameter does to
+the field. Documentation: `mkdocs serve` or the `docs/` pages.
 
 ## What the phantoms show
 
-Three phantoms with truth, at 20 µm with the texture matched to a real HiP-CT crop — a single bundle, a crossing
-and a bundle across a tissue step — at two texture settings (tight bundles; the dispersion and texture level of
-the real crop):
+Three phantoms with truth, at 20 µm with the texture matched to a real HiP-CT crop (20° of fibre dispersion within
+a population) — a single bundle, a 60° crossing and a bundle across a tissue step. Every figure in the package has
+the same columns: the image, the excised structure tensor, the shape space with the populations found in it, one
+activation layer per population, the shape tensor's single field, and the first vector of its multi-vector field.
 
 <div align="center">
-<img src="docs/img/validation_coherent.png" alt="validation" width="100%" />
+<img src="docs/img/validation_calibrated.png" alt="validation" width="100%" />
 </div>
 
-- At a **tissue step** the plain structure tensor is dragged into the boundary; the excision removes the effect,
-  and the pipeline inherits it (the excision is inside every population tensor).
-- At a **crossing** the structure tensor reports the bisector. With tight bundles the pipeline finds the two
-  populations on every seed and carries two vectors; their per-voxel directions are accurate on some orientations
-  relative to the voxel grid and not on others (a property of the network's features, reported with its numbers
-  in the validation). With the real crop's fibre dispersion (20° within a population) the populations are no
-  longer separable per voxel.
+- At a **tissue step** the plain structure tensor is dragged 35° into the boundary; the excision removes the
+  effect, and the pipeline inherits it (the excision is inside every population tensor).
+- At a **crossing** the structure tensor reports the bisector, 24° from either population. The pipeline finds the
+  two populations on every seed; the first vector of its multi-vector field is 12° from the nearest population at
+  the median, the stronger population's own tensor at each voxel. The pair is not resolved per voxel at this
+  dispersion: the second vector is indicative.
 - On a **single bundle**, and on the real block where the structure tensor is confident, the single field
   reproduces the excised structure tensor.
 

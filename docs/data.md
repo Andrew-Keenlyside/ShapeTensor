@@ -12,11 +12,14 @@ fibres darken it, the grey/white boundary and vessels are steps of 40–70 grey 
 
 ![HiP-CT block: structure tensor, shape tensor, populations](img/real_S2146.png)
 
-The block's own structure tensor is the pipeline's teacher: calibrated on a 384³ block, the readout covers 22 of
-24 orientation bins. The shape tensor's single field and the excised structure tensor agree where the tensor is
-confident (the top quarter by gap) and in the one coherent bundle the block holds; across the whole block, which is
-low-coherence tissue (median gap 0.2), the two fields differ by tens of degrees at the median — the activation
-weights are what tells a consumer which voxels to trust.
+The same columns as every figure in the package: the image, the excised structure tensor, the shape space with
+the populations found in it, their activation layers, the single field and the first vector of the multi-vector
+field. The block's own structure tensor is the pipeline's teacher: calibrated on the 384³ around the block, the
+readout covers 18 of 24 orientation bins and two populations are found. The single field and the excised
+structure tensor agree to 7° where the tensor is confident (the top quarter by gap; 93% of those voxels within
+15°) and to 12° over the whole block, which is low-coherence tissue (median gap 0.2) — the activation weights are
+what tells a consumer which voxels to trust. The population count on this block is sensitive to the detection
+settings ([parameters](parameters.md)): the two readings of the tissue differ by 8° at the median.
 
 ![HiP-CT block: streamlines](img/real_S2146_tracks.png)
 
@@ -24,7 +27,9 @@ weights are what tells a consumer which voxels to trust.
 
 A 768³ volume of interest from the BigBrain histological reconstruction (a cell-body stain), resampled to 20 µm:
 white matter is dark and nearly featureless at this stain, so it is the harder case for any gradient-based
-estimate and a test of the engine on a different contrast. `scripts/bigbrain_fetch.py` downloads it.
+estimate and a test of the engine on a different contrast; the pipeline reads three populations in it, which
+with no truth is a statement about the shape space of this stain, not about fibres. `scripts/bigbrain_fetch.py`
+downloads it.
 
 ![BigBrain: structure tensor and shape tensor](img/bigbrain.png)
 
