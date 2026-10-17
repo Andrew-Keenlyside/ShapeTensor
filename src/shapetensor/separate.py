@@ -133,6 +133,18 @@ class OrientationReadout:
                 dens += (P * region[z:z + shp[0]].reshape(-1, 1).float()).sum(0)
         return dens
 
+    def window_densities(self, F: torch.Tensor, region: torch.Tensor, window: int, z_chunk: int = 16) -> torch.Tensor:
+        """The orientation density of every ``window``³ sub-window of the block (``(n_windows, n_dirs)``), in one pass
+        over the features."""
+        Z, Y, X = region.shape
+        nz, ny, nx = (Z + window - 1) // window, (Y + window - 1) // window, (X + window - 1) // window
+        ar = lambda n: torch.arange(n, device=F.device) // window
+        wid = (ar(Z)[:, None, None] * ny + ar(Y)[None, :, None]) * nx + ar(X)[None, None, :]
+        out = torch.zeros(nz * ny * nx, self.n_dirs, device=F.device)
+        for z, shp, P in self._chunks(F, z_chunk):
+            out.index_add_(0, wid[z:z + shp[0]].reshape(-1), P * region[z:z + shp[0]].reshape(-1, 1).float())
+        return out
+
     def predict(self, F: torch.Tensor, z_chunk: int = 16):
         """The distribution's peak direction per voxel ``(3, Z, Y, X)`` and its confidence (the peak's share)."""
         P = self.predict_dist(F, z_chunk)

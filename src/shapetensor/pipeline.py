@@ -129,13 +129,22 @@ def _dominant_axis(d: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     return V[:, -1]
 
 
-def _candidates(cal: Calibration, F: torch.Tensor, reg: torch.Tensor, n: int, min_sep_deg: float):
-    """Candidate populations: the peaks of the block's orientation density (gain-normalised), at most ``n`` of
-    them, ``min_sep_deg`` apart, each owning a tenth of the density."""
-    gain = cal.density_gain if cal.density_gain is not None else 1.0
-    dens = cal.readout.density(F, reg) / gain
-    m, h, k = modes_from_density(dens, cal.readout.grid, rel=0.3, min_sep_deg=min_sep_deg, nmax=n, mass_floor=0.1)
-    return m[:k]
+def _candidates(cal: Calibration, F: torch.Tensor, reg: torch.Tensor, n: int, min_sep_deg: float, window: int = 64):
+    """Candidate populations: the peaks of the block's orientation density and of every ``window``³ sub-window's (a
+    block may hold regions of different orientation), gain-normalised, merged ``min_sep_deg`` apart, the block's
+    first and then the sub-windows' by their mass, at most ``n``."""
+    grid = cal.readout.grid; gain = cal.density_gain if cal.density_gain is not None else 1.0
+    dens = [cal.readout.density(F, reg) / gain]
+    if window and window < max(reg.shape):
+        W = cal.readout.window_densities(F, reg, window) / gain
+        dens += [W[i] for i in torch.argsort(W.sum(1), descending=True) if float(W[i].sum()) > 0]
+    cos_sep = math.cos(math.radians(min_sep_deg)); cands = []
+    for d in dens:
+        m, h, k = modes_from_density(d, grid, rel=0.3, min_sep_deg=min_sep_deg, nmax=4, mass_floor=0.1)
+        for j in range(k):
+            if len(cands) < n and all(float((m[j] @ c).abs()) < cos_sep for c in cands):
+                cands.append(m[j])
+    return torch.stack(cands)
 
 
 def _normalised(cal, A, modes):
@@ -186,14 +195,17 @@ def _confirm(cal: Calibration, v, F, reg, cand, w_exc, nmax: int, min_sep_deg: f
 
 
 def apply(cal: Calibration, volume, tissue=None, *, nmax: int = 3, min_sep_deg: float = 25.0, min_mask_share: float = 0.05, iterations: int = 2,
-          features=None, spacing=None, timings: dict | None = None, device: str = "cuda") -> dict:
+          tensor_floor: float = 0.01, window: int = 64, features=None, spacing=None, timings: dict | None = None, device: str = "cuda") -> dict:
     """Stages 2–4 on ``volume (Z, Y, X)`` with a calibration. Returns a dict (vectors in (z, y, x), no masks applied):
 
     ``modes (N, 3)`` the populations' directions; ``activation (N, Z, Y, X)`` their layers; ``dirs (N, 3, Z, Y, X)`` and
     ``gap (N, Z, Y, X)`` each layer's own direction and its uniqueness; ``vec (3, Z, Y, X)``, ``vec_gap`` and ``weight``
     the single field (the merged population tensors, the total activation as weight); ``vecs (N, 3, Z, Y, X)`` and
-    ``weights`` the multi-vector field (every population everywhere, ordered by activation); ``masks (N, Z, Y, X)``
-    (``iterations``: joint refinements of the populations from their own layers; ``nmax``: at most this many);
+    ``weights`` the multi-vector field (every population everywhere, ordered by activation); ``confidence`` (the
+    readout's fit, the share of tissue above the null, the populations' mask shares); ``masks (N, Z, Y, X)``
+    (``iterations``: joint refinements of the populations from their own layers; ``nmax``: at most this many;
+    ``tensor_floor``: the weight floor of every population tensor, as a fraction of the null; ``window``: the sub-window
+    size for candidate populations, 0 = the block only);
     where each population's smoothed activation exceeds the null ``tau``, ``tissue_mask`` where the smoothed *total*
     activation does, ``strongest`` (int8, 1 + index inside the tissue mask); ``residual``, ``tau``, ``n_candidates``.
     ``timings``: a dict that receives the seconds per stage."""
@@ -212,7 +224,7 @@ def apply(cal: Calibration, volume, tissue=None, *, nmax: int = 3, min_sep_deg: 
     # candidates from the block's orientation density, confirmed by their own layers: a
     # candidate's population tensor points where its fibres lie; the shoulders of one population all point at it,
     # so the populations are the distinct layer axes (no activation floor here: the pure activation decides)
-    cand = _candidates(cal, F, reg, nmax + 3, min_sep_deg); n = cand.shape[0]
+    cand = _candidates(cal, F, reg, nmax + 3, min_sep_deg, window); n = cand.shape[0]
     modes = _confirm(cal, v, F, reg, cand, w_exc, nmax, min_sep_deg, iterations, spacing)
     keep = list(range(modes.shape[0]))
     while keep:                                                                         # a population must own a mask
@@ -226,7 +238,7 @@ def apply(cal: Calibration, volume, tissue=None, *, nmax: int = 3, min_sep_deg: 
     modes = modes[keep]; mark("populations")
     S, dirs, gaps = [], [], []
     for k in range(len(keep)):
-        Sk, dk, gk = population_tensor(v, A[k], cal.sigma, cal.rho, cal.truncate, w_exc, 0.01 * cal.tau, spacing); S.append(Sk); dirs.append(dk); gaps.append(gk)
+        Sk, dk, gk = population_tensor(v, A[k], cal.sigma, cal.rho, cal.truncate, w_exc, tensor_floor * cal.tau, spacing); S.append(Sk); dirs.append(dk); gaps.append(gk)
     S, dirs, gaps = torch.stack(S), torch.stack(dirs), torch.stack(gaps); mark("tensors")
     vec, vec_gap, weight = single_field(S, A, floor=0.1 * cal.tau); del S
     vecs, weights = multi_field(dirs, A)
@@ -235,8 +247,10 @@ def apply(cal: Calibration, volume, tissue=None, *, nmax: int = 3, min_sep_deg: 
     strongest = (A.argmax(0) + 1).to(torch.int8) * tissue_mask.to(torch.int8); mark("merge")
     if timings is not None:
         timings.update({b: round(tb - ta, 3) for (_, ta), (b, tb) in zip(marks[:-1], marks[1:])}); timings["total"] = round(marks[-1][1] - marks[0][1], 3)
+    confidence = {"readout_overlap": round(float(cal.readout_overlap), 3), "tissue_above_null": round(float((tissue_mask & tis).float().sum() / tis.float().sum().clamp_min(1)), 3),
+                  "mask_shares": [round(float(x), 3) for x in share]}
     return {"modes": modes, "activation": A, "dirs": dirs, "gap": gaps, "vec": vec, "vec_gap": vec_gap, "weight": weight, "vecs": vecs, "weights": weights,
-            "masks": masks, "tissue_mask": tissue_mask, "strongest": strongest, "residual": R, "tau": cal.tau, "n_candidates": int(n)}
+            "masks": masks, "tissue_mask": tissue_mask, "strongest": strongest, "residual": R, "tau": cal.tau, "n_candidates": int(n), "confidence": confidence}
 
 
 def population_field(volume, tissue=None, *, nmax: int = 3, timings: dict | None = None, device: str = "cuda", **calibration) -> dict:

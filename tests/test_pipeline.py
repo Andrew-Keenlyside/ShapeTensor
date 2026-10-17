@@ -99,6 +99,23 @@ def test_read_volume_formats(tmp_path):
 
 
 @pytest.mark.skipif(DEV != "cuda", reason="the pipeline needs a GPU")
+def test_gains_make_orientations_count_alike():
+    """A bundle along x and one along z: after the per-direction gains the two reach the same activation on their
+    own signature (within 25%), and each is read as one population."""
+    pytest.importorskip("anatomix")
+    from shapetensor.pipeline import apply, calibrate
+    from shapetensor.validate import ANGLES
+    g = Grid(core=(64, 32, 64), margin=(32, 32, 32))
+    cal = calibrate([torch.as_tensor(build("bundle", 100 + k, g, angle=float(a), device=DEV)[0], device=DEV).float() for k, a in enumerate(ANGLES)], margin=32, device=DEV)
+    means = []
+    for ang in (0.0, 90.0):
+        out = apply(cal, torch.as_tensor(build("bundle", 0, g, angle=ang, device=DEV)[0], device=DEV).float(), device=DEV)
+        assert out["modes"].shape[0] == 1
+        means.append(float(out["activation"][0][g.inner].mean()))
+    assert abs(means[0] - means[1]) / max(means) < 0.25, means
+
+
+@pytest.mark.skipif(DEV != "cuda", reason="the pipeline needs a GPU")
 def test_run_volume_pipeline(tmp_path):
     pytest.importorskip("anatomix")
     import zarr

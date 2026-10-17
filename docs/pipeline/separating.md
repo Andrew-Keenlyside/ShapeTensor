@@ -30,13 +30,15 @@ readout reports to the teacher's own orientation histogram, the activations by w
 direction's signature. Every direction then counts alike.
 
 The density's peaks still over-count: a single population with dispersed fibres has shoulders that a peak finder
-reads as further populations. The pipeline therefore takes up to four candidates and lets stage 3 judge them:
-the candidates are unmixed together into their activation layers (below), and each layer's own population
-tensor — the image's gradients weighted by that activation — gives the direction its fibres actually have. The
-shoulders of one population all point at that population; a real second population points elsewhere. The
-populations are the *distinct* layer axes (25° apart), refined once from their own layers, and a population must
-also own at least 5% of the tissue above the activation null. The joint unmixing is kept to at most four
-signatures, within the rank of the orientation code.
+reads as further populations. The pipeline therefore gathers up to six candidates — the peaks of the block's
+density and of its 64³ sub-windows' (a block may hold regions of different orientation) — and lets stage 3 judge
+them. Each candidate is first unmixed *alone* into its activation layer (below), and the layer's own population
+tensor — the image's gradients weighted by that activation — gives the direction its fibres actually have; the
+shoulders of one population all point at that population, a real second population points elsewhere, and the
+*distinct* axes (25° apart) are kept. The kept axes are then unmixed *together*, twice, and the distinct axes kept
+again: under a joint unmixing the shoulders lose their shared voxels to the population they belong to. A joint
+unmixing never has more than four signatures (the rank of the orientation code is five), and a population must
+own at least 5% of the tissue above the activation null.
 
 ## Where each population is: the activation layers
 

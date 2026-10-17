@@ -133,10 +133,106 @@ design:
    pipeline driver exists; a test that the gains flatten the response on a bundle at two orientations would guard
    item 1's fix.
 
+### Outcome of pass 2
+
+1. Symmetry averaging of the layers was implemented and measured, and dropped: averaging over the fibre plane's
+   symmetries (z–x swap, x flip) made the 90° crossing at the diagonal worse (both within 15°: 87% → 18%), the six
+   axis orderings worse still, and neither improved the x–z crossing. The transformed frames are not better
+   estimates, so the average blurs (`notes/results_log.md` §27). The per-voxel orientation dependence stands as a
+   documented limitation of the network's features.
+2. The population tensor's weight floor is not the lever for single-population noise (1–30% of the null: 7.2° →
+   6.8° far from the step on the three-band interface, at a cost to crossings). The band problem is the population
+   count, and with the two-pass confirmation the sub-window candidates can be afforded again: the interface gets
+   a second band (far error 7.2° → 5.4°) and a dispersed bundle loses its spurious second population. Kept, with
+   the 64³ window.
+3. `apply` returns a per-block `confidence` (the readout's fit, the share of tissue above the null, the
+   populations' mask shares) for a consumer to fall back to the single field on.
+6. §27 of the results log records the findings of both passes with their numbers.
+8. A test that a bundle along x and one along z reach the same activation after the gains (within 25%) and are
+   each read as one population; 17 tests through the stand-in.
+
 ## Pass 3
 
-(after the pass-2 work)
+### Correctness
+1. The one open accuracy item is the per-voxel orientation dependence of the layers (pass 2, item 1). Not fixable
+   by averaging; a rotation-equivariant feature network or a dictionary fitted per orientation band would be the
+   research directions, outside the release.
+2. Everything else in the pipeline is either validated (bundle, interface at both textures, the population count
+   at coherent dispersion, the real block's agreement) or reported as a limit with its number.
+
+### Peer review
+3. The documentation makes three claims and each has a measured row: the excision fixes interfaces; the
+   population count is right where fibres are coherent; the single field reproduces the excised tensor on
+   single-population tissue and the real block. The crossing directions are reported as indicative.
+
+### Speed
+4. 192³ block: about 6 s with the sub-window candidates and the two-pass confirmation; `shapetensor bench`
+   measures it on the user's GPU.
+
+### Clarity
+5. The pipeline module's confirmation is the one intricate function; its docstring states the rank argument and
+   the two passes. The rest of the public surface is unchanged since pass 1.
+
+### Downstream
+6. `vec`, `gap`, `weight`, `vecs`, `weights`, `tissue_mask`, `tau`, `confidence`: what BRIDGE and a tracker need.
+   The tracker follows the multi-vector field only above the null.
+
+### Validation and testing
+7. 17 tests; CI for the CPU subset; `pytest` still to be installed in the working environment. The validation runs
+   from one command and writes its JSON and figures.
+
+### Release
+8. Remaining before a public release: `pip install pytest mkdocs` in the environment and a green local run of
+   both; a version tag; the Apptainer definition rebuilt against the new CLI (its entry point is unchanged).
+
+### Outcome of pass 2
+
+1. Symmetry averaging of the layers was implemented and measured, and dropped: averaging over the fibre plane's
+   symmetries (z–x swap, x flip) made the 90° crossing at the diagonal worse (both within 15°: 87% → 18%), the six
+   axis orderings worse still, and neither improved the x–z crossing. The transformed frames are not better
+   estimates, so the average blurs (`notes/results_log.md` §27). The per-voxel orientation dependence stands as a
+   documented limitation of the network's features.
+2. The population tensor's weight floor is not the lever for single-population noise (1–30% of the null: 7.2° →
+   6.8° far from the step on the three-band interface, at a cost to crossings). The band problem is the population
+   count, and with the two-pass confirmation the sub-window candidates can be afforded again: the interface gets
+   a second band (far error 7.2° → 5.4°) and a dispersed bundle loses its spurious second population. Kept, with
+   the 64³ window.
+3. `apply` returns a per-block `confidence` (the readout's fit, the share of tissue above the null, the
+   populations' mask shares) for a consumer to fall back to the single field on.
+6. §27 of the results log records the findings of both passes with their numbers.
+8. A test that a bundle along x and one along z reach the same activation after the gains (within 25%) and are
+   each read as one population; 17 tests through the stand-in.
 
 ## Pass 3
 
-(after the pass-2 work)
+### Correctness
+1. The one open accuracy item is the per-voxel orientation dependence of the layers (pass 2, item 1). Not fixable
+   by averaging; a rotation-equivariant feature network or a dictionary fitted per orientation band would be the
+   research directions, outside the release.
+2. Everything else in the pipeline is either validated (bundle, interface at both textures, the population count
+   at coherent dispersion, the real block's agreement) or reported as a limit with its number.
+
+### Peer review
+3. The documentation makes three claims and each has a measured row: the excision fixes interfaces; the
+   population count is right where fibres are coherent; the single field reproduces the excised tensor on
+   single-population tissue and the real block. The crossing directions are reported as indicative.
+
+### Speed
+4. 192³ block: about 6 s with the sub-window candidates and the two-pass confirmation; `shapetensor bench`
+   measures it on the user's GPU.
+
+### Clarity
+5. The pipeline module's confirmation is the one intricate function; its docstring states the rank argument and
+   the two passes. The rest of the public surface is unchanged since pass 1.
+
+### Downstream
+6. `vec`, `gap`, `weight`, `vecs`, `weights`, `tissue_mask`, `tau`, `confidence`: what BRIDGE and a tracker need.
+   The tracker follows the multi-vector field only above the null.
+
+### Validation and testing
+7. 17 tests; CI for the CPU subset; `pytest` still to be installed in the working environment. The validation runs
+   from one command and writes its JSON and figures.
+
+### Release
+8. Remaining before a public release: `pip install pytest mkdocs` in the environment and a green local run of
+   both; a version tag; the Apptainer definition rebuilt against the new CLI (its entry point is unchanged).
