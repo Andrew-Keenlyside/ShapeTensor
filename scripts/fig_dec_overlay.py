@@ -40,7 +40,7 @@ def phantom_image(angles, seed):
 
 
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("--field", default="phantom_3pop"); ap.add_argument("--gamma", type=float, default=0.7); ap.add_argument("--mode", default="saturation", choices=["saturation", "opacity"])
+    ap = argparse.ArgumentParser(); ap.add_argument("--field", default="phantom_3pop"); ap.add_argument("--gamma", type=float, default=0.7); ap.add_argument("--mode", default="brightness", choices=["brightness", "saturation", "opacity"])
     a = ap.parse_args()
     if a.field == "phantom_3pop":
         g = zarr.open_group(str(Path(DATA_ROOT) / "fields" / "phantom_3pop_population_field.zarr"), mode="r")
@@ -59,11 +59,17 @@ def main():
     acts = [A[k][crop[0], y, crop[1]] for k in range(N)]; dds = [D[k][:, crop[0], y, crop[1]] for k in range(N)]
     for k in range(N):
         ax = axs[1 + k]; ax.imshow(dec_activation_overlay(dds[k], acts[k], im, a.mode, a.gamma), origin="lower", interpolation="nearest")
-        ax.set_title(f"population {k + 1}: its layer's direction as hue everywhere, activation as {a.mode}", fontsize=10); ax.set_xticks([]); ax.set_yticks([])
-    best = np.argmax(np.stack(acts), 0); dboth = np.choose(best[None], dds) if N > 1 else dds[0]; aboth = np.max(np.stack(acts), 0)
-    ax = axs[N + 1]; ax.imshow(dec_activation_overlay(dboth, aboth, im, a.mode, a.gamma), origin="lower", interpolation="nearest")
-    ax.set_title(f"all populations: the most active layer's direction per voxel, activation as {a.mode}", fontsize=10); ax.set_xticks([]); ax.set_yticks([])
-    fig.suptitle(f"DEC orientation of each population's layer (hue, never masked) with its activation as {a.mode}, over the intensity image (R = |x|, G = |y|, B = |z|)", x=0.01, ha="left", fontsize=11)
+        ax.set_title(f"population {k + 1}: DEC of its layer's direction, brightness = activation" if a.mode == "brightness" else f"population {k + 1}: its layer's direction as hue everywhere, activation as {a.mode}", fontsize=10); ax.set_xticks([]); ax.set_yticks([])
+    if a.mode == "brightness":
+        comb = sum(dec_activation_overlay(dds[k], acts[k], im, a.mode, a.gamma) for k in range(N))      # the DEC maps add: a voxel with two populations shows both
+        ax = axs[N + 1]; ax.imshow(np.clip(comb, 0, 1), origin="lower", interpolation="nearest")
+        ax.set_title("all populations: the per-population DEC maps summed (brightness = activation)", fontsize=10)
+    else:
+        best = np.argmax(np.stack(acts), 0); dboth = np.choose(best[None], dds) if N > 1 else dds[0]; aboth = np.max(np.stack(acts), 0)
+        ax = axs[N + 1]; ax.imshow(dec_activation_overlay(dboth, aboth, im, a.mode, a.gamma), origin="lower", interpolation="nearest")
+        ax.set_title(f"all populations: the most active layer's direction per voxel, activation as {a.mode}", fontsize=10)
+    ax.set_xticks([]); ax.set_yticks([])
+    fig.suptitle(f"DEC orientation of each population's layer with its activation as {a.mode} (R = |x|, G = |y|, B = |z|)", x=0.01, ha="left", fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.94]); out = FIGS / f"dec_overlay_{a.field}_{a.mode}.png"; fig.savefig(out); plt.close(fig); print("wrote", out)
 
 
