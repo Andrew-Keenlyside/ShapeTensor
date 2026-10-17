@@ -366,9 +366,12 @@ def run_volume(src: str, dst: str, *, level: str | None = None, chunk=(192, 192,
             tis = None if tissue_threshold is None else blk >= tissue_threshold
             use, which = cal, 2
             if calibrate_chunks:                                                               # the chunk's own readers, unless its teacher holds too few orientations
-                own = calibrate(blk, tis, features=F, spacing=spacing, device=device, **calibration)
-                if own.orientation_bins_occupied >= min_bins:
-                    use, which = own, 1
+                try:
+                    own = calibrate(blk, tis, features=F, spacing=spacing, device=device, **calibration)
+                    if own.orientation_bins_occupied >= min_bins and np.isfinite(own.tau) and own.tau > 0:
+                        use, which = own, 1
+                except Exception as e:                                                         # too little oriented tissue to fit on: the volume's readers
+                    log(f"[{rank}/{world}] chunk {i + 1}/{len(tiles)} ({z0}, {y0}, {x0}): own calibration failed ({type(e).__name__}), volume calibration used")
             chunk_cal[f"{z0},{y0},{x0}"] = which
             out = apply(use, blk, tis, nmax=nmax, spacing=spacing, features=F, device=device); del F
         except Exception as e:                                                                 # a chunk must not end a whole-volume run
