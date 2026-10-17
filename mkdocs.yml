@@ -1,42 +1,22 @@
 site_name: ShapeTensor
-site_description: Fibre orientation fields for high-resolution white-matter volumes, on the GPU
-site_url: https://shapetensor.readthedocs.io/
+site_description: Fibre orientation fields of high-resolution white-matter volumes from a pretrained shape-feature space, on the GPU
 repo_url: https://github.com/Andrew-Keenlyside/ShapeTensor
-repo_name: Andrew-Keenlyside/ShapeTensor
-copyright: Andrew Keenlyside, UCL
-docs_dir: docs
 theme:
   name: readthedocs
-  logo: img/shapetensor_logo.png
-  highlightjs: true
 nav:
   - Introduction: index.md
   - Installation: installation.md
   - Quick start: quickstart.md
-  - The structure tensor and where it fails: structure_tensor.md
-  - Theory of the shape tensor: theory.md
-  - The pipeline, stage by stage:
+  - The pipeline:
       - Overview: pipeline/index.md
-      - 1. Getting the shape features: pipeline/shape_features.md
-      - 2. Separating populations in shape space: pipeline/separating.md
-      - 3. Getting tensors from populations: pipeline/tensors_from_populations.md
-      - 4. Merging population vector fields: pipeline/merging.md
-  - Phantoms and validation: phantoms.md
-  - Brain image data: brain_data.md
-  - BigBrain: bigbrain.md
-  - Non-isotropic data: anisotropy.md
-  - Walkthrough, step by step: walkthrough.md
-  - Results: results.md
-  - API: api.md
-  - Research notes:
-      - Review and recommendation: research/TCA_FIELD_REVIEW.md
-      - Results log: research/TCA_FIELD_RESULTS.md
-      - Build plan: research/TCA_FIELD_PLAN.md
-      - Image to vectors (pre-package): research/IMAGE_TO_VECTORS.md
-      - Shape-space handoff: research/SHAPE_SPACE_HANDOFF.md
-      - The boundary problem: research/BOUNDARY_PROBLEM.md
-      - Literature review: research/literature_review.md
-      - Prototype scripts: research/PROTOTYPES.md
+      - 1. Shape features: pipeline/shape_features.md
+      - 2. Separating populations: pipeline/separating.md
+      - 3. One tensor per population: pipeline/tensors.md
+      - 4. Merging the fields: pipeline/merging.md
+  - The structure tensor, the baseline: structure_tensor.md
+  - Validation on phantoms: validation.md
+  - Real data: data.md
+  - API and command line: api.md
 markdown_extensions:
   - admonition
   - attr_list

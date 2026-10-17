@@ -1,15 +1,19 @@
-"""``from shapetensor import cp as st; vec = st.shapetensor(image, ...)``: the one-call API returning cupy arrays
-(computed on the GPU in torch, handed over through DLPack without a copy). ``image`` may be numpy, cupy or torch."""
+"""``from shapetensor import cp as st``: the one-call API returning cupy arrays (computed on the GPU in torch, handed
+over through DLPack without a copy). ``image`` may be numpy, cupy or torch."""
 from __future__ import annotations
 
-from . import st as _st
+from . import shapetensor as _shapetensor, structure_tensor as _structure_tensor
+from .st import _to_torch
+
+
+def _cupy(t):
+    import cupy
+    return cupy.from_dlpack(t.contiguous())
 
 
 def shapetensor(image, **kwargs):
-    import cupy
-    out = _st.shapetensor(_st._to_torch(image, kwargs.get("device", "cuda")), **kwargs)
-    return cupy.from_dlpack(out.contiguous())
+    return _cupy(_shapetensor(_to_torch(image, kwargs.get("device", "cuda")), **kwargs))
 
 
-shapetensor.__doc__ = (_st.shapetensor.__doc__ or "") + "\n    Returned as a cupy array."
-__all__ = ["shapetensor"]
+def structure_tensor(image, **kwargs):
+    return _cupy(_structure_tensor(_to_torch(image, kwargs.get("device", "cuda")), **kwargs))

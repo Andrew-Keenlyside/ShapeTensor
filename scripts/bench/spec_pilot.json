@@ -1,9 +1,0 @@
-{
- "pids": ["P3-15", "P3-0", "P8", "P9"],
- "seeds": [0],
- "engines": ["intensity", "jet", "anatomix16", "anatomix48"],
- "rhos": [4.0, 8.0, 16.0, 32.0],
- "stride": 4,
- "odf": true,
- "tag": "pilot"
-}

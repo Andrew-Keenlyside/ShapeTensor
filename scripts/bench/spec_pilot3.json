@@ -1,3 +1,0 @@
-{"pids": ["P4-lines-single", "P4-lines-c60-f1", "P4-lines-c90-f1", "P4-lines-c30-f1", "P4-lines-c60-f4", "P4-rods-single", "P4-rods-c60-f1", "P5", "P8", "P9"],
- "seeds": [0], "engines": ["intensity", "jet", "anatomix16", "anatomix48"], "rhos": [8.0, 16.0],
- "stride": 4, "odf": true, "engine_kwargs": {"anatomix48": {"nyquist": "none"}, "anatomix16": {"nyquist": "none"}}, "tag": "main"}

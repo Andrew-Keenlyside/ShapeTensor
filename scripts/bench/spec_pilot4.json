@@ -1,3 +1,0 @@
-{"pids": ["P1", "P1t", "P1-t0.25", "P1t-t0.25", "P2", "P2t", "P3-0", "P3-0-t0.25", "P8-t0.25", "P7", "P7-t0.25"],
- "seeds": [0], "engines": ["intensity", "jet", "anatomix16", "anatomix48"], "rhos": [8.0, 16.0],
- "stride": 4, "odf": true, "engine_kwargs": {"anatomix48": {"nyquist": "none"}, "anatomix16": {"nyquist": "none"}}, "tag": "main"}

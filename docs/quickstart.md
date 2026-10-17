@@ -1,94 +1,67 @@
 # Quick start
 
-Several co-registered stains or contrasts of the same block are read together by passing a list — the tensors add,
-so every stain's gradients (and, with a shape engine, every stain's features) count in one direction field:
-
-```python
-vec = st.cp.shapetensor([cell_stain, myelin_stain], rho=10.0, engine="anatomix48")
-```
-
 ## One call
 
 ```python
 import numpy as np
-from shapetensor import np as st          # or: from shapetensor import cp as st   (cupy out, no copy)
+import shapetensor as st
 
-image = np.load("block.npy").astype(np.float32)                # (Z, Y, X) grey levels, e.g. a 20 µm HiP-CT block
+image = np.load("block.npy").astype(np.float32)                   # (Z, Y, X) grey levels, e.g. a 20 µm HiP-CT block
 
-vec  = st.shapetensor(image, sigma=1.0, rho=16.0)              # (3, Z, Y, X): unit fibre direction (x, y, z); boundary-robust
-vec  = st.shapetensor(image, rho=16.0, excise=False)           # the plain structure tensor's direction
-vec  = st.shapetensor(image, rho=16.0, engine="anatomix48")    # from shape-space features instead of the intensity
-dirs = st.shapetensor(image, rho=16.0, fixels=True)            # (3, 3, Z, Y, X): up to three directions per voxel
+vec = st.shapetensor(image, rho=10.0)                              # (3, Z, Y, X): one unit direction per voxel, (x, y, z)
+vecs, w = st.shapetensor(image, rho=10.0, multi=True, weights=True)   # (N, 3, Z, Y, X) and (N, Z, Y, X): every population, by activation
+vec = st.structure_tensor(image, rho=10.0)                         # the excised structure tensor's direction: the baseline
 ```
+
+`image` may be a numpy, cupy or torch array; the result comes back as the same kind (`shapetensor.np` and
+`shapetensor.cp` force numpy or cupy). Vectors are axial: a direction and its negative are the same fibre.
 
 | keyword | meaning | default |
 |---|---|---|
-| `sigma` | derivative scale, voxels | 1.0 |
-| `rho` | integration window, voxels (at 20 µm, 16 = 0.32 mm) | 16.0 |
-| `engine` | `"intensity"`, `"jet"`, `"anatomix16"`, `"anatomix48"` | `"intensity"` |
-| `excise` | drop boundary gradients before integrating (intensity engine) | `True` |
-| `excise_mask` | white-matter mask `(Z, Y, X)`: the excision threshold is 3× the median coarse gradient *over the mask*; without it, over the whole image, which is too low where much of the image is smooth grey matter or background | `None` |
-| `fixels` | return up to three directions per voxel from CSD of the gradient ODF | `False` |
-| `order` | component order of the vectors, `"xyz"` or `"zyx"` | `"xyz"` |
-| `spacing` | voxel size per axis `(dz, dy, dx)` for anisotropic data, e.g. `(2.5, 1, 1)` for 50 × 20 × 20 µm: filters scale per axis, gradients and directions are physical; the shape engines resample to isotropic internally | `None` |
-| `truncate` | filter extent in standard deviations | 4.0 |
-| `device` | torch device | `"cuda"` |
+| `rho` | the integration window in voxels, used alike by the teacher, every population's tensor and the baseline (at 20 µm, 10 = 0.2 mm) | 10 |
+| `sigma` | the derivative scale in voxels | 1 |
+| `multi` | every population's direction at every voxel, ordered by activation, instead of one merged direction | `False` |
+| `weights` | also return the activation weights: where a population is present | `False` |
+| `tissue` | a bool mask `(Z, Y, X)` of the tissue to read (calibration samples and the window's population density) | all |
+| `order` | component order, `"xyz"` (as the `structure-tensor` package) or `"zyx"` | `"xyz"` |
+| `engine` | the feature engine | `"anatomix_enc2"` |
 
-`image` may be a numpy, cupy or torch array. `shapetensor.np` returns numpy, `shapetensor.cp` returns cupy through
-DLPack (no copy), and `shapetensor.st.shapetensor` returns the caller's kind. Vectors are axial (a direction and its
-negative are the same fibre); the sign convention makes the largest-magnitude component positive.
+The block is calibrated on itself: the readers of the shape space are fitted on its own confident structure-tensor
+sites. Give it real context on every face (the filters reach about 4 (σ + ρ) voxels, the network 24 more); a block
+with few orientations (a single straight bundle) calibrates poorly — calibrate on a larger or more varied block and
+apply (below).
 
-!!! tip "Context"
-    Give the block real context on every face: the filters reach `truncate * (sigma + rho)` voxels, and the anatomix
-    engines a further 64. Directions computed within that distance of a block face are unreliable. The chunked
-    driver below handles this for you.
+## Everything the pipeline produces
+
+```python
+out = st.population_field(image, rho=10.0)
+out["modes"]        # (N, 3) the populations' directions (z, y, x)
+out["activation"]   # (N, Z, Y, X) one layer per population
+out["dirs"], out["gap"]          # each layer's own direction and how unique it is
+out["vec"], out["vec_gap"], out["weight"]      # the single field: merged population tensors, total activation
+out["vecs"], out["weights"]      # the multi-vector field
+out["tissue_mask"], out["masks"], out["strongest"], out["tau"]   # where the activation exceeds the null (not applied)
+```
+
+## Calibrate once, apply to many blocks
+
+```python
+from shapetensor.pipeline import calibrate, apply
+cal = calibrate(calibration_block, rho=10.0)            # or a list of blocks
+out = apply(cal, block)                                   # any block of the same data
+```
 
 ## A whole volume
 
 ```bash
-shapetensor volume brain_20um.ome.zarr --level 0 out.zarr --rho 16 --outputs S eig excised fixels \
-    --chunk 256 256 256 --rank 0 --world 1
+shapetensor run brain_20um.ome.zarr out.zarr --level 0 --rho 10 --chunk 192 192 192 --tissue-threshold 142
 ```
 
-reads the volume chunk by chunk with halos and writes a zarr group holding `S` and `S_excised` (the tensors,
-`(6, Z, Y, X)` in the `structure-tensor` package's layout), `val` / `vec` / `vec_excised` (eigenvalues and the fibre
-direction) and `dirs` / `fracs` / `npop` (the fixels). Start one process per GPU with `--rank r --world n`; every
-chunk's output equals a one-pass computation, so the split is exact.
-
-## The pieces
-
-The one-call API is a thin layer over `shapetensor.st`:
-
-```python
-from shapetensor import st
-S = st.structure_tensor_3d(image, 1.0, 16.0)        # (6, Z, Y, X) = [Sxx, Syy, Szz, Sxy, Sxz, Syz], x = last axis
-val, vec = st.eig_special_3d(S)                     # descending values; the smallest eigenvalue's vector, (x, y, z)
-Sx = st.excised_structure_tensor_3d(image, 1.0, 16.0, factor=3.0)
-Ss = st.shape_structure_tensor_3d(image, 1.0, 16.0, engine="anatomix48")
-dirs, fracs, npop = st.fixels_3d(image, 1.0, 16.0)
-```
-
-These mirror the `structure-tensor` package's functions and conventions, so their outputs substitute for its outputs
-wherever those are consumed.
-
-## The orientation field for a tractography pipeline
-
-```python
-import torch
-from shapetensor.field import compute_field, write_store
-field = compute_field(torch.as_tensor(image, device="cuda"), rho=16.0, reduce=4)
-write_store("block_field.zarr", field, voxel_mm=0.02)
-```
-
-On a coarse site grid (`reduce` voxels per site): the excised and plain directions, the boundary strength (coarse
-gradient magnitude) and normal, the sheet dominance `cl`, the orientation gap as a quality, and the fixels.
-
-## Phantoms and the validation suite
+calibrates once on a central 256³ block, then runs every chunk with halos and writes `vec (3, Z, Y, X)`, `gap`,
+`weight`, and `vecs (3, 3, Z, Y, X)` with `weights`. One process per GPU: `--rank r --world n`.
 
 ```bash
-shapetensor phantoms --pids P3-40-t0.5 P8 --seeds 0 1       # build phantoms with twins and truth
-shapetensor run --spec results/spec_full.json                # caches, read-outs, scores
-shapetensor report --tag main                                # REPORT.md and figures
+shapetensor structure-tensor brain_20um.ome.zarr st.zarr --level 0 --rho 10        # the baseline, same layout
+shapetensor block block.npy block_field.zarr --rho 10                               # one block, with its layers
+shapetensor validate --out validation                                                # the three phantoms
 ```
-
-See [Phantoms and validation](phantoms.md).

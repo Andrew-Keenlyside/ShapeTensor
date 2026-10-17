@@ -1,11 +1,15 @@
-"""Feature engines, by name. ``make_engine("anatomix48", n_pcs=16)`` etc.
+"""Feature engines, by name: ``make_engine("anatomix_enc2")``.
 
 | name | channels | what |
 |---|---|---|
-| ``intensity`` | 1 | the image: TCA degenerates to the structure tensor (the control) |
-| ``jet`` | 27 (3 scales x 9) | multiscale Gaussian derivatives, locally contrast-normalised (no network) |
-| ``anatomix16`` | 16 | the anatomix output layer, run cleanly |
-| ``anatomix48`` | 48 -> ``n_pcs`` | anatomix layer 58 (texture + context), run cleanly, PCA-compressed |
+| ``anatomix_enc2`` | 32 | anatomix encoder block 2 — the orientation-selective layer; the pipeline's default |
+| ``anatomix48`` | 48 → ``n_pcs`` | anatomix layer 58 (the decoder's full-resolution texture + context layer) |
+| ``anatomix16`` | 16 | the anatomix output layer |
+| ``jet`` | 27 | a multiscale Gaussian derivative jet, locally contrast-normalised: the no-network control |
+| ``intensity`` | 1 | the image itself |
+
+An engine maps a block ``(Z, Y, X)`` to features ``(C, Z, Y, X)`` on the same grid; ``engine.margin`` is how far from
+a block face its output is unreliable.
 """
 from __future__ import annotations
 
@@ -13,34 +17,22 @@ from .base import FeatureEngine
 from .intensity import IntensityEngine
 from .jet import JetEngine
 
+
+def _anatomix(layer: str, n_pcs):
+    def make(**kw):
+        from .anatomix import AnatomixEngine
+        kw.setdefault("n_pcs", n_pcs)
+        return AnatomixEngine(layer=layer, **kw)
+    return make
+
+
 ENGINES = {
-    "intensity": IntensityEngine,
+    "anatomix_enc2": _anatomix("enc2", None),
+    "anatomix48": _anatomix("l58", 16),
+    "anatomix16": _anatomix("out16", None),
     "jet": JetEngine,
+    "intensity": IntensityEngine,
 }
-
-
-def _anatomix16(**kw):
-    from .anatomix import AnatomixEngine
-    kw.setdefault("n_pcs", None)
-    return AnatomixEngine(layer="out16", **kw)
-
-
-def _anatomix48(**kw):
-    from .anatomix import AnatomixEngine
-    kw.setdefault("n_pcs", 16)
-    return AnatomixEngine(layer="l58", **kw)
-
-
-def _anatomix_enc2(**kw):
-    """Encoder block 2 (layer 15, 32 channels at half resolution, upsampled): the orientation-selective layer."""
-    from .anatomix import AnatomixEngine
-    kw.setdefault("n_pcs", None)
-    return AnatomixEngine(layer="enc2", **kw)
-
-
-ENGINES["anatomix16"] = _anatomix16
-ENGINES["anatomix48"] = _anatomix48
-ENGINES["anatomix_enc2"] = _anatomix_enc2
 
 
 def make_engine(name: str, **kwargs) -> FeatureEngine:

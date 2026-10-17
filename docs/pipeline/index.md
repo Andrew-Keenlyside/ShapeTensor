@@ -1,24 +1,29 @@
-# The pipeline, stage by stage
+# The pipeline
 
-![pipeline](../img/pipeline_overview.png)
+Four stages, one pair of scales. `sigma` (the derivative scale) and `rho` (the integration window) are used alike
+by the teacher of stage 2, by every population's tensor in stage 3 and by the baseline structure tensor the result is
+compared with, so every comparison is like for like.
 
-The pipeline as drawn has four stages: shape features are computed from the image, the shape space is separated
-into fibre populations, a tensor is fitted per population, and the per-population vector fields are merged into one
-multi-vector field for a streamline builder. The four pages that follow explain each stage: what it is meant to
-do, what the package implements for it, what the phantom suite found when the stage was tested, and what is being
-changed *within* the stage to make it work.
+![pipeline overview](../img/pipeline_overview.png)
 
-| stage | what it does | where it stands | the page |
-|---|---|---|---|
-| 1 | shape features per voxel | three engines behind one interface; the orientation-carrying layer is encoder block 2, now exposed as `anatomix_enc2` | [Getting the shape features](shape_features.md) |
-| 2 | separate the shape space into populations | the stage under construction: label-free separation in the orientation-selective shape space (TCA pieces / channel-signature memberships) | [Separating populations](separating.md) |
-| 3 | one tensor per population | the channel-resolved tensor and its CP decomposition (TCA); the excised intensity tensor where there is one population | [Getting tensors from populations](tensors_from_populations.md) |
-| 4 | merge the population fields | one set of directions per site for a streamline builder; several stains add | [Merging population vector fields](merging.md) |
+| stage | what it does | module |
+|---|---|---|
+| [1. Shape features](shape_features.md) | the block through a pretrained 3-D UNet, read at the encoder layer that encodes orientation | `shapetensor.features` |
+| [2. Separating populations](separating.md) | the shape space read without labels; the populations present; one activation layer per population | `shapetensor.separate` |
+| [3. One tensor per population](tensors.md) | the structure tensor of each layer | `shapetensor.tensors` |
+| [4. Merging](merging.md) | one vector per voxel from the merged tensors, or every population's vector with its activation as weight | `shapetensor.merge` |
 
-!!! note "Archived alternative"
-    An ODF / spherical-deconvolution route (`st.fixels_3d`, `readout.multi.n_by_peaks`) was built and validated
-    alongside this pipeline and is kept in the package and the results log as an archived alternative. It is not
-    part of the pipeline and is not developed further.
+`shapetensor.pipeline` runs them: `calibrate` fits stage 2 on a block, `apply` runs stages 2–4 with a calibration,
+`population_field` does both on one block, `run_volume` runs a whole zarr volume chunk by chunk.
 
-The [walkthrough](../walkthrough.md) runs all four on one block with a figure and a validation number per step;
-the [results](../results.md) page and the [results log](../research/TCA_FIELD_RESULTS.md) hold every number quoted.
+## What is and is not a parameter
+
+- The feature layer is fixed by evidence (encoder block 2 is where orientation is a linear code; `notes/`).
+- The teacher is the excised structure tensor at the output `rho`; its confident sites are the top 30% by
+  orientation gap, stratified over orientation; the least oriented 30% give the background signature.
+- The feature average before any read-out is a 3³ box: the fibre texture's period at 20 µm is about 5 voxels, and
+  the activation of a rectified filter oscillates with that phase; the average integrates it (`smooth`).
+- The null `tau` is the activation a wrong population's signature reaches on single-population voxels; it is
+  calibrated on the block and exported with the field, never applied to the vectors.
+- A population is a mode of the window's orientation density that owns at least 5% of the tissue above the null;
+  up to `nmax` (3).
