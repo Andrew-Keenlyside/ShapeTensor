@@ -42,6 +42,24 @@ ordered by activation at every voxel, so its first vector means the same on both
 in the standardised feature's units, normalised per direction; `weight / tau` is the dimensionless presence (above
 1: present).
 
+## Displaying the field
+
+The field is a direction and a weight at every voxel, and how it is drawn is a choice made at display time, not in
+the pipeline. The figures in this documentation use DEC colour (R = |x|, G = |y|, B = |z|) with the total
+activation as brightness on black; the same field can be drawn as orientation alone, with a compressed brightness,
+cut at the null, or over the grey image with the activation as opacity or as saturation (`shapetensor.viz.dec_rgb`,
+`dec_activation_overlay`; `scripts/renderings.py`, which redraws from a cached slice without the GPU):
+
+![renderings](../img/renderings.png)
+
+- **Orientation alone** shows what the vectors say everywhere, including where nothing oriented is present; it is
+  the honest comparison with the structure tensor's DEC, which also has a direction at every voxel.
+- **Brightness = activation** is the field as a downstream consumer should weight it; the square root keeps the
+  faint tissue readable when the scale is set by the strongest fascicles.
+- **Cut at the null** is the tissue mask as a display; it is the one rendering that hides information.
+- **Over the image**, opacity shows where the orientation is supported and what it is supported by; saturation keeps
+  the image's anatomy legible and greys out the unsupported voxels.
+
 ## Following the field
 
 `shapetensor.tracking.track` is a deterministic streamline tracker over a multi-vector grid (nearest-vector,

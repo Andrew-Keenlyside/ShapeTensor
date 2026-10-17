@@ -62,3 +62,20 @@ Measured on the three phantoms (`shapetensor.phantoms`), 192³ blocks, calibrati
   (block / where the tensor is confident) agreement with the excised tensor on two days; the readout's fit on the
   GPU is not bit-reproducible and the population pair found can differ. Worth a seeded, deterministic fit before
   release.
+
+## 29. HiP-CT across voxel sizes, four regions, a whole brain (2026-10-17)
+
+- **Six voxel sizes, one 192³ block each, σ 1 / ρ 10 voxels throughout** (`scripts/scales.py`, `results/scales.json`):
+  I74 at 2.2 µm (VOI 2) and 10 µm (chunk), S-21-46 deep brain at 20 µm (the 20 µm scan) and 50 / 100 / 200 µm
+  (levels 0–2 of the 50 µm scan, the same thalamic site). Agreement with the excised tensor, median over the
+  tissue / where the tensor is confident: 2.2 µm 23° / 20° (3 populations, one of them a vessel); 10 µm 25° / 16°
+  (3); 20 µm 6.2° / 4.8° (2); 50 µm 5.9° / 3.2° (2; the layers follow the visible fascicles); 100 µm 11.8° / 4.6°
+  (2); 200 µm 9.9° / 5.7° (3 populations that are tissue classes: a white-matter band, the ventricular edge, the
+  rest). The pipeline reads shape at its receptive field (16 voxels): at sub-cellular voxel sizes that is cells,
+  vessels and single axons, and the voxel size decides what a "fibre" is.
+- **Four regions at 20 µm (S-21-46)**, each calibrated on its own 384³: deep brain 2 populations, 6.2° from the
+  tensor; gyral white matter 3, 12.7°; cerebellar white matter 2, 25.6° (tensor gap 0.08: little oriented
+  texture); **brainstem 1 population, 2.4° — but the self-calibration is degenerate**: one fibre direction, 7 of 24
+  teacher bins, null 2.8 (seven times the deep brain's), 6% of tissue above it. Self-calibration needs orientation
+  diversity in the calibration block; the production rule is one calibration per volume on a diverse block
+  (`run_volume`), and the regions figure's second row applies the deep-brain calibration to all four.
