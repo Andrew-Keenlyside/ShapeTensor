@@ -19,7 +19,7 @@ import math
 import torch
 import torch.nn.functional as Fn
 
-from .orientation import hemisphere
+from .orientation import _sample_idx, hemisphere
 
 
 class SignatureDictionary:
@@ -45,7 +45,7 @@ class SignatureDictionary:
         for F, d, w in blocks:
             f = self._prep(F)
             wv = w.reshape(-1).float().cpu()
-            idx = torch.multinomial(wv / wv.sum(), min(per, int((wv > 0).sum())), replacement=False, generator=g).to(F.device)
+            idx = _sample_idx(wv, per, g).to(F.device)
             Xs.append(f.reshape(f.shape[0], -1)[:, idx].T); Ds.append(d.reshape(3, -1)[:, idx].T)
         X = torch.cat(Xs); Dd = torch.cat(Ds)
         self.mean, self.std = X.mean(0), X.std(0).clamp_min(1e-6)
@@ -59,7 +59,7 @@ class SignatureDictionary:
             Bs = []
             for F, w in background:
                 f = self._prep(F); wv = w.reshape(-1).float().cpu()
-                idx = torch.multinomial(wv / wv.sum(), min(per, int((wv > 0).sum())), replacement=False, generator=g).to(F.device)
+                idx = _sample_idx(wv, per, g).to(F.device)
                 Bs.append(f.reshape(f.shape[0], -1)[:, idx].T)
             self.background = ((torch.cat(Bs) - self.mean) / self.std).mean(0)
         return self
@@ -125,7 +125,7 @@ def activation_null(dictionary: SignatureDictionary, blocks, offsets_deg=(45.0, 
     vals = []
     for F, d, w in blocks:
         f = dictionary._prep(F); wv = w.reshape(-1).float().cpu()
-        idx = torch.multinomial(wv / wv.sum(), min(per, int((wv > 0).sum())), replacement=False, generator=g).to(F.device)
+        idx = _sample_idx(wv, per, g).to(F.device)
         Xn = (f.reshape(f.shape[0], -1)[:, idx].T - dictionary.mean) / dictionary.std
         dd = d.reshape(3, -1)[:, idx].T
         _, V = torch.linalg.eigh(dd.T @ dd); d0 = V[:, -1]                                 # the axial mean: the principal direction (signs are arbitrary)

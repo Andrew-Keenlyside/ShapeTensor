@@ -22,6 +22,15 @@ import torch.nn.functional as Fn
 from .common import eigh
 
 
+def _sample_idx(wv: torch.Tensor, n: int, g: torch.Generator) -> torch.Tensor:
+    """``n`` indices drawn without replacement with probability ∝ ``wv`` (CPU weights), over the nonzero entries only
+    (``torch.multinomial`` is capped at 2^24 categories; a whole block has more)."""
+    nz = (wv > 0).nonzero(as_tuple=True)[0]
+    k = min(n, len(nz))
+    pick = torch.multinomial(wv[nz] / wv[nz].sum(), k, replacement=False, generator=g)
+    return nz[pick]
+
+
 def outer6(d: torch.Tensor) -> torch.Tensor:
     """``d (..., 3)`` unit -> the six unique entries of d dᵀ: zz, yy, xx, zy, zx, yx."""
     z, y, x = d[..., 0], d[..., 1], d[..., 2]
@@ -55,7 +64,7 @@ class OrientationReadout:
         for F, d, w in blocks:
             f = self._prep(F)
             wv = w.reshape(-1).float().cpu()
-            idx = torch.multinomial(wv / wv.sum(), min(per, int((wv > 0).sum())), replacement=False, generator=g).to(F.device)
+            idx = _sample_idx(wv, per, g).to(F.device)
             Xs.append(f.reshape(f.shape[0], -1)[:, idx].T)
             Ys.append(outer6(d.reshape(3, -1)[:, idx].T))
         X = torch.cat(Xs); Y = torch.cat(Ys)
@@ -114,7 +123,7 @@ class OrientationReadoutMLP(OrientationReadout):
         for F, d, w in blocks:
             f = self._prep(F)
             wv = w.reshape(-1).float().cpu()
-            idx = torch.multinomial(wv / wv.sum(), min(per, int((wv > 0).sum())), replacement=False, generator=g).to(F.device)
+            idx = _sample_idx(wv, per, g).to(F.device)
             Xs.append(f.reshape(f.shape[0], -1)[:, idx].T); Ys.append(outer6(d.reshape(3, -1)[:, idx].T))
         X = torch.cat(Xs); Y = torch.cat(Ys)
         self.mean, self.std = X.mean(0), X.std(0).clamp_min(1e-6)
@@ -166,7 +175,7 @@ class OrientationReadoutDist(OrientationReadoutMLP):
         for F, d, w in blocks:
             f = self._prep(F)
             wv = w.reshape(-1).float().cpu()
-            idx = torch.multinomial(wv / wv.sum(), min(per, int((wv > 0).sum())), replacement=False, generator=g).to(F.device)
+            idx = _sample_idx(wv, per, g).to(F.device)
             Xs.append(f.reshape(f.shape[0], -1)[:, idx].T); Ds.append(d.reshape(3, -1)[:, idx].T)
         X = torch.cat(Xs); D = torch.cat(Ds)
         self.grid = hemisphere(self.n_dirs, X.device)
