@@ -62,9 +62,12 @@ the real crop):
 - At a **tissue step** the plain structure tensor is dragged into the boundary; the excision removes the effect,
   and the pipeline inherits it (the excision is inside every population tensor).
 - At a **crossing** the structure tensor reports the bisector. With tight bundles the pipeline finds the two
-  populations and gives each its own direction; with the real crop's fibre dispersion (20° within a population)
-  the populations are no longer separable per voxel, and the single field is at best a better bisector.
-- On a **single bundle** the single field reproduces the structure tensor.
+  populations on every seed and carries two vectors; their per-voxel directions are accurate on some orientations
+  relative to the voxel grid and not on others (a property of the network's features, reported with its numbers
+  in the validation). With the real crop's fibre dispersion (20° within a population) the populations are no
+  longer separable per voxel.
+- On a **single bundle**, and on the real block where the structure tensor is confident, the single field
+  reproduces the excised structure tensor.
 
 The numbers are in `docs/validation.md`; the research behind every design decision, with all its numbers, in
 `notes/`.
