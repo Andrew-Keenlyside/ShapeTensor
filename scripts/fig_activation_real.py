@@ -21,7 +21,7 @@ import zarr
 from shapetensor import DATA_ROOT, st
 from shapetensor.features import make_engine
 from shapetensor.features.cache import cached_features
-from shapetensor.readout.layers import (SignatureDictionary, activation_null, export_population_field, layer_tensor_direction,
+from shapetensor.readout.layers import (SignatureDictionary, activation_null, compress_activation, export_population_field, layer_tensor_direction,
                                         nnls_batched, population_masks, unmix)
 from shapetensor.readout.orientation import OrientationReadoutDist, modes_from_density
 from shapetensor.viz import sticks
@@ -69,7 +69,8 @@ def lambert(u):
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--calib", type=int, default=384); ap.add_argument("--block", type=int, default=192); ap.add_argument("--rho", type=float, default=10.0); ap.add_argument("--nmax", type=int, default=4); ap.add_argument("--smooth", type=int, default=3)
-    a = ap.parse_args(); t0 = time.time()
+    ap.add_argument("--transform", default="none", choices=["none", "sqrt", "log1p", "unit"], help="compression of the features before the dictionary"); ap.add_argument("--act-transform", default="none", choices=["none", "sqrt", "log"], help="compression of the activations after the unmixing")
+    a = ap.parse_args(); t0 = time.time(); sfx = ("" if a.transform == "none" else f"_t{a.transform}") + ("" if a.act_transform == "none" else f"_a{a.act_transform}")
     z0 = zarr.open(CROP, mode="r")["0"]; n = z0.shape[0]
     lo = (n - a.calib) // 2; hi = lo + a.calib
     vc = torch.as_tensor(np.asarray(z0[lo:hi, lo:hi, lo:hi]).astype(np.float32), device="cuda")
@@ -79,7 +80,7 @@ def main():
     inner = (slice(32, a.calib - 32),) * 3
     w = torch.zeros_like(gap); wi, counts = stratified_weights(d[(slice(None),) + inner], gap[inner], tissue[inner]); w[inner] = wi
     wb = torch.zeros_like(gap); wb[inner] = ((gap[inner] < q_of(gap[inner][tissue[inner]], 0.3)) & tissue[inner]).float()
-    dic = SignatureDictionary(smooth=a.smooth).fit([(Fc, d, w)], background=[(Fc, wb)])
+    dic = SignatureDictionary(smooth=a.smooth, transform=a.transform).fit([(Fc, d, w)], background=[(Fc, wb)])
     ro = OrientationReadoutDist(smooth=a.smooth).fit([(Fc, d, w)], n_sample=240_000)
     tau = activation_null(dic, [(Fc, d, w)])
     print(f"[{time.time() - t0:4.0f}s] self-calibrated on the {a.calib}^3 block: orientation bins occupied {int((counts > 0).sum())}/{len(counts)}, readout target overlap {ro.fit_r2:.2f}, tau {tau:.3f}", flush=True)
@@ -103,7 +104,7 @@ def main():
         if float(share[worst]) >= 0.05 or len(keep) == 1:
             break
         keep.pop(worst)
-    modes = modes[keep]; N = len(keep)
+    modes = modes[keep]; N = len(keep); A = compress_activation(A, a.act_transform)                     # masks stay from the raw averaged activations
     S_list = [dic.signature(mm) for mm in modes]
     print(f"[{time.time() - t0:4.0f}s] block: {nmod} candidate modes, {N} kept (mask shares {[round(float(s), 2) for s in share]}); residual median {float(R[tis].median()):.2f}", flush=True)
     # per-window N over the slab
@@ -124,21 +125,23 @@ def main():
         ang_img = torch.rad2deg(torch.arccos((dl * d_img).sum(0).abs().clamp(max=1)))
         ang_mode = torch.rad2deg(torch.arccos((dl * modes[k][:, None, None, None]).sum(0).abs().clamp(max=1)))
         mk = masks[k] & tis
+        ak = A[k]; d2 = (ak[2:] - ak[:-2]).abs()[tis[1:-1]].mean()
         layers.append({"dirs": dl, "gap": gl, "mask_share": round(float(mk.float().sum() / tis.float().sum()), 3),
+                       "spike_p99_over_median_in_mask": round(float(q_of(ak[mk], 0.99) / ak[mk].median().clamp_min(1e-6)), 2) if mk.any() else None, "rel_2vox_diff_in_tissue": round(float(d2 / ak[tis].mean().clamp_min(1e-6)), 3),
                        "layer_vs_image_tensor_in_mask_deg": round(float(ang_img[mk].median()), 1), "layer_vs_mode_in_mask_deg": round(float(ang_mode[mk].median()), 1),
                        "mode_zyx": [round(float(c), 3) for c in modes[k]]})
-    res = {"calib": a.calib, "block": a.block, "rho": a.rho, "tau": tau, "n_candidates": int(nmod), "N": N, "residual_median": round(float(R[tis].median()), 3),
+    res = {"calib": a.calib, "block": a.block, "rho": a.rho, "smooth": a.smooth, "transform": a.transform, "act_transform": a.act_transform, "tau": tau, "n_candidates": int(nmod), "N": N, "residual_median": round(float(R[tis].median()), 3),
            "union_share_of_tissue": round(float((union & tis).float().sum() / tis.float().sum()), 3), "window_N_shares": [round(float((Nmap == k).mean()), 3) for k in range(5)],
            "layers": [{k2: v2 for k2, v2 in L.items() if k2 not in ("dirs", "gap")} for L in layers]}
     print(json.dumps(res, indent=1), flush=True)
-    json.dump(res, open(f"{DATA_ROOT}/results/activation_real_S2146_nmax{a.nmax}_s{a.smooth}.json", "w"), indent=1)
-    export_population_field(Path(DATA_ROOT) / "fields" / f"S2146_population_field_block{a.block}_nmax{a.nmax}_s{a.smooth}.zarr", modes, A, torch.stack([L["dirs"] for L in layers]),
-                            torch.stack([L["gap"] for L in layers]), masks, union, strongest, VOX, {"source": "S-21-46 crop centre", "tau": tau, "smooth": a.smooth, "residual_median": res["residual_median"]})
+    json.dump(res, open(f"{DATA_ROOT}/results/activation_real_S2146_nmax{a.nmax}_s{a.smooth}{sfx}.json", "w"), indent=1)
+    export_population_field(Path(DATA_ROOT) / "fields" / f"S2146_population_field_block{a.block}_nmax{a.nmax}_s{a.smooth}{sfx}.zarr", modes, A, torch.stack([L["dirs"] for L in layers]),
+                            torch.stack([L["gap"] for L in layers]), masks, union, strongest, VOX, {"source": "S-21-46 crop centre", "tau": tau, "smooth": a.smooth, "transform": a.transform, "act_transform": a.act_transform, "residual_median": res["residual_median"]})
     # ---------------------------------------------------------------- figure 1: the walkthrough
     chan = [int(S.argmax()) for S in S_list[:2]]
     Dang = dic.D; mu = Dang.mean(0); _, _, Vt = torch.linalg.svd(Dang - mu, full_matrices=False); E = Vt[:2].T
     grid_xy = ((Dang - mu) @ E).cpu().numpy()
-    Xrow = ((f[(slice(None),) + row].reshape(f.shape[0], -1).T - dic.mean) / dic.std)
+    Xrow = dic.standardise(f[(slice(None),) + row].reshape(f.shape[0], -1).T)
     vox_xy = ((Xrow - mu) @ E).cpu().numpy()
     tisr = tis[row].cpu().numpy().ravel()
     # colour the voxels by the teacher's in-plane angle (the only orientation reference on real data)
@@ -198,7 +201,7 @@ def main():
         ax.set_xticks([]); ax.set_yticks([])
     fig.suptitle(f"The activation walkthrough on real HiP-CT data (S-21-46, populations unknown, everything self-calibrated): {N} populations found; layer vs image tensor inside each mask: "
                  + ", ".join(f"{L['layer_vs_image_tensor_in_mask_deg']}°" for L in res["layers"]), x=0.01, ha="left", fontsize=11)
-    fig.tight_layout(rect=[0, 0, 1, 0.96]); fig.savefig(FIGS / f"activation_real_S2146_nmax{a.nmax}_s{a.smooth}.png"); plt.close(fig)
+    fig.tight_layout(rect=[0, 0, 1, 0.96]); fig.savefig(FIGS / f"activation_real_S2146_nmax{a.nmax}_s{a.smooth}{sfx}.png"); plt.close(fig)
     # ---------------------------------------------------------------- figure 2: the population direction fields in their masks
     fig, axs = plt.subplots(1, N + 1, figsize=(6.5 * (N + 1), 6.5), dpi=100)
     axs = np.atleast_1d(axs)
@@ -214,7 +217,7 @@ def main():
     for ax in axs:
         ax.set_xticks([]); ax.set_yticks([])
     fig.suptitle("Merged population vector field on the real crop: one direction field per population, placed by its mask", x=0.01, ha="left", fontsize=11)
-    fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(FIGS / f"activation_real_S2146_field_nmax{a.nmax}_s{a.smooth}.png"); plt.close(fig)
+    fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(FIGS / f"activation_real_S2146_field_nmax{a.nmax}_s{a.smooth}{sfx}.png"); plt.close(fig)
     # ---------------------------------------------------------------- figure 3: the real-data equivalent of the pipeline illustration
     Ab = unmix_background(F, dic, modes)                                                  # the background's own activation volume
     fig, axs = plt.subplots(2, 4, figsize=(26, 12.5), dpi=100)
@@ -262,7 +265,7 @@ def main():
     for ax in [axs[0, 0], axs[0, 2], axs[0, 3], axs[1, 0], axs[1, 1], axs[1, 2], axs[1, 3]]:
         ax.set_xticks([]); ax.set_yticks([])
     fig.suptitle("The pipeline on real HiP-CT data (S-21-46 crop, populations unknown): brain image → shape space → per-population feature activations (+ background, discarded) → per-population vector fields → combined multi-vector field", x=0.01, ha="left", fontsize=12)
-    fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(FIGS / f"activation_real_S2146_illustration_nmax{a.nmax}_s{a.smooth}.png"); plt.close(fig)
+    fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(FIGS / f"activation_real_S2146_illustration_nmax{a.nmax}_s{a.smooth}{sfx}.png"); plt.close(fig)
     print(f"REAL WALKTHROUGH DONE {time.time() - t0:.0f} s", flush=True)
 
 
@@ -272,7 +275,7 @@ def unmix_background(F, dic, modes, z_chunk=16):
     S = torch.stack([dic.signature(m) for m in modes] + [dic.background], 1)
     out = torch.empty((Z, Y, X), device=F.device)
     for z in range(0, Z, z_chunk):
-        fz = f[:, z:z + z_chunk]; Xn = (fz.reshape(C, -1).T - dic.mean) / dic.std
+        fz = f[:, z:z + z_chunk]; Xn = dic.standardise(fz.reshape(C, -1).T)
         out[z:z + z_chunk] = nnls_batched(S, Xn)[:, -1].reshape(fz.shape[1:])
     return out
 

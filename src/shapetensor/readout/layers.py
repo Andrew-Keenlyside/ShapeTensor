@@ -26,15 +26,29 @@ from .orientation import _sample_idx, hemisphere
 class SignatureDictionary:
     """Mean standardised feature pattern per orientation (a hemisphere grid), from ``(F, teacher dirs, weights)`` blocks."""
 
-    def __init__(self, smooth: int = 3, n_dirs: int = 160, kernel_deg: float = 12.0):
-        self.smooth, self.n_dirs, self.kernel_deg = int(smooth), int(n_dirs), float(kernel_deg)
+    def __init__(self, smooth: int = 3, n_dirs: int = 160, kernel_deg: float = 12.0, transform: str = "none"):
+        """``transform``: a compression of the rectified features before the dictionary -- "none", "sqrt" (√ of the
+        non-negative part), "log1p" -- or "unit" (each voxel's standardised vector divided by its norm after
+        standardisation: the pattern only, not the contrast amplitude)."""
+        self.smooth, self.n_dirs, self.kernel_deg, self.transform = int(smooth), int(n_dirs), float(kernel_deg), transform
         self.mean = self.std = self.grid = self.D = None
 
     def _prep(self, F):
         f = F.float()
+        if self.transform == "sqrt":
+            f = f.clamp_min(0).sqrt()
+        elif self.transform == "log1p":
+            f = torch.log1p(f.clamp_min(0))
         if self.smooth > 1:
             f = Fn.avg_pool3d(f[None], self.smooth, stride=1, padding=self.smooth // 2)[0]
         return f
+
+    def standardise(self, X):
+        """Standardised rows ``(M, C)``; with transform "unit" also divided by each row's norm."""
+        Xn = (X - self.mean) / self.std
+        if self.transform == "unit":
+            Xn = Xn / Xn.norm(dim=1, keepdim=True).clamp_min(1e-6)
+        return Xn
 
     def fit(self, blocks, n_sample: int = 300_000, seed: int = 0, background=None):
         """``blocks``: ``(F, teacher dirs, weights)`` for the signatures; ``background``: an optional list of
@@ -50,7 +64,7 @@ class SignatureDictionary:
             Xs.append(f.reshape(f.shape[0], -1)[:, idx].T); Ds.append(d.reshape(3, -1)[:, idx].T)
         X = torch.cat(Xs); Dd = torch.cat(Ds)
         self.mean, self.std = X.mean(0), X.std(0).clamp_min(1e-6)
-        Xn = (X - self.mean) / self.std
+        Xn = self.standardise(X)
         self.grid = hemisphere(self.n_dirs, X.device)
         k = 1.0 / (2 * math.sin(math.radians(self.kernel_deg)) ** 2)
         W = torch.exp(k * ((Dd @ self.grid.T) ** 2 - 1))                                   # (N, n_dirs) kernel weights
@@ -62,7 +76,7 @@ class SignatureDictionary:
                 f = self._prep(F); wv = w.reshape(-1).float().cpu()
                 idx = _sample_idx(wv, per, g).to(F.device)
                 Bs.append(f.reshape(f.shape[0], -1)[:, idx].T)
-            self.background = ((torch.cat(Bs) - self.mean) / self.std).mean(0)
+            self.background = self.standardise(torch.cat(Bs)).mean(0)
         return self
 
     def signature(self, direction: torch.Tensor) -> torch.Tensor:
@@ -95,12 +109,26 @@ def unmix(F: torch.Tensor, dictionary: SignatureDictionary, modes: torch.Tensor,
     A_out = torch.empty((N, Z, Y, X), device=F.device); R_out = torch.empty((Z, Y, X), device=F.device)
     for z in range(0, Z, z_chunk):
         fz = f[:, z:z + z_chunk]
-        Xn = (fz.reshape(C, -1).T - dictionary.mean) / dictionary.std                       # (M, C)
+        Xn = dictionary.standardise(fz.reshape(C, -1).T)                                       # (M, C)
         a = nnls_batched(S, Xn, iters)                                                       # (M, N)
         rec = a @ S.T
         res = ((Xn - rec) ** 2).sum(1) / (Xn ** 2).sum(1).clamp_min(1e-9)
         A_out[:, z:z + z_chunk] = a[:, :N].T.reshape(N, *fz.shape[1:]); R_out[z:z + z_chunk] = res.clamp(0, 1).reshape(fz.shape[1:])
     return A_out, R_out
+
+
+def compress_activation(A: torch.Tensor, how: str = "none") -> torch.Tensor:
+    """A pointwise compression of activations: "none", "sqrt" (√a) or "log" (log1p(10 a)). Monotone, so masks
+    and argmax are unchanged; it flattens the peaks for weighting and display but cannot remove any spatial
+    frequency -- the fibre-period oscillation of the activation stays (results log §25)."""
+    A = A.clamp_min(0)
+    if how == "none":
+        return A
+    if how == "sqrt":
+        return A.sqrt()
+    if how == "log":
+        return torch.log1p(10.0 * A)
+    raise ValueError(f"unknown activation compression {how!r}")
 
 
 def layer_tensor_direction(a: torch.Tensor, sigma: float, rho: float, truncate: float = 4.0):
@@ -127,7 +155,7 @@ def activation_null(dictionary: SignatureDictionary, blocks, offsets_deg=(45.0, 
     for F, d, w in blocks:
         f = dictionary._prep(F); wv = w.reshape(-1).float().cpu()
         idx = _sample_idx(wv, per, g).to(F.device)
-        Xn = (f.reshape(f.shape[0], -1)[:, idx].T - dictionary.mean) / dictionary.std
+        Xn = dictionary.standardise(f.reshape(f.shape[0], -1)[:, idx].T)
         dd = d.reshape(3, -1)[:, idx].T
         _, V = torch.linalg.eigh(dd.T @ dd); d0 = V[:, -1]                                 # the axial mean: the principal direction (signs are arbitrary)
         # a perpendicular in-plane axis to rotate around: any unit vector orthogonal to d0

@@ -746,3 +746,82 @@ The DEC-by-activation overlay (each layer's direction as colour, its activation 
 `population_layers_dec_c60.png`, `fig_dec_overlay.py`) shows the two layers of the 60° crossing in two colours
 where they separate, and on the real block shows at a glance that one of the two layers is a coherent direction
 (one colour) and the other is not (a patchwork) — a layer-coherence check without a number.
+
+## 25. Why the activation is spiky, and whether compressing it helps (`scripts/bench/activation_sensitivity.py`, `--transform`, `--act-transform`; seed 0, ρ 10)
+
+The activation a_r(v) is a non-negative *linear* coefficient of the voxel's standardised feature vector: nothing in
+the unmixing squares or exponentiates (the only exponent in the stage is the softmax of the distribution read-out,
+which the layers do not use). What makes it spiky is upstream. The encoder-2 features are single rectified filter
+responses (anatomix: 3³ convolutions, BatchNorm, ReLU), so each channel is zero over much of the texture and
+responds where its filter lands on a fibre edge *in phase* — the way one half of a quadrature pair does — and a
+linear read of such features oscillates with the fibre texture (on a fibre / between fibres). The structure
+tensor is smooth for the opposite reason: it squares the gradient (an energy, which is phase-invariant) and then
+integrates it over ρ, i.e. over several fibre periods. The spectral check on a single-population phantom (fibres
+120/mm², mean spacing 4.6 voxels; power across the fibres in the texture band, periods 3–8 voxels, as a share of
+the line power; relative fluctuation = std / mean in the core):
+
+| quantity | texture-band power, across | along | relative fluctuation |
+|---|---|---|---|
+| image | 0.26 | 0.11 | 0.17 |
+| gradient energy \|∇I\|² (σ 1, no ρ) | 0.29 | 0.07 | 1.23 |
+| tensor trace, ρ 1 / 3 / 5 / 10 | 0.09 / 0.00 / 0.00 / 0.00 | | 0.84 / 0.40 / 0.23 / 0.11 |
+| feature norm ‖x‖ | 0.27 | 0.13 | 0.28 |
+| activation (dictionary at smooth 1) | 0.21 | 0.06 | 1.03 |
+| activation, box 3 / 5 / 7 | 0.11 / 0.03 / 0.01 | | 0.84 / 0.66 / 0.53 |
+| activation from √ / log1p / unit-norm features | 0.18 / 0.21 / 0.20 | | 0.98 / 1.02 / 0.93 |
+| √activation, log1p(10·activation) | 0.22 / 0.23 | | 0.72 / 0.68 |
+
+- The raw activation has the spectral signature of the un-integrated gradient energy (texture-band share 0.21 vs
+  0.29; both anisotropic, three times more across the fibres than along), and a relative fluctuation of 1.0 — it is
+  a per-voxel read of a texture whose period is ~5 voxels. The 3³ average is below that period (0.11 left); 5 is at
+  it (0.03); the tensor at ρ 3 has none (0.00). The "spikes" are the fibres themselves.
+- No pointwise compression removes it: compressing the features (√, log1p, unit-norm pattern) leaves the
+  texture-band share at 0.18–0.21, and compressing the activation (√a, log1p(10a)) at 0.22–0.23. A monotone
+  transform cannot move power between spatial frequencies; it only flattens the peaks (fluctuation 1.03 → 0.72 for
+  √a), which is a display and weighting choice, not resolution.
+
+What the compressions do to the stage's outputs on the crossings (own-tensor error of each layer, median on the
+population's own voxels, layer 1 / layer 2; the p99 / median of the activation on the population's own voxels):
+
+| variant | 60°: error | 60°: p99 / median | 90°: error | 90°: p99 / median |
+|---|---|---|---|---|
+| plain (smooth 3) | 19.7° / 6.3° | 3.8 / 3.9 | 5.8° / 9.5° | 4.4 / 3.4 |
+| √ features | 12.2° / 17.9° | 3.0 / 3.7 | 7.7° / 18.9° | 3.7 / 3.3 |
+| log1p features | 20.1° / 6.6° | 3.7 / 3.7 | 6.3° / 10.6° | 4.2 / 3.4 |
+| unit-norm features (pattern only) | 11.4° / 17.1° | 2.8 / 4.1 | 6.6° / 8.4° | 3.6 / 3.6 |
+| √ activation (post hoc) | 32.4° / 7.2° | 1.9 / 2.0 | 6.2° / 20.5° | 2.1 / 1.8 |
+| log1p(10·activation) (post hoc) | 37.2° / 8.0° | 1.6 / 1.6 | 6.9° / 34.0° | 1.7 / 1.5 |
+
+- Compressing the *features* is the same trade as the feature average (§24): it rebalances which layer gets the
+  shared voxels (60°: 20 / 6 → 11–12 / 17–18) without improving the pair, and at 90° unit-norm is a wash
+  (5.8 / 9.5 → 6.6 / 8.4). The masks and N are unaffected (the null τ is recalibrated with the dictionary).
+- Compressing the *activation* makes the layer tensors worse (90°: 9.5 → 20–34° on layer 2): the layer's direction
+  comes from the gradients of the activation, and ∇√a = ∇a / 2√a amplifies the weak, between-fibre regions where the
+  activation is mostly texture. The spikiness number halves, but that is the compression, not a cleaner map.
+- So: compression is not an alternative to integration. The activation needs integrating over about one fibre
+  period (5 voxels) for a per-voxel use, and the layer tensor already integrates over ρ 10 — the compressed
+  activation is only useful as the opacity / weight for display, where a γ of 0.7 is already applied.
+
+On the real block (S-21-46 192³, two populations, smooth 3; `transform_real_S2146.png`, `fig_transform_real.py`):
+
+| variant | τ | residual | union mask (share of tissue) | layer 1: mask share · vs image tensor · p99 / median · 2-voxel difference / mean | layer 2 |
+|---|---|---|---|---|---|
+| plain | 0.45 | 0.84 | 0.76 | 0.40 · 72° · 2.5 · 0.64 | 0.55 · 21° · 5.4 · 0.67 |
+| unit-norm features | 0.47 | 0.88 | 0.53 | 0.27 · 68° · 2.4 · 0.82 | 0.38 · 35° · 4.2 · 0.91 |
+| √ features | 0.46 | 0.85 | 0.79 | 0.43 · 76° · 2.3 · 0.63 | 0.56 · 23° · 5.0 · 0.63 |
+| √ activation | 0.45 | 0.84 | 0.76 | 0.40 · 73° · 1.6 · 0.53 | 0.55 · 20° · 2.3 · 0.57 |
+| log1p(10·activation) | 0.45 | 0.84 | 0.76 | 0.40 · 73° · 1.4 · 0.51 | 0.54 · 20° · 1.6 · 0.53 |
+
+- The same picture as on the phantoms. Compressing the activation flattens the peaks (p99 / median 5.4 → 1.6 on
+  the bundle layer) and leaves every blob where it was (the two-voxel difference drops only from 0.67 to 0.53,
+  which is the flattening); the layer directions hardly move (21 → 20°, 72 → 73°). It is a display gain — the
+  overlays look fuller because more of the volume sits above the display floor — not a smoother map.
+- Taking the pattern only (unit-norm features) is the one variant that changes the stage: the activations lose
+  the contrast amplitude, the masks shrink to 53% of the tissue (from 76%), the blobs get thinner and *more*
+  fragmented (two-voxel difference 0.82–0.91), and the bundle layer's agreement with the image tensor worsens (21 →
+  35°). The amplitude the unmixing carries is useful: it is the local evidence for the population, and removing it
+  leaves the phase oscillation standing on its own.
+- Which answers the question: the spikes are the fibre phase of rectified filters, not an exponent anywhere in the
+  stage; a root or a log only rescales them; and the alternative to a larger `smooth` is a feature that is itself
+  phase-invariant at the fascicle scale, or the integration over ρ that the layer tensor already does.
+

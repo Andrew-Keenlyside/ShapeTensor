@@ -16,7 +16,7 @@ from shapetensor import DATA_ROOT, st
 from shapetensor.features import make_engine
 from shapetensor.features.cache import cached_features
 from shapetensor.phantoms import make
-from shapetensor.readout.layers import SignatureDictionary, layer_tensor_direction, unmix
+from shapetensor.readout.layers import SignatureDictionary, compress_activation, layer_tensor_direction, unmix
 from shapetensor.readout.orientation import OrientationReadoutDist, modes_from_density
 from shapetensor.viz import dec_activation_overlay, sticks
 
@@ -59,8 +59,8 @@ def teacher(v):
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--cross", type=float, nargs="+", default=[60.0, 90.0, 45.0]); ap.add_argument("--engine", default="anatomix_enc2")
-    ap.add_argument("--rho", type=float, default=10.0); ap.add_argument("--smooth", type=int, default=3); ap.add_argument("--overlay-mode", default="saturation", choices=["saturation", "opacity"])
-    a = ap.parse_args(); t0 = time.time()
+    ap.add_argument("--rho", type=float, default=10.0); ap.add_argument("--smooth", type=int, default=3); ap.add_argument("--overlay-mode", default="saturation", choices=["saturation", "opacity"]); ap.add_argument("--transform", default="none", choices=["none", "sqrt", "log1p", "unit"]); ap.add_argument("--act-transform", default="none", choices=["none", "sqrt", "log"])
+    a = ap.parse_args(); t0 = time.time(); sfx = ("" if a.transform == "none" else f"_{a.transform}") + ("" if a.act_transform == "none" else f"_a{a.act_transform}")   # the default keeps the un-suffixed names
     tex = json.load(open(f"{DATA_ROOT}/results/tex_calibrated.json"))["texture"]; tex["widths"] = [tuple(w) for w in tex["widths"]]
     tex = make.TextureParams(**{**tex, "dispersion_deg": 8.0, "pitch_deg": 4.0})
     g = make.Grid(vox=0.02, core=(96, 32, 96), margin=(32, 32, 32)); Z, Y, X = g.shape; y_mid = Y // 2
@@ -74,7 +74,7 @@ def main():
         blocks.append((F, d, w))
         wb = torch.zeros_like(gap); wb[inner] = (gap[inner] < torch.quantile(gap[inner], 0.3)).float() * (~fib[inner]).float()   # no fibre, low gap: background
         bg.append((F, wb))
-    dic = SignatureDictionary(smooth=a.smooth).fit(blocks, background=bg)
+    dic = SignatureDictionary(smooth=a.smooth, transform=a.transform).fit(blocks, background=bg)
     ro = OrientationReadoutDist(smooth=a.smooth).fit(blocks, n_sample=240_000)
     del blocks; torch.cuda.empty_cache()
     print(f"[{time.time() - t0:4.0f}s] dictionary and readout fitted", flush=True)
@@ -92,7 +92,7 @@ def main():
         em = [[float(torch.rad2deg(torch.arccos((modes[r] * t).sum().abs().clamp(max=1)))) for t in (t1, t2)] for r in range(n)]
         order = sorted(range(n), key=lambda r: min(em[r]))[:2]
         # the layers: unmixing onto the two populations' signatures
-        A, R = unmix(F, dic, modes[order])
+        A, R = unmix(F, dic, modes[order]); A = compress_activation(A, a.act_transform)
         res = {"n_modes": int(n), "mode_err": [round(min(e), 1) for e in em], "residual_median": round(float(R[inner].median()), 3)}
         row = (slice(36, Z - 36), y_mid, slice(36, X - 36))
         img = v[row].cpu().numpy(); tm = [m[row].cpu().numpy() for m in masks]
@@ -105,7 +105,10 @@ def main():
             d_layer, gap_layer = layer_tensor_direction(act, SIGMA, a.rho, TR)
             err = angle_map(d_layer, t)
             onpop = masks[tk]; other = masks[1 - tk]
-            res[f"layer{k + 1}"] = {"truth": tk + 1, "mode_err": round(em[r][tk], 1),
+            # spikiness of the activation: p99 / median on the population's own voxels, and the relative gradient
+            own_act = act[onpop & fib]; gz = (act[2:] - act[:-2]).abs().mean(); 
+            res[f"layer{k + 1}"] = {"truth": tk + 1, "mode_err": round(em[r][tk], 1), "spike_p99_over_median_own": round(float(own_act.quantile(0.99) / own_act.median().clamp_min(1e-6)), 2),
+                                    "rel_gradient": round(float(gz / act.mean().clamp_min(1e-6)), 3),
                                     "activation_on_own_voxels_vs_others": [round(float(act[onpop & fib].mean()), 3), round(float(act[other & fib].mean()), 3)],
                                     "layer_dir_err_median_on_own_voxels": round(float(err[onpop & torch.zeros_like(onpop).index_fill_(0, torch.arange(36, Z - 36, device="cuda"), True)].median()), 1),
                                     "layer_dir_err_median_all_fibre_voxels": round(float(err[fib].median()), 1),
@@ -134,7 +137,7 @@ def main():
         for ax in axs.ravel()[:7]:
             ax.set_xticks([]); ax.set_yticks([])
         fig.suptitle(f"Per-population layers of the shape space ({a.engine}): signature dictionary (label-free) → per-voxel non-negative unmixing onto the modes' signatures → one activation volume per population → that layer's own structure tensor", x=0.01, ha="left", fontsize=11)
-        fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(FIGS / f"population_layers_c{cross:.0f}.png"); plt.close(fig)
+        fig.tight_layout(rect=[0, 0, 1, 0.95]); fig.savefig(FIGS / f"population_layers_c{cross:.0f}{sfx}.png"); plt.close(fig)
         # the DEC overlay test: each layer's direction as colour, its activation as opacity, over the intensity image
         fig2, ax2 = plt.subplots(1, 4, figsize=(24, 6.3), dpi=100)
         ax2[0].imshow(img, cmap="gray", origin="lower"); ax2[0].set_title(f"{cross:.0f}° crossing: intensity")
@@ -152,11 +155,11 @@ def main():
         ax2[3].set_title(f"both: the more active layer's direction at each voxel, activation as {a.overlay_mode}", fontsize=10)
         for ax in ax2: ax.set_xticks([]); ax.set_yticks([])
         fig2.suptitle(f"DEC orientation per population (hue, never masked) with activation as {a.overlay_mode}, over the image (R = |x|, G = |y|, B = |z|; fibres lie in the z–x plane: x = red, z = blue)", x=0.01, ha="left", fontsize=11)
-        fig2.tight_layout(rect=[0, 0, 1, 0.93]); fig2.savefig(FIGS / f"population_layers_dec_c{cross:.0f}_{a.overlay_mode}.png"); plt.close(fig2)
+        fig2.tight_layout(rect=[0, 0, 1, 0.93]); fig2.savefig(FIGS / f"population_layers_dec_c{cross:.0f}_{a.overlay_mode}{sfx}.png"); plt.close(fig2)
         out[f"c{cross:.0f}"] = res
         print(f"[{time.time() - t0:4.0f}s] {cross:.0f}°: {res}", flush=True)
         del F, A, R, S; torch.cuda.empty_cache()
-    json.dump(out, open(f"{DATA_ROOT}/results/population_layers.json", "w"), indent=1)
+    json.dump(out, open(f"{DATA_ROOT}/results/population_layers{sfx}.json", "w"), indent=1)
     print("LAYERS DONE", flush=True)
 
 

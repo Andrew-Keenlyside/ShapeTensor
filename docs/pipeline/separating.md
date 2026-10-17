@@ -67,6 +67,19 @@ tensor is the same idea phrased on gradients (its pieces carry channel signature
 form. `scripts/bench/separate_shape_space.py` scores both against the truth-split ceiling on the crossings, in the
 encoder-2 and the layer-58 spaces.
 
+## The current form: per-population layers
+
+The division now used (results log §22–25) reads the shape space with a *dictionary*: the mean standardised
+feature pattern of each orientation, learned on the block itself from the excised tensor at confident sites (no
+labels), plus a background pattern from the least-oriented voxels. Each voxel's feature vector is unmixed
+non-negatively onto the signatures of the populations present (found as the modes of the per-voxel orientation
+distribution), which gives one **activation volume per population** — a full-volume layer of that population's
+shape, not a mask of the image — and the population's direction is the structure tensor of its own layer. The masks
+are the activations above a null calibrated on wrong-population voxels, N is the number of modes that own a mask,
+and the layers' directions are merged in stage 4. The activation is a linear read of rectified filter responses, so
+it carries the fibre texture (on a fibre / between fibres) as the raw gradient energy does; it is integrated by the
+`smooth` average and by ρ, and no pointwise compression (√, log, unit-norm) can replace that integration (§25).
+
 ## Beyond the window: fascicles
 
 The per-voxel readout above (82% within ±15° in encoder 2) is what makes a *spatial* form of the division possible:

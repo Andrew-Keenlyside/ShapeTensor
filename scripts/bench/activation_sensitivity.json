@@ -1,0 +1,143 @@
+{
+ "network": {
+  "nonlinearity": [
+   "ReLU"
+  ],
+  "normalisation": [
+   "BatchNorm3d"
+  ]
+ },
+ "fibre_density_per_mm2": 120.0,
+ "mean_fibre_spacing_vox": 4.56,
+ "across_axis": "z",
+ "quantities": {
+  "image": {
+   "peak_period_across_vox": 44.0,
+   "power_share_period_3_to_8_across": 0.262,
+   "power_share_period_3_to_8_along": 0.113,
+   "cv_core": 0.172,
+   "rel_2vox_diff_across": 0.131,
+   "rel_2vox_diff_along": 0.081
+  },
+  "gradient energy |\u2207I|\u00b2 (\u03c3 1, no \u03c1)": {
+   "peak_period_across_vox": 44.0,
+   "power_share_period_3_to_8_across": 0.288,
+   "power_share_period_3_to_8_along": 0.066,
+   "cv_core": 1.227,
+   "rel_2vox_diff_across": 0.86,
+   "rel_2vox_diff_along": 0.422
+  },
+  "tensor trace, \u03c1 1": {
+   "peak_period_across_vox": 44.0,
+   "power_share_period_3_to_8_across": 0.091,
+   "power_share_period_3_to_8_along": 0.022,
+   "cv_core": 0.843,
+   "rel_2vox_diff_across": 0.433,
+   "rel_2vox_diff_along": 0.2
+  },
+  "tensor trace, \u03c1 3": {
+   "peak_period_across_vox": 88.0,
+   "power_share_period_3_to_8_across": 0.001,
+   "power_share_period_3_to_8_along": 0.0,
+   "cv_core": 0.4,
+   "rel_2vox_diff_across": 0.133,
+   "rel_2vox_diff_along": 0.05
+  },
+  "tensor trace, \u03c1 5": {
+   "peak_period_across_vox": 88.0,
+   "power_share_period_3_to_8_across": 0.0,
+   "power_share_period_3_to_8_along": 0.0,
+   "cv_core": 0.234,
+   "rel_2vox_diff_across": 0.055,
+   "rel_2vox_diff_along": 0.02
+  },
+  "tensor trace, \u03c1 10": {
+   "peak_period_across_vox": 88.0,
+   "power_share_period_3_to_8_across": 0.0,
+   "power_share_period_3_to_8_along": 0.0,
+   "cv_core": 0.106,
+   "rel_2vox_diff_across": 0.014,
+   "rel_2vox_diff_along": 0.005
+  },
+  "feature norm \u2016x\u2016 (standardised)": {
+   "peak_period_across_vox": 44.0,
+   "power_share_period_3_to_8_across": 0.272,
+   "power_share_period_3_to_8_along": 0.133,
+   "cv_core": 0.285,
+   "rel_2vox_diff_across": 0.206,
+   "rel_2vox_diff_along": 0.129
+  },
+  "activation (smooth 1)": {
+   "peak_period_across_vox": 44.0,
+   "power_share_period_3_to_8_across": 0.213,
+   "power_share_period_3_to_8_along": 0.057,
+   "cv_core": 1.027,
+   "rel_2vox_diff_across": 0.736,
+   "rel_2vox_diff_along": 0.375
+  },
+  "activation, box 3": {
+   "peak_period_across_vox": 44.0,
+   "power_share_period_3_to_8_across": 0.106,
+   "power_share_period_3_to_8_along": 0.027,
+   "cv_core": 0.844,
+   "rel_2vox_diff_across": 0.509,
+   "rel_2vox_diff_along": 0.264
+  },
+  "activation, box 5": {
+   "peak_period_across_vox": 44.0,
+   "power_share_period_3_to_8_across": 0.027,
+   "power_share_period_3_to_8_along": 0.007,
+   "cv_core": 0.664,
+   "rel_2vox_diff_across": 0.316,
+   "rel_2vox_diff_along": 0.166
+  },
+  "activation, box 7": {
+   "peak_period_across_vox": 88.0,
+   "power_share_period_3_to_8_across": 0.008,
+   "power_share_period_3_to_8_along": 0.001,
+   "cv_core": 0.528,
+   "rel_2vox_diff_across": 0.211,
+   "rel_2vox_diff_along": 0.108
+  },
+  "activation from \u221afeatures": {
+   "peak_period_across_vox": 44.0,
+   "power_share_period_3_to_8_across": 0.179,
+   "power_share_period_3_to_8_along": 0.056,
+   "cv_core": 0.979,
+   "rel_2vox_diff_across": 0.671,
+   "rel_2vox_diff_along": 0.357
+  },
+  "activation from log1p features": {
+   "peak_period_across_vox": 44.0,
+   "power_share_period_3_to_8_across": 0.207,
+   "power_share_period_3_to_8_along": 0.058,
+   "cv_core": 1.017,
+   "rel_2vox_diff_across": 0.725,
+   "rel_2vox_diff_along": 0.374
+  },
+  "activation from unit-norm features": {
+   "peak_period_across_vox": 44.0,
+   "power_share_period_3_to_8_across": 0.202,
+   "power_share_period_3_to_8_along": 0.068,
+   "cv_core": 0.931,
+   "rel_2vox_diff_across": 0.692,
+   "rel_2vox_diff_along": 0.347
+  },
+  "\u221aactivation": {
+   "peak_period_across_vox": 44.0,
+   "power_share_period_3_to_8_across": 0.216,
+   "power_share_period_3_to_8_along": 0.078,
+   "cv_core": 0.716,
+   "rel_2vox_diff_across": 0.547,
+   "rel_2vox_diff_along": 0.295
+  },
+  "log1p(10\u00b7activation)": {
+   "peak_period_across_vox": 44.0,
+   "power_share_period_3_to_8_across": 0.228,
+   "power_share_period_3_to_8_along": 0.091,
+   "cv_core": 0.678,
+   "rel_2vox_diff_across": 0.513,
+   "rel_2vox_diff_along": 0.281
+  }
+ }
+}

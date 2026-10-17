@@ -1,0 +1,46 @@
+{
+ "calib": 384,
+ "block": 192,
+ "rho": 10.0,
+ "smooth": 3,
+ "transform": "unit",
+ "act_transform": "none",
+ "tau": 0.4702727794647217,
+ "n_candidates": 2,
+ "N": 2,
+ "residual_median": 0.879,
+ "union_share_of_tissue": 0.525,
+ "window_N_shares": [
+  0.0,
+  0.521,
+  0.201,
+  0.278,
+  0.0
+ ],
+ "layers": [
+  {
+   "mask_share": 0.267,
+   "spike_p99_over_median_in_mask": 2.42,
+   "rel_2vox_diff_in_tissue": 0.817,
+   "layer_vs_image_tensor_in_mask_deg": 68.2,
+   "layer_vs_mode_in_mask_deg": 66.0,
+   "mode_zyx": [
+    0.916,
+    -0.105,
+    0.388
+   ]
+  },
+  {
+   "mask_share": 0.384,
+   "spike_p99_over_median_in_mask": 4.18,
+   "rel_2vox_diff_in_tissue": 0.908,
+   "layer_vs_image_tensor_in_mask_deg": 34.9,
+   "layer_vs_mode_in_mask_deg": 24.4,
+   "mode_zyx": [
+    0.653,
+    -0.384,
+    0.653
+   ]
+  }
+ ]
+}

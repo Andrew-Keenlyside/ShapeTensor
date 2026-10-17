@@ -10,24 +10,28 @@
   "layer1": {
    "truth": 2,
    "mode_err": 4.5,
+   "spike_p99_over_median_own": 3.79,
+   "rel_gradient": 0.491,
    "activation_on_own_voxels_vs_others": [
-    0.779,
+    0.781,
     0.406
    ],
-   "layer_dir_err_median_on_own_voxels": 20.2,
-   "layer_dir_err_median_all_fibre_voxels": 19.5,
-   "layer_dir_within_15_on_own_voxels": 0.286
+   "layer_dir_err_median_on_own_voxels": 19.7,
+   "layer_dir_err_median_all_fibre_voxels": 19.0,
+   "layer_dir_within_15_on_own_voxels": 0.305
   },
   "layer2": {
    "truth": 1,
    "mode_err": 4.9,
+   "spike_p99_over_median_own": 3.88,
+   "rel_gradient": 0.673,
    "activation_on_own_voxels_vs_others": [
-    0.883,
-    0.446
+    0.88,
+    0.445
    ],
-   "layer_dir_err_median_on_own_voxels": 6.4,
-   "layer_dir_err_median_all_fibre_voxels": 6.3,
-   "layer_dir_within_15_on_own_voxels": 0.96
+   "layer_dir_err_median_on_own_voxels": 6.3,
+   "layer_dir_err_median_all_fibre_voxels": 6.2,
+   "layer_dir_within_15_on_own_voxels": 0.961
   },
   "image_tensor_err_on_pop_voxels": [
    28.3,
@@ -45,63 +49,32 @@
   "layer1": {
    "truth": 1,
    "mode_err": 8.6,
+   "spike_p99_over_median_own": 4.35,
+   "rel_gradient": 0.669,
    "activation_on_own_voxels_vs_others": [
-    0.795,
-    0.335
+    0.789,
+    0.333
    ],
-   "layer_dir_err_median_on_own_voxels": 5.7,
+   "layer_dir_err_median_on_own_voxels": 5.8,
    "layer_dir_err_median_all_fibre_voxels": 6.4,
-   "layer_dir_within_15_on_own_voxels": 0.899
+   "layer_dir_within_15_on_own_voxels": 0.898
   },
   "layer2": {
    "truth": 2,
    "mode_err": 10.4,
+   "spike_p99_over_median_own": 3.44,
+   "rel_gradient": 0.515,
    "activation_on_own_voxels_vs_others": [
-    0.792,
-    0.341
+    0.79,
+    0.337
    ],
-   "layer_dir_err_median_on_own_voxels": 9.4,
-   "layer_dir_err_median_all_fibre_voxels": 11.6,
-   "layer_dir_within_15_on_own_voxels": 0.656
+   "layer_dir_err_median_on_own_voxels": 9.5,
+   "layer_dir_err_median_all_fibre_voxels": 11.7,
+   "layer_dir_within_15_on_own_voxels": 0.653
   },
   "image_tensor_err_on_pop_voxels": [
    33.5,
    34.1
-  ]
- },
- "c45": {
-  "n_modes": 3,
-  "mode_err": [
-   18.5,
-   4.9,
-   11.2
-  ],
-  "residual_median": 0.716,
-  "layer1": {
-   "truth": 1,
-   "mode_err": 4.9,
-   "activation_on_own_voxels_vs_others": [
-    0.993,
-    0.738
-   ],
-   "layer_dir_err_median_on_own_voxels": 10.2,
-   "layer_dir_err_median_all_fibre_voxels": 10.1,
-   "layer_dir_within_15_on_own_voxels": 0.901
-  },
-  "layer2": {
-   "truth": 2,
-   "mode_err": 11.2,
-   "activation_on_own_voxels_vs_others": [
-    0.792,
-    0.41
-   ],
-   "layer_dir_err_median_on_own_voxels": 13.4,
-   "layer_dir_err_median_all_fibre_voxels": 12.9,
-   "layer_dir_within_15_on_own_voxels": 0.662
-  },
-  "image_tensor_err_on_pop_voxels": [
-   20.8,
-   23.2
   ]
  }
 }
