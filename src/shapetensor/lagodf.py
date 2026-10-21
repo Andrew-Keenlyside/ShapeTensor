@@ -1,0 +1,274 @@
+"""Fibre populations as the ridges of the local lagged autocorrelation on the sphere (classical, calibration-light).
+
+A population of fibres along ``d`` is (nearly) invariant along ``d``, so its contribution to the image's local
+autocorrelation ``C(l)`` is a ridge, constant along ``d`` and decaying across it. Independent populations add
+(``C = C_1 + C_2``: intermixed crossings; a window over interleaved bundles sums their parts). At a lag radius ``r``
+the normalised local autocorrelation as a function of direction, ``ρ(r u)``, therefore peaks at every population's
+direction: the **lag ODF** (the lag mode of the positions x lags tensor, per position). It is to the structure tensor
+what Q-ball is to the diffusion tensor: the structure tensor is its second moment at an infinitesimal lag and cannot
+hold two directions.
+
+Per position (on a lattice of ``step`` voxels):
+
+1. :func:`lag_odf` -- ``ρ(r u)`` over ``n_dirs`` hemisphere directions, averaged over ``radii``, the products
+   smoothed by a Gaussian window ``sigma_w`` (the local estimate) after removing a local mean (``sigma_m``);
+2. :func:`presence` -- the peak's height above the median direction: no fibres, no peak (the sensitivity weight);
+3. :func:`deconvolve` -- the angular blur of one population (its **response**, :func:`response_profile`: from synthetic
+   bundles or from the block's own most anisotropic positions, :func:`self_response`) removed by non-negative least
+   squares, which sharpens the lobes so that crossings separate;
+4. optional momentum along each direction (:func:`shapetensor.populations.momentum`: smooths each population along its
+   own direction and bridges where it holds on both sides, never extends a free end);
+5. :func:`peaks` -- up to ``nmax`` lobes at least ``min_sep_deg`` apart, kept when their share of the position's
+   distribution is at least ``min_share`` and ``rel`` of the strongest, each direction refined off the grid (the
+   principal axis of its lobe). A lobe's mass is its share times the position's weight (zero below ``floor``);
+6. :func:`ring_fraction` -- sheets (tissue boundaries, vessel walls, sulci) correlate along a whole plane: their
+   distribution is a ring, which peak-picking would report as two crossing populations. Where the share of the
+   distribution's in-plane mass lying away from every kept peak exceeds ``max_ring`` and no peak stands
+   ``min_prominence`` times above the ring, the position is a sheet, N = 0.
+"""
+from __future__ import annotations
+
+import math
+
+import numpy as np
+import torch
+import torch.nn.functional as Fn
+
+from .filters import gaussian
+from .separate import hemisphere
+
+
+def shift_field(F: torch.Tensor, u: torch.Tensor, t: float) -> torch.Tensor:
+    """``F (K, Z, Y, X)`` sampled at ``x + t u`` (trilinear, border-padded)."""
+    K, Z, Y, X = F.shape
+    base = torch.stack(torch.meshgrid(*(torch.arange(n, device=F.device, dtype=torch.float32) for n in (Z, Y, X)), indexing="ij"))
+    scale = torch.tensor([2.0 / max(Z - 1, 1), 2.0 / max(Y - 1, 1), 2.0 / max(X - 1, 1)], device=F.device).view(3, 1, 1, 1)
+    p = (base + t * u.view(3, 1, 1, 1).to(F.device)) * scale - 1.0
+    g = torch.stack([p[2], p[1], p[0]], -1)[None]
+    return Fn.grid_sample(F[None], g, mode="bilinear", padding_mode="border", align_corners=True)[0]
+
+
+def along(f: torch.Tensor, u: torch.Tensor, sigma: float, truncate: float = 2.5) -> torch.Tensor:
+    """Scalar field ``f (z, y, x)`` smoothed along direction ``u`` (lattice units) by a Gaussian of ``sigma`` lattice
+    steps, unit taps, normalised where the line leaves the block."""
+    n = int(math.ceil(truncate * sigma)); f4 = torch.stack([f, torch.ones_like(f)])
+    acc = torch.zeros_like(f4)
+    for t in range(-n, n + 1):
+        w = math.exp(-0.5 * (t / sigma) ** 2)
+        acc += w * (f4 if t == 0 else _shift_zero(f4, u, float(t)))
+    return acc[0] / acc[1].clamp_min(1e-12)
+
+
+def _shift_zero(F: torch.Tensor, u: torch.Tensor, t: float) -> torch.Tensor:
+    K, Z, Y, X = F.shape
+    base = torch.stack(torch.meshgrid(*(torch.arange(n, device=F.device, dtype=torch.float32) for n in (Z, Y, X)), indexing="ij"))
+    scale = torch.tensor([2.0 / max(Z - 1, 1), 2.0 / max(Y - 1, 1), 2.0 / max(X - 1, 1)], device=F.device).view(3, 1, 1, 1)
+    p = (base + t * u.view(3, 1, 1, 1).to(F.device)) * scale - 1.0
+    g = torch.stack([p[2], p[1], p[0]], -1)[None]
+    return Fn.grid_sample(F[None], g, mode="bilinear", padding_mode="zeros", align_corners=True)[0]
+
+
+def lag_odf(F: torch.Tensor, grid: torch.Tensor, *, radii=(3.0, 6.0), sigma_w: float = 10.0, sigma_m: float = 8.0,
+            step: int = 4, origin: int = 2, sigma_along: float | None = None) -> torch.Tensor:
+    """``F (Z, Y, X)`` or ``(K, Z, Y, X)`` -> ``ρ (n_dirs, z, y, x)`` on the lattice ``origin + step * i``: the local
+    normalised autocorrelation at lags ``± r u`` (``u`` the grid's directions, averaged over ``radii``), the products
+    and the variance smoothed by a Gaussian of ``sigma_w`` voxels, the mean removed at ``sigma_m``. With
+    ``sigma_along`` (voxels) each direction's products and variance are further smoothed along that direction only:
+    a window elongated along the population it measures, which averages along the fibres without blurring across
+    them into neighbouring tissue."""
+    F = (F[None] if F.dim() == 3 else F).float()
+    Fc = F - gaussian(F, sigma_m)
+    sl = (slice(origin, None, step),) * 3
+    var = gaussian((Fc * Fc).sum(0), sigma_w)[sl]
+    O = torch.empty((grid.shape[0],) + tuple(var.shape), device=F.device)
+    for d in range(grid.shape[0]):
+        acc = torch.zeros(F.shape[1:], device=F.device)
+        for r in radii:
+            acc += (Fc * (shift_field(Fc, grid[d], r) + shift_field(Fc, grid[d], -r))).sum(0)
+        a = gaussian(acc / (2 * len(radii)), sigma_w)[sl]
+        if sigma_along:
+            O[d] = along(a, grid[d], sigma_along / step) / along(var, grid[d], sigma_along / step).clamp_min(1e-12)
+        else:
+            O[d] = a / var.clamp_min(1e-12)
+    return O
+
+
+def presence(O: torch.Tensor) -> torch.Tensor:
+    """The lag ODF's peak above its median direction, ``(z, y, x)``: near zero for isotropic texture."""
+    return O.max(0).values - O.median(0).values
+
+
+def response_profile(O: torch.Tensor, dirs: torch.Tensor, grid: torch.Tensor, mask=None, bin_deg: float = 2.5) -> torch.Tensor:
+    """The mean of ``O - min`` against the angle to each position's population direction ``dirs (3, ...)`` over
+    ``mask``, normalised to 1 at 0°, in ``bin_deg`` bins over [0, 90] (empty bins interpolated)."""
+    nd = O.shape[0]; Of = O.reshape(nd, -1); Of = Of - Of.min(0, keepdim=True).values
+    D = dirs.reshape(3, -1)
+    if mask is not None:
+        m = mask.reshape(-1); Of, D = Of[:, m], D[:, m]
+    ang = torch.rad2deg(torch.acos((grid @ D).abs().clamp(max=1.0)))                              # (nd, V)
+    nb = int(round(90 / bin_deg)); idx = (ang / bin_deg).long().clamp(max=nb - 1)
+    s = torch.zeros(nb, device=O.device).scatter_add_(0, idx.flatten(), Of.flatten())
+    c = torch.zeros(nb, device=O.device).scatter_add_(0, idx.flatten(), torch.ones_like(Of.flatten()))
+    R = (s / c.clamp_min(1)).cpu().numpy(); ok = c.cpu().numpy() > 0
+    x = np.arange(nb)
+    R = np.interp(x, x[ok], R[ok])
+    R = np.minimum.accumulate(R / R[0])                                                             # monotone non-increasing
+    return torch.as_tensor(R, dtype=torch.float32, device=O.device)
+
+
+def response_matrix(R: torch.Tensor, grid: torch.Tensor, bin_deg: float = 2.5) -> torch.Tensor:
+    """``(n_dirs, n_dirs + 1)``: column ``j`` the response centred on grid direction ``j`` (linear in angle), the last
+    column an isotropic term."""
+    ang = torch.rad2deg(torch.acos((grid @ grid.T).abs().clamp(max=1.0)))
+    x = (ang / bin_deg - 0.5).clamp(0, R.numel() - 1)
+    i0 = x.floor().long().clamp(max=R.numel() - 2); f = x - i0
+    K = R[i0] * (1 - f) + R[i0 + 1] * f
+    return torch.cat([K, torch.ones(grid.shape[0], 1, device=grid.device)], 1)
+
+
+def deconvolve(O: torch.Tensor, A: torch.Tensor, iters: int = 300) -> torch.Tensor:
+    """Non-negative ``f`` with ``A f ≈ O - min`` per position (FISTA): ``(n_dirs, ...)`` (the isotropic term dropped)."""
+    nd = O.shape[0]; shp = O.shape[1:]
+    B = O.reshape(nd, -1); B = B - B.min(0, keepdim=True).values
+    L = float(torch.linalg.matrix_norm(A, 2)) ** 2
+    AtA, AtB = A.T @ A, A.T @ B
+    x = torch.zeros(A.shape[1], B.shape[1], device=O.device); y = x.clone(); t = 1.0
+    for _ in range(iters):
+        xn = (y - (AtA @ y - AtB) / L).clamp_min(0)
+        tn = (1 + math.sqrt(1 + 4 * t * t)) / 2
+        y = xn + ((t - 1) / tn) * (xn - x); x, t = xn, tn
+    return x[:nd].reshape(nd, *shp)
+
+
+def angular_smooth(f: torch.Tensor, grid: torch.Tensor, deg: float) -> torch.Tensor:
+    if deg <= 0:
+        return f
+    k = 1.0 / (2 * math.sin(math.radians(deg)) ** 2)
+    K = torch.exp(k * ((grid @ grid.T) ** 2 - 1)); K = K / K.sum(1, keepdim=True)
+    return (K @ f.reshape(f.shape[0], -1)).reshape(f.shape)
+
+
+def peaks(f: torch.Tensor, grid: torch.Tensor, *, nmax: int = 2, rel: float = 0.3, min_mass: float = 0.0, min_sep_deg: float = 30.0,
+          nbr_deg: float | None = None, lobe_deg: float = 20.0):
+    """Lobes of distributions ``f (n_dirs, ...)``: grid local maxima (no neighbour within ``nbr_deg`` higher), taken
+    strongest first at least ``min_sep_deg`` apart; each lobe's mass is ``f`` over the directions within ``lobe_deg``
+    of its peak that are nearer it than any other kept peak, and its direction their weighted principal axis. Lobes
+    with mass below ``rel`` of the strongest or ``min_mass`` are dropped. Returns ``dirs (nmax, 3, ...)`` and
+    ``mass (nmax, ...)`` (largest first, zero where absent)."""
+    nd = f.shape[0]; shp = f.shape[1:]; Ff = f.reshape(nd, -1); V = Ff.shape[1]; dev = f.device
+    cosg = (grid @ grid.T).abs()
+    if nbr_deg is None:
+        nbr_deg = 1.3 * math.degrees(math.sqrt(2 * math.pi / nd))                                   # ~1.3 grid spacings
+    nbr = (cosg >= math.cos(math.radians(nbr_deg))) & ~torch.eye(nd, dtype=torch.bool, device=dev)
+    is_max = torch.ones_like(Ff, dtype=torch.bool)
+    for k in range(nd):
+        nk = nbr[k].nonzero().flatten()
+        if len(nk):
+            is_max[k] = Ff[k] >= Ff[nk].max(0).values
+    s = torch.where(is_max & (Ff > 0), Ff, torch.zeros_like(Ff))
+    cos_sep = math.cos(math.radians(min_sep_deg)); pk = torch.full((nmax, V), -1, dtype=torch.long, device=dev)
+    for r in range(nmax):
+        val, idx = s.max(0); ok = val > 0
+        pk[r] = torch.where(ok, idx, torch.full_like(idx, -1))
+        s = torch.where((cosg[idx] >= cos_sep).T & ok[None], torch.zeros_like(s), s)
+    cp = torch.stack([torch.where(pk[r] >= 0, cosg[:, pk[r].clamp_min(0)], torch.full((nd, V), -1.0, device=dev)) for r in range(nmax)])
+    owner = cp.argmax(0); cos_lobe = math.cos(math.radians(lobe_deg))
+    dirs = torch.zeros(nmax, 3, V, device=dev); mass = torch.zeros(nmax, V, device=dev)
+    for r in range(nmax):
+        w = Ff * ((owner == r) & (cp[r] >= cos_lobe)).float()
+        mass[r] = w.sum(0)
+        M = torch.einsum("dv,di,dj->vij", w, grid, grid)
+        dirs[r] = torch.linalg.eigh(M.double())[1][:, :, -1].float().T
+    order = mass.argsort(0, descending=True)
+    mass = mass.gather(0, order); dirs = dirs.gather(0, order[:, None, :].expand(-1, 3, -1))
+    keep = (mass >= rel * mass[:1]) & (mass >= min_mass) & (mass > 0)
+    return (dirs * keep[:, None]).reshape(nmax, 3, *shp), (mass * keep).reshape(nmax, *shp)
+
+
+def ring_fraction(f: torch.Tensor, grid: torch.Tensor, dirs: torch.Tensor, mass: torch.Tensor, *, plane_deg: float = 12.0,
+                  away_deg: float = 25.0, prominence: bool = False):
+    """For distributions ``f (n_dirs, ...)`` and their kept peaks ``dirs (nmax, 3, ...)`` (``mass`` zero where absent):
+    the plane of ``f`` (normal = least axis of its second moment), the mass within ``plane_deg`` of that plane, and the
+    share of it farther than ``away_deg`` from every kept peak. About 0.6 for a ring (a sheet), near 0 for one or two
+    lines (populations). With ``prominence`` also the largest value of ``f`` over the mean of the ring's directions
+    away from the peaks (a population lying in a sheet, such as a fascicle along its boundary, stands above it)."""
+    nd = f.shape[0]; shp = f.shape[1:]; Ff = f.reshape(nd, -1); V = Ff.shape[1]
+    M = torch.einsum("dv,di,dj->vij", Ff, grid, grid)
+    n = torch.linalg.eigh(M.double())[1][:, :, 0].float()                                         # (V, 3) plane normal
+    inplane = ((grid @ n.T).abs() <= math.sin(math.radians(plane_deg))).float()                    # (nd, V)
+    D = dirs.reshape(dirs.shape[0], 3, -1); has = mass.reshape(mass.shape[0], -1) > 0
+    near = torch.zeros(nd, V, dtype=torch.bool, device=f.device); cos_a = math.cos(math.radians(away_deg))
+    for r in range(D.shape[0]):
+        near |= ((grid @ D[r]).abs() >= cos_a) & has[r][None]
+    tot = (Ff * inplane).sum(0); away = inplane * (~near).float()
+    ring = ((Ff * away).sum(0) / tot.clamp_min(1e-12)).reshape(shp)
+    if not prominence:
+        return ring
+    level = (Ff * away).sum(0) / away.sum(0).clamp_min(1)
+    return ring, (Ff.max(0).values / level.clamp_min(1e-12)).reshape(shp)
+
+
+def self_response(O: torch.Tensor, grid: torch.Tensor, *, top: float = 0.05, single: float = 0.2, bin_deg: float = 2.5):
+    """A response from the block itself: the positions in the top ``top`` share of :func:`presence` whose second lag
+    ODF lobe is below ``single`` of the first, aligned on their own (refined) peaks."""
+    p = presence(O); thr = torch.quantile(p.flatten()[:: max(1, p.numel() // 200_000)], 1 - top)
+    base = O - O.min(0, keepdim=True).values
+    d, m = peaks(base, grid, nmax=2, rel=0.0, min_sep_deg=30.0)
+    sel = (p >= thr) & (m[1] <= single * m[0])
+    return response_profile(O, d[0], grid, sel, bin_deg), int(sel.sum())
+
+
+class LagODF:
+    """The pathway's parameters (voxels unless stated) and a response; :meth:`populations` per block."""
+
+    def __init__(self, *, n_dirs: int = 160, radii=(3.0, 6.0), sigma_w: float = 10.0, sigma_m: float = 8.0, step: int = 4, window_along=None,
+                 min_weight: float = 0.2,
+                 origin: int = 2, response=None, bin_deg: float = 2.5, iters: int = 300, angular_deg: float = 6.0,
+                 nmax: int = 2, rel: float = 0.3, min_sep_deg: float = 30.0, floor: float = 0.06, full: float = 0.12,
+                 min_share: float = 0.15, momentum: bool = False, sigma_along: float = 3.0, reach: int = 6, max_ring: float = 0.35,
+                 min_prominence: float = 5.0, device="cuda"):
+        self.grid = hemisphere(n_dirs, device)
+        self.radii, self.sigma_w, self.sigma_m, self.step, self.origin = tuple(radii), float(sigma_w), float(sigma_m), int(step), int(origin)
+        self.window_along, self.min_weight = window_along, float(min_weight)
+        self.response, self.bin_deg, self.iters, self.angular_deg = response, float(bin_deg), int(iters), float(angular_deg)
+        self.nmax, self.rel, self.min_sep_deg, self.floor, self.full, self.min_share = int(nmax), float(rel), float(min_sep_deg), float(floor), float(full), float(min_share)
+        self.momentum, self.sigma_along, self.reach, self.device = bool(momentum), float(sigma_along), int(reach), device
+        self.max_ring, self.min_prominence = float(max_ring), float(min_prominence)
+
+    def odf(self, v: torch.Tensor) -> torch.Tensor:
+        return lag_odf(v.to(self.device), self.grid, radii=self.radii, sigma_w=self.sigma_w, sigma_m=self.sigma_m, step=self.step,
+                       origin=self.origin, sigma_along=self.window_along)
+
+    def fit_response(self, volumes, dirs_fn):
+        """The response from volumes with known single-population directions: ``dirs_fn(i, O) -> (dirs (3, ...), mask)``."""
+        num, cnt = 0, 0
+        for i, v in enumerate(volumes):
+            O = self.odf(v); d, m = dirs_fn(i, O)
+            n = int(m.sum()); num = num + n * response_profile(O, d, self.grid, m, self.bin_deg); cnt += n
+        self.response = num / max(cnt, 1)
+        return self
+
+    def weight(self, p: torch.Tensor) -> torch.Tensor:
+        """Sensitivity weight from presence: 0 at ``floor``, 1 from ``full``, linear between."""
+        return ((p - self.floor) / max(self.full - self.floor, 1e-6)).clamp(0, 1)
+
+    def populations(self, v: torch.Tensor, *, O=None, response=None, use_momentum=None) -> dict:
+        O = self.odf(v) if O is None else O
+        R = response if response is not None else self.response
+        if R is None:
+            R, _ = self_response(O, self.grid, bin_deg=self.bin_deg)
+        A = response_matrix(R, self.grid, self.bin_deg)
+        f = angular_smooth(deconvolve(O, A, self.iters), self.grid, self.angular_deg)
+        p = presence(O); w = self.weight(p)
+        g = f / f.sum(0, keepdim=True).clamp_min(1e-12) * w[None]                                 # sums to the weight
+        if self.momentum if use_momentum is None else use_momentum:
+            from .populations import momentum
+            g = momentum(g, self.grid, sigma_along=self.sigma_along, reach=self.reach, angular_deg=0.0)
+        wt = g.sum(0)                                                                              # the weight after bridging
+        dirs, share = peaks(g / wt.clamp_min(1e-12)[None], self.grid, nmax=self.nmax, rel=self.rel, min_mass=self.min_share,
+                            min_sep_deg=self.min_sep_deg)
+        ring, prom = ring_fraction(g, self.grid, dirs, share, prominence=True)
+        sheet = (ring > self.max_ring) & (prom < self.min_prominence) & (wt >= self.min_weight)
+        mass = share * ((wt >= self.min_weight) & ~sheet).float()[None] * wt[None]                 # N = 0 below the weight floor and on sheets
+        return {"N": (mass > 0).sum(0), "mass": mass, "share": share, "dirs_cells": dirs, "presence": p, "weight": wt, "fodf": g,
+                "ring": ring, "prominence": prom, "sheet": sheet}

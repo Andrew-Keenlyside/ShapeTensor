@@ -251,3 +251,70 @@ an axial slice of the S-21-46 20 µm VOI): the UNet's 16-channel output is smoot
 at its 64-voxel cores** (the transformer attends over the whole 128³ tile, so a voxel's features depend on its tile)
 with the 8-voxel patch grid faintly over it. Every window statistic of the dev pipeline straddles these seams; tiles
 overlapping with blended cores (stride 32, a 2³ = 8x cost, or 48) would remove them.
+
+## 34. Lag-TCA, and the lag ODF: a classical flexible-N pathway (2026-10-21)
+
+Design decisions of the day (the user's): flexible N per position with population-specific momentum is a semi-hard
+requirement; lag-TCA (a spatial-lag mode) is the primary separation and the populations model (section 33's kNN
+distribution regression) the comparison; label-free; weighted rather than thresholded; native resolution; N <= 2 and
+>= 30° by default, tunable; momentum ~0.5 mm following bends; quantitative tests on phantoms, visual QC on real data.
+
+**Lag-TCA on dev-vit's features fails** (`shapetensor.lagtca`, `tests/test_lagtca.py`, `scripts/test_lagtca_phantoms.py`).
+- A plain CP of the positions x channels x lags tensor does not separate populations (a field is not low rank over
+  positions x lags). The low-rank tensor is the channels x channels x lags covariance, `C_l = A diag(g(l)) A^T`
+  (INDSCAL), solved as SOBI (whitening + Jacobi joint diagonalisation); each source's lag profile gives a direction
+  (least axis of a quadratic fitted to its squared differences) and an anisotropy.
+- On synthetic multichannel fields it works: one population, two mixed in the same channels, isotropic texture with
+  none, interleaved halves kept apart (5 tests pass).
+- On dev-vit's 32 output channels it does not: fibre-free texture gives 4-5 "anisotropic" sources per window. Single
+  channels look anisotropic in random directions; the features are smooth (a 32³ window holds ~64 independent
+  samples) and sources in bundles miss the truth by 27-33° (median). The lag profile of dev-vit's features is also
+  broad on the sphere (half height ~45-50° from the fibre direction), too broad to resolve crossings even after
+  angular deconvolution (crossings: both within 15° in 0-9% of cells).
+
+**The lag ODF** (`shapetensor.lagodf`, `tests/test_lagodf.py`, `scripts/test_lagodf.py`). A population invariant along
+`d` adds a ridge along `d` to the image's local autocorrelation, and independent populations add. So the normalised
+local autocorrelation of the *intensity* at lags `± r u` (r = 3, 6 voxels; 160 directions; Gaussian window σ 10
+voxels; local mean removed at σ 8) peaks at every population's direction: Q-ball to the structure tensor's DTI. Then:
+presence = peak minus median direction (weight 0 at 0.06, 1 from 0.12); angular deconvolution by NNLS with a
+single-population response (synthetic bundles, or the block's own top-5% single-lobe cells); momentum per direction
+(`populations.momentum`, σ 3 cells along, reach 6 cells ≈ 0.5 mm, bridging both sides, no free-end extension); lobes
+at least 30° apart with share >= 0.15 and >= 0.3 of the strongest, refined off the grid; N = 0 below weight 0.2 and
+on sheets (below). Held-out phantoms (seed 1; cells of the core; N share, top-lobe error, pair error and both within
+15°), self response with momentum vs the populations model:
+
+| case | lag ODF (self response, momentum) | populations model (no momentum) |
+| --- | --- | --- |
+| bundle 60 | N1 0.95, 2.4° | N1 0.86, 12.4° |
+| bend, fascicles (GM around) | N1 0.63, 4.6° (GM N0 0.76) | N1 0.05 (GM N0 1.00) |
+| straight fascicles | N1 0.94, 4.7° (GM N0 0.71) | N1 0.42 (GM N0 0.99) |
+| band crossing 90 (interleaved) | N2 0.62, 5.1°, 0.62 | N2 0.00 |
+| band crossing 60 | N2 1.00, 7.0°, 1.00 | N2 0.00 |
+| T-junction 90 | false extension 0.00 | 0.00 |
+| crossing 90 (intermixed) | N2 0.70, 9.6°, 0.45 | N2 0.91, 12.5°, 0.49 |
+| crossing 60 | N2 0.95, 7.6°, 0.65 | N2 0.97, 10.9°, 0.78 |
+| crossing 75 (new angle) | N2 0.78, 9.6°, 0.47 | N2 0.99, 7.7°, 0.98 |
+| crossing 50 (new angle) | N2 0.74, 9.0°, 0.53 | N2 0.96, 6.2°, 0.83 |
+| texture | N0 1.00 | N0 1.00 |
+
+- Calibration-free in the separation; the synthetic and self responses perform alike (self better on thin fascicles,
+  synthetic slightly better on 90/75° crossings). Momentum helps interleaved crossings most (band 90: both within 15°
+  0.38 -> 0.62; band 60: 0.72 -> 1.00).
+- N must count lobe *shares*, not absolute mass: a crossing splits its weight between two lobes, and an absolute floor
+  dropped 90° crossings to N2 0.25. The weight floor must come after momentum (bridging otherwise spreads small weights
+  into texture: N0 1.00 -> 0.72).
+- A window elongated along each direction (σ 4 or 6 across, 12 or 16 along) instead of σ 10 everywhere was not better:
+  fewer samples, noisier presence (GM N0 0.73 -> 0.44 at 4/12) and single-bundle error 3.6 -> 9.7°.
+- Weak points: intermixed crossings at 90/75° (N2 0.70-0.78 vs 0.91-0.99) and the pair accuracy (both within 15° about
+  half; the populations model is calibrated on crossings, the lag ODF is not); leakage of ~one window (200 µm) into
+  grey matter beside fascicles (GM N0 0.71-0.83).
+
+**Sheets.** On the S-21-46 20 µm cortex VOI (`scripts/figure_lagodf_real.py`, a 96-slice slab) the first version
+reported two populations along every tissue boundary, sulcus and vessel wall: a sheet correlates along a whole plane,
+so its lag ODF is a ring and peak-picking returns two of its points. `lagodf.ring_fraction`: the share of the
+distribution's in-plane mass away from the kept peaks (~0.6 for a ring, ~0.15 for crossings) and the strongest value
+over that ring's level (prominence). Sheet = ring > 0.35 and prominence < 5: on the phantoms the bend's fascicles
+(planar edges, as the phantom is extruded along y) have prominence q10 5.3 and stay; on the real slab 3.6% of tissue
+cells are sheets (boundaries, vessels). Real-data numbers: presence median 0.071 in the darker tissue, 0.099 in the
+brighter, 0.18 outside the tissue (edges); tissue cells N0/N1/N2 0.45/0.18/0.37; where both give a direction the first
+population is a median 12° from the standard structure tensor. Visual QC pending.

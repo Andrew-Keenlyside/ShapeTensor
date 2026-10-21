@@ -2,6 +2,13 @@
 
 ## Unreleased — the dev pipeline (not in the docs until validated)
 
+- `shapetensor.lagodf` (results log section 34): flexible-N populations from the local lagged autocorrelation of the
+  intensity on the sphere (the lag ODF), angular deconvolution by a synthetic or self-estimated response, momentum per
+  direction, off-grid lobe peaks, a sensitivity weight from presence and sheet rejection (`ring_fraction`). Classical;
+  tests `tests/test_lagodf.py`; phantoms `scripts/test_lagodf.py`; real VOI `scripts/figure_lagodf_real.py`.
+- `shapetensor.lagtca`: SOBI (joint diagonalisation of lagged feature covariances) per window and an overlapping-window
+  field; works on synthetic multichannel fields, not on dev-vit's features (section 34). Tests `tests/test_lagtca.py`;
+  `scripts/test_lagtca_phantoms.py`.
 - `shapetensor.dev`: `DevConfig`, `calibrate_dev`, `apply_dev`, `population_field_dev`, `run_volume_dev`; CLI
   `run --pipeline dev [--dev-config cfg.json]`. Stages: anatomix-dev-vit + sliceTCA features, fibre-set populations,
   directions from the shape features, the released merge.
