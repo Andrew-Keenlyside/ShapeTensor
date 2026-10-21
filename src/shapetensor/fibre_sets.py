@@ -607,6 +607,13 @@ class References:
                         for k, a in enumerate(self.angles)]
         self.dirs = [direction(a) for a in self.angles]
         self.bundle_region = gb.inner
+        # fibre-free windows *next to* fibres: the straight fascicles in grey-matter-level tissue (the bend phantom's
+        # control); a window with no fascicle voxel is fibre-free whatever its features have seen of the fascicles nearby
+        from .phantoms import BEND_GRID
+        img, tr, _ = build("bend", 307, BEND_GRID, tex, texture=p["texture"], device=device, straight=True)
+        self.near = torch.as_tensor(img, device=device).float()
+        self.near_cover = torch.as_tensor(np.isfinite(tr["dir1"][..., 0]), device=device)[:, None, :].expand(self.near.shape).float()
+        self.near_region = BEND_GRID.inner
         self.setting, self.device = setting, device
         self._feat = None
 
@@ -616,12 +623,15 @@ class References:
 
     def _features(self, cal):
         if self._feat is None:
-            self._feat = {"texture": cal.features(self.texture), "bundles": [cal.features(b) for b in self.bundles]}
+            self._feat = {"texture": cal.features(self.texture), "bundles": [cal.features(b) for b in self.bundles], "near": cal.features(self.near)}
         return self._feat
 
     def nulls(self, cal, cfg: FibreSetConfig) -> dict:
-        """``{"prominence", "mass", "share", "response"}`` for this calibration's readers (``mass``: the largest oriented
-        share of a texture window, for a readout with a *no orientation* output; else None)."""
+        """``{"prominence", "mass", "probe", "distance", "share", "response"}`` for this calibration's readers (``mass``: the
+        largest oriented share of a texture window, for a readout with a *no orientation* output; ``distance``: the largest
+        distance from texture of a texture window; ``distance_near_fibres``, reported only: the same over the windows of a
+        straight-fascicle reference that hold no fascicle voxel -- with seamless dev-vit features it is as high as the
+        fibre windows' (the features see well beyond a window), so it cannot serve as the null; else None)."""
         f = self._features(cal)
         Fp = cal.dictionary.prep(f["texture"])
         D, _, _ = window_densities(cal, Fp, self.texture_region, cfg.window, cfg.stride)
@@ -630,9 +640,20 @@ class References:
         probe = float(window_presence(cal, Fp, self.texture_region, cfg.window, cfg.stride).max()) if getattr(cal, "presence", None) is not None else None
         dist = float(window_distance(cal, Fp, self.texture_region, cfg.window, cfg.stride).max()) if getattr(cal, "texture_model", None) is not None else None
         del Fp
+        dist_near = None
+        if dist is not None:                                                         # the fibre-free windows next to fascicles
+            Fn_ = cal.dictionary.prep(f["near"])
+            wd = window_distance(cal, Fn_, self.near_region, cfg.window, cfg.stride); del Fn_
+            cov = self.near_cover[tuple(self.near_region)]
+            w = tuple(min(cfg.window, n) for n in cov.shape)
+            cw = Fn.avg_pool3d(cov[None, None], w, stride=cfg.stride)[0, 0]
+            free = cw <= 0
+            if bool(free.any()):
+                dist_near = float(wd[free].max())
         share = _second_share(cal, self.bundles, f["bundles"], self.bundle_region, cfg)
         resp = _response(cal, f["bundles"], self.dirs, self.bundle_region, cfg) if cfg.deconvolve else None
-        return {"prominence": prom, "mass": mass, "probe": probe, "distance": dist, "share": share, "response": resp}
+        return {"prominence": prom, "mass": mass, "probe": probe, "share": share, "response": resp,
+                "distance": dist, "distance_near_fibres": dist_near}
 
 
 def _second_share(cal, vols, feats, region, cfg) -> float:

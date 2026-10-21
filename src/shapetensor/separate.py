@@ -357,6 +357,10 @@ class SignatureDictionary:
         self.grid = hemisphere(self.n_dirs, X.device)
         W = self._kernel((D @ self.grid.T) ** 2)                                           # (n, n_dirs)
         self.D = (W.T @ Xn) / W.sum(0)[:, None].clamp_min(1e-6)                            # (n_dirs, C)
+        # the features' variation that is not orientation: residuals of the sites about their direction's signature
+        Wn = W / W.sum(1, keepdim=True).clamp_min(1e-12)
+        R = Xn - Wn @ self.D
+        self.residual_cov = (R.T @ R) / max(1, R.shape[0] - 1)                              # (C, C)
         if background:
             B, _ = _draw([(F, None, w, prep) for F, w in background], max(1, n_sample // max(1, len(background))), self.seed)
             self.background = self.standardise(B).mean(0)

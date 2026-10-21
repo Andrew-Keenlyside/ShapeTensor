@@ -82,7 +82,7 @@ def _engine(monkeypatch_net, **kw):
 def test_devvit_tiling_puts_voxels_back():
     for shape in [(70, 50, 90), (20, 20, 20), (64, 64, 64)]:
         vol = torch.rand(shape) * 255
-        eng = _engine(_StubNet())
+        eng = _engine(_StubNet(), blend="core", grid_filter=False)
         out = eng(vol)
         assert out.shape == (32,) + shape
         assert torch.allclose(out[0], vol / 255, atol=1e-5), shape
@@ -90,8 +90,8 @@ def test_devvit_tiling_puts_voxels_back():
 
 def test_devvit_shift_average_cancels_patch_grid():
     vol = torch.rand((40, 40, 72)) * 255
-    one = _engine(_StubNet(grid_amp=0.3), shifts=((0, 0, 0),))(vol)
-    two = _engine(_StubNet(grid_amp=0.3), shifts=((0, 0, 0), (4, 4, 4)))(vol)
+    one = _engine(_StubNet(grid_amp=0.3), shifts=((0, 0, 0),), blend="core", grid_filter=False)(vol)
+    two = _engine(_StubNet(grid_amp=0.3), shifts=((0, 0, 0), (4, 4, 4)), blend="core", grid_filter=False)(vol)
     err1 = float((one[0] - vol / 255).abs().max()); err2 = float((two[0] - vol / 255).abs().max())
     assert err1 > 0.25 and err2 < 1e-4, (err1, err2)
 
@@ -189,3 +189,41 @@ def test_calibration_is_reproducible():
     kw = dict(features=F, sigma=1.0, rho=4.0, truncate=3.0, smooth=1, margin=6, n_sample=20_000, device=DEV)
     a, b = calibrate(v, None, seed=0, **kw), calibrate(v, None, seed=0, **kw)
     assert a.tau == b.tau and torch.equal(a.dictionary.D, b.dictionary.D)
+
+
+class _TileOffsetNet(_StubNet):
+    """A stand-in for global attention: every output voxel shifted by its tile's mean input (so tiles disagree)."""
+
+    def __call__(self, x):
+        return super().__call__(x) + 0.5 * x.mean(dim=(2, 3, 4), keepdim=True)
+
+
+def test_devvit_blended_tiling_puts_voxels_back():
+    for blend in ("hann", "sphere", "gauss"):
+        for shape in [(70, 50, 90), (20, 20, 20)]:
+            vol = torch.rand(shape) * 255
+            out = _engine(_StubNet(), blend=blend, stride=64, grid_filter=False)(vol)
+            assert out.shape == (32,) + shape
+            assert torch.allclose(out[0], vol / 255, atol=1e-4), (blend, shape)
+
+
+def test_devvit_blending_removes_tile_steps():
+    """A ramp volume: with a tile-dependent offset, the core blend steps at the core faces; the blends do not."""
+    z = torch.arange(160, dtype=torch.float32)
+    vol = (z[:, None, None] / 160 * 255).expand(160, 8, 8).contiguous()
+    def step_ratio(out):
+        d = (out[0, 1:] - out[0, :-1]).abs().mean(dim=(1, 2))                                      # |dF/dz| per plane pair
+        face = d[63]; inner = torch.cat([d[10:60], d[70:120]]).median()
+        return float(face / inner)
+    core = step_ratio(_engine(_TileOffsetNet(), shifts=((0, 0, 0),), blend="core", grid_filter=False)(vol))
+    hann = step_ratio(_engine(_TileOffsetNet(), shifts=((0, 0, 0),), blend="hann", stride=64, grid_filter=False)(vol))
+    assert core > 3.0 and hann < 1.5, (core, hann)
+
+
+def test_devvit_grid_filter_removes_the_patch_grid():
+    vol = torch.rand((40, 40, 72)) * 255
+    raw = _engine(_StubNet(grid_amp=0.3), shifts=((0, 0, 0),), blend="sphere", grid_filter=False)(vol)
+    filt = _engine(_StubNet(grid_amp=0.3), shifts=((0, 0, 0),), blend="sphere", grid_filter=True)(vol)
+    ref = _engine(_StubNet(), shifts=((0, 0, 0),), blend="sphere", grid_filter=True)(vol)       # the same filter, no grid
+    err_raw = float((raw[0] - vol / 255).abs().max()); err = float((filt[0] - ref[0]).abs()[:, :, 8:-8].max())
+    assert err_raw > 0.25 and err < 1e-4, (err_raw, err)

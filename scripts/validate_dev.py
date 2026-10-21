@@ -51,6 +51,12 @@ METHODS = {
     "dev (intensity)": {"engine": "devvit_slicetca", "engine_kwargs": {"ranks": (2, 2, 2), "spacing": 3}, "smooth": 1, "stage2": "sets", "direction": "intensity", "iso": True},
     "dev (shape gradients)": {"engine": "devvit_slicetca", "engine_kwargs": {"ranks": (2, 2, 2), "spacing": 3}, "smooth": 1, "stage2": "sets", "direction": "shape", "iso": True},
     "dev-vit sets, readout": {"engine": "anatomix_devvit", "engine_kwargs": {}, "smooth": 3, "stage2": "sets", "direction": "readout", "iso": True},
+    "classical, dev-vit": {"engine": "anatomix_devvit", "engine_kwargs": {}, "smooth": 3, "stage2": "classical", "direction": "lobes"},
+    "classical, enc2": {"engine": "anatomix_enc2", "engine_kwargs": {}, "smooth": 3, "stage2": "classical", "direction": "lobes"},
+    "classical, UNet out16": {"engine": "anatomix16", "engine_kwargs": {}, "smooth": 3, "stage2": "classical", "direction": "lobes"},
+    "dev-vit core tiles, readout": {"engine": "anatomix_devvit", "engine_kwargs": {"blend": "core", "grid_filter": False}, "smooth": 3, "stage2": "sets",
+                                    "direction": "readout", "iso": True},
+    "dev-vit, readout, no box": {"engine": "anatomix_devvit", "engine_kwargs": {}, "smooth": 1, "stage2": "sets", "direction": "readout", "iso": True},
     "dev-vit sets, intensity": {"engine": "anatomix_devvit", "engine_kwargs": {}, "smooth": 3, "stage2": "sets", "direction": "intensity", "iso": True},
     "dev-vit+TCA sets, readout": {"engine": "devvit_slicetca", "engine_kwargs": {"ranks": (2, 2, 2), "spacing": 3}, "smooth": 1, "stage2": "sets", "direction": "readout", "iso": True},
 }
@@ -75,6 +81,9 @@ def dyad_r2(cal) -> float:
 
 
 def run(method, m, cal, refs, v, tissue, F, grid):
+    if m["stage2"] == "classical":                                                       # deconvolution in shape space, lobes, lobe tensors
+        from shapetensor.classical import classical_field
+        return classical_field(cal, v, tissue, features=F, device=DEV)
     if m["stage2"] == "block":
         o = apply(cal, v, tissue, features=F, device=DEV)
         o["activation"] = o["activation"] / max(cal.tau, 1e-12)
