@@ -46,7 +46,7 @@ def test_isotropic_noise_has_low_presence():
 
 def test_two_intermixed_populations_give_two_lobes():
     d1, d2 = _unit([1.0, 0.0, 0.0]), _unit([0.0, 0.5, 0.866])
-    m = LagODF(n_dirs=90, sigma_w=6.0, step=4, origin=14, floor=0.0, full=1e-3, min_weight=0.0, device="cpu", iters=200)
+    m = LagODF(n_dirs=90, sigma_w=6.0, step=4, origin=14, floor=0.0, full=1e-3, min_weight=0.0, edge=0.0, device="cpu", iters=200)
     O1 = m.odf(_tubes(d1, seed=3) + _noise(seed=4))
     core = torch.zeros(O1.shape[1:], dtype=torch.bool); core[1:-1, 1:-1, 1:-1] = True
     m.response = response_profile(O1, d1.view(3, 1, 1, 1).expand(3, *O1.shape[1:]), m.grid, core)
@@ -76,3 +76,27 @@ def test_ring_fraction_separates_a_sheet_from_a_crossing():
         D, M = peaks(f, grid, nmax=2)
         r = float(ring_fraction(f, grid, D, M)[0])
         assert lo <= r <= hi, r
+
+
+def test_label_populations_keeps_two_crossing_bundles_and_follows_a_bend():
+    from shapetensor.lagodf import label_populations
+    Z, Y, X = 12, 3, 12
+    dirs = torch.zeros(2, 3, Z, Y, X); mass = torch.zeros(2, Z, Y, X)
+    # bundle A along z in columns x = 2..3, bending to x for z >= 8 (rows z = 8..9, x = 2..11)
+    for z in range(8):
+        for x in (2, 3):
+            dirs[0, :, z, :, x] = torch.tensor([1.0, 0, 0])[:, None]; mass[0, z, :, x] = 1
+    for z in (8, 9):
+        for x in range(2, 12):
+            t = min(1.0, (x - 2) / 3)                                                               # turns over three cells
+            d = torch.tensor([math.cos(t * math.pi / 2), 0, math.sin(t * math.pi / 2)])
+            dirs[0, :, z, :, x] = d[:, None]; mass[0, z, :, x] = 1
+    # bundle B along x in rows z = 4..5, crossing A at x = 2..3 (there as the second fixel)
+    for z in (4, 5):
+        for x in range(X):
+            k = 1 if x in (2, 3) else 0
+            dirs[k, :, z, :, x] = torch.tensor([0, 0, 1.0])[:, None]; mass[k, z, :, x] = 1
+    lab, table = label_populations(dirs, mass, max_angle_deg=35.0, min_fixels=4)
+    a = {int(v) for v in lab[0, :4, :, 2:4].flatten()} | {int(v) for v in lab[0, 8:10, :, 8:].flatten()}
+    b = {int(v) for v in lab[0, 4:6, :, 6:].flatten()} | {int(v) for v in lab[1, 4:6, :, 2:4].flatten()}
+    assert len(a) == 1 and len(b) == 1 and a != b and 0 not in a | b, (a, b, table)

@@ -25,6 +25,11 @@ Per position (on a lattice of ``step`` voxels):
    distribution is a ring, which peak-picking would report as two crossing populations. Where the share of the
    distribution's in-plane mass lying away from every kept peak exceeds ``max_ring`` and no peak stands
    ``min_prominence`` times above the ring, the position is a sheet, N = 0.
+7. :func:`label_populations` -- identities instead of per-position ranks: each position's lobe (a fixel) is linked to
+   the lobe of a neighbouring position that it and that lobe best align with (mutually), within ``max_angle_deg``,
+   best-aligned first, never merging two populations that share a position; the sets are the populations 1, 2, 3, ...
+   (largest first), so a bundle keeps one number along its bends and through the crossings it passes, and two
+   crossing bundles keep theirs.
 """
 from __future__ import annotations
 
@@ -226,7 +231,7 @@ class LagODF:
                  origin: int = 2, response=None, bin_deg: float = 2.5, iters: int = 300, angular_deg: float = 6.0,
                  nmax: int = 2, rel: float = 0.3, min_sep_deg: float = 30.0, floor: float = 0.06, full: float = 0.12,
                  min_share: float = 0.15, momentum: bool = False, sigma_along: float = 3.0, reach: int = 6, max_ring: float = 0.35,
-                 min_prominence: float = 5.0, device="cuda"):
+                 min_prominence: float = 5.0, edge: float | None = None, device="cuda"):
         self.grid = hemisphere(n_dirs, device)
         self.radii, self.sigma_w, self.sigma_m, self.step, self.origin = tuple(radii), float(sigma_w), float(sigma_m), int(step), int(origin)
         self.window_along, self.min_weight = window_along, float(min_weight)
@@ -234,6 +239,7 @@ class LagODF:
         self.nmax, self.rel, self.min_sep_deg, self.floor, self.full, self.min_share = int(nmax), float(rel), float(min_sep_deg), float(floor), float(full), float(min_share)
         self.momentum, self.sigma_along, self.reach, self.device = bool(momentum), float(sigma_along), int(reach), device
         self.max_ring, self.min_prominence = float(max_ring), float(min_prominence)
+        self.edge = float(edge) if edge is not None else max(self.radii) + 2 * self.sigma_w             # voxels too near a face to trust
 
     def odf(self, v: torch.Tensor) -> torch.Tensor:
         return lag_odf(v.to(self.device), self.grid, radii=self.radii, sigma_w=self.sigma_w, sigma_m=self.sigma_m, step=self.step,
@@ -248,6 +254,15 @@ class LagODF:
         self.response = num / max(cnt, 1)
         return self
 
+    def interior(self, vshape, cshape) -> torch.Tensor:
+        """1 at lattice positions at least ``edge`` voxels from every face of the block, else 0."""
+        m = torch.ones(tuple(cshape), device=self.device)
+        for ax, (n, c) in enumerate(zip(vshape, cshape)):
+            x = self.origin + self.step * torch.arange(c, device=self.device, dtype=torch.float32)
+            ok = ((x >= self.edge) & (x <= n - 1 - self.edge)).float()
+            shp = [1, 1, 1]; shp[ax] = c; m = m * ok.view(shp)
+        return m
+
     def weight(self, p: torch.Tensor) -> torch.Tensor:
         """Sensitivity weight from presence: 0 at ``floor``, 1 from ``full``, linear between."""
         return ((p - self.floor) / max(self.full - self.floor, 1e-6)).clamp(0, 1)
@@ -259,7 +274,7 @@ class LagODF:
             R, _ = self_response(O, self.grid, bin_deg=self.bin_deg)
         A = response_matrix(R, self.grid, self.bin_deg)
         f = angular_smooth(deconvolve(O, A, self.iters), self.grid, self.angular_deg)
-        p = presence(O); w = self.weight(p)
+        p = presence(O); w = self.weight(p) * self.interior(v.shape[-3:], O.shape[1:])
         g = f / f.sum(0, keepdim=True).clamp_min(1e-12) * w[None]                                 # sums to the weight
         if self.momentum if use_momentum is None else use_momentum:
             from .populations import momentum
@@ -272,3 +287,156 @@ class LagODF:
         mass = share * ((wt >= self.min_weight) & ~sheet).float()[None] * wt[None]                 # N = 0 below the weight floor and on sheets
         return {"N": (mass > 0).sum(0), "mass": mass, "share": share, "dirs_cells": dirs, "presence": p, "weight": wt, "fodf": g,
                 "ring": ring, "prominence": prom, "sheet": sheet}
+
+
+def _half_offsets(connectivity: int = 26):
+    offs = [(dz, dy, dx) for dz in (-1, 0, 1) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dz, dy, dx) > (0, 0, 0)]
+    if connectivity == 6:
+        offs = [o for o in offs if sum(map(abs, o)) == 1]
+    elif connectivity == 18:
+        offs = [o for o in offs if sum(map(abs, o)) <= 2]
+    return offs
+
+
+def _constrained_components(n: int, src, dst, order, pa, pb, tol: float = 0.0, tol_min: int = 0):
+    """Kruskal over edges ``src[order], dst[order]`` with cannot-link pairs ``(pa[i], pb[i])`` (fixels of one position):
+    two components merge only if at most ``max(tol_min, tol * size of the smaller)`` cannot-link pairs would fall
+    inside the merged one. Returns each node's root."""
+    global _KRUSKAL
+    if _KRUSKAL is None:
+        _KRUSKAL = _compile_kruskal()
+    return _KRUSKAL(n, src, dst, order, pa, pb, float(tol), int(tol_min))
+
+
+_KRUSKAL = None
+
+
+def _compile_kruskal():
+    from numba import njit
+
+    @njit(cache=True)
+    def run(n, src, dst, order, pa, pb, tol, tol_min):
+        parent = np.arange(n); size = np.ones(n, np.int64)
+        m = 2 * len(pa)
+        ent_partner = np.empty(m, np.int64); ent_next = np.full(m, -1, np.int64)
+        head = np.full(n, -1, np.int64); tail = np.full(n, -1, np.int64); length = np.zeros(n, np.int64)
+        for i in range(len(pa)):
+            for e, a, b in ((2 * i, pa[i], pb[i]), (2 * i + 1, pb[i], pa[i])):
+                ent_partner[e] = b
+                if head[a] == -1:
+                    head[a] = e
+                else:
+                    ent_next[tail[a]] = e
+                tail[a] = e; length[a] += 1
+
+        def find(x):
+            r = x
+            while parent[r] != r:
+                r = parent[r]
+            while parent[x] != r:
+                nx = parent[x]; parent[x] = r; x = nx
+            return r
+        for j in range(len(order)):
+            ra = find(src[order[j]]); rb = find(dst[order[j]])
+            if ra == rb:
+                continue
+            small, other = (ra, rb) if length[ra] <= length[rb] else (rb, ra)
+            allow = max(tol_min, int(tol * min(size[ra], size[rb])))
+            e = head[small]; bad = 0
+            while e != -1:
+                if find(ent_partner[e]) == other:
+                    bad += 1
+                    if bad > allow:
+                        break
+                e = ent_next[e]
+            if bad > allow:
+                continue
+            big, little = (ra, rb) if size[ra] >= size[rb] else (rb, ra)
+            parent[little] = big; size[big] += size[little]
+            if head[little] != -1:
+                if head[big] == -1:
+                    head[big] = head[little]
+                else:
+                    ent_next[tail[big]] = head[little]
+                tail[big] = tail[little]; length[big] += length[little]
+        roots = np.empty(n, np.int64)
+        for x in range(n):
+            roots[x] = find(x)
+        return roots
+    return run
+
+
+def label_populations(dirs: torch.Tensor, mass: torch.Tensor, *, max_angle_deg: float = 20.0, min_fixels: int = 8,
+                      connectivity: int = 26, conflict_tol: float = 0.02, conflict_min: int = 2):
+    """Population identities for fixels ``dirs (K, 3, Z, Y, X)`` with ``mass (K, Z, Y, X)`` (zero = absent). Candidate
+    links: fixel ``a`` at ``p`` and ``b`` at a neighbour ``p + o`` when each is the other's best-aligned fixel there and
+    they are within ``max_angle_deg``. Links are taken best-aligned first (Kruskal), and two populations merge only if
+    the merged one would hold two fixels of one position at more than ``max(conflict_min, conflict_tol x the smaller's
+    fixels)`` positions: a population follows its bends, but chains of in-between directions (unresolved crossing
+    positions, noise) cannot join two populations that cross, while a few noisy fixels cannot keep one population in
+    pieces. Where a population still holds two fixels of a position the weaker loses the label. Populations are
+    numbered 1, 2, ... by size; fewer than ``min_fixels`` fixels get 0. Returns ``labels (K, Z, Y, X)`` (int64, 0 =
+    none) and a table (per label: fixels, mass, mean direction (z, y, x))."""
+    K = dirs.shape[0]; shp = tuple(mass.shape[1:]); V = int(np.prod(shp)); dev = mass.device
+    cos_max = math.cos(math.radians(max_angle_deg))
+    idx = torch.arange(V, device=dev).reshape(shp)
+    src, dst, cost = [], [], []
+    for o in _half_offsets(connectivity):
+        a_sl = tuple(slice(max(0, -d), n - max(0, d)) for d, n in zip(o, shp))
+        b_sl = tuple(slice(sa.start + d, sa.stop + d) for sa, d in zip(a_sl, o))
+        A = dirs[(slice(None), slice(None)) + a_sl]; B = dirs[(slice(None), slice(None)) + b_sl]
+        ma = mass[(slice(None),) + a_sl] > 0; mb = mass[(slice(None),) + b_sl] > 0
+        C = torch.einsum("ic...,jc...->ij...", A, B).abs()                                         # (K, K, ...)
+        C = torch.where(ma[:, None] & mb[None, :], C, torch.full_like(C, -1.0))
+        best_b = C.argmax(1); best_a = C.argmax(0)                                                  # (K, ...): for each a its b; for each b its a
+        ia = idx[a_sl]; ib = idx[b_sl]
+        for k1 in range(K):
+            k2 = best_b[k1]
+            c = C[k1].gather(0, k2[None])[0]
+            mutual = best_a.gather(0, k2[None])[0] == k1
+            ok = mutual & (c >= cos_max)
+            if ok.any():
+                src.append((k1 * V + ia[ok]).cpu()); dst.append((k2[ok] * V + ib[ok]).cpu()); cost.append((1 - c[ok]).cpu())
+    nodes = K * V
+    if src:
+        s_ = torch.cat(src).numpy().astype(np.int64); d_ = torch.cat(dst).numpy().astype(np.int64); c_ = torch.cat(cost).numpy()
+    else:
+        s_ = d_ = np.zeros(0, np.int64); c_ = np.zeros(0, np.float32)
+    present = (mass.reshape(-1) > 0).cpu().numpy()
+    pres = present.reshape(K, V)
+    pa, pb = [], []
+    for k1 in range(K):
+        for k2 in range(k1 + 1, K):
+            both = np.nonzero(pres[k1] & pres[k2])[0]
+            pa.append(k1 * V + both); pb.append(k2 * V + both)
+    pa = np.concatenate(pa).astype(np.int64) if pa else np.zeros(0, np.int64)
+    pb = np.concatenate(pb).astype(np.int64) if pb else np.zeros(0, np.int64)
+    comp = _constrained_components(nodes, s_, d_, np.argsort(c_, kind="stable").astype(np.int64), pa, pb, conflict_tol, conflict_min)
+    if len(pa):                                                                                   # one fixel per position and population
+        clash = comp[pa] == comp[pb]
+        wm = mass.reshape(-1).cpu().numpy()
+        weaker = np.where(wm[pa[clash]] >= wm[pb[clash]], pb[clash], pa[clash])
+        present = present.copy(); present[weaker] = False
+    comp = np.where(present, comp, -1)
+    ids, counts = np.unique(comp[present], return_counts=True)
+    order = np.argsort(-counts, kind="stable")
+    remap = np.zeros(comp.max() + 2 if comp.size else 1, np.int64)
+    n_lab = 0
+    for j in order:
+        if counts[j] < min_fixels:
+            break
+        n_lab += 1; remap[ids[j] + 1] = n_lab
+    lab = remap[comp + 1]
+    labels = torch.as_tensor(lab, device=dev).reshape(K, *shp)
+    D = dirs.movedim(1, -1).reshape(-1, 3)
+    w = mass.reshape(-1); L = labels.reshape(-1)
+    table = []
+    if n_lab:
+        M = torch.zeros(n_lab + 1, 3, 3, device=dev)
+        M.index_add_(0, L, w[:, None, None] * D[:, :, None] * D[:, None, :])
+        cnt = torch.bincount(L, minlength=n_lab + 1); msum = torch.zeros(n_lab + 1, device=dev).index_add_(0, L, w)
+        ev = torch.linalg.eigh(M[1:].double())[1][:, :, -1].float()
+        for j in range(n_lab):
+            table.append({"label": j + 1, "fixels": int(cnt[j + 1]), "mass": round(float(msum[j + 1]), 2),
+                          "direction": [round(float(x), 3) for x in ev[j]]})
+    return labels, table

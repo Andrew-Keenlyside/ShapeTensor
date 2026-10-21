@@ -122,3 +122,39 @@ def pipeline_row(axs, img, d_st, space, acts, vec, vec1, *, aref=None, label="im
     axs[4 + n].imshow(dec_rgb(vec1), origin="lower", interpolation="nearest"); axs[4 + n].set_title(("multi-vector field, first vector " + extra.get("first", "")).strip(), fontsize=10)
     for ax in axs:
         ax.set_xticks([]); ax.set_yticks([])
+
+
+def identity_palette(n: int, seed: int = 3) -> np.ndarray:
+    """``(n + 1, 3)`` colours for population labels 0..n: 0 black, the first 20 from tab20 (reordered so neighbours in
+    the list differ), the rest random but bright."""
+    import matplotlib
+    base = np.asarray(matplotlib.colormaps["tab20"].colors)[[0, 6, 4, 2, 8, 10, 12, 14, 16, 18, 1, 7, 5, 3, 9, 11, 13, 15, 17, 19]]
+    rng = np.random.default_rng(seed)
+    extra = rng.uniform(0.25, 1.0, size=(max(0, n - len(base)), 3))
+    return np.concatenate([np.zeros((1, 3)), base, extra])[: n + 1]
+
+
+def identity_rgb(labels: np.ndarray, cell: int = 4, palette: np.ndarray | None = None, shape=None) -> np.ndarray:
+    """Population identities of a slice's cells, ``labels (K, H, W)`` (0 = none; slot 0 the strongest), as an RGB
+    image of ``cell`` pixels per cell: one population fills its cell, two split it along the diagonal (the first slot
+    above it), three in thirds by angle about the centre."""
+    K, H, W = labels.shape
+    pal = identity_palette(int(labels.max())) if palette is None else palette
+    yy, xx = np.mgrid[0:cell, 0:cell] + 0.5
+    ang = (np.arctan2(yy - cell / 2, xx - cell / 2) + np.pi) / (2 * np.pi)                     # 0..1 about the centre
+    present = labels > 0
+    n = present.sum(0)
+    upper = (yy < xx)[None, None]
+    out = np.zeros((H * cell, W * cell, 3))
+    for k in range(K):
+        r = present[:k].sum(0)[..., None, None]                                                  # rank among the cell's present slots
+        nn = n[..., None, None]
+        own = ((nn == 1) | ((nn == 2) & (((r == 0) & upper) | ((r == 1) & ~upper)))
+               | ((nn >= 3) & (ang[None, None] >= r / 3.0) & (ang[None, None] < (r + 1) / 3.0)))
+        own = own & present[k][..., None, None]
+        col = pal[labels[k]]                                                                     # (H, W, 3)
+        tile = np.where(own[..., None], col[:, :, None, None, :], 0.0)
+        out += tile.transpose(0, 2, 1, 3, 4).reshape(H * cell, W * cell, 3)
+    if shape is not None:
+        out = out[: shape[0], : shape[1]]
+    return np.clip(out, 0, 1)

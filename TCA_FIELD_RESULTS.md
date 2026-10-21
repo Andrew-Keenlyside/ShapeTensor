@@ -318,3 +318,21 @@ over that ring's level (prominence). Sheet = ring > 0.35 and prominence < 5: on 
 cells are sheets (boundaries, vessels). Real-data numbers: presence median 0.071 in the darker tissue, 0.099 in the
 brighter, 0.18 outside the tissue (edges); tissue cells N0/N1/N2 0.45/0.18/0.37; where both give a direction the first
 population is a median 12° from the standard structure tensor. Visual QC pending.
+
+**Population identities** (2026-10-22, `lagodf.label_populations`, `viz.identity_rgb`, `scripts/test_population_labels.py`).
+Instead of per-position ranks (strongest / second), each fixel (a position's lobe) gets a population number shared
+across space. Candidate links: a fixel and a neighbour's fixel (26-neighbourhood) that are each other's best-aligned and
+within 20°. Plain connected components merged everything into one population on every phantom: chains of in-between
+directions (unresolved crossing cells, grey-matter leakage) bridge crossing bundles, and the bridging fixels look like
+good ones (same weight, share and lobe sharpness). The rule that separates them: one population cannot hold two
+fixels of one position. Links are taken best-aligned first (Kruskal) and two populations merge only if the merged one
+would hold two fixels of a position at no more than max(2, 2% of the smaller's fixels) positions (the tolerance lets a
+few noisy fixels not keep one population in pieces, and a tight bend's corner, where the window sees both arms, not
+split it); where a population still holds two fixels of a position the weaker loses the label. A face margin (max
+radius + 2σw voxels) removes a frame of spurious labels. Phantoms (dominant label per truth population, coverage of its
+cells): band crossings 90/60 and the T-junction keep two populations, each one label through the overlap (coverage
+1.00/0.90, 1.00/0.92, 0.99/0.84); the bend is one population through its turn; intermixed crossings 60/90 two
+populations (coverage 0.88/0.89, 0.56/0.65, the latter limited by N = 2 detection). The bend's and straight control's
+three fascicles (0.2 mm apart) share one label: the 10-voxel window's leakage joins them, below this resolution they
+are one orientation population. Real slab: 137 populations of >= 20 fixels; the largest runs along x in the white
+matter under the cortex with a second, interleaved one in the same cells.

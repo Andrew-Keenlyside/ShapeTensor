@@ -6,6 +6,9 @@
   intensity on the sphere (the lag ODF), angular deconvolution by a synthetic or self-estimated response, momentum per
   direction, off-grid lobe peaks, a sensitivity weight from presence and sheet rejection (`ring_fraction`). Classical;
   tests `tests/test_lagodf.py`; phantoms `scripts/test_lagodf.py`; real VOI `scripts/figure_lagodf_real.py`.
+- `lagodf.label_populations`: population identities (1, 2, 3, ...) instead of per-position ranks, by best-aligned-first
+  merging of neighbouring fixels that never puts two fixels of one position in one population (numba); `LagODF(edge=)`
+  face margin; `viz.identity_palette` / `identity_rgb`; `scripts/test_population_labels.py`.
 - `shapetensor.lagtca`: SOBI (joint diagonalisation of lagged feature covariances) per window and an overlapping-window
   field; works on synthetic multichannel fields, not on dev-vit's features (section 34). Tests `tests/test_lagtca.py`;
   `scripts/test_lagtca_phantoms.py`.

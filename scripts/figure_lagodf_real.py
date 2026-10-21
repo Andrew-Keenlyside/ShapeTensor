@@ -26,8 +26,8 @@ import zarr
 from matplotlib.colors import ListedColormap
 
 from shapetensor import st
-from shapetensor.lagodf import LagODF, self_response
-from shapetensor.viz import dec_rgb
+from shapetensor.lagodf import LagODF, label_populations, self_response
+from shapetensor.viz import dec_rgb, identity_palette, identity_rgb
 
 SRC = "/hdd/andrew/BRIDGE/20um_cortex_S2146/sub-S2146/micr/sub-S2146_sample-cortex_acq-20um_XPCT.ome.zarr"
 DEV = "cuda"; HALF_Z = 48
@@ -80,34 +80,45 @@ def main():
     R_self, n_self = self_response(O, model.grid, bin_deg=model.bin_deg)
     R = R_self if a.response == "self" else synthetic_response(model)
     o = model.populations(v, O=O, response=R); log("populations")
+    labels, table = label_populations(o["dirs_cells"], o["mass"], max_angle_deg=20.0, min_fixels=20); log("labels", len(table))
     k = HALF_Z; kc = (k - model.origin) // model.step
     g = img[k].astype(np.float32); g = np.clip((g - np.percentile(g, 1)) / max(np.ptp(np.percentile(g, [1, 99])), 1e-6), 0, 1)
     tis = tissue[k].cpu().numpy(); dst = d_st[:, k].cpu().numpy()
     D = o["dirs_cells"][:, :, kc].cpu().numpy(); M = o["mass"][:, kc].cpu().numpy(); N = o["N"][kc].cpu().numpy()
     W = o["weight"][kc].cpu().numpy(); SH = o["sheet"][kc].cpu().numpy()
     D1, D2 = up(D[0]), up(D[1]); M1, M2 = up(M[0]), up(M[1]); Nf = up(N); Wf = up(W); SHf = up(SH.astype(np.uint8)).astype(bool)
+    LAB = labels[:, kc].cpu().numpy(); pal = identity_palette(max(len(table), 1))
+    IDf = identity_rgb(LAB, 4, pal, shape=(768, 768)); L1, L2 = up(LAB[0]), up(LAB[1])
     fig, axs = plt.subplots(2, 3, figsize=(19.5, 13.2), facecolor="white")
     axs[0, 0].imshow(np.stack([g] * 3, -1)); axs[0, 0].set_title("HiP-CT image (S-21-46, 20 µm)", fontsize=11)
     axs[0, 0].plot([20, 270], [740, 740], color="yellow", lw=3); axs[0, 0].text(20, 725, "5 mm", color="yellow", fontsize=9)
     axs[0, 1].imshow(dec_rgb(dst) * tis[..., None]); axs[0, 1].set_title("standard structure tensor (σ 1, ρ 10)", fontsize=11)
-    s1 = np.clip(M1 / max(np.percentile(M1[M1 > 0], 95) if (M1 > 0).any() else 1, 1e-6), 0, 1)
-    axs[0, 2].imshow(dec_rgb(D1) * (s1 * tis)[..., None]); axs[0, 2].set_title("lag ODF: weighted single field (strongest population)", fontsize=11)
+    axs[0, 2].imshow(IDf * tis[..., None]); axs[0, 2].set_title("lag ODF: populations by identity (a cell with two split on the diagonal)", fontsize=11)
     cmap = ListedColormap(["#222222", "#2a78d6", "#e34948", "#eda100"])
     h = axs[1, 0].imshow(np.where(tis, np.where(SHf, 3, Nf), np.nan), cmap=cmap, vmin=-0.5, vmax=3.5, interpolation="nearest")
     cb = plt.colorbar(h, ax=axs[1, 0], fraction=0.046, ticks=[0, 1, 2, 3]); cb.ax.set_yticklabels(["none", "one", "two", "sheet"])
     axs[1, 0].set_title("lag ODF: populations per 80 µm cell", fontsize=11)
-    s2 = np.clip(M2 / max(np.percentile(M2[M2 > 0], 95) if (M2 > 0).any() else 1, 1e-6), 0, 1)
-    axs[1, 1].imshow(dec_rgb(D2) * ((Nf == 2) * s2 * tis)[..., None]); axs[1, 1].set_title("lag ODF: second population (where two)", fontsize=11)
+    top = table[:15]
+    ax = axs[1, 1]; ax.set_facecolor("white")
+    ys_ = np.arange(len(top))[::-1]
+    ax.barh(ys_, [t["fixels"] for t in top], color=[pal[t["label"]] for t in top])
+    for yy, t in zip(ys_, top):
+        d = np.abs(np.asarray(t["direction"])); ax.add_patch(plt.Rectangle((-0.09, yy - 0.4), 0.05, 0.8, transform=ax.get_yaxis_transform(), clip_on=False,
+                                                                       color=(d[2], d[1], d[0])))
+    ax.set_yticks(ys_); ax.set_yticklabels([f"population {t['label']}" for t in top], fontsize=8)
+    ax.set_xlabel("fixels in the slab (80 µm cells)"); ax.set_title(f"the 15 largest of {len(table)} populations (swatch: mean direction, DEC)", fontsize=11)
     from scipy import ndimage
     gm = ndimage.gaussian_filter(g, 8); gy, gx = np.gradient(gm); mag = ndimage.uniform_filter(np.hypot(gy, gx) * tis, 192)
     y0, x0 = np.unravel_index(np.argmax(mag[96:-96, 96:-96]), mag[96:-96, 96:-96].shape); y0, x0 = int(y0), int(x0)
     zs = (slice(y0, y0 + 192), slice(x0, x0 + 192))
-    ax = axs[1, 2]; ax.imshow(g[zs], cmap="gray"); ax.set_title("zoom: structure tensor (cyan), populations (white, magenta)", fontsize=11)
-    sticks(ax, dst[:, zs[0], zs[1]], tis[zs], 8, "#00e0ff")
-    sticks(ax, D1[:, zs[0], zs[1]], (Nf[zs] >= 1) & tis[zs], 8, "white"); sticks(ax, D2[:, zs[0], zs[1]], (Nf[zs] == 2) & tis[zs], 8, "#ff40ff")
-    for a2 in axs.flat:
+    ax = axs[1, 2]; ax.imshow(g[zs], cmap="gray"); ax.set_title("zoom: structure tensor (thin white), populations (coloured by identity)", fontsize=11)
+    sticks(ax, dst[:, zs[0], zs[1]], tis[zs], 8, "white", lw=0.4)
+    for Dk, Lk in ((D1, L1), (D2, L2)):
+        for lab in np.unique(Lk[zs][Lk[zs] > 0]):
+            sticks(ax, Dk[:, zs[0], zs[1]], (Lk[zs] == lab) & tis[zs], 8, pal[lab], lw=1.4)
+    for a2 in (axs[0, 0], axs[0, 1], axs[0, 2], axs[1, 0], axs[1, 2]):
         a2.set_xticks([]); a2.set_yticks([])
-    for a2 in (axs[0, 1], axs[0, 2], axs[1, 0], axs[1, 1]):
+    for a2 in (axs[0, 1], axs[0, 2], axs[1, 0]):
         a2.add_patch(plt.Rectangle((x0, y0), 192, 192, fill=False, ec="white", lw=1.0))
     tag = f"sw{a.sigma_w}_al{a.along}_{a.response}{'_mom' if a.momentum else ''}"
     fig.suptitle(f"Lag-ODF populations vs the standard structure tensor, S-21-46 20 µm cortex VOI, axial slice z = {c} "
@@ -120,7 +131,7 @@ def main():
            "tissue cells sheet": round(float((o["sheet"].cpu().numpy() & tc).sum() / max(tc.sum(), 1)), 3),
            "ring fraction q10/50/90 (weight >= min)": [round(float(x), 3) for x in np.quantile(o["ring"].cpu().numpy()[(o["weight"] >= model.min_weight).cpu().numpy() & tc], [0.1, 0.5, 0.9])],
            "first population vs ST median angle (slice, N>=1)": round(float(np.median(agree)), 1) if agree.size else None,
-           "seconds": round(time.time() - t0, 1)}
+           "populations": len(table), "largest populations": table[:15], "seconds": round(time.time() - t0, 1)}
     json.dump(rep, open(OUT / f"lagodf_vs_st_{tag}.json", "w"), indent=1); log(json.dumps(rep))
 
 
