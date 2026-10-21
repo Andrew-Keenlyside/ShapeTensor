@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../../img/favicon.ico" />
+    <title>2. Separating populations - ShapeTensor</title>
+    <link rel="stylesheet" href="../../css/theme.css" />
+    <link rel="stylesheet" href="../../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "2. Separating populations";
+        var mkdocs_page_input_path = "pipeline/separating.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href="../.." class="icon icon-home"> ShapeTensor
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../..">Introduction</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../installation/">Installation</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../quickstart/">Quick start</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">The pipeline</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../">Overview</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../shape_features/">1. Shape features</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">2. Separating populations</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#the-teacher">The teacher</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#two-readers-of-the-shape-space">Two readers of the shape space</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#which-populations-candidates-confirmed-by-their-layers">Which populations: candidates confirmed by their layers</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#where-each-population-is-the-activation-layers">Where each population is: the activation layers</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#what-this-stage-cannot-do">What this stage cannot do</a>
+    </li>
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../tensors/">3. One tensor per population</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../merging/">4. Merging the fields</a>
+                  </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../parameters/">Parameters</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../structure_tensor/">The structure tensor, the baseline</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../validation/">Validation on phantoms</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../data/">Real data</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../scales/">Scales and regions</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../api/">API and command line</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../..">ShapeTensor</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="../.." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">The pipeline</li>
+      <li class="breadcrumb-item active">2. Separating populations</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Andrew-Keenlyside/ShapeTensor/edit/master/docs/pipeline/separating.md" class="icon icon-github"> Edit on GitHub</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="2-separating-populations-in-the-shape-space">2. Separating populations in the shape space<a class="headerlink" href="#2-separating-populations-in-the-shape-space" title="Permanent link">&para;</a></h1>
+<p>Stage 2 answers two questions without labels: <em>which</em> fibre populations are present in a window, and <em>where</em> each
+of them is, voxel by voxel. Its readers are fitted on the block itself.</p>
+<h2 id="the-teacher">The teacher<a class="headerlink" href="#the-teacher" title="Permanent link">&para;</a></h2>
+<p>The excised structure tensor at the output ρ is the teacher: at its confident sites (the top 30% by orientation
+gap in the tissue, drawn evenly over orientation bins so that no direction dominates) its direction is taken as
+that voxel's orientation. No labels, no annotation. The least oriented 30% of the tissue give a <em>background</em>
+pattern.</p>
+<h2 id="two-readers-of-the-shape-space">Two readers of the shape space<a class="headerlink" href="#two-readers-of-the-shape-space" title="Permanent link">&para;</a></h2>
+<p><strong>The signature dictionary</strong> is the mean standardised feature pattern of every orientation (160 directions on a
+hemisphere, kernel-smoothed), plus the background pattern. The signature of any direction is interpolated from it.</p>
+<p><strong>The orientation readout</strong> is a small network from a voxel's features to a distribution over the same 160
+directions, trained with the teacher's direction as a soft target. Summed over a window, the voxels' distributions
+are the window's <strong>orientation density</strong>, whose peaks are the candidate populations.</p>
+<p>Both are fitted by <code>shapetensor.pipeline.calibrate</code> on one block (real data) or on a set of single-population
+blocks (phantoms at several orientations), and both are applied unchanged to any block of the same data.</p>
+<h2 id="which-populations-candidates-confirmed-by-their-layers">Which populations: candidates confirmed by their layers<a class="headerlink" href="#which-populations-candidates-confirmed-by-their-layers" title="Permanent link">&para;</a></h2>
+<p>The readers do not respond equally to every direction (the network's filters are not isotropic), so both are
+gain-normalised per direction against the teacher on the calibration block: the density by the ratio of what the
+readout reports to the teacher's own orientation histogram, the activations by what a sample reaches on its own
+direction's signature. Every direction then counts alike.</p>
+<p>The density's peaks still over-count: a single population with dispersed fibres has shoulders that a peak finder
+reads as further populations. The pipeline therefore gathers up to six candidates — the peaks of the block's
+density and of its 64³ sub-windows' (a block may hold regions of different orientation) — and lets stage 3 judge
+them. Each candidate is first unmixed <em>alone</em> into its activation layer (below), and the layer's own population
+tensor — the image's gradients weighted by that activation — gives the direction its fibres actually have; the
+shoulders of one population all point at that population, a real second population points elsewhere, and the
+<em>distinct</em> axes (25° apart) are kept. The kept axes are then unmixed <em>together</em>, twice, and the distinct axes kept
+again: under a joint unmixing the shoulders lose their shared voxels to the population they belong to. A joint
+unmixing never has more than four signatures (the rank of the orientation code is five), and a population must
+own at least 5% of the tissue above the activation null.</p>
+<h2 id="where-each-population-is-the-activation-layers">Where each population is: the activation layers<a class="headerlink" href="#where-each-population-is-the-activation-layers" title="Permanent link">&para;</a></h2>
+<p>Every voxel's feature vector is decomposed non-negatively onto the signatures of the populations found plus the
+background:</p>
+<div class="arithmatex">\[x(v) \approx \sum_r a_r(v)\, D(\theta_r) + b(v)\, D_\text{bg}, \qquad a_r \ge 0\]</div>
+<p>The coefficients <span class="arithmatex">\(a_r(v)\)</span> are the <strong>activation layers</strong>: one full-volume image per population of where that
+population's shape is, not a mask of the image. They are what stage 3 weights the image gradients with and what
+stage 4 uses as weights. The <em>null</em> <span class="arithmatex">\(\tau\)</span> — the activation a wrong population's signature reaches on
+single-population voxels, calibrated on the block — is exported with every field; it is never applied to the
+vectors.</p>
+<p>The crossing row of the <a href="../../validation/">validation</a> figure shows the layers on a phantom; the
+<a href="../../data/">real data</a> figures show them on HiP-CT and BigBrain.</p>
+<h2 id="what-this-stage-cannot-do">What this stage cannot do<a class="headerlink" href="#what-this-stage-cannot-do" title="Permanent link">&para;</a></h2>
+<p>With the second-order orientation code of the features (stage 1), a voxel whose receptive field holds two
+populations looks like a weaker single population at their bisector, and three populations are linearly
+dependent. Separation therefore works where the populations interdigitate at the fascicle scale, and it degrades
+as the crossing angle closes and as the fibres within a population disperse: see <a href="../../validation/">validation</a>.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../shape_features/" class="btn btn-neutral float-left" title="1. Shape features"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../tensors/" class="btn btn-neutral float-right" title="3. One tensor per population">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Andrew-Keenlyside/ShapeTensor" class="fa fa-github" style="color: #fcfcfc"> GitHub</a>
+        </span>
+    
+    
+      <span><a href="../shape_features/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../tensors/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "../..";</script>
+    <script src="../../js/theme_extra.js"></script>
+    <script src="../../js/theme.js"></script>
+      <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      <script src="../../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

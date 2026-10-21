@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Quick start - ShapeTensor</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Quick start";
+        var mkdocs_page_input_path = "quickstart.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> ShapeTensor
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Introduction</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../installation/">Installation</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Quick start</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#one-call">One call</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#everything-the-pipeline-produces">Everything the pipeline produces</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#calibrate-once-apply-to-many-blocks">Calibrate once, apply to many blocks</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#a-whole-volume">A whole volume</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">The pipeline</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/">Overview</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/shape_features/">1. Shape features</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/separating/">2. Separating populations</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/tensors/">3. One tensor per population</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/merging/">4. Merging the fields</a>
+                  </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../parameters/">Parameters</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../structure_tensor/">The structure tensor, the baseline</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../validation/">Validation on phantoms</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../data/">Real data</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../scales/">Scales and regions</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../api/">API and command line</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">ShapeTensor</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Quick start</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Andrew-Keenlyside/ShapeTensor/edit/master/docs/quickstart.md" class="icon icon-github"> Edit on GitHub</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="quick-start">Quick start<a class="headerlink" href="#quick-start" title="Permanent link">&para;</a></h1>
+<h2 id="one-call">One call<a class="headerlink" href="#one-call" title="Permanent link">&para;</a></h2>
+<pre class="highlight"><code class="language-python">import numpy as np
+import shapetensor as st
+
+image = np.load("block.npy").astype(np.float32)                   # (Z, Y, X) grey levels, e.g. a 20 µm HiP-CT block
+
+vec = st.shapetensor(image, rho=10.0)                              # (3, Z, Y, X): one unit direction per voxel, (x, y, z)
+vecs, w = st.shapetensor(image, rho=10.0, multi=True, weights=True)   # (N, 3, Z, Y, X) and (N, Z, Y, X): every population, by activation
+vec = st.structure_tensor(image, rho=10.0)                         # the excised structure tensor's direction: the baseline</code></pre>
+<p><code>image</code> may be a numpy, cupy or torch array; the result comes back as the same kind (<code>shapetensor.np</code> and
+<code>shapetensor.cp</code> force numpy or cupy). Vectors are axial: a direction and its negative are the same fibre.</p>
+<table>
+<thead>
+<tr>
+<th>keyword</th>
+<th>meaning</th>
+<th>default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>rho</code></td>
+<td>the integration window in voxels, used alike by the teacher, every population's tensor and the baseline (at 20 µm, 10 = 0.2 mm)</td>
+<td>10</td>
+</tr>
+<tr>
+<td><code>sigma</code></td>
+<td>the derivative scale in voxels</td>
+<td>1</td>
+</tr>
+<tr>
+<td><code>multi</code></td>
+<td>every population's direction at every voxel, ordered by activation, instead of one merged direction</td>
+<td><code>False</code></td>
+</tr>
+<tr>
+<td><code>weights</code></td>
+<td>also return the activation weights: where a population is present</td>
+<td><code>False</code></td>
+</tr>
+<tr>
+<td><code>tissue</code></td>
+<td>a bool mask <code>(Z, Y, X)</code> of the tissue to read (calibration samples and the window's population density)</td>
+<td>all</td>
+</tr>
+<tr>
+<td><code>order</code></td>
+<td>component order, <code>"xyz"</code> (as the <code>structure-tensor</code> package) or <code>"zyx"</code></td>
+<td><code>"xyz"</code></td>
+</tr>
+<tr>
+<td><code>engine</code></td>
+<td>the feature engine</td>
+<td><code>"anatomix_enc2"</code></td>
+</tr>
+</tbody>
+</table>
+<p>The block is calibrated on itself: the readers of the shape space are fitted on its own confident structure-tensor
+sites. Give it real context on every face (the filters reach about 4 (σ + ρ) voxels, the network 24 more); a block
+with few orientations (a single straight bundle) calibrates poorly — calibrate on a larger or more varied block and
+apply (below).</p>
+<h2 id="everything-the-pipeline-produces">Everything the pipeline produces<a class="headerlink" href="#everything-the-pipeline-produces" title="Permanent link">&para;</a></h2>
+<pre class="highlight"><code class="language-python">out = st.population_field(image, rho=10.0)
+out["modes"]        # (N, 3) the populations' directions (z, y, x)
+out["activation"]   # (N, Z, Y, X) one layer per population
+out["dirs"], out["gap"]          # each layer's own direction and how unique it is
+out["vec"], out["vec_gap"], out["weight"]      # the single field: merged population tensors, total activation
+out["vecs"], out["weights"]      # the multi-vector field
+out["tissue_mask"], out["masks"], out["strongest"], out["tau"]   # where the activation exceeds the null (not applied)</code></pre>
+<h2 id="calibrate-once-apply-to-many-blocks">Calibrate once, apply to many blocks<a class="headerlink" href="#calibrate-once-apply-to-many-blocks" title="Permanent link">&para;</a></h2>
+<pre class="highlight"><code class="language-python">from shapetensor.pipeline import calibrate, apply
+cal = calibrate(calibration_block, rho=10.0)            # or a list of blocks
+out = apply(cal, block)                                   # any block of the same data</code></pre>
+<h2 id="a-whole-volume">A whole volume<a class="headerlink" href="#a-whole-volume" title="Permanent link">&para;</a></h2>
+<pre class="highlight"><code class="language-bash">shapetensor run brain_20um.ome.zarr out.zarr --level 0 --rho 10 --chunk 192 192 192 --tissue-threshold 142</code></pre>
+<p>calibrates once on a central 256³ block, then runs every chunk with halos and writes <code>vec (3, Z, Y, X)</code>, <code>gap</code>,
+<code>weight</code>, and <code>vecs (3, 3, Z, Y, X)</code> with <code>weights</code>. One process per GPU: <code>--rank r --world n</code>.</p>
+<pre class="highlight"><code class="language-bash">shapetensor structure-tensor brain_20um.ome.zarr st.zarr --level 0 --rho 10        # the baseline, same layout
+shapetensor block block.tif block_field.zarr --rho 10                               # one block (.npy, .tif, .nii, zarr), with its layers
+shapetensor demo                                                                     # a crossing phantom through the pipeline: no data needed
+shapetensor bench --size 192 256                                                     # the structure tensor and the pipeline timed on this GPU</code></pre>
+<p>On a 48 GB Ampere GPU a 192³ block takes about 2.7 s for stages 2–4 after a 10 s calibration on the 384³ around
+it, half of which is the network; the whole-volume driver runs a 256³ chunk in about 20 s.</p>
+<pre class="highlight"><code class="language-bash">shapetensor validate --out validation                                                # the three phantoms</code></pre>
+<p>Anisotropic voxels: <code>--spacing dz dy dx</code> (or <code>spacing=</code> in the API), for example <code>2.5 1 1</code> for 50 × 20 × 20 µm.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../installation/" class="btn btn-neutral float-left" title="Installation"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../pipeline/" class="btn btn-neutral float-right" title="Overview">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Andrew-Keenlyside/ShapeTensor" class="fa fa-github" style="color: #fcfcfc"> GitHub</a>
+        </span>
+    
+    
+      <span><a href="../installation/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../pipeline/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

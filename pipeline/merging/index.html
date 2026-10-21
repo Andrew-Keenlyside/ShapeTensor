@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../../img/favicon.ico" />
+    <title>4. Merging the fields - ShapeTensor</title>
+    <link rel="stylesheet" href="../../css/theme.css" />
+    <link rel="stylesheet" href="../../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "4. Merging the fields";
+        var mkdocs_page_input_path = "pipeline/merging.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href="../.." class="icon icon-home"> ShapeTensor
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../..">Introduction</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../installation/">Installation</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../quickstart/">Quick start</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">The pipeline</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../">Overview</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../shape_features/">1. Shape features</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../separating/">2. Separating populations</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../tensors/">3. One tensor per population</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">4. Merging the fields</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#one-vector-per-voxel">One vector per voxel</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#several-vectors-per-voxel">Several vectors per voxel</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#tissue-and-population-masks-for-those-who-want-them">Tissue and population masks, for those who want them</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#at-a-chunk-seam-and-what-the-weights-mean">At a chunk seam, and what the weights mean</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#displaying-the-field">Displaying the field</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#following-the-field">Following the field</a>
+    </li>
+    </ul>
+                  </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../parameters/">Parameters</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../structure_tensor/">The structure tensor, the baseline</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../validation/">Validation on phantoms</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../data/">Real data</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../scales/">Scales and regions</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../../api/">API and command line</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../..">ShapeTensor</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="../.." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">The pipeline</li>
+      <li class="breadcrumb-item active">4. Merging the fields</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Andrew-Keenlyside/ShapeTensor/edit/master/docs/pipeline/merging.md" class="icon icon-github"> Edit on GitHub</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="4-merging-the-population-fields">4. Merging the population fields<a class="headerlink" href="#4-merging-the-population-fields" title="Permanent link">&para;</a></h1>
+<p>Two outputs, both covering the whole volume, both carrying the activation as weight. <strong>No masks are applied</strong>: a
+mask would cut the field where a population fades, and a downstream consumer can weight or threshold as it
+needs. Where a population is absent its weight is at the noise level, and the null <code>tau</code> exported with every
+field says what that level is.</p>
+<h2 id="one-vector-per-voxel">One vector per voxel<a class="headerlink" href="#one-vector-per-voxel" title="Permanent link">&para;</a></h2>
+<p>The merged population tensor, each population's tensor weighted by its activation:</p>
+<div class="arithmatex">\[T = \sum_r a_r\, \frac{S_r}{\operatorname{tr} S_r}\]</div>
+<p>Its smallest eigenvector is the field's direction, its gap the uniqueness, the total activation its weight. A
+layer without a coherent direction has a near-isotropic tensor and adds none, so it is discounted by itself.
+This is the shape tensor's single field — the like-for-like alternative to the structure tensor's eigenvector.</p>
+<h2 id="several-vectors-per-voxel">Several vectors per voxel<a class="headerlink" href="#several-vectors-per-voxel" title="Permanent link">&para;</a></h2>
+<p>Every population's direction at every voxel, ordered by activation, with the activation as weight
+(<code>vecs (N, 3, Z, Y, X)</code>, <code>weights (N, Z, Y, X)</code>). A streamline builder that follows the vector most aligned with its
+heading can use the weight as its confidence; where one population is present the others' weights sit at the
+noise level.</p>
+<pre class="highlight"><code class="language-python">out = st.population_field(image, rho=10.0)
+out["vec"], out["vec_gap"], out["weight"]       # the single field
+out["vecs"], out["weights"], out["tau"]         # the multi-vector field and the activation null</code></pre>
+<h2 id="tissue-and-population-masks-for-those-who-want-them">Tissue and population masks, for those who want them<a class="headerlink" href="#tissue-and-population-masks-for-those-who-want-them" title="Permanent link">&para;</a></h2>
+<p>For node sampling or display, <code>tissue_mask</code> is where the smoothed <em>total</em> activation exceeds the null, <code>masks</code>
+where each population's does, and <code>strongest</code> the index of the most active population inside the tissue mask.
+They are outputs, not steps: nothing in the vectors depends on them.</p>
+<h2 id="at-a-chunk-seam-and-what-the-weights-mean">At a chunk seam, and what the weights mean<a class="headerlink" href="#at-a-chunk-seam-and-what-the-weights-mean" title="Permanent link">&para;</a></h2>
+<p>The chunked driver finds the populations of every chunk, and calibrates every chunk on itself, so the merged tensor
+differs from its neighbour's near their common face even though every voxel's tensors are exact; written side by
+side, the two readings meet in a visible seam. <code>run_volume</code> therefore overlaps neighbouring chunks by <code>blend</code>
+voxels (32) on each side of every face, accumulates each chunk's merged tensor — it is linear in the activations —
+with linear ramps that sum to 1 across the seam, and takes the field from the blended tensor, so one reading turns
+into the next over 64 voxels. The network and the filters see enough beyond the overlap for every blended tensor to
+be exact. The multi-vector field is written per chunk without blending: it is ordered by activation at every voxel,
+so its first vector means the same on both sides of a seam, but the set of populations may not.</p>
+<p>The activation weights of <code>apply</code> are in the standardised feature's units, normalised per direction; <code>weight / tau</code>
+is the dimensionless presence (above 1: present). <code>run_volume</code> writes the weight already divided by the chunk's
+null, so that chunks calibrated on themselves are comparable, and zero where the volume has no data.</p>
+<h2 id="displaying-the-field">Displaying the field<a class="headerlink" href="#displaying-the-field" title="Permanent link">&para;</a></h2>
+<p>The field is a direction and a weight at every voxel, and how it is drawn is a choice made at display time, not in
+the pipeline. The figures in this documentation draw every direction field as plain DEC colour (R = |x|, G = |y|,
+B = |z|) at every voxel, the shape tensor's exactly as the structure tensor's, and show the activation as its own
+layers; the same field can also be drawn with the activation as brightness (linear or compressed), cut at the null,
+or over the grey image with the activation as opacity or as saturation (<code>shapetensor.viz.dec_rgb</code>,
+<code>dec_activation_overlay</code>; <code>scripts/renderings.py</code>, which redraws from a cached slice without the GPU):</p>
+<p><img alt="renderings" src="../../img/renderings.png" /></p>
+<ul>
+<li><strong>Orientation alone</strong> shows what the vectors say everywhere, including where nothing oriented is present; it is
+  the honest comparison with the structure tensor's DEC, which also has a direction at every voxel.</li>
+<li><strong>Brightness = activation</strong> is the field as a downstream consumer should weight it; the square root keeps the
+  faint tissue readable when the scale is set by the strongest fascicles.</li>
+<li><strong>Cut at the null</strong> is the tissue mask as a display; it is the one rendering that hides information.</li>
+<li><strong>Over the image</strong>, opacity shows where the orientation is supported and what it is supported by; saturation keeps
+  the image's anatomy legible and greys out the unsupported voxels.</li>
+</ul>
+<h2 id="following-the-field">Following the field<a class="headerlink" href="#following-the-field" title="Permanent link">&para;</a></h2>
+<p><code>shapetensor.tracking.track</code> is a deterministic streamline tracker over a multi-vector grid (nearest-vector,
+curvature-limited), the same code for every field, so that fields can be compared by their streamlines rather than
+by their vectors. Given the no-mask field's <code>weights</code> and a <code>min_weight</code> (the null <code>tau</code>), it follows a vector only
+where its population is present. <a href="../../data/">Real data</a> shows the structure tensor's and the shape tensor's streamlines on the
+same HiP-CT block.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../tensors/" class="btn btn-neutral float-left" title="3. One tensor per population"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../../parameters/" class="btn btn-neutral float-right" title="Parameters">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Andrew-Keenlyside/ShapeTensor" class="fa fa-github" style="color: #fcfcfc"> GitHub</a>
+        </span>
+    
+    
+      <span><a href="../tensors/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../../parameters/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "../..";</script>
+    <script src="../../js/theme_extra.js"></script>
+    <script src="../../js/theme.js"></script>
+      <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      <script src="../../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

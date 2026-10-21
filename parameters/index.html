@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Parameters - ShapeTensor</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Parameters";
+        var mkdocs_page_input_path = "parameters.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> ShapeTensor
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Introduction</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../installation/">Installation</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../quickstart/">Quick start</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">The pipeline</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/">Overview</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/shape_features/">1. Shape features</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/separating/">2. Separating populations</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/tensors/">3. One tensor per population</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/merging/">4. Merging the fields</a>
+                  </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Parameters</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#the-scales-rho-and-sigma">The scales: rho and sigma</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#the-feature-average-smooth">The feature average: smooth</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#finding-the-populations-nmax-min_sep_deg-window-iterations">Finding the populations: nmax, min_sep_deg, window, iterations</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#little-or-no-effect-on-the-field-tensor_floor-tissue">Little or no effect on the field: tensor_floor, tissue</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../structure_tensor/">The structure tensor, the baseline</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../validation/">Validation on phantoms</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../data/">Real data</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../scales/">Scales and regions</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../api/">API and command line</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">ShapeTensor</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Parameters</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Andrew-Keenlyside/ShapeTensor/edit/master/docs/parameters.md" class="icon icon-github"> Edit on GitHub</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="parameters">Parameters<a class="headerlink" href="#parameters" title="Permanent link">&para;</a></h1>
+<p>What each parameter does to the field, one at a time, on the HiP-CT block of <a href="../data/">real data</a> (S-21-46, 20 µm,
+a 192³ block calibrated on the 384³ around it), the rest at their defaults. Every strip shows the shape tensor's
+single field as DEC colour (R = |x|, G = |y|, B = |z|) at every voxel. The titles give the populations found and the
+median angle of the field from the default run's over the tissue.</p>
+<pre class="highlight"><code class="language-bash">python scripts/parameters.py                # docs/img/params_&lt;name&gt;.png, results/parameters.json</code></pre>
+<p>Two things are <em>not</em> parameters: the feature layer (encoder block 2 of anatomix, the layer where orientation is a
+linear code) and the teacher (the excised structure tensor at the output <code>rho</code>). Changing the scale at which the
+shape is read means resampling the image; see <a href="../pipeline/">the pipeline</a>.</p>
+<p>What the strips show overall: the field's <em>direction</em> is set by the scales and by which populations are found, and
+by nothing else. The weight floor and the sub-window size leave it unchanged; a different population count or a
+different pair of populations moves it by 9–16° at the median on this low-coherence block, where several readings
+of the tissue are plausible. The readout's fit is not bit-reproducible on the GPU, so the exact populations a run
+finds, and these numbers, vary a little between runs.</p>
+<h2 id="the-scales-rho-and-sigma">The scales: <code>rho</code> and <code>sigma</code><a class="headerlink" href="#the-scales-rho-and-sigma" title="Permanent link">&para;</a></h2>
+<p><code>rho</code> is the integration window of every tensor: the teacher, each population's tensor and the baseline structure
+tensor. It is the one scale a user should normally touch. Smaller windows follow the fibres more closely and carry
+more noise (the structure tensor's swirl defects at ρ 5, three populations found); larger ones smooth the field and
+blur crossings and bends further. The bottom row is the excised structure tensor at the same <code>rho</code>: the two fields
+move together, which is what makes the comparison like for like. At ρ 20 the teacher is smoother than the fascicles
+of this block and one population is found.</p>
+<p><img alt="rho" src="../img/params_rho.png" /></p>
+<p><code>sigma</code> is the derivative scale. At half a voxel the gradients see the noise and the teacher, and so the field,
+change character (24° from the default); at two voxels the fibre texture (period about 5 voxels at 20 µm) is
+blurred before it is differentiated, every tensor loses contrast and one population is found.</p>
+<p><img alt="sigma" src="../img/params_sigma.png" /></p>
+<h2 id="the-feature-average-smooth">The feature average: <code>smooth</code><a class="headerlink" href="#the-feature-average-smooth" title="Permanent link">&para;</a></h2>
+<p>The features are box-averaged over <code>smooth</code>³ voxels before the readers are fitted and before the activations are
+thresholded for the tissue mask. The activation of a rectified filter oscillates with the phase of the fibre
+texture; a 3³ average (the default) integrates it. Without it the activations spike voxel by voxel, the null is
+lower and the second population is not confirmed; a 5³ box blurs the layers at the scale of the box and leaves the
+field within 3° of the default.</p>
+<p><img alt="smooth" src="../img/params_smooth.png" /></p>
+<h2 id="finding-the-populations-nmax-min_sep_deg-window-iterations">Finding the populations: <code>nmax</code>, <code>min_sep_deg</code>, <code>window</code>, <code>iterations</code><a class="headerlink" href="#finding-the-populations-nmax-min_sep_deg-window-iterations" title="Permanent link">&para;</a></h2>
+<p>These decide <em>how many</em> populations the block is unmixed onto, not how any tensor integrates. The top row is the
+single field; the bottom row is the second vector of the multi-vector field with its activation as brightness,
+black where only one population was found.</p>
+<p><code>nmax</code> caps the number of populations. With one population the single field is the excised structure tensor
+weighted by that population's activation (15° from the default here). With two the block has two readings that
+differ by 9°: the default (candidates from the 64³ sub-windows, up to three confirmed) and the pair found with
+<code>nmax</code> 2 or <code>window</code> 0, which is the same pair.</p>
+<p><img alt="nmax" src="../img/params_nmax.png" /></p>
+<p><code>min_sep_deg</code> is the angle below which two candidate populations are the same one. Smaller values let the
+shoulders of one dispersed population count as two (at 15° a different pair is found, 16° from the default); at
+40° the two populations of this block are merged into one.</p>
+<p><img alt="min_sep_deg" src="../img/params_min_sep_deg.png" /></p>
+<p><code>window</code> is the size of the sub-windows in which candidate populations are looked for, 0 for the block only. A
+population confined to one region of the block is found through its sub-window; 64 and 96 give the same result here.</p>
+<p><img alt="window" src="../img/params_window.png" /></p>
+<p><code>iterations</code> is the number of joint refinements of the populations from their own layers after the candidates are
+confirmed one by one. One pass or four leave the field within 4–5° of the default on this block.</p>
+<p><img alt="iterations" src="../img/params_iterations.png" /></p>
+<h2 id="little-or-no-effect-on-the-field-tensor_floor-tissue">Little or no effect on the field: <code>tensor_floor</code>, <code>tissue</code><a class="headerlink" href="#little-or-no-effect-on-the-field-tensor_floor-tissue" title="Permanent link">&para;</a></h2>
+<p><code>tensor_floor</code> is the weight floor of every population tensor, as a fraction of the null. It keeps a population's
+tensor defined where its activation is zero and is not a lever on the field (0.3° between 0 and 0.1; also
+<code>notes/results_log.md</code> §27).</p>
+<p><img alt="tensor_floor" src="../img/params_tensor_floor.png" /></p>
+<p><code>tissue</code> is the optional mask of the voxels to read (here the grey level above the air/tissue threshold). It
+chooses where the teacher is sampled and where the excision looks for steps; it is never applied to the vectors,
+and on a block that is all tissue it changes the field by 4°.</p>
+<p><img alt="tissue" src="../img/params_tissue.png" /></p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../pipeline/merging/" class="btn btn-neutral float-left" title="4. Merging the fields"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../structure_tensor/" class="btn btn-neutral float-right" title="The structure tensor, the baseline">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Andrew-Keenlyside/ShapeTensor" class="fa fa-github" style="color: #fcfcfc"> GitHub</a>
+        </span>
+    
+    
+      <span><a href="../pipeline/merging/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../structure_tensor/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

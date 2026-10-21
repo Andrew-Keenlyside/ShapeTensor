@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Scales and regions - ShapeTensor</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Scales and regions";
+        var mkdocs_page_input_path = "scales.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> ShapeTensor
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Introduction</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../installation/">Installation</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../quickstart/">Quick start</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">The pipeline</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/">Overview</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/shape_features/">1. Shape features</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/separating/">2. Separating populations</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/tensors/">3. One tensor per population</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/merging/">4. Merging the fields</a>
+                  </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../parameters/">Parameters</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../structure_tensor/">The structure tensor, the baseline</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../validation/">Validation on phantoms</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../data/">Real data</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Scales and regions</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#six-voxel-sizes">Six voxel sizes</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#four-regions-at-20-m">Four regions at 20 µm</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#a-whole-brain-at-100-m">A whole brain at 100 µm</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../api/">API and command line</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">ShapeTensor</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Scales and regions</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Andrew-Keenlyside/ShapeTensor/edit/master/docs/scales.md" class="icon icon-github"> Edit on GitHub</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="scales-regions-a-whole-brain">Scales, regions, a whole brain<a class="headerlink" href="#scales-regions-a-whole-brain" title="Permanent link">&para;</a></h1>
+<p>The same pipeline, at the same settings (σ 1, ρ 10 voxels, calibration on the 384³ around a 192³ block, tissue =
+grey level above zero), on HiP-CT at six voxel sizes, on four regions of one brain at 20 µm, and over a whole brain
+at 100 µm. There is no truth on real data; what is reported is what the pipeline finds, and how far its single field
+is from the excised structure tensor at the same scales, over the tissue and where the tensor is confident (its top
+quarter by orientation gap). Every direction field is drawn as plain DEC at every voxel, the shape tensor's exactly
+as the structure tensor's.</p>
+<pre class="highlight"><code class="language-bash">python scripts/scales.py            # docs/img/scales.png, docs/img/regions_20um.png, results/scales.json
+python scripts/wholebrain.py run    # the 100 µm brain: shape.zarr and st.zarr under /hdd/andrew/shapetensor_runs
+python scripts/wholebrain.py figure # docs/img/wholebrain_100um.png, results/wholebrain_100um.json</code></pre>
+<h2 id="six-voxel-sizes">Six voxel sizes<a class="headerlink" href="#six-voxel-sizes" title="Permanent link">&para;</a></h2>
+<p>The two finest blocks are from I74 (a 2.2 µm volume of interest and a 10 µm chunk); the four coarser ones are the
+deep brain of S-21-46, at 20 µm from its 20 µm scan and at 50, 100 and 200 µm from the levels of its 50 µm scan,
+centred on the same thalamic site. The parameters are in voxels, so the integration window runs from 22 µm to
+2 mm down the figure and the network's 16-voxel receptive field from 35 µm to 3.2 mm.</p>
+<p><img alt="scales" src="../img/scales.png" /></p>
+<ul>
+<li><strong>From 20 µm to 100 µm</strong> the pipeline reads the deep brain as two populations and its single field is within 5°
+  of the excised tensor where the tensor is confident (6° to 12° over the block). At 50 µm the activation layers
+  follow the fascicles that are visible in the image, one layer per direction of fibre bundle.</li>
+<li><strong>At 200 µm</strong> the receptive field is 3 mm and the three "populations" are tissue classes: a band of white matter,
+  the oriented edge of the ventricle, the rest. The field still agrees with the tensor (14°, 7° where confident),
+  because both are now reading anatomy, not fibres.</li>
+<li><strong>At 2.2 µm and 10 µm</strong> the voxels resolve cells, vessels and single axons. The features are read at a receptive
+  field of 35 µm and 160 µm, the readers calibrate on whatever is oriented at that scale (a vessel is one of the
+  three populations at 2.2 µm), and the single field departs from the structure tensor by 20° to 25°. The
+  pipeline reads shape at the scale of its receptive field; the voxel size decides what a "fibre" is. For
+  sub-cellular voxel sizes, downsample to the fascicle scale first.</li>
+</ul>
+<h2 id="four-regions-at-20-m">Four regions at 20 µm<a class="headerlink" href="#four-regions-at-20-m" title="Permanent link">&para;</a></h2>
+<p>Deep brain, a gyral white-matter site, the brainstem and the cerebellar white matter of S-21-46, each a 192³ block.</p>
+<p><img alt="regions" src="../img/regions_20um.png" /></p>
+<p>Two things the figure settles about calibration.</p>
+<ul>
+<li><strong>Self-calibration needs orientation diversity.</strong> The brainstem block's fibres run in one direction, its teacher
+  occupies 7 of 24 orientation bins, the readers cannot learn an orientation code from one orientation, and the
+  null rises until a third of the tissue is above it. The field is then the excised tensor weighted by a degenerate
+  activation (2.5° from the tensor, weights that mean little).</li>
+<li><strong>A calibration does not travel.</strong> The third row applies the deep-brain block's calibration to the other three
+  regions: the cortex block goes from 13° to 32° from the tensor with 45% of its tissue above the null, the
+  brainstem from 2.5° to 18° with 9% above, the cerebellum stays at 19° to 25°. The readers are specific to the local
+  texture (its feature statistics, its signatures); a calibration from elsewhere in the same brain reads a region's
+  populations poorly.</li>
+</ul>
+<p>So the rule for a volume is <strong>calibrate every chunk on itself</strong>, and fall back to a volume calibration only where a
+chunk's teacher covers too few orientations. That is what <code>run_volume</code> now does (<code>calibrate_chunks</code>, <code>min_bins</code>);
+one calibration for the whole volume remains an option.</p>
+<h2 id="a-whole-brain-at-100-m">A whole brain at 100 µm<a class="headerlink" href="#a-whole-brain-at-100-m" title="Permanent link">&para;</a></h2>
+<p>S-21-46 at 100 µm (1475 × 1493 × 1493 voxels, level 1 of its 50 µm scan), in 256³ chunks each calibrated on itself
+(the central 256³'s calibration as fallback), the chunks' merged tensors ramp-blended over a 32-voxel overlap at
+every face, chunks without tissue skipped, and the excised structure tensor over the same volume at the same σ and
+ρ (1 mm integration). The weights are zero where the masked volume has no data; the vectors are never masked. Every
+field is drawn as plain DEC.</p>
+<p><img alt="whole brain" src="../img/wholebrain_100um.png" /></p>
+<p>121 chunks of 256³ held tissue, 95 were air and skipped; 114 chunks used their own calibration and 7 the volume's
+(a teacher with too few orientations, or too little oriented tissue to fit on). No chunk failed, and the field has
+no seams. On the three mid planes the single field is 8° from the excised tensor over the tissue and 4° where the
+tensor is confident. The shape pass took 2 hours at a median of 62 s per chunk (the per-chunk calibration, the
+overlap and the accumulators on top of the 26 s of stages 2–4), the blended write 6 minutes and the structure
+tensor 5 minutes. The two fields agree on the large structure, the corpus callosum, the internal capsule, the
+cerebellar peduncles; the shape tensor is the finer-grained of the two, following the gyral white matter and the
+cortex at the scale of its receptive field (1.6 mm here) where the structure tensor's 1 mm window has already
+averaged it.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../data/" class="btn btn-neutral float-left" title="Real data"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../api/" class="btn btn-neutral float-right" title="API and command line">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Andrew-Keenlyside/ShapeTensor" class="fa fa-github" style="color: #fcfcfc"> GitHub</a>
+        </span>
+    
+    
+      <span><a href="../data/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../api/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

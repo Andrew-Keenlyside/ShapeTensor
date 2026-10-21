@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Validation on phantoms - ShapeTensor</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Validation on phantoms";
+        var mkdocs_page_input_path = "validation.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> ShapeTensor
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Introduction</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../installation/">Installation</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../quickstart/">Quick start</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">The pipeline</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/">Overview</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/shape_features/">1. Shape features</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/separating/">2. Separating populations</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/tensors/">3. One tensor per population</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../pipeline/merging/">4. Merging the fields</a>
+                  </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../parameters/">Parameters</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../structure_tensor/">The structure tensor, the baseline</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Validation on phantoms</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#what-it-shows">What it shows</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#what-to-take-from-it">What to take from it</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../data/">Real data</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../scales/">Scales and regions</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../api/">API and command line</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">ShapeTensor</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Validation on phantoms</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/Andrew-Keenlyside/ShapeTensor/edit/master/docs/validation.md" class="icon icon-github"> Edit on GitHub</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="validation-on-phantoms">Validation on phantoms<a class="headerlink" href="#validation-on-phantoms" title="Permanent link">&para;</a></h1>
+<p>Three phantoms with truth, at 20 µm voxels, 192³ blocks with 32 voxels of context, three seeds each; every field
+at σ 1, ρ 10 voxels. The texture is the one matched to the real HiP-CT crop: 20° of fibre dispersion within a
+population and half the fibre darkening (<code>shapetensor stats</code>). The structure tensor (plain and excised) is scored
+against the shape tensor's single field and the first vector of its multi-vector field.</p>
+<pre class="highlight"><code class="language-bash">shapetensor validate --out validation        # validation.json, validation_calibrated.png</code></pre>
+<p>The shape pipeline is calibrated once on twelve single bundles at 15° steps of orientation (a phantom block has
+one or two orientations, too few to calibrate on itself; a real block has them all).</p>
+<ul>
+<li><strong>bundle</strong> — one population at 60°: the clear-tissue floor.</li>
+<li><strong>crossing</strong> — two populations at 60°, equal density, interdigitated at the fascicle scale.</li>
+<li><strong>interface</strong> — one population crossing a tissue step of 40 grey levels, at 90°, 60° and 30° to it in three bands.</li>
+</ul>
+<p><img alt="validation" src="../img/validation_calibrated.png" /></p>
+<p>Each row is one phantom in the package's standard layout: the image, the excised structure tensor, the shape space
+with the populations found in it, one activation layer per population, the shape tensor's single field and the
+first vector of its multi-vector field, every field as plain DEC at every voxel, with each field's median error
+against the truth in its title.
+<code>results/validation.json</code> has every seed and every band.</p>
+<h2 id="what-it-shows">What it shows<a class="headerlink" href="#what-it-shows" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>On the bundle</strong> both fields are within 4° of the truth; the shape tensor is the closer (2.4° against 3.9°),
+  because the activation weighting discounts the voxels between fibres.</li>
+<li><strong>At the crossing</strong> the structure tensor reports the bisector (24° from either population, 10% of voxels within
+  15°). The pipeline finds two populations on every seed. Its single field is also near the bisector (23°), as a
+  merged tensor must be, but the <strong>first vector of the multi-vector field</strong> is 11.6° from the nearest population
+  with 55% of voxels within 15°: at each voxel the stronger population's own tensor. The pair is not resolved per
+  voxel (both vectors within 15° at 1% of voxels): with 20° of dispersion within each population the two
+  activation layers overlap, and the second vector is indicative only.</li>
+<li><strong>At the interface</strong> the plain structure tensor is dragged 35° into the step within 0.1 mm of it; the excision
+  removes this (6°), and the pipeline inherits the excision. The shape tensor is nonetheless the noisier field here
+  (17° against 6°, in every band): three bands at different angles to the step are read as one or two
+  populations, and their activation weighting cannot sharpen three directions. Where a block holds one coherent
+  direction the pipeline matches the excised tensor; where it holds several, the population count per region is
+  the lever, not the weights (<code>notes/results_log.md</code> §27).</li>
+</ul>
+<h2 id="what-to-take-from-it">What to take from it<a class="headerlink" href="#what-to-take-from-it" title="Permanent link">&para;</a></h2>
+<ul>
+<li>The excision is the remedy for interfaces; it is in the baseline and inside every population tensor.</li>
+<li>At a crossing, use the multi-vector field's first vector where the two populations are of different strength,
+  and treat the second as indicative. The single field is a merged tensor and reports the bisector like the
+  structure tensor.</li>
+<li>Tight, coherent bundles (8° dispersion, the <code>coherent</code> setting of <code>shapetensor validate --settings coherent</code>)
+  are separated per voxel and were the earlier validation's headline; they are not the regime of the HiP-CT crop,
+  so they are no longer the default and are not shown here.</li>
+<li>On the real block, where orientations vary smoothly, the single field agrees with the excised tensor to 7°
+  where the tensor is confident (<a href="../data/">real data</a>).</li>
+</ul>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../structure_tensor/" class="btn btn-neutral float-left" title="The structure tensor, the baseline"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../data/" class="btn btn-neutral float-right" title="Real data">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/Andrew-Keenlyside/ShapeTensor" class="fa fa-github" style="color: #fcfcfc"> GitHub</a>
+        </span>
+    
+    
+      <span><a href="../structure_tensor/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../data/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>
