@@ -116,8 +116,8 @@ def main():
     e1 = Vt[0] - (Vt[0] @ pa) * pa; e1 /= e1.norm(); e2 = Vt[1] - (Vt[1] @ pa) * pa - (Vt[1] @ e1) * e1; e2 /= e2.norm()
     E = torch.stack([e1, e2, pa])                                                                 # (3, C)
     proj = lambda Z: (Z @ E.T).cpu().numpy()
-    fig = plt.figure(figsize=(22, 8.5), facecolor="white")
-    ax3 = fig.add_subplot(1, 3, 1, projection="3d")
+    fig = plt.figure(figsize=(22, 16), facecolor="white")
+    ax3 = fig.add_subplot(2, 3, 1, projection="3d")
     for a, Z in Zb:
         p = proj(Z[:150]); ax3.scatter(p[:, 0], p[:, 1], p[:, 2], s=3, c=hue(a).repeat(len(p), 0), alpha=0.5)
     for Zs, cc in ((Zt[:300], [0.55] * 3), (Z90[:200], [0, 0, 0]), (Z60[:200], [0.45, 0.25, 0.1])):
@@ -127,7 +127,7 @@ def main():
     ax3.set_xlabel("orientation PC 1"); ax3.set_ylabel("orientation PC 2"); ax3.set_zlabel("presence axis"); ax3.view_init(elev=22, azim=-60)
     ax3.set_title("blobs (2σ ellipsoids, covariance projected) and samples", fontsize=10)
     for col, (i, j, xl, yl) in enumerate(((0, 1, "orientation PC 1", "orientation PC 2"), (2, 0, "presence axis (texture -> bundles)", "orientation PC 1"))):
-        ax = fig.add_subplot(1, 3, 2 + col)
+        ax = fig.add_subplot(2, 3, 2 + col)
         for a, Z in Zb:
             p = proj(Z); ax.scatter(p[:, i], p[:, j], s=3, c=hue(a).repeat(len(p), 0), alpha=0.35)
         for Zs, cc, mk, lab in ((Zt, [0.55] * 3, "o", "texture"), (Z90, [0, 0, 0], "s", "crossing 90"), (Z60, [0.45, 0.25, 0.1], "^", "crossing 60")):
@@ -136,6 +136,31 @@ def main():
             Cp = (E @ S @ E.T).cpu().numpy()[np.ix_([i, j], [i, j])]
             ellipse(ax, proj(c[None])[0][[i, j]], Cp, hue(a)[0] if kind == "dir" else (0.3, 0.3, 0.3), lw=1.6 if kind != "dir" else 1.0)
         ax.set_xlabel(xl); ax.set_ylabel(yl); ax.legend(fontsize=8, loc="lower right", markerscale=2); ax.set_xticks([]); ax.set_yticks([])
+    # UMAP of the same samples in the full whitened space (points only: a non-linear embedding has no way back to the
+    # features, so no regions), coloured by truth, by the readout network's prediction and by the blob assignment
+    import umap
+    Zall = torch.cat([Z for _, Z in Zb] + [Zt, Z90, Z60])
+    kinds = np.array(["bundle"] * sum(len(Z) for _, Z in Zb) + ["texture"] * len(Zt) + ["crossing 90"] * len(Z90) + ["crossing 60"] * len(Z60))
+    tru = np.concatenate([np.full(len(Z), a) for a, Z in Zb] + [np.full(len(Zt) + len(Z90) + len(Z60), np.nan)])
+    emb = umap.UMAP(n_neighbors=30, min_dist=0.15, random_state=0).fit_transform(Zall.cpu().numpy())
+    F_all = ((Zall @ torch.linalg.inv(Wh).T) + mu) * D.std + D.mean
+    with torch.no_grad():
+        pr = cal.readout.probs((F_all - cal.readout.mean) / cal.readout.std)
+    pred = (torch.rad2deg(torch.atan2(cal.readout.grid[pr.argmax(1)][:, 0], cal.readout.grid[pr.argmax(1)][:, 2])) % 180).cpu().numpy()
+    kall = assign(Zall)
+    def kind_col(kd):
+        return {"texture": [0.6] * 3, "crossing 90": [0, 0, 0], "crossing 60": [0.45, 0.25, 0.1]}.get(kd, [0, 0, 0])
+    col_t = np.array([hue(a)[0] if kd == "bundle" else kind_col(kd) for a, kd in zip(tru, kinds)])
+    col_p = hue(pred)
+    col_b = np.array([hue(blobs[k][1])[0] if 0 <= k < nb - 1 else ([0.6] * 3 if k == nb - 1 else [0, 0, 0]) for k in kall])
+    for col, (cc, title) in enumerate(((col_t, "UMAP of the samples: truth (texture grey, crossing 90 black, 60 brown)"),
+                                       (col_p, "UMAP: the readout network's prediction (hue = angle)"),
+                                       (col_b, "UMAP: blob assignment (hue = blob's angle, grey = texture blob, black = none)"))):
+        ax = fig.add_subplot(2, 3, 4 + col)
+        for kd, mk, sz in (("bundle", "o", 3), ("texture", "o", 3), ("crossing 60", "^", 8), ("crossing 90", "s", 8)):
+            m = kinds == kd
+            ax.scatter(emb[m, 0], emb[m, 1], c=cc[m], s=sz, marker=mk, linewidths=0.2, edgecolors="w" if kd.startswith("crossing") else "none")
+        ax.set_title(title, fontsize=10); ax.set_xticks([]); ax.set_yticks([])
     s = stats
     fig.suptitle(f"Regions in the shape space ({ENGINE}): a blob per calibration direction (hue = angle) and for texture (grey), 2σ.  Assigned to a direction / texture / none —  "
                  f"bundles {s['bundles']['to a direction']:.2f}/{s['bundles']['to texture']:.2f}/{s['bundles']['to none']:.2f} (error {s['bundles'].get('direction error median (deg)', float('nan'))}°);  "
