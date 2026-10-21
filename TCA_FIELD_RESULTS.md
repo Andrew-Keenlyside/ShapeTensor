@@ -131,3 +131,87 @@ Profiled on the HiP-CT block (192³ stages 2–4; 384³ calibration), synchronis
   408³ block + calibration + accumulator I/O), 2 h 3 min for the shape pass, 6 min for the blended write, 4.5 min
   for the structure tensor. Agreement with the excised tensor on the mid planes 7.9 / 8.5 / 8.2° (4.3 / 4.5 / 3.5°
   where confident). No seams visible. The single-calibration run (9.4 + 7.8 GB) deleted.
+
+## 32. The dev pipeline, validated and debugged (2026-10-21)
+
+Branch `dev-pipeline`. The dev pipeline as formalised (anatomix-dev-vit + sliceTCA, fibre sets, directions from the
+features' gradients) on the validation phantoms (calibrated texture, seed 0) and a real slab, then debugged stage by
+stage. Results under `/home/andrew/bridge_wmcov/shapetensor/results/dev_pipeline/`.
+
+**Stage 2 found nothing.** Calibrated on the straight bundles (the prototypes' protocol), the fibre sets found 0 of
+441 bend windows: the fibre-free texture reference's window prominence (24.0) was above every fibre window's (median
+11.9). `diag_presence.py`: with dev-vit the readout gives texture confident directions, 83% of texture windows peak
+within 10° of a coordinate axis (chance 4%; the 8-voxel patch grid is 17% of the texture features' variance, 0.1% for
+encoder 2; the half-patch shift average leaves its period-4 and period-2 parts), and a texture window's prominence
+(median 12.9) exceeds a bundle's (8.7). sliceTCA removes most of the grid (2%) but not the confidence. Encoder 2's
+weak readout (fit 0.40) is diffuse on texture, which is why prominence worked there. The released per-window mask
+share does not separate either (texture median 0.81 with dev-vit).
+- The features do carry it: a linear probe on dev-vit features, bundles against texture, has voxel AUC 0.999 (bend
+  fascicle vs rest 0.92; encoder 2 0.72-0.79) (`diag_probe.py`).
+- Tried in turn: a *no orientation* readout output (takes crossings for texture: 26/169 windows of a full crossing);
+  the linear probe as presence (`PresenceProbe`; crossings 12-28% of windows); a Gaussian model of fibre-free texture,
+  presence = the window's mean Mahalanobis distance above the largest of the held-out texture's windows
+  (`TextureModel`, `presence="distance"`): crossings 59-63% of windows, bend 280/441, band crossings 341-386/441.
+  The texture's padded faces must be left out of the model (with them, every distance shrank and crossings fell
+  below the null). Default: distance.
+
+**Stage 3 from the features' gradients follows the patch grid.** With the true fascicles as the layers
+(`diag_stage3.py`, bend): image structure tensor 3.0-4.4° (p90 5-9°); shape tensor on encoder 2 4.7-7.1°; on dev-vit
+9-32° median with p90 ~89° (in-plane flips; not the slab-in-y ambiguity: |y| 0.02). New default `direction="readout"`:
+the readout's distributions as dyads `sum_u P_u u u^T`, integrated with the layer (gradient-free). Bundle-calibrated:
+encoder 2 2.5-3.7° but dev-vit 14-46°; **self-calibrated on the bend: dev-vit 2.2-3.7° (p90 5.5-11°)**, encoder 2
+6.3-8.6°. dev-vit's readers do not carry over from straight bundles to other geometry and tissue (readout fit 0.97 on
+the bundles notwithstanding); they must be calibrated in-domain, as `run_volume` calibrates chunks. A case with one
+orientation (the straight control) is a degenerate self-calibration, so the validation now has `CALIBRATION=pool`:
+one calibration on the 12 bundles + all six cases (label-free, every orientation, in-domain).
+
+**Validation, pooled calibration** (`validate_dev.py`; errors in degrees; bend: way in / turn / way out over the
+three fascicles, populations carrying them; bands: each band's largest share, error outside the overlap):
+
+| method | bend | straight | band 90 | band 60 | crossing 90 / 60 merged |
+| --- | --- | --- | --- | --- | --- |
+| released | 61-73 / 30-36 / 1-2, 1 pop | 7.1-7.6, 2 pops | 0.76/0.74, 15/29 | 0.52/0.73, 12/42 | 29.2 / 27.5 |
+| fibre sets, enc2 | 2.4-3.7 / 1.7-3.6 / 1.1-1.5, 1 | 1.2-2.4, 1 | 0.88/0.84, 6/7 | 0.89/0.97, 5/9 | 18.0 / 25.1 |
+| dev-vit, probe, readout | 0.9-4.1 / 2.8-5.5 / 1.8-3.4, 1 | 0.5-1.6, 1 | 0.86/0.90, 3/7 | 0.96/0.87, 3/6 | 14.3 / 26.3 |
+| dev-vit, distance, readout | 1.3-4.0 / 2.9-5.1 / 1.8-2.1, 1 | 0.4-2.1, 1 | 0.89/0.85, 3/9 | 0.92/0.84, 4/6 | 12.7 / 26.1 |
+| dev-vit + sliceTCA, probe, readout | 0.9-3.2 / 2.2-4.0 / 1.5-2.5, 1 | 0.7-0.9, 1 | 0.91/0.89, 3/7 | 0.90/0.93, 3/3 | 11.5 / 25.8 |
+
+(excised structure tensor on the crossings: 18.5 / 23.9.) One population per fascicle through the bends, the two bands
+whole and apart, the lowest errors outside crossings. sliceTCA helps a little at 5.5x the calibration time (700 vs
+126 s). Not solved by any method: inside an overlap or a crossing the two directions are not resolved (overlap pair
+error 23-36°, both within 15° ~0); the windows rarely yield a second population (dev-vit's second-share null is 0:
+single bundles never show one).
+
+**Artefacts** (`shapetensor.artefacts`, `scripts/artefacts.py`, `artefacts_real.py`): streaks (lines in z slices,
+1 voxel thick, ~0.5 per slice, bright or dark) along x (in the fibre plane), along y, at any direction; rings about an
+axis half a block beyond x = 0 (sheets along z). Strength in grey levels; the fibre darkening is 50. Bundle at 60°,
+merged median error at strengths 0 / 25 / 50 / 100 / 200, readers calibrated clean:
+
+| | streaks along x | streaks along y | streaks, any | rings |
+| --- | --- | --- | --- | --- |
+| structure tensor | 4.0 / 4.0 / 6.7 / 28.7 / 47.6 | 4.0 / 4.1 / 4.9 / 10.7 / 86.5 | 4.0 / 4.0 / 4.7 / 12.8 / 37.6 | 4.0 / 8.2 / 13.8 / 17.1 / 13.5 |
+| released | 2.4 / 2.5 / 2.6 / 27.4 / 55.3 | 2.4 / 2.5 / 2.7 / 4.4 / 20.4 | 2.4 / 2.4 / 2.9 / 15.9 / 57.3 | 2.4 / 8.2 / 18.5 / 21.3 / 19.7 |
+| dev | 4.0 / 6.9 / 28.8 / 28.5 / 27.0 | 4.0 / 8.3 / 9.3 / 9.0 / 17.1 | 4.0 / 3.2 / 8.1 / 13.4 / 25.2 | 4.0 / 7.2 / 17.9 / 27.8 / 28.8 |
+
+- dev reacts earliest to streaks in the fibre plane (at 50 it makes them a set of their own, which takes the merged
+  field; the true set survives: best vector 16.9°) but saturates lowest at 200 (27° against 55° and 48°).
+- Readers calibrated on the artefacted data (a chunk calibrating on itself) help the released pipeline against rings
+  (8.5-11.4°) and dev against weak streaks (10.1° at 50), but at 100-200 both learn the streaks (dev 46-59° along x,
+  both ~89° along y).
+- Rings pull every method towards z (the rotation axis); on the 90° crossing they flip the released field to the z
+  population (change 74-86°).
+- Real slab (S-21-46 20 µm cortex, 128 x 32 x 128 core, change against the method's own unaltered field): with readers
+  calibrated on the unaltered slab, **dev is the most stable**: streaks along x 5.5° / 7.6° at 50 / 200, rings 6.9° /
+  6.9° (released 9.7 / 14.3 and 72.9 / 74.4; structure tensor 10.6 / 18.0 and 49.8 / 24.6). Calibrated on the altered
+  slab, dev loses it (rings 59 / 44°; released 24 / 42°): calibrate on clean tissue (the volume calibration), not on an
+  artefact-heavy chunk.
+
+**QC figures** (`scripts/figures_dev.py`, `results/dev_pipeline/figures/`): the six phantoms, two artefact examples
+and the real slab, mid-y plane: image, truth, structure tensor, released, dev, presence, dev layers, error maps.
+
+**Open:**
+- Crossings: found (presence) but not resolved; dense crossings partly look like texture to dev-vit.
+- The presence null is synthetic texture: on the real slab 146/169 windows count as fibres (real tissue is far from
+  synthetic texture whatever it holds); a real-data null is needed (e.g. the block's least oriented tissue).
+- Streaks in the fibre plane become a population; a z-slab-confinement test (tomographic geometry) would reject them.
+- Blocky population layers (32³ window blending); stage 2 costs 2-4 min per 128 x 32 x 128 block (per-window stage 2).
