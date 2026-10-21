@@ -303,18 +303,23 @@ def bend(grid: Grid, tex: TextureParams, rng, centre=BEND_CENTRE, radii=BEND_RAD
     return img, tr, {"centre_mm": list(centre), "radii_mm": list(radii), "width_mm": width, "straight": straight}
 
 
-def band_crossing(grid: Grid, tex: TextureParams, rng, cross_deg: float = 90.0, width: float = 0.4, device="cuda"):
+def band_crossing(grid: Grid, tex: TextureParams, rng, cross_deg: float = 90.0, width: float = 0.4, t_junction: bool = False, device="cuda"):
     """Two straight fascicles ``width`` mm wide through the core's centre, at 45 ± ``cross_deg`` / 2 (as ``crossing``),
     in grey-matter-level tissue. Truth: ``dir1`` / ``dir2`` the two directions where each fascicle is (``dir1`` the only
     one where a single fascicle is), ``npop`` 1 or 2, ``region`` 2 in the fascicles and 1 elsewhere, and the masks
-    ``band1`` / ``band2`` on the (Z, X) plane."""
+    ``band1`` / ``band2`` on the (Z, X) plane. ``t_junction``: the second fascicle stops at the first one's centre line
+    (a T: its fibres end inside the first band), and ``corridor2`` is the strip it would have continued along."""
     a1, a2 = 45.0 + cross_deg / 2, 45.0 - cross_deg / 2
     Z, X = np.meshgrid(grid.coords(0), grid.coords(2), indexing="ij")
     zc, xc = grid.core_mm[0] / 2, grid.core_mm[2] / 2
-    bands = []
+    bands, signed = [], []
     for a in (a1, a2):
         d = direction(a)
-        bands.append(np.abs((Z - zc) * d[2] - (X - xc) * d[0]) < width / 2)               # distance from the centre line
+        signed.append((Z - zc) * d[2] - (X - xc) * d[0])                                 # signed distance from the centre line
+        bands.append(np.abs(signed[-1]) < width / 2)
+    corridor2 = bands[1].copy()
+    if t_junction:
+        bands[1] = bands[1] & (signed[0] <= 0)
     sp = Splat(grid, tex, rng, device)
     for a, m in zip((a1, a2), bands):
         add_population(sp, a, 1.0, region2d=m)
@@ -322,11 +327,11 @@ def band_crossing(grid: Grid, tex: TextureParams, rng, cross_deg: float = 90.0, 
     b1, b2 = bands
     tr["dir1"][b1] = direction(a1); tr["dir1"][b2 & ~b1] = direction(a2); tr["dir2"][b1 & b2] = direction(a2)
     tr["npop"][b1 | b2] = 1; tr["npop"][b1 & b2] = 2; tr["region"][~(b1 | b2)] = 1; tr["cross_deg"][b1 & b2] = cross_deg
-    tr.update({"band1": b1, "band2": b2})
+    tr.update({"band1": b1, "band2": b2, "corridor2": corridor2})
     inside = b1 | b2
     img = finish(grid, tex, np.where(inside, tex.levels["wm"], tex.levels["gm"]).astype(np.float32),
                  np.where(inside, tex.amp, 0.0).astype(np.float32), sp.render(), rng)
-    return img, tr, {"cross_deg": cross_deg, "angles": [a1, a2], "width_mm": width}
+    return img, tr, {"cross_deg": cross_deg, "angles": [a1, a2], "width_mm": width, "t_junction": t_junction}
 
 
 PHANTOMS = {"bundle": bundle, "crossing": crossing, "interface": interface, "bend": bend, "band_crossing": band_crossing}

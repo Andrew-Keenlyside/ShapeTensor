@@ -215,3 +215,39 @@ and the real slab, mid-y plane: image, truth, structure tensor, released, dev, p
   synthetic texture whatever it holds); a real-data null is needed (e.g. the block's least oriented tissue).
 - Streaks in the fibre plane become a population; a z-slab-confinement test (tomographic geometry) would reject them.
 - Blocky population layers (32³ window blending); stage 2 costs 2-4 min per 128 x 32 x 128 block (per-window stage 2).
+
+## 33. Population completion across crossings, and dev-vit's tile seams (2026-10-21)
+
+**Completion** (`shapetensor.completion`, `scripts/test_completion.py`, pooled calibration, stage 2 shared by the four
+stage 3s): each set carried across a crossing along its own direction from its arms, only where it holds on *both*
+sides within reach (a free end is never extended). Three findings in turn:
+- Carried along its first-pass direction it changed nothing (band 90 overlap pair 32.9 -> 29-36°): inside an overlap a
+  set's own field is read from crossing-confused dyads. `diag_completion.py`: the band-2 set's direction there was 71°
+  off (pulled onto band 1).
+- Steering by the set's direction extrapolated from its *pure* voxels (alone and strong; normalised convolution, σ 8)
+  fixes the direction (band-2 set 71 -> 4-7.5° in the overlap) but the activation stayed low (bridge = mean along 16
+  voxels, mostly inside the 20-voxel overlap: band-1 set 0.16 -> 0.22 vs 1.6 on its arms).
+- Bridge = each side's strongest activation within 24 voxels, the smaller side:
+
+| overlap pair error, both within 15° | none | image | image + continuation | shape |
+| --- | --- | --- | --- | --- |
+| band crossing 90 | 27.1, 0 | 43.7, 0 | 12.0, 0.20 | 14.3, 0.27 |
+| band crossing 60 | 24.8, 0 | 26.5, 0 | 15.7, 0 | 25.6, 0 |
+| T-junction 90 (false extension) | 42.7 (0.029) | 43.1 (0.027) | 27.0 (0.027) | 38.9 (0.027) |
+| T-junction 60 (false extension) | 21.9 (0.0) | 22.6 (0.0) | 18.1 (0.0) | 22.2 (0.0) |
+
+  No false extension past a T. The shape-space variant (features averaged along the set's direction on each side,
+  confirmed by the readout, directions read from them) keeps the bands outside the overlap as they were and is best at
+  90° (the first overlap voxels with both directions within 15°), but does not help at 60° (24 voxels along a direction
+  60° from the other band do not average it out); image + continuation reaches further (60°: 15.7°) but blurs the
+  second band's arm by 2-5°. Both cost the tightest bend's turn 2-3°. Whole-block crossings: no change (stage 2 forms
+  one or two mixed sets there; there is nothing to carry). Opt-in (`DevConfig.completion`), default off.
+- Run-to-run: the pooled calibration and stage 2 are not deterministic on the GPU (band 90 baseline 27-33°, 2 or 3 sets
+  between runs); compare modes within a run (they share stage 2).
+
+**dev-vit's tile seams** (`scripts/figure_models.py`, the first three principal components of each model's features on
+an axial slice of the S-21-46 20 µm VOI): the UNet's 16-channel output is smooth and anatomical, its encoder block 2
+(the released pipeline's) fine texture, dev-vit sharp on vessels and the grey-white boundary but **offset tile by tile
+at its 64-voxel cores** (the transformer attends over the whole 128³ tile, so a voxel's features depend on its tile)
+with the 8-voxel patch grid faintly over it. Every window statistic of the dev pipeline straddles these seams; tiles
+overlapping with blended cores (stride 32, a 2³ = 8x cost, or 48) would remove them.

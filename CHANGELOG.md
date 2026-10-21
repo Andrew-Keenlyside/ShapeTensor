@@ -29,6 +29,14 @@
     bend by 14–46°; `validate_dev.py` gains `CALIBRATION=self|pool`.
 - `shapetensor.artefacts`: streaks and rings in z slices (the rotation axis); `scripts/artefacts.py` (phantoms, against
   the truth) and `scripts/artefacts_real.py` (a real slab, against its own artefact-free field).
+- `shapetensor.completion` (opt-in, `DevConfig.completion`): each fibre set carried across crossings along its own
+  direction, extrapolated from where the set is alone (`steering`), only where the set holds on both sides within
+  `completion_half` voxels (no free end is extended). `"image"` extends the layer; `"image_cont"` also takes the arms'
+  direction in the bridged voxels; `"shape"` averages the features along the set's direction on each side (a
+  population-steered matched filter in shape space), confirms the set with the readout and reads its direction from
+  them. `apply_dev(..., stage2=)` reuses a block's stage 2 for another stage 3. `phantoms.band_crossing(t_junction=True)`:
+  the second band stops at the first (false-extension control). `scripts/test_completion.py`, `diag_completion.py`.
+- `scripts/figure_models.py`: the old (UNet output, encoder block 2) and new (dev-vit) feature spaces on the HiP-CT VOI.
 
 ## 0.2.0 — 2026-10
 

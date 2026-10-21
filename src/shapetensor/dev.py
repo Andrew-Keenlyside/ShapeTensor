@@ -64,6 +64,11 @@ class DevConfig:
     vox_mm: float = 0.02
     reference_setting: str = "calibrated"
     presence_texture: bool = True                     # fit the presence probe on synthetic fibre-free texture
+    completion: str | None = None                     # carry each set across crossings: None | "image" | "image_cont" | "shape"
+    completion_half: int = 24                         # voxels sampled on each side along the set's own direction
+    completion_cone_deg: float = 25.0
+    completion_steer: bool = True                     # carry along the direction extrapolated from the set's pure voxels
+    completion_reduce: str = "max"                    # each side's evidence: the strongest activation within reach ("max") or the mean
     iso_readout: bool = False                         # also a no-orientation output in the readout (it takes crossings for texture)
 
     def to_dict(self) -> dict:
@@ -96,14 +101,15 @@ def calibrate_dev(volume, tissue=None, cfg: DevConfig | None = None, *, features
 
 def apply_dev(cal: Calibration, volume, tissue=None, *, cfg: DevConfig | None = None, references: References | None = None,
               features=None, region=None, spacing=None, nmax: int | None = None, timings: dict | None = None, device: str = "cuda", log=None,
-              **_ignored) -> dict:
+              stage2=None, **_ignored) -> dict:
     """Stages 2-4 of the dev pipeline on ``volume (Z, Y, X)`` with a calibration. Returns the keys the released
     :func:`shapetensor.pipeline.apply` returns where they apply (vectors in (z, y, x), no masks applied):
     ``activation (N, Z, Y, X)`` the sets' layers in multiples of the null; ``dirs``, ``gap`` each set's direction and
     uniqueness; ``vec``, ``vec_gap``, ``weight`` (the summed layers x ``tau``, so ``weight / tau`` >= 1 where a set is
     present, as in the released field) and ``tensor`` the single field; ``vecs``, ``weights`` (x ``tau``) the
     multi-vector field, the ``nmax`` strongest at each voxel when given; ``n_populations``; ``nulls`` and ``report`` from
-    stage 2; ``tau``; ``confidence``."""
+    stage 2; ``tau``; ``confidence``; ``stage2`` (layers, report, nulls) to pass back as ``stage2=`` for another stage 3
+    on the same block (e.g. another completion mode) without repeating stage 2."""
     cfg = cfg or DevConfig()
     t0 = time.perf_counter(); marks = {}
     v = st._to_torch(volume, device, torch.float32)
@@ -113,11 +119,15 @@ def apply_dev(cal: Calibration, volume, tissue=None, *, cfg: DevConfig | None = 
     if region is None:
         m = cal.margin
         region = tuple(slice(m, max(m + 1, n - m)) for n in v.shape)
-    if references is None:
-        references = References(tuple(s.stop - s.start for s in region), cfg.reference_setting, device)
-    nulls = references.nulls(cal, cfg.fibre_sets); marks["nulls"] = time.perf_counter() - t0
-    L, rep = fibre_sets(cal, v, tis, F, nulls, cfg.fibre_sets, region=region, vox_mm=cfg.vox_mm, device=device, log=log)
-    rep.pop("labels", None); marks["populations"] = time.perf_counter() - t0
+    if stage2 is not None:                                                            # ``out["stage2"]`` of an earlier call on the same block
+        L, rep, nulls = stage2[0].clone(), dict(stage2[1]), stage2[2]
+    else:
+        if references is None:
+            references = References(tuple(s.stop - s.start for s in region), cfg.reference_setting, device)
+        nulls = references.nulls(cal, cfg.fibre_sets); marks["nulls"] = time.perf_counter() - t0
+        L, rep = fibre_sets(cal, v, tis, F, nulls, cfg.fibre_sets, region=region, vox_mm=cfg.vox_mm, device=device, log=log)
+        rep.pop("labels", None)
+    stage2_out = (L.clone(), dict(rep), nulls); marks["populations"] = time.perf_counter() - t0
     if L.shape[0] == 0:
         L = torch.zeros((1,) + tuple(v.shape), device=v.device)                       # no set: one empty layer (the field falls back)
     A = L / L.max(0).values.clamp_min(1.0)[None] if cfg.relative_layers else L
@@ -137,7 +147,22 @@ def apply_dev(cal: Calibration, volume, tissue=None, *, cfg: DevConfig | None = 
         else:
             Sk, dk, gk = population_tensor(v, A[k], cfg.sigma, cfg.rho, cfg.truncate, w_exc, cfg.tensor_floor, spacing, P)
         S.append(Sk); dirs.append(dk); gaps.append(gk)
-    S, dirs, gaps = torch.stack(S), torch.stack(dirs), torch.stack(gaps); del P
+    S, dirs, gaps = torch.stack(S), torch.stack(dirs), torch.stack(gaps)
+    if cfg.completion and float(L.abs().sum()) > 0:                                    # each set carried along its own axis across crossings
+        if cfg.direction != "readout":
+            raise ValueError("completion needs direction='readout'")
+        from .completion import complete
+        L, prods, crep = complete(cal, cal.dictionary.prep(F), L, dirs, mode=cfg.completion, half=cfg.completion_half,
+                                  cone_deg=cfg.completion_cone_deg, base_products=P, steer=cfg.completion_steer, reduce=cfg.completion_reduce)
+        rep["completion"] = crep
+        A = L / L.max(0).values.clamp_min(1.0)[None] if cfg.relative_layers else L
+        S, dirs, gaps = [], [], []
+        for k in range(A.shape[0]):
+            Sk, dk, gk = shape_tensor(prods[k], A[k], cfg.rho, cfg.truncate, w_exc, cfg.tensor_floor, spacing)
+            S.append(Sk); dirs.append(dk); gaps.append(gk)
+        S, dirs, gaps = torch.stack(S), torch.stack(dirs), torch.stack(gaps); del prods
+        marks["completion"] = time.perf_counter() - t0
+    del P
     vec, vec_gap, _, T = single_field(S, A, floor=cfg.merge_floor, return_tensor=True); del S
     order_w = L if cfg.relative_layers else A                                          # the multi-vector order and weights: the layers in nulls
     vecs, weights = multi_field(dirs, order_w)
@@ -151,7 +176,7 @@ def apply_dev(cal: Calibration, volume, tissue=None, *, cfg: DevConfig | None = 
     tissue_above = float(((L.max(0).values >= 1) & tis).float().sum() / tis.float().sum().clamp_min(1))
     return {"n_populations": int(L.shape[0]) if float(L.abs().sum()) > 0 else 0, "activation": L, "dirs": dirs, "gap": gaps,
             "vec": vec, "vec_gap": vec_gap, "weight": weight, "tensor": T, "vecs": vecs, "weights": weights * tau, "tau": tau,
-            "nulls": {k: (v_ if k != "response" else None) for k, v_ in nulls.items()}, "report": rep,
+            "nulls": {k: (v_ if k != "response" else None) for k, v_ in nulls.items()}, "report": rep, "stage2": stage2_out,
             "confidence": {"readout_overlap": round(float(cal.readout_overlap), 3), "tissue_above_null": round(tissue_above, 3)}}
 
 
