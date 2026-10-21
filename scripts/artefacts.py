@@ -2,23 +2,27 @@
 the validation's phantoms, the field of each method scored against the truth and against its own artefact-free field.
 
 Methods: the excised structure tensor (the baseline), the released pipeline (anatomix encoder 2, block populations,
-image structure tensor) and the dev pipeline (dev-vit + sliceTCA, fibre sets, shape tensor). The readers are calibrated
-on the validation's twelve straight bundles at the calibrated texture, either clean (``clean`` readers: the artefact is
+image structure tensor) and the dev pipeline (dev-vit, fibre sets with the presence probe, readout-tensor directions).
+The readers are calibrated
+on the validation's twelve straight bundles at the calibrated texture and the phantoms themselves (the pooled, in-domain
+calibration: dev-vit's readers do not carry over from bundles alone), either clean (``clean`` readers: the artefact is
 met only at application) or carrying the same artefact (``artefacted`` readers: a block that calibrates on itself, as
 ``run_volume`` does, learns from contaminated data). The dev pipeline's references are synthetic and clean by design.
 
-Phantoms (validation grid, 20 µm, whole block white matter): a bundle at 60°, the 90° and 60° crossings. Artefacts, in
+Phantoms (validation grid, 20 µm, whole block white matter): a bundle at 60° and the 90° crossing (and the 60°). Artefacts, in
 z slices (the rotation axis along z): streaks near-parallel along x (inside the fibre planes), near-parallel along y
 (across them), at any direction; rings about an axis half a block beyond the x = 0 face. Strength in grey levels
 against the fibre darkening (50 at the calibrated texture): 0, 25, 50, 100, 200.
 
-Scores on the core: the merged field's median error to the nearest population and its share within 15°; on the
-crossings the multi-vector pair (median, both within 15°); ``captured``: the share of voxels whose merged vector lies
+Scores on the core: the merged field's median error to the nearest population and its share within 15°; the
+multi-vector field's first vector and its best (each true population's nearest vector, the worse of the two: is the
+truth still in the field when an artefact adds a population?); on the crossings the pair (median, both within 15°);
+``captured``: the share of voxels whose merged vector lies
 within 20° of the streaks' direction and more than 20° from every population (near-parallel streaks only); ``change``:
 the median angle between the field and the same method's field without the artefact; populations found; the dev
 pipeline's stage-2 presence numbers.
 
-    python scripts/artefacts.py [OUT_DIR]            QUICK=1: the bundle and the 90° crossing, strengths 0/50/200, clean readers
+    python scripts/artefacts.py [OUT_DIR]            QUICK=1: strengths 0/50/200, clean readers; CROSSING60=1 adds the 60° crossing
 """
 from __future__ import annotations
 
@@ -45,7 +49,7 @@ QUICK = os.environ.get("QUICK") == "1"
 AMPS = (0.0, 50.0, 200.0) if QUICK else (0.0, 25.0, 50.0, 100.0, 200.0)
 READERS = ("clean",) if QUICK else tuple(os.environ.get("READERS", "clean,artefacted").split(","))
 PHANTOMS = (("bundle 60", "bundle", {"angle": 60.0}), ("crossing 90", "crossing", {"cross_deg": 90.0}))
-if not QUICK:
+if os.environ.get("CROSSING60") == "1":
     PHANTOMS += (("crossing 60", "crossing", {"cross_deg": 60.0}),)
 KINDS = {"streaks along x": ("streaks", {"angle_deg": 0.0, "spread_deg": 5.0}),
          "streaks along y": ("streaks", {"angle_deg": 90.0, "spread_deg": 5.0}),
@@ -54,7 +58,7 @@ KINDS = {"streaks along x": ("streaks", {"angle_deg": 0.0, "spread_deg": 5.0}),
 if os.environ.get("KINDS"):
     KINDS = {k: v for k, v in KINDS.items() if k in os.environ["KINDS"].split(";")}
 METHODS = {"released": {"engine": "anatomix_enc2", "engine_kwargs": {}, "smooth": 3},
-           "dev": {"engine": "devvit_slicetca", "engine_kwargs": {"ranks": (2, 2, 2), "spacing": 3}, "smooth": 1, "iso": True}}
+           "dev": {"engine": "anatomix_devvit", "engine_kwargs": {}, "smooth": 3, "iso": True, "direction": "readout"}}
 
 
 def corrupt(img, kind, amp, seed):
@@ -72,7 +76,7 @@ def run_method(method, cal, refs, v, grid):
         return {"vec": o["vec"], "vecs": o["vecs"], "n_populations": int(o["modes"].shape[0])}
     m = METHODS[method]
     cfg = DevConfig(engine=m["engine"], engine_kwargs=dict(m["engine_kwargs"]), sigma=SIGMA, rho=RHO, truncate=TRUNC, smooth=m["smooth"],
-                    fibre_sets=FibreSetConfig(), vox_mm=grid.vox)
+                    fibre_sets=FibreSetConfig(), vox_mm=grid.vox, direction=m.get("direction", "readout"))
     o = apply_dev(cal, v, None, cfg=cfg, references=refs, features=cal.features(v), region=grid.inner, device=DEV)
     rep = o["report"]
     return {"vec": o["vec"], "vecs": o["vecs"], "n_populations": o["n_populations"],
@@ -87,6 +91,11 @@ def scores(o, tr, grid, ny, info, clean_vec):
     e = angle_deg(o["vec"], t1) if t2 is None else torch.minimum(angle_deg(o["vec"], t1), angle_deg(o["vec"], t2))
     r = {"merged median": round(float(e[sel].median()), 1), "merged within 15": round(float((e[sel] <= 15).float().mean()), 3),
          "n_populations": o["n_populations"]}
+    if "vecs" in o:                                                                  # is the truth still in the multi-vector field?
+        V = o["vecs"]; T = [t1] + ([t2] if t2 is not None else [])
+        best = torch.stack([torch.stack([angle_deg(V[k], t) for k in range(V.shape[0])]).nan_to_num(90.0).min(0).values for t in T]).max(0).values
+        r["first vector median"] = round(float((angle_deg(V[0], t1) if t2 is None else torch.minimum(angle_deg(V[0], t1), angle_deg(V[0], t2)))[sel].median()), 1)
+        r["best vector median"] = round(float(best[sel].median()), 1)                     # every population matched by some vector: the worst of their best
     if t2 is not None and "vecs" in o:
         V = o["vecs"]
         if V.shape[0] >= 2:
@@ -137,7 +146,8 @@ def main():
                     if key not in cals:
                         cals.clear()                                                # one calibration on the GPU at a time
                         m = METHODS[method]; tc = time.time()
-                        vols = [torch.as_tensor(corrupt(b, kind, amp, 900 + k)[0] if key[2] else b, device=DEV).float() for k, b in enumerate(bundles)]
+                        pool = bundles + [images[n][0] for n, _, _ in PHANTOMS]                 # in-domain: the bundles and the phantoms themselves
+                        vols = [torch.as_tensor(corrupt(b, kind, amp, 900 + k)[0] if key[2] else b, device=DEV).float() for k, b in enumerate(pool)]
                         cals[key] = calibrate(vols, sigma=SIGMA, rho=RHO, truncate=TRUNC, margin=cg.margin[0], engine=m["engine"],
                                               engine_kwargs=m["engine_kwargs"], smooth=m["smooth"], seed=0, device=DEV,
                                               iso=iso_textures(SETTING, DEV) if m.get("iso") else None)

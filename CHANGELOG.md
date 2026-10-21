@@ -15,6 +15,20 @@
   records the pipeline; `apply` returns `n_populations`; the teacher and the tensor helpers keep the block's device.
 - Tests `tests/test_dev.py` (CPU); `scripts/smoke_dev.py` (one phantom, end to end) and `scripts/validate_dev.py`
   (released vs dev, one change at a time, on the fibre-set prototypes' phantoms).
+- Validation and debugging (2026-10-21, results log section 32):
+  - Stage 2 found no fibre windows with dev-vit: its readout gives fibre-free texture confident directions (the patch
+    grid puts them on the axes), so texture out-peaks fibres in the prominence test. Presence is now the windows'
+    distance from synthetic fibre-free texture (`separate.TextureModel`, `FibreSetConfig.presence="distance"`); the
+    linear fibres-vs-texture probe (`separate.PresenceProbe`, `"probe"`) and a readout with a no-orientation output
+    (`iso_readout`) are kept as options (both miss dense crossings). `pipeline.calibrate(..., iso=...)` fits them on
+    `fibre_sets.iso_textures`.
+  - Directions from the features' gradients follow dev-vit's patch grid (p90 ~89° with the true populations given);
+    the default is now `direction="readout"`: the readout's distributions as dyads (`OrientationReadout.dyad_products`,
+    `tensors.readout_products`), within a degree of the image structure tensor when the readers calibrate in-domain.
+  - dev-vit's readers must calibrate in-domain: fitted on straight bundles alone their readout (fit 0.97) misreads a
+    bend by 14–46°; `validate_dev.py` gains `CALIBRATION=self|pool`.
+- `shapetensor.artefacts`: streaks and rings in z slices (the rotation axis); `scripts/artefacts.py` (phantoms, against
+  the truth) and `scripts/artefacts_real.py` (a real slab, against its own artefact-free field).
 
 ## 0.2.0 — 2026-10
 

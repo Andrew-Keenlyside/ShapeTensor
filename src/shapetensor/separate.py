@@ -299,6 +299,39 @@ class PresenceProbe:
         return out
 
 
+class TextureModel:
+    """How far a voxel's features lie from fibre-free texture: a Gaussian (shrunk covariance) fitted to the readers'
+    averaged features of synthetic fibre-free texture, the Mahalanobis distance per voxel (``predict``). It needs no
+    fibre examples, so a voxel unlike any calibration site -- two populations crossing -- still counts as *not
+    texture* (a probe fitted on single-direction fibres against texture can take it for texture)."""
+
+    def __init__(self, smooth: int = 3, shrink: float = 1e-3, seed: int = 0):
+        self.prep = _Prep(smooth)
+        self.shrink, self.seed = float(shrink), int(seed)
+        self.mean = self.icov = None
+
+    def fit(self, iso, n_sample: int = 400_000, prepped: bool = False):
+        pp = _IDENTITY if prepped else self.prep
+        X, _ = _draw([(F, None, torch.ones(F.shape[1:], device=F.device), pp) for F in iso], max(1, n_sample // max(1, len(iso))), self.seed)
+        X = X.float(); self.mean = X.mean(0)
+        C = torch.cov(X.T); C = C + self.shrink * torch.trace(C) / C.shape[0] * torch.eye(C.shape[0], device=C.device)
+        self.icov = torch.linalg.inv(C)
+        d = X - self.mean
+        self.fit_report = {"texture_distance_median": round(float(((d @ self.icov) * d).sum(1).clamp_min(0).sqrt().median()), 3)}
+        return self
+
+    def predict(self, F: torch.Tensor, prepped: bool = False, z_chunk: int | None = None) -> torch.Tensor:
+        f = F if prepped else self.prep(F); C = f.shape[0]
+        out = torch.empty(tuple(f.shape[1:]), device=f.device)
+        z_chunk = z_chunk or _slab(f.shape[1:], 8_000_000)
+        with torch.no_grad():
+            for z in range(0, f.shape[1], z_chunk):
+                fz = f[:, z:z + z_chunk].float()
+                d = fz.reshape(C, -1).T - self.mean
+                out[z:z + fz.shape[1]] = ((d @ self.icov) * d).sum(1).clamp_min(0).sqrt().reshape(fz.shape[1:])
+        return out
+
+
 class SignatureDictionary:
     """The mean standardised feature pattern of every orientation (kernel-smoothed over a hemisphere grid), and a
     background pattern from voxels with no orientation."""

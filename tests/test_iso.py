@@ -52,3 +52,20 @@ def test_presence_probe_keeps_mixtures_as_fibres():
     f1, _ = _features(seed=30); f2, _ = _features(seed=31); ftex, _ = _features(oriented=False, seed=32)
     p_mix = pr.predict(0.5 * (f1 + f2), prepped=True); p_tex = pr.predict(ftex, prepped=True)
     assert float(p_mix.mean()) > 0.8 and float(p_tex.mean()) < 0.3, (float(p_mix.mean()), float(p_tex.mean()))
+
+
+def test_texture_model_puts_fibres_and_mixtures_far_from_texture():
+    """Fibre features carry what texture lacks (here two channels at 3, as dev-vit's features separate fibres from
+    texture); a mix of two fibre patterns keeps it, so it stays far from texture though unlike either fibre."""
+    from shapetensor.separate import TextureModel
+    g = torch.Generator().manual_seed(60)
+
+    def fibres(seed):
+        f, d = _features(seed=seed); f = f.clone(); f[6:] += 3.0; return f
+
+    iso = [torch.randn(8, 8, 8, 8, generator=g) for _ in range(2)]
+    tm = TextureModel(smooth=1).fit(iso, n_sample=4000, prepped=True)
+    d_tex = tm.predict(torch.randn(8, 8, 8, 8, generator=g), prepped=True)
+    f1, f2 = fibres(61), fibres(62)
+    d_fib, d_mix = tm.predict(f1, prepped=True), tm.predict(0.5 * (f1 + f2), prepped=True)
+    assert float(d_fib.median()) > float(d_tex.quantile(0.99)) and float(d_mix.median()) > float(d_tex.quantile(0.99))

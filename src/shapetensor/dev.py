@@ -4,13 +4,18 @@ Stages (the released pipeline in ``shapetensor.pipeline`` is unchanged and remai
 
 1. **Features** -- ``devvit_slicetca``: anatomix-dev-vit at full resolution, patch-grid shift-averaged
    (``shapetensor.features.devvit``), then sliceTCA smoothing (``shapetensor.smoothing``), which replaces the 3³ box.
+   ``engine="anatomix_devvit"`` with ``smooth=3`` (the box) validates within a few degrees of it at a fifth of the
+   calibration time.
 2. **Populations** -- fibre sets (``shapetensor.fibre_sets``): the released stage 2 per window, joined by continuity
    along the fibres, split where two groups cross, pruned below one window's length, re-unmixed; thresholds from
    synthetic references read through the block's own readers. The readers (signature dictionary, orientation readout)
-   are calibrated on the block as in the released pipeline (self-supervised by the excised structure tensor), plus a
-   linear presence probe, fibres against synthetic fibre-free texture (``presence_texture``): dev-vit's readout is
-   confident enough to give texture a direction, so a window holds fibres when its mean probability of fibres exceeds
-   that of fibre-free texture windows (``FibreSetConfig.presence``), not when its orientation density is peaked.
+   are calibrated as in the released pipeline (self-supervised by the excised structure tensor), plus a model of
+   synthetic fibre-free texture (``presence_texture``): dev-vit's readout is confident enough to give texture a
+   direction (and its patch grid puts it on the axes), so a window holds fibres when its features lie further from
+   texture than any fibre-free texture window's (``FibreSetConfig.presence="distance"``, a Gaussian texture model; a
+   linear fibres-vs-texture probe, ``"probe"``, misses dense crossings), not when its orientation density is peaked.
+   dev-vit's readers must be calibrated in-domain (the block, or the volume it belongs to): fitted on straight
+   bundles alone they do not carry over to other geometry and tissue.
 3. **Direction per population** -- read from the shape space (``direction="readout"``): the orientation readout's
    per-voxel distributions as dyads ``sum_u P_u u u^T`` (``OrientationReadout.dyad_products``), weighted by the
    population's layer (each layer relative to the largest at the voxel, as the fibre-set prototypes were scored) and
@@ -20,8 +25,10 @@ Stages (the released pipeline in ``shapetensor.pipeline`` is unchanged and remai
 4. **Merging** -- unchanged (``shapetensor.merge``): the single field from the activation-weighted unit-trace tensors,
    and every population's vector ordered by activation.
 
-Status: assembled from components tested separately (results log; the dev pipeline document); not yet validated end to
-end. ``scripts/validate_dev.py`` runs the phantom suite and the real cortex block against the released pipeline.
+Status: validated on the phantom suite against the released pipeline and the windowed fibre sets on encoder 2
+(results log section 32, ``scripts/validate_dev.py`` with ``CALIBRATION=pool``) and for resilience to streak and ring
+artefacts (``scripts/artefacts.py``, ``scripts/artefacts_real.py``). Crossings are found but not yet resolved into two
+vectors (as with every method so far).
 """
 from __future__ import annotations
 

@@ -22,7 +22,7 @@ import torch.nn.functional as Fn
 from . import st
 from .features import make_engine
 from .merge import multi_field, single_field
-from .separate import (OrientationReadout, PresenceProbe, SignatureDictionary, activation_null, direction_gains, gain_at, hemisphere, modes_from_density,
+from .separate import (OrientationReadout, PresenceProbe, SignatureDictionary, TextureModel, activation_null, direction_gains, gain_at, hemisphere, modes_from_density,
                        population_masks, unmix)
 from .tensors import population_tensor
 
@@ -87,6 +87,7 @@ class Calibration:
     orientation_bins_occupied: int = 0
     readout_overlap: float = 0.0
     presence: object = None                    # a PresenceProbe when calibrated with fibre-free texture (``iso``)
+    texture_model: object = None               # a TextureModel (distance from fibre-free texture), likewise
     _eng: object = field(default=None, repr=False)
 
     def features(self, v: torch.Tensor) -> torch.Tensor:
@@ -105,7 +106,8 @@ def calibrate(volumes, tissue=None, *, engine: str = "anatomix_enc2", engine_kwa
     give the background signature; ``margin`` voxels at the faces are not sampled. ``seed``: the calibration's random
     draws (the sites' quantiles; the readers seed their own sampling and training), so a block calibrates the same way
     every time; None follows the global RNG. ``iso``: blocks of fibre-free texture (volumes, read through the same
-    engine): a :class:`~shapetensor.separate.PresenceProbe` is fitted (``cal.presence``, fibres against texture), and
+    engine): a :class:`~shapetensor.separate.PresenceProbe` is fitted (``cal.presence``, fibres against texture) and a
+    :class:`~shapetensor.separate.TextureModel` (``cal.texture_model``, the distance from texture), and
     with ``iso_readout`` the readout also gets a *no orientation* output (:class:`~shapetensor.separate.OrientationReadout`).
     None: the released readers."""
     vols = volumes if isinstance(volumes, (list, tuple)) else [volumes]
@@ -128,10 +130,16 @@ def calibrate(volumes, tissue=None, *, engine: str = "anatomix_enc2", engine_kwa
         bins = max(bins, nb)
         blocks.append((Fp, d, w)); bg.append((Fp, wb))
     cal.dictionary.fit(blocks, n_sample, background=bg, prepped=True)
-    iso_f = None if not iso else [cal.dictionary.prep(cal.features(st._to_torch(t, device, torch.float32))) for t in iso]
+    iso_f = None                                                                        # fibre-free texture, its faces (the features' padding) left out
+    if iso:
+        iso_f = []
+        for t in iso:
+            ft = cal.dictionary.prep(cal.features(st._to_torch(t, device, torch.float32)))
+            iso_f.append(ft[(slice(None),) + tuple(slice(margin, max(margin + 1, n - margin)) for n in ft.shape[1:])].contiguous()); del ft
     cal.readout.fit(blocks, n_sample, prepped=True, iso=iso_f if iso_readout else None)
     if iso_f:
         cal.presence = PresenceProbe(smooth).fit(blocks, iso_f, prepped=True)
+        cal.texture_model = TextureModel(smooth).fit(iso_f, prepped=True)
     del iso_f
     cal.density_gain, cal.activation_gain = direction_gains(cal.dictionary, cal.readout, blocks, prepped=True)
     cal.tau = activation_null(cal.dictionary, blocks, smooth=smooth, activation_gain=cal.activation_gain, prepped=True)

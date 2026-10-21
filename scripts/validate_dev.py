@@ -58,8 +58,11 @@ CALIBRATION = os.environ.get("CALIBRATION", "bundles")                          
 if os.environ.get("METHODS"):                                                    # e.g. METHODS="dev (intensity);dev"
     METHODS = {k: v for k, v in METHODS.items() if k in os.environ["METHODS"].split(";")}
 SETTINGS_RUN = tuple(os.environ.get("SETTINGS", "calibrated,coherent").split(","))
+PRESENCE = os.environ.get("PRESENCE", "auto")                                    # the fibre sets' presence test (FibreSetConfig.presence)
 CASES = (("bend", {}), ("straight", {"straight": True}), ("band crossing 90", {"cross_deg": 90.0}), ("band crossing 60", {"cross_deg": 60.0}),
          ("crossing 90", {"cross_deg": 90.0}), ("crossing 60", {"cross_deg": 60.0}))
+if os.environ.get("CASES"):                                                      # e.g. CASES="bend;crossing 90"
+    CASES = tuple(c for c in CASES if c[0] in os.environ["CASES"].split(";"))
 
 
 def dyad_r2(cal) -> float:
@@ -77,7 +80,7 @@ def run(method, m, cal, refs, v, tissue, F, grid):
         o["activation"] = o["activation"] / max(cal.tau, 1e-12)
         return o
     cfg = DevConfig(engine=m["engine"], engine_kwargs=dict(m["engine_kwargs"]), sigma=SIGMA, rho=RHO, truncate=TRUNC, smooth=m["smooth"],
-                    direction=m["direction"], fibre_sets=FibreSetConfig(), vox_mm=VOX)
+                    direction=m["direction"], fibre_sets=FibreSetConfig(presence=PRESENCE), vox_mm=VOX)
     return apply_dev(cal, v, tissue, cfg=cfg, references=refs, features=F, region=grid.inner, device=DEV)
 
 
@@ -134,7 +137,7 @@ def main():
                             row["presence_probe"] = cal.presence.fit_report
                         if "report" in o:
                             row["stage2"] = {k: o["report"].get(k) for k in ("windows", "windows_with_fibres", "windows_with_2plus", "sets_after_reunmix", "presence",
-                                                                               "probe_null", "window_probe_max", "window_probe_median", "share_null")}
+                                                                               "probe_null", "window_probe_max", "window_probe_median", "distance_null", "window_distance_max", "window_distance_median", "share_null")}
                         results["runs"].append(row); log(f"  {case} seed {seed} [self-calibrated, fit {cal.readout_overlap:.2f}]: {json.dumps(sc, default=str)[:300]}"
                                                          + (f" | stage 2 {json.dumps(row['stage2'])}" if "stage2" in row else ""))
                         json.dump(results, open(OUT / "validate_dev.json", "w"), indent=1, default=str)
@@ -164,7 +167,8 @@ def main():
                     if "report" in o:                                                   # fibre sets: presence and second-population diagnostics
                         row["stage2"] = {k: o["report"].get(k) for k in ("windows", "windows_with_fibres", "windows_with_2plus", "sets_after_reunmix",
                                                                            "presence", "prominence_null", "window_prominence_max", "window_prominence_median",
-                                                                           "probe_null", "window_probe_max", "window_probe_median", "mass_null", "window_mass_max", "window_mass_median", "share_null")}
+                                                                           "probe_null", "window_probe_max", "window_probe_median", "distance_null", "window_distance_max", "window_distance_median",
+                                                                           "share_null")}
                     results["runs"].append(row); log(f"  {case} seed {seed}: {json.dumps(sc, default=str)[:300]}"
                                                      + (f" | stage 2 {json.dumps(row['stage2'])}" if "stage2" in row else ""))
                     json.dump(results, open(OUT / "validate_dev.json", "w"), indent=1, default=str)
