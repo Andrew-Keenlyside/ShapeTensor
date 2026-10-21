@@ -55,6 +55,9 @@ def main(argv=None):
     r.add_argument("--min-bins", type=int, default=12, help="orientation bins (of 24) a chunk's teacher must cover to use its own calibration")
     r.add_argument("--blend", type=int, default=32, help="overlap band (voxels) over which neighbouring chunks' tensors are ramp-blended; 0 = none")
     r.add_argument("--spacing", type=float, nargs=3, default=None, help="voxel size per axis (dz dy dx) for anisotropic data")
+    r.add_argument("--pipeline", choices=["released", "dev"], default="released",
+                   help="released: anatomix encoder 2, block populations, intensity tensors; dev: dev-vit + sliceTCA, fibre sets, shape tensors")
+    r.add_argument("--dev-config", default=None, help="a JSON DevConfig (shapetensor.dev) for --pipeline dev; default: the built-in settings")
 
     b = sub.add_parser("block", help="the pipeline on one block (.npy or a zarr array), exported with its layers")
     b.add_argument("src"); b.add_argument("dst"); b.add_argument("--level", default=None); _scales(b)
@@ -87,7 +90,15 @@ def main(argv=None):
     t.add_argument("path"); t.add_argument("--level", type=int, default=0); t.add_argument("--threshold", type=float, default=None); t.add_argument("-o", "--out", default="stats.json")
 
     a = ap.parse_args(argv)
-    if a.cmd == "run":
+    if a.cmd == "run" and a.pipeline == "dev":
+        import json
+        from .dev import DevConfig, run_volume_dev
+        cfg = DevConfig.from_dict(json.load(open(a.dev_config))) if a.dev_config else DevConfig()
+        cfg.sigma, cfg.rho = a.sigma, a.rho
+        run_volume_dev(a.src, a.dst, cfg, level=a.level, chunk=tuple(a.chunk), nmax=a.nmax, tissue_threshold=a.tissue_threshold,
+                       calibration_size=a.calibration_size, calibration_origin=a.calibration_origin, calibrate_chunks=not a.volume_calibration,
+                       min_bins=a.min_bins, blend=a.blend, multi=not a.no_multi, spacing=a.spacing, rank=a.rank, world=a.world, device=a.device)
+    elif a.cmd == "run":
         from .pipeline import run_volume
         run_volume(a.src, a.dst, level=a.level, chunk=tuple(a.chunk), nmax=a.nmax, tissue_threshold=a.tissue_threshold, calibration_size=a.calibration_size,
                    calibration_origin=a.calibration_origin, calibrate_chunks=not a.volume_calibration, min_bins=a.min_bins, blend=a.blend, multi=not a.no_multi, spacing=a.spacing,

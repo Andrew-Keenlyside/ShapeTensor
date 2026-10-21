@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased — the dev pipeline (not in the docs until validated)
+
+- `shapetensor.dev`: `DevConfig`, `calibrate_dev`, `apply_dev`, `population_field_dev`, `run_volume_dev`; CLI
+  `run --pipeline dev [--dev-config cfg.json]`. Stages: anatomix-dev-vit + sliceTCA features, fibre-set populations,
+  directions from the shape features, the released merge.
+- Engines `anatomix_devvit` (`features/devvit.py`: 128³ tiles with 32 voxels of context, patch-grid shift average) and
+  `devvit_slicetca`; `shapetensor.smoothing` (sliceTCA, promoted from `experimental.slice_tca`, which now re-exports it).
+- `shapetensor.fibre_sets`: the windowed fibre-set stage 2 promoted from `experimental.fibre_sets` (functions unchanged),
+  with `FibreSetConfig`, label-free thresholds from synthetic references (`References`) and `fibre_sets()`.
+- `tensors.feature_products` / `tensors.shape_tensor`: a population's tensor from the features' gradients.
+- Released pipeline: calibration is seeded (`calibrate(seed=0)`; the gap-quantile draw used the global RNG, so a block
+  could calibrate differently between runs); `run_volume` takes `calibrate_fn` / `apply_fn` / `engine_margin` hooks and
+  records the pipeline; `apply` returns `n_populations`; the teacher and the tensor helpers keep the block's device.
+- Tests `tests/test_dev.py` (CPU); `scripts/smoke_dev.py` (one phantom, end to end) and `scripts/validate_dev.py`
+  (released vs dev, one change at a time, on the fibre-set prototypes' phantoms).
+
 ## 0.2.0 — 2026-10
 
 The package as a four-stage pipeline — shape features, populations separated in the shape space, one tensor per
