@@ -7,11 +7,16 @@ Stages (the released pipeline in ``shapetensor.pipeline`` is unchanged and remai
 2. **Populations** -- fibre sets (``shapetensor.fibre_sets``): the released stage 2 per window, joined by continuity
    along the fibres, split where two groups cross, pruned below one window's length, re-unmixed; thresholds from
    synthetic references read through the block's own readers. The readers (signature dictionary, orientation readout)
-   are calibrated on the block as in the released pipeline (self-supervised by the excised structure tensor).
-3. **Direction per population** -- from the shape features (``shapetensor.tensors.shape_tensor``): the channel-summed
-   feature gradient products weighted by the population's layer (each layer relative to the largest at the voxel, as
-   the fibre-set prototypes were scored) and integrated over ``rho``. ``direction="intensity"`` uses the released
-   stage 3 (the image's excised structure tensor) instead, for comparison.
+   are calibrated on the block as in the released pipeline (self-supervised by the excised structure tensor), plus a
+   linear presence probe, fibres against synthetic fibre-free texture (``presence_texture``): dev-vit's readout is
+   confident enough to give texture a direction, so a window holds fibres when its mean probability of fibres exceeds
+   that of fibre-free texture windows (``FibreSetConfig.presence``), not when its orientation density is peaked.
+3. **Direction per population** -- read from the shape space (``direction="readout"``): the orientation readout's
+   per-voxel distributions as dyads ``sum_u P_u u u^T`` (``OrientationReadout.dyad_products``), weighted by the
+   population's layer (each layer relative to the largest at the voxel, as the fibre-set prototypes were scored) and
+   integrated over ``rho``; the population's direction is their principal axis. ``"shape"`` uses the features'
+   gradients instead (``shapetensor.tensors.feature_products``; with dev-vit they follow the patch grid, see the
+   results log) and ``"intensity"`` the released stage 3 (the image's excised structure tensor).
 4. **Merging** -- unchanged (``shapetensor.merge``): the single field from the activation-weighted unit-trace tensors,
    and every population's vector ordered by activation.
 
@@ -27,7 +32,7 @@ from dataclasses import asdict, dataclass, field
 import torch
 
 from . import st
-from .fibre_sets import FibreSetConfig, References, fibre_sets
+from .fibre_sets import FibreSetConfig, References, fibre_sets, iso_textures
 from .merge import multi_field, single_field
 from .pipeline import Calibration, calibrate, run_volume
 from .tensors import feature_products, population_tensor, shape_tensor
@@ -44,13 +49,15 @@ class DevConfig:
     smooth: int = 1                                   # the readers' box average: sliceTCA already smooths
     seed: int = 0
     fibre_sets: FibreSetConfig = field(default_factory=FibreSetConfig)
-    direction: str = "shape"                          # "shape" (feature gradients) | "intensity" (the released stage 3)
+    direction: str = "readout"                        # "readout" (the readout's distributions) | "shape" (feature gradients) | "intensity" (released stage 3)
     relative_layers: bool = True
     excise: bool = True
     tensor_floor: float = 0.01                        # in nulls: the layers are in multiples of the null
     merge_floor: float = 0.1
     vox_mm: float = 0.02
     reference_setting: str = "calibrated"
+    presence_texture: bool = True                     # fit the presence probe on synthetic fibre-free texture
+    iso_readout: bool = False                         # also a no-orientation output in the readout (it takes crossings for texture)
 
     def to_dict(self) -> dict:
         d = asdict(self); d["fibre_sets"] = self.fibre_sets.to_dict(); return d
@@ -60,19 +67,24 @@ class DevConfig:
         d = dict(d); fs = FibreSetConfig(**d.pop("fibre_sets", {}))
         return cls(fibre_sets=fs, **d)
 
-    def calibration_kwargs(self) -> dict:
+    def calibration_kwargs(self, device: str = "cuda", iso: bool = True) -> dict:
+        """The keyword arguments of :func:`shapetensor.pipeline.calibrate` (with the fibre-free texture when
+        ``presence_texture`` and ``iso``)."""
         kw = dict(self.engine_kwargs)
         for k in ("shifts", "ranks"):
             if k in kw:
                 kw[k] = [tuple(x) for x in kw[k]] if k == "shifts" else tuple(kw[k])
-        return {"engine": self.engine, "engine_kwargs": kw, "sigma": self.sigma, "rho": self.rho, "truncate": self.truncate,
-                "smooth": self.smooth, "seed": self.seed}
+        out = {"engine": self.engine, "engine_kwargs": kw, "sigma": self.sigma, "rho": self.rho, "truncate": self.truncate,
+               "smooth": self.smooth, "seed": self.seed}
+        if iso and (self.presence_texture or self.iso_readout):
+            out["iso"] = iso_textures(self.reference_setting, device); out["iso_readout"] = self.iso_readout
+        return out
 
 
 def calibrate_dev(volume, tissue=None, cfg: DevConfig | None = None, *, features=None, spacing=None, device: str = "cuda") -> Calibration:
     """The readers on a block with the dev features (the released :func:`shapetensor.pipeline.calibrate`)."""
     cfg = cfg or DevConfig()
-    return calibrate(volume, tissue, features=features, spacing=spacing, device=device, **cfg.calibration_kwargs())
+    return calibrate(volume, tissue, features=features, spacing=spacing, device=device, **cfg.calibration_kwargs(device))
 
 
 def apply_dev(cal: Calibration, volume, tissue=None, *, cfg: DevConfig | None = None, references: References | None = None,
@@ -105,13 +117,15 @@ def apply_dev(cal: Calibration, volume, tissue=None, *, cfg: DevConfig | None = 
     w_exc = st.excision_weights(v, mask=tis if tissue is not None else None, spacing=st.spacing_ratio(spacing)) if cfg.excise else None
     if cfg.direction == "shape":
         P = feature_products(F, cfg.sigma, cfg.truncate, spacing=spacing)
+    elif cfg.direction == "readout":
+        P = cal.readout.dyad_products(cal.dictionary.prep(F), prepped=True)
     elif cfg.direction == "intensity":
         P = st.gradient_products(v, cfg.sigma, cfg.truncate, spacing=spacing, device=v.device)
     else:
-        raise ValueError(f"direction must be 'shape' or 'intensity', got {cfg.direction!r}")
+        raise ValueError(f"direction must be 'readout', 'shape' or 'intensity', got {cfg.direction!r}")
     S, dirs, gaps = [], [], []
     for k in range(A.shape[0]):
-        if cfg.direction == "shape":
+        if cfg.direction in ("shape", "readout"):
             Sk, dk, gk = shape_tensor(P, A[k], cfg.rho, cfg.truncate, w_exc, cfg.tensor_floor, spacing)
         else:
             Sk, dk, gk = population_tensor(v, A[k], cfg.sigma, cfg.rho, cfg.truncate, w_exc, cfg.tensor_floor, spacing, P)
@@ -158,9 +172,9 @@ def run_volume_dev(src: str, dst: str, cfg: DevConfig | None = None, *, level: s
     cfg = cfg or DevConfig()
     reach = int(cfg.truncate * (cfg.sigma + cfg.rho) + 0.5)
     from .features import make_engine
-    eng_margin = int(getattr(make_engine(cfg.engine, device=device, **cfg.calibration_kwargs()["engine_kwargs"]), "margin", 24))
+    eng_margin = int(getattr(make_engine(cfg.engine, device=device, **cfg.calibration_kwargs(iso=False)["engine_kwargs"]), "margin", 24))
     refs = References(tuple(int(c) + 2 * blend for c in chunk), cfg.reference_setting, device)
-    cal_kw = cfg.calibration_kwargs()
+    cal_kw = cfg.calibration_kwargs(device)                                              # the no-orientation texture made once
 
     def cal_fn(vol, tissue=None, *, features=None, spacing=None, device=device, **_):
         return calibrate(vol, tissue, features=features, spacing=spacing, device=device, **cal_kw)

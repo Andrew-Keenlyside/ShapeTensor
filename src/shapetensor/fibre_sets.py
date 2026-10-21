@@ -80,6 +80,23 @@ def prominence(D: torch.Tensor) -> torch.Tensor:
     return D.max(0).values / D.mean(0).clamp_min(1e-12)
 
 
+def window_presence(cal, Fp: torch.Tensor, region, window: int, stride: int) -> torch.Tensor:
+    """Each window's mean probability of fibres ``(nz, ny, nx)`` from the calibration's presence probe
+    (:class:`~shapetensor.separate.PresenceProbe`). The windows as :func:`window_densities`."""
+    m = cal.presence.predict(Fp, prepped=True)[tuple(region)]
+    w = tuple(min(window, n) for n in m.shape)
+    return Fn.avg_pool3d(m[None, None], w, stride=stride)[0, 0]
+
+
+def window_mass(cal, Fp: torch.Tensor, region, window: int, stride: int) -> torch.Tensor:
+    """Each window's oriented share ``(nz, ny, nx)``: the mean over its voxels of the readout's probability of holding
+    an orientation (1 - its *no orientation* output; all ones for a readout without one). The windows as
+    :func:`window_densities`."""
+    m = 1.0 - cal.readout.iso_mass(Fp, prepped=True)[tuple(region)]
+    w = tuple(min(window, n) for n in m.shape)
+    return Fn.avg_pool3d(m[None, None], w, stride=stride)[0, 0]
+
+
 def readout_response(cal, volumes, dirs, region, window: int = 32, stride: int = 8, bin_deg: float = 2.0):
     """The readout's response to one population: the window-averaged orientation density (each window's density
     divided by its sum, after the direction gains) against the angle to the population, over ``volumes`` of one
@@ -451,10 +468,14 @@ def _blend(new, wins, v):
 def windowed_sets(cal, v: torch.Tensor, tissue: torch.Tensor, F: torch.Tensor, *, prominence_null: float, share_null: float,
                   window: int = 32, stride: int = 8, region=None, nmax: int = 3, min_sep_deg: float = 25.0, r_min_mm: float = 0.3,
                   noise_deg: float = 10.0, vox_mm: float = 0.02, device: str = "cuda", log=None, prefer_alone: bool = False,
-                  reach_windows: int = 2, min_extent: float | None = None, split: bool = False, response=None) -> tuple[torch.Tensor, dict]:
+                  reach_windows: int = 2, min_extent: float | None = None, split: bool = False, response=None,
+                  presence: str = "prominence", mass_null: float | None = None, probe_null: float | None = None) -> tuple[torch.Tensor, dict]:
     """:func:`windowed_stage2` for the sets (windows with fibres, the pipeline's stage 2 per window, good continuation,
     concatenation, end-to-end joins), then the activations re-estimated with the sets known (:func:`_reunmix`) and
-    blended into one layer per set."""
+    blended into one layer per set. ``presence``: a window holds fibres when its ``"prominence"`` exceeds
+    ``prominence_null``; when its mean probability of fibres (:func:`window_presence`, the calibration's presence probe)
+    exceeds ``probe_null`` (``"probe"``); or, with a readout that has a *no orientation* output, when its oriented share
+    (:func:`window_mass`) exceeds ``mass_null`` (``"mass"``)."""
     say = log or (lambda *_: None)
     Z, Y, X = v.shape
     region = tuple(region or (slice(0, Z), slice(0, Y), slice(0, X)))
@@ -465,6 +486,14 @@ def windowed_sets(cal, v: torch.Tensor, tissue: torch.Tensor, F: torch.Tensor, *
         cal_w = copy.copy(cal); cal_w.readout = DeconvolvedReadout(cal.readout, response, cal.density_gain)
     D, starts, w = window_densities(cal, cal.dictionary.prep(F), region, window, stride)
     prom = prominence(D); del D
+    if presence == "probe":
+        stat, null = window_presence(cal, cal.dictionary.prep(F), region, window, stride), float(probe_null)
+    elif presence == "mass":
+        stat, null = window_mass(cal, cal.dictionary.prep(F), region, window, stride), float(mass_null)
+    elif presence == "prominence":
+        stat, null = prom, float(prominence_null)
+    else:
+        raise ValueError(f"presence must be 'prominence', 'probe' or 'mass', got {presence!r}")
     pops, wins = [], {}
     for iz in range(prom.shape[0]):
         for iy in range(prom.shape[1]):
@@ -472,7 +501,7 @@ def windowed_sets(cal, v: torch.Tensor, tissue: torch.Tensor, F: torch.Tensor, *
                 key = (iz, iy, ix)
                 core = tuple(slice(s[k], s[k] + w[a]) for a, (s, k) in enumerate(zip(starts, key)))
                 wins[key] = {"core": core, "pops": [], "centre": [(c.start + c.stop) / 2 for c in core]}
-                if float(prom[key]) < prominence_null or float(tissue[core].float().mean()) < 0.01:
+                if float(stat[key]) < null or float(tissue[core].float().mean()) < 0.01:
                     continue
                 r = _window_stage2(cal_w, v, tissue, F, core, reach, nmax, min_sep_deg, device)
                 if r is None:
@@ -488,8 +517,11 @@ def windowed_sets(cal, v: torch.Tensor, tissue: torch.Tensor, F: torch.Tensor, *
         labels, rep["crossing_splits"] = split_crossings(pops, wins, labels, stride=float(stride))
     if min_extent is not None:                                                             # e.g. ``window``: one window length
         labels, rp = prune_short(pops, wins, labels, min_extent); rep.update(rp)
-    rep.update({"prominence_null": round(float(prominence_null), 3), "window_prominence_max": round(float(prom.max()), 3),
+    rep.update({"presence": presence, "prominence_null": round(float(prominence_null), 3), "window_prominence_max": round(float(prom.max()), 3),
                 "window_prominence_median": round(float(prom.median()), 3), "share_null": round(float(share_null), 4)})   # presence diagnostics
+    if presence in ("mass", "probe"):
+        rep.update({f"{presence}_null": round(null, 4), f"window_{presence}_max": round(float(stat.max()), 4),
+                    f"window_{presence}_median": round(float(stat.median()), 4)})
     new = _reunmix(cal, cal.dictionary.prep(F), pops, wins, labels, min_sep_deg=min_sep_deg, prefer_alone=prefer_alone,
                    reach_windows=reach_windows)
     L = _blend(new, wins, v)
@@ -516,9 +548,25 @@ class FibreSetConfig:
     deconvolve: bool = True
     reach_windows: int = 2
     share_every: int = 2
+    presence: str = "auto"                     # "auto": "probe" with a presence probe, "mass" with a no-orientation readout, else "prominence"
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def iso_textures(setting: str = "calibrated", device: str = "cuda", seed: int = 7, shape=(192, 96, 192)) -> list:
+    """Fibre-free texture for a readout's *no orientation* output (``calibrate(..., iso=...)``): the phantoms' texture
+    and noise at ``setting``, at grey- and white-matter level, with seeds apart from :class:`References`' presence
+    texture (which must stay unseen by the readers it tests)."""
+    from .phantoms import Grid, TextureParams, finish
+    from .validate import SETTINGS
+    p = SETTINGS[setting]
+    t_ = TextureParams(dispersion_deg=p["dispersion_deg"], pitch_deg=p["pitch_deg"]); t_ = TextureParams(**{**t_.__dict__, "amp": t_.amp * p["texture"]})
+    g = Grid(core=tuple(int(n) - 64 for n in shape), margin=(32, 32, 32))
+    Zg, Xg = g.shape[0], g.shape[2]
+    return [torch.as_tensor(finish(g, t_, np.full((Zg, Xg), t_.levels[lvl], np.float32), np.zeros((Zg, Xg), np.float32),
+                                   torch.zeros(g.shape, device=device), np.random.default_rng([seed + 1 + k, 4243])), device=device).float()
+            for k, lvl in enumerate(("gm", "wm"))]
 
 
 class References:
@@ -550,19 +598,28 @@ class References:
         self.setting, self.device = setting, device
         self._feat = None
 
+    def iso_volumes(self, shape=(192, 96, 192)):
+        """:func:`iso_textures` at this reference's texture setting (seeds apart from the presence reference)."""
+        return iso_textures(self.setting, self.device, self.seed, shape)
+
     def _features(self, cal):
         if self._feat is None:
             self._feat = {"texture": cal.features(self.texture), "bundles": [cal.features(b) for b in self.bundles]}
         return self._feat
 
     def nulls(self, cal, cfg: FibreSetConfig) -> dict:
-        """``{"prominence", "share", "response"}`` for this calibration's readers."""
+        """``{"prominence", "mass", "share", "response"}`` for this calibration's readers (``mass``: the largest oriented
+        share of a texture window, for a readout with a *no orientation* output; else None)."""
         f = self._features(cal)
-        D, _, _ = window_densities(cal, cal.dictionary.prep(f["texture"]), self.texture_region, cfg.window, cfg.stride)
+        Fp = cal.dictionary.prep(f["texture"])
+        D, _, _ = window_densities(cal, Fp, self.texture_region, cfg.window, cfg.stride)
         prom = float(prominence(D).max()); del D
+        mass = float(window_mass(cal, Fp, self.texture_region, cfg.window, cfg.stride).max()) if getattr(cal.readout, "iso", False) else None
+        probe = float(window_presence(cal, Fp, self.texture_region, cfg.window, cfg.stride).max()) if getattr(cal, "presence", None) is not None else None
+        del Fp
         share = _second_share(cal, self.bundles, f["bundles"], self.bundle_region, cfg)
         resp = _response(cal, f["bundles"], self.dirs, self.bundle_region, cfg) if cfg.deconvolve else None
-        return {"prominence": prom, "share": share, "response": resp}
+        return {"prominence": prom, "mass": mass, "probe": probe, "share": share, "response": resp}
 
 
 def _second_share(cal, vols, feats, region, cfg) -> float:
@@ -602,7 +659,10 @@ def fibre_sets(cal, v: torch.Tensor, tissue: torch.Tensor, F: torch.Tensor, null
     """Stage 2 as fibre sets on a block: the activation layers ``(N, Z, Y, X)`` in multiples of the null, largest set
     first, and a report. ``nulls``: :meth:`References.nulls` for this calibration."""
     cfg = cfg or FibreSetConfig()
+    presence = cfg.presence if cfg.presence != "auto" else ("probe" if getattr(cal, "presence", None) is not None
+                                                             else "mass" if getattr(cal.readout, "iso", False) else "prominence")
     return windowed_sets(cal, v, tissue, F, prominence_null=nulls["prominence"], share_null=nulls["share"], window=cfg.window,
+                         presence=presence, mass_null=nulls.get("mass"), probe_null=nulls.get("probe"),
                          stride=cfg.stride, region=region, nmax=cfg.nmax, min_sep_deg=cfg.min_sep_deg, r_min_mm=cfg.r_min_mm,
                          noise_deg=cfg.noise_deg, vox_mm=vox_mm, device=device, log=log, reach_windows=cfg.reach_windows,
                          min_extent=cfg.min_extent, split=cfg.split, response=nulls.get("response") if cfg.deconvolve else None)

@@ -50,6 +50,19 @@ def feature_products(F: torch.Tensor, sigma: float = 1.0, truncate: float = 4.0,
     return acc / F.shape[0]
 
 
+def readout_products(P: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
+    """The orientation readout's per-voxel distributions ``P (n_dirs, Z, Y, X)`` over ``grid (n_dirs, 3)`` (z, y, x) as
+    products for :func:`shape_tensor`, in :func:`shapetensor.st.gradient_products` order: ``tr(M) I - M`` with
+    ``M = sum_u P_u u u^T``, so that the least eigenvector is the distribution's principal axis, as the least gradient
+    axis is for an image. A population's direction read from the shape space without differentiating the features."""
+    ux, uy, uz = grid[:, 2], grid[:, 1], grid[:, 0]
+    M = torch.stack([torch.einsum("n,n...->...", c.to(P.dtype), P) for c in (ux * ux, uy * uy, uz * uz, ux * uy, ux * uz, uy * uz)])
+    tr = M[0] + M[1] + M[2]
+    S = -M
+    S[0] += tr; S[1] += tr; S[2] += tr
+    return S
+
+
 def shape_tensor(products: torch.Tensor, a: torch.Tensor, rho: float = 10.0, truncate: float = 4.0, excision=None, floor: float = 0.0, spacing=None):
     """A population's tensor from the shape features: the channel-summed feature gradient products (:func:`feature_products`)
     weighted by the activation ``a`` plus ``floor`` (and by ``excision``), integrated over ``rho`` and normalised by the

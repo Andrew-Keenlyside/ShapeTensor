@@ -22,7 +22,8 @@ import torch.nn.functional as Fn
 from . import st
 from .features import make_engine
 from .merge import multi_field, single_field
-from .separate import (OrientationReadout, SignatureDictionary, activation_null, direction_gains, gain_at, hemisphere, modes_from_density, population_masks, unmix)
+from .separate import (OrientationReadout, PresenceProbe, SignatureDictionary, activation_null, direction_gains, gain_at, hemisphere, modes_from_density,
+                       population_masks, unmix)
 from .tensors import population_tensor
 
 
@@ -85,6 +86,7 @@ class Calibration:
     activation_gain: torch.Tensor = None
     orientation_bins_occupied: int = 0
     readout_overlap: float = 0.0
+    presence: object = None                    # a PresenceProbe when calibrated with fibre-free texture (``iso``)
     _eng: object = field(default=None, repr=False)
 
     def features(self, v: torch.Tensor) -> torch.Tensor:
@@ -95,14 +97,17 @@ class Calibration:
 
 def calibrate(volumes, tissue=None, *, engine: str = "anatomix_enc2", engine_kwargs: dict | None = None, sigma: float = 1.0,
               rho: float = 10.0, truncate: float = 4.0, smooth: int = 3, margin: int = 24, n_sample: int = 240_000,
-              features=None, spacing=None, seed: int | None = 0, device: str = "cuda") -> Calibration:
+              features=None, spacing=None, seed: int | None = 0, iso=None, iso_readout: bool = False, device: str = "cuda") -> Calibration:
     """Fit the stage-2 readers. ``volumes``: one block ``(Z, Y, X)`` or a list of blocks (for example phantoms at
     several orientations); ``tissue``: a bool mask per block (None: all voxels); ``features``: the blocks' feature
     fields if already computed. The teacher is the excised structure tensor at ``sigma`` / ``rho``; its confident
     sites (gap above the 70th percentile), stratified over orientation, are the samples; the least oriented 30%
     give the background signature; ``margin`` voxels at the faces are not sampled. ``seed``: the calibration's random
     draws (the sites' quantiles; the readers seed their own sampling and training), so a block calibrates the same way
-    every time; None follows the global RNG."""
+    every time; None follows the global RNG. ``iso``: blocks of fibre-free texture (volumes, read through the same
+    engine): a :class:`~shapetensor.separate.PresenceProbe` is fitted (``cal.presence``, fibres against texture), and
+    with ``iso_readout`` the readout also gets a *no orientation* output (:class:`~shapetensor.separate.OrientationReadout`).
+    None: the released readers."""
     vols = volumes if isinstance(volumes, (list, tuple)) else [volumes]
     tiss = tissue if isinstance(tissue, (list, tuple)) else [tissue] * len(vols)
     feats = features if isinstance(features, (list, tuple)) else [features] * len(vols)
@@ -123,7 +128,11 @@ def calibrate(volumes, tissue=None, *, engine: str = "anatomix_enc2", engine_kwa
         bins = max(bins, nb)
         blocks.append((Fp, d, w)); bg.append((Fp, wb))
     cal.dictionary.fit(blocks, n_sample, background=bg, prepped=True)
-    cal.readout.fit(blocks, n_sample, prepped=True)
+    iso_f = None if not iso else [cal.dictionary.prep(cal.features(st._to_torch(t, device, torch.float32))) for t in iso]
+    cal.readout.fit(blocks, n_sample, prepped=True, iso=iso_f if iso_readout else None)
+    if iso_f:
+        cal.presence = PresenceProbe(smooth).fit(blocks, iso_f, prepped=True)
+    del iso_f
     cal.density_gain, cal.activation_gain = direction_gains(cal.dictionary, cal.readout, blocks, prepped=True)
     cal.tau = activation_null(cal.dictionary, blocks, smooth=smooth, activation_gain=cal.activation_gain, prepped=True)
     cal.orientation_bins_occupied, cal.readout_overlap = bins, cal.readout.fit_overlap

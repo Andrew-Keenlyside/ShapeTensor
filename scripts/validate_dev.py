@@ -7,11 +7,17 @@ Methods (features | stage 2 | stage 3):
     fibre sets         anatomix encoder 2, 3^3 box | fibre sets        | image structure tensor   (stage 2 alone)
     dev (intensity)    dev-vit + sliceTCA          | fibre sets        | image structure tensor   (all but stage 3)
     dev                dev-vit + sliceTCA          | fibre sets        | shape tensor
-Every method is calibrated on the validation's straight bundles of each texture setting (as the prototypes were).
+Every method is calibrated on the validation's straight bundles of each texture setting (as the prototypes were), or
+with ``CALIBRATION=self`` on each case itself (with its tissue mask, as ``run_volume`` calibrates a chunk: degenerate for
+a case with one orientation, which ``run_volume`` meets by falling back to the volume's calibration), or with
+``CALIBRATION=pool`` once on all the cases and the bundles together (the volume calibration's analogue: in-domain,
+every orientation, no labels); the
+dev methods' readouts also learn *no orientation* from synthetic fibre-free texture (``iso``), and their fibre windows
+are those the readout calls more oriented than fibre-free texture (the presence test the dev pipeline uses).
 Also reported per method: how linear the mean feature pattern is in the orientation dyad d d^T (the plan's test 1:
 the share of the signature dictionary's variance a linear map of d d^T explains).
 
-    QUICK=1 python scripts/validate_dev.py [OUT_DIR]      (QUICK: seed 0 only)
+    QUICK=1 python scripts/validate_dev.py [OUT_DIR]      (QUICK: seed 0 only; METHODS="a;b", SETTINGS=calibrated,coherent to narrow)
 """
 from __future__ import annotations
 
@@ -26,7 +32,7 @@ import numpy as np
 import torch
 
 from shapetensor.dev import DevConfig, apply_dev
-from shapetensor.fibre_sets import FibreSetConfig, References
+from shapetensor.fibre_sets import FibreSetConfig, References, iso_textures
 from shapetensor.phantoms import BEND_GRID, Grid, build
 from shapetensor.pipeline import apply, calibrate
 from shapetensor.validate import ANGLES
@@ -42,9 +48,16 @@ METHODS = {
     "released":        {"engine": "anatomix_enc2", "engine_kwargs": {}, "smooth": 3, "stage2": "block", "direction": "intensity"},
     "released+devvit": {"engine": "anatomix_devvit", "engine_kwargs": {}, "smooth": 3, "stage2": "block", "direction": "intensity"},
     "fibre sets":      {"engine": "anatomix_enc2", "engine_kwargs": {}, "smooth": 3, "stage2": "sets", "direction": "intensity"},
-    "dev (intensity)": {"engine": "devvit_slicetca", "engine_kwargs": {"ranks": (2, 2, 2), "spacing": 3}, "smooth": 1, "stage2": "sets", "direction": "intensity"},
-    "dev":             {"engine": "devvit_slicetca", "engine_kwargs": {"ranks": (2, 2, 2), "spacing": 3}, "smooth": 1, "stage2": "sets", "direction": "shape"},
+    "dev (intensity)": {"engine": "devvit_slicetca", "engine_kwargs": {"ranks": (2, 2, 2), "spacing": 3}, "smooth": 1, "stage2": "sets", "direction": "intensity", "iso": True},
+    "dev (shape gradients)": {"engine": "devvit_slicetca", "engine_kwargs": {"ranks": (2, 2, 2), "spacing": 3}, "smooth": 1, "stage2": "sets", "direction": "shape", "iso": True},
+    "dev-vit sets, readout": {"engine": "anatomix_devvit", "engine_kwargs": {}, "smooth": 3, "stage2": "sets", "direction": "readout", "iso": True},
+    "dev-vit sets, intensity": {"engine": "anatomix_devvit", "engine_kwargs": {}, "smooth": 3, "stage2": "sets", "direction": "intensity", "iso": True},
+    "dev-vit+TCA sets, readout": {"engine": "devvit_slicetca", "engine_kwargs": {"ranks": (2, 2, 2), "spacing": 3}, "smooth": 1, "stage2": "sets", "direction": "readout", "iso": True},
 }
+CALIBRATION = os.environ.get("CALIBRATION", "bundles")                          # "bundles" (as the prototypes) | "self" (each case on itself) | "pool"
+if os.environ.get("METHODS"):                                                    # e.g. METHODS="dev (intensity);dev"
+    METHODS = {k: v for k, v in METHODS.items() if k in os.environ["METHODS"].split(";")}
+SETTINGS_RUN = tuple(os.environ.get("SETTINGS", "calibrated,coherent").split(","))
 CASES = (("bend", {}), ("straight", {"straight": True}), ("band crossing 90", {"cross_deg": 90.0}), ("band crossing 60", {"cross_deg": 60.0}),
          ("crossing 90", {"cross_deg": 90.0}), ("crossing 60", {"cross_deg": 60.0}))
 
@@ -70,17 +83,67 @@ def run(method, m, cal, refs, v, tissue, F, grid):
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True); t0 = time.time()
+    if CALIBRATION not in ("bundles", "self", "pool"):
+        raise SystemExit(f"CALIBRATION must be bundles or self, got {CALIBRATION!r}")
     log = lambda *a: print(f"[{time.time() - t0:6.0f}s]", *a, flush=True)
     results = {"settings": {"sigma": SIGMA, "rho": RHO, "truncate": TRUNC, "seeds": SEEDS}, "dyad_r2": {}, "runs": []}
-    for setting in ("calibrated", "coherent"):
+    for setting in SETTINGS_RUN:
         tex, texture = P.tex_for(setting); cg = Grid()
         bundles = [torch.as_tensor(build("bundle", 100 + k, cg, tex, texture=texture, angle=float(a), device=DEV)[0], device=DEV).float()
                    for k, a in enumerate(ANGLES)]
         for method, m in METHODS.items():
-            cal = calibrate(bundles, sigma=SIGMA, rho=RHO, truncate=TRUNC, margin=cg.margin[0], engine=m["engine"],
-                            engine_kwargs=m["engine_kwargs"], smooth=m["smooth"], seed=0, device=DEV)
+            ckw = dict(sigma=SIGMA, rho=RHO, truncate=TRUNC, engine=m["engine"], engine_kwargs=m["engine_kwargs"], smooth=m["smooth"], seed=0, device=DEV,
+                       iso=iso_textures(setting, DEV) if m.get("iso") else None)
+            if CALIBRATION == "pool":
+                vols, tis = list(bundles), [None] * len(bundles)
+                for case, kw in CASES:
+                    name = "bend" if case in ("bend", "straight") else ("band_crossing" if case.startswith("band") else "crossing")
+                    for seed in SEEDS:
+                        img = build(name, seed, tex=tex, texture=texture, device=DEV, **kw)[0]
+                        vv = torch.as_tensor(img, device=DEV).float(); vols.append(vv)
+                        tis.append((vv > P.otsu(img)) if name in ("bend", "band_crossing") else None)
+                tc = time.time()
+                cal = calibrate(vols, tis, margin=cg.margin[0], **ckw); del vols, tis
+                log(f"{setting} | {method}: calibrated on the pool ({len(bundles)} bundles + {len(CASES) * len(SEEDS)} cases) in {time.time() - tc:.0f} s"
+                    + (f", presence probe {cal.presence.fit_report}" if getattr(cal, "presence", None) is not None else ""))
+            else:
+                cal = None if CALIBRATION == "self" else calibrate(bundles, margin=cg.margin[0], **ckw)
+            if cal is None:
+                log(f"{setting} | {method}: each case calibrates on itself")
+                refs = {}
+                for case, kw in CASES:
+                    name = "bend" if case in ("bend", "straight") else ("band_crossing" if case.startswith("band") else "crossing")
+                    grid = BEND_GRID if name in ("bend", "band_crossing") else Grid()
+                    if m["stage2"] == "sets" and id(grid) not in refs:
+                        refs[id(grid)] = References(tuple(s.stop - s.start for s in grid.inner), setting, DEV)
+                    for seed in SEEDS:
+                        img, tr, meta = build(name, seed, tex=tex, texture=texture, device=DEV, **kw)
+                        v = torch.as_tensor(img, device=DEV).float()
+                        tissue = (v > P.otsu(img)) if name in ("bend", "band_crossing") else torch.ones_like(v, dtype=torch.bool)
+                        t1 = time.time()
+                        cal = calibrate(v, tissue, margin=grid.margin[0], **ckw)
+                        tc = time.time() - t1
+                        F = cal.features(v)
+                        o = run(method, m, cal, refs.get(id(grid)), v, tissue, F, grid)
+                        sc = (P.score_bend(o, tr, grid) if name == "bend" else P.score_band(o, tr, grid) if name == "band_crossing"
+                              else P.score_crossing(o, v, tr, grid, setting))
+                        row = {"setting": setting, "method": method, "case": case, "seed": seed, "calibration": "self", "seconds": round(time.time() - t1, 1),
+                               "calibration_seconds": round(tc, 1), "readout_fit": round(float(cal.readout_overlap), 3),
+                               "n_populations": int(o.get("n_populations", o["activation"].shape[0])), "scores": sc}
+                        if getattr(cal, "presence", None) is not None:
+                            row["presence_probe"] = cal.presence.fit_report
+                        if "report" in o:
+                            row["stage2"] = {k: o["report"].get(k) for k in ("windows", "windows_with_fibres", "windows_with_2plus", "sets_after_reunmix", "presence",
+                                                                               "probe_null", "window_probe_max", "window_probe_median", "share_null")}
+                        results["runs"].append(row); log(f"  {case} seed {seed} [self-calibrated, fit {cal.readout_overlap:.2f}]: {json.dumps(sc, default=str)[:300]}"
+                                                         + (f" | stage 2 {json.dumps(row['stage2'])}" if "stage2" in row else ""))
+                        json.dump(results, open(OUT / "validate_dev.json", "w"), indent=1, default=str)
+                        del F, o, v, cal; torch.cuda.empty_cache()
+                continue
             results["dyad_r2"][f"{method} ({setting})"] = round(dyad_r2(cal), 4)
-            log(f"{setting} | {method}: calibrated, readout fit {cal.readout_overlap:.2f}, dyad R2 {results['dyad_r2'][f'{method} ({setting})']}")
+            log(f"{setting} | {method}: calibrated, readout fit {cal.readout_overlap:.2f}, dyad R2 {results['dyad_r2'][f'{method} ({setting})']}"
+                + (f", no-orientation fit {cal.readout.iso_fit}" if getattr(cal.readout, "iso", False) else "")
+                + (f", presence probe {cal.presence.fit_report}" if getattr(cal, "presence", None) is not None else ""))
             refs = {}
             for case, kw in CASES:
                 name = "bend" if case in ("bend", "straight") else ("band_crossing" if case.startswith("band") else "crossing")
@@ -100,8 +163,10 @@ def main():
                            "n_populations": int(o.get("n_populations", o["activation"].shape[0])), "scores": sc}
                     if "report" in o:                                                   # fibre sets: presence and second-population diagnostics
                         row["stage2"] = {k: o["report"].get(k) for k in ("windows", "windows_with_fibres", "windows_with_2plus", "sets_after_reunmix",
-                                                                           "prominence_null", "window_prominence_max", "window_prominence_median", "share_null")}
-                    results["runs"].append(row); log(f"  {case} seed {seed}: {json.dumps(sc, default=str)[:300]}")
+                                                                           "presence", "prominence_null", "window_prominence_max", "window_prominence_median",
+                                                                           "probe_null", "window_probe_max", "window_probe_median", "mass_null", "window_mass_max", "window_mass_median", "share_null")}
+                    results["runs"].append(row); log(f"  {case} seed {seed}: {json.dumps(sc, default=str)[:300]}"
+                                                     + (f" | stage 2 {json.dumps(row['stage2'])}" if "stage2" in row else ""))
                     json.dump(results, open(OUT / "validate_dev.json", "w"), indent=1, default=str)
                     del F, o, v; torch.cuda.empty_cache()
     log(f"wrote {OUT / 'validate_dev.json'}")

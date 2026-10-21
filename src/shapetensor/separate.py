@@ -89,7 +89,13 @@ class OrientationReadout:
     """Features -> a distribution over ``n_dirs`` hemisphere directions (softmax), trained on the self-calibrated
     teacher as a soft target (a kernel of ``target_deg`` around the teacher direction). A voxel holding two
     populations keeps two bumps rather than their average, and a window's population density is the sum of its
-    voxels' distributions."""
+    voxels' distributions.
+
+    ``fit(..., iso=...)`` adds one more output, *no orientation*, trained on features of fibre-free texture (the
+    readers otherwise only ever see fibres, and a confident readout gives texture a direction too). Every directional
+    output (``predict_dist``, ``density``, ``window_densities``, ``probs``) then leaves that mass out: a voxel's
+    directions sum to its probability of holding an orientation, and a window's density sums to how much of it does
+    (``iso_mass`` gives the rest)."""
 
     def __init__(self, smooth: int = 3, n_dirs: int = 160, target_deg: float = 12.0, hidden: int = 64, steps: int = 2000,
                  lr: float = 2e-3, weight_decay: float = 1e-4, seed: int = 0):
@@ -97,19 +103,30 @@ class OrientationReadout:
         self.n_dirs, self.target_deg, self.hidden, self.steps = int(n_dirs), float(target_deg), int(hidden), int(steps)
         self.lr, self.wd, self.seed = float(lr), float(weight_decay), int(seed)
         self.mean = self.std = self.net = self.grid = None
+        self.iso = False
 
-    def fit(self, blocks, n_sample: int = 240_000, prepped: bool = False):
+    def fit(self, blocks, n_sample: int = 240_000, prepped: bool = False, iso=None, iso_share: float = 0.5):
         """``blocks``: ``(F, d, w)`` triples of features (already averaged if ``prepped``), teacher directions and
-        sampling weights."""
+        sampling weights. ``iso``: feature fields of fibre-free texture (averaged alike if ``prepped``) for the *no
+        orientation* output, drawn uniformly to ``iso_share`` of the samples."""
         X, D = _draw([(F, d, w, _IDENTITY if prepped else self.prep) for F, d, w in blocks], max(1, n_sample // max(1, len(blocks))), self.seed)
         self.grid = hemisphere(self.n_dirs, X.device)
         k = 1.0 / (2 * math.sin(math.radians(self.target_deg)) ** 2)
         Y = torch.exp(k * ((D @ self.grid.T) ** 2 - 1)); Y = Y / Y.sum(1, keepdim=True)
+        n_dir = len(X)
+        self.iso = bool(iso)
+        if self.iso:
+            n_iso = int(round(n_dir * iso_share / max(1e-6, 1 - iso_share)))
+            Xi, _ = _draw([(F, None, torch.ones(F.shape[1:], device=F.device), _IDENTITY if prepped else self.prep) for F in iso],
+                          max(1, n_iso // len(iso)), self.seed + 1)
+            X = torch.cat([X, Xi])
+            Y = torch.cat([torch.cat([Y, torch.zeros(n_dir, 1, device=Y.device)], 1),
+                           torch.cat([torch.zeros(len(Xi), self.n_dirs, device=Y.device), torch.ones(len(Xi), 1, device=Y.device)], 1)])
         self.mean, self.std = X.mean(0), X.std(0).clamp_min(1e-6)
         Xn = (X - self.mean) / self.std
         torch.manual_seed(self.seed)
         self.net = torch.nn.Sequential(torch.nn.Linear(X.shape[1], self.hidden), torch.nn.GELU(), torch.nn.Linear(self.hidden, self.hidden),
-                                       torch.nn.GELU(), torch.nn.Linear(self.hidden, self.n_dirs)).to(X.device)
+                                       torch.nn.GELU(), torch.nn.Linear(self.hidden, self.n_dirs + int(self.iso))).to(X.device)
         opt = torch.optim.Adam(self.net.parameters(), lr=self.lr, weight_decay=self.wd)
         n = len(Xn); bs = min(8192, n)
         for _ in range(self.steps):
@@ -118,8 +135,48 @@ class OrientationReadout:
             opt.zero_grad(); loss.backward(); opt.step()
         with torch.no_grad():
             P = torch.cat([torch.softmax(self.net(Xn[a:a + 65536]), 1) for a in range(0, n, 65536)])
-            self.fit_overlap = float((P * Y).sum(1).mean() / (Y * Y).sum(1).mean())            # 1 = perfect
+            Pd, Yd = P[:n_dir, :self.n_dirs], Y[:n_dir, :self.n_dirs]
+            self.fit_overlap = float((Pd * Yd).sum(1).mean() / (Yd * Yd).sum(1).mean())        # 1 = perfect (on the oriented samples)
+            if self.iso:
+                self.iso_fit = {"oriented_samples_iso_mass": round(float(P[:n_dir, -1].mean()), 4),
+                                "texture_samples_iso_mass": round(float(P[n_dir:, -1].mean()), 4)}
         return self
+
+    def probs(self, Xn: torch.Tensor) -> torch.Tensor:
+        """Standardised features ``(n, C)`` -> the directional probabilities ``(n, n_dirs)`` (without the no-orientation
+        output, if there is one)."""
+        P = torch.softmax(self.net(Xn), 1)
+        return P[:, :self.n_dirs] if getattr(self, "iso", False) else P
+
+    def dyad_products(self, F: torch.Tensor, z_chunk: int | None = None, prepped: bool = False) -> torch.Tensor:
+        """The distributions as tensor products ``(6, Z, Y, X)`` in :func:`shapetensor.st.gradient_products` order,
+        without holding the distributions: ``tr(M) I - M`` with ``M = sum_u P_u u u^T`` (see
+        :func:`shapetensor.tensors.readout_products`); integrated with a population's layer as the weight
+        (:func:`shapetensor.tensors.shape_tensor`), the least eigenvector is the population's direction read from the
+        shape space."""
+        u = self.grid; ux, uy, uz = u[:, 2], u[:, 1], u[:, 0]
+        C6 = torch.stack([ux * ux, uy * uy, uz * uz, ux * uy, ux * uz, uy * uz], 1)               # (n_dirs, 6)
+        f = F if prepped else self.prep(F)
+        out = torch.empty((6,) + tuple(f.shape[1:]), device=f.device)
+        for z, shp, P in self._chunks(f, z_chunk, True):
+            M = (P @ C6).T.reshape(6, *shp)
+            tr = M[0] + M[1] + M[2]
+            M = -M; M[0] += tr; M[1] += tr; M[2] += tr
+            out[:, z:z + shp[0]] = M
+        return out
+
+    def iso_mass(self, F: torch.Tensor, z_chunk: int | None = None, prepped: bool = False) -> torch.Tensor:
+        """Per-voxel probability of *no orientation* ``(Z, Y, X)`` (zeros without the iso output)."""
+        f = F if prepped else self.prep(F); C = f.shape[0]
+        out = torch.zeros(tuple(f.shape[1:]), device=f.device)
+        if not getattr(self, "iso", False):
+            return out
+        z_chunk = z_chunk or _slab(f.shape[1:], 4_000_000)
+        with torch.no_grad():
+            for z in range(0, f.shape[1], z_chunk):
+                fz = f[:, z:z + z_chunk]
+                out[z:z + fz.shape[1]] = torch.softmax(self.net((fz.reshape(C, -1).T - self.mean) / self.std), 1)[:, -1].reshape(fz.shape[1:])
+        return out
 
     def _chunks(self, F: torch.Tensor, z_chunk: int | None, prepped: bool = False):
         """The per-voxel distributions in slabs of ``z_chunk`` planes (by default as many as keep a slab's
@@ -129,7 +186,7 @@ class OrientationReadout:
         with torch.no_grad():
             for z in range(0, f.shape[1], z_chunk):
                 fz = f[:, z:z + z_chunk]
-                yield z, fz.shape[1:], torch.softmax(self.net((fz.reshape(C, -1).T - self.mean) / self.std), 1)
+                yield z, fz.shape[1:], self.probs((fz.reshape(C, -1).T - self.mean) / self.std)
 
     def predict_dist(self, F: torch.Tensor, z_chunk: int | None = None, prepped: bool = False) -> torch.Tensor:
         """Per-voxel distributions ``(n_dirs, Z, Y, X)``."""
@@ -194,6 +251,53 @@ def modes_from_density(dens: torch.Tensor, u: torch.Tensor, rel: float = 0.3, mi
 # ---------------------------------------------------------------------------------------------------------------
 # the signature dictionary and the unmixing into population layers
 # ---------------------------------------------------------------------------------------------------------------
+
+class PresenceProbe:
+    """Fibres or not, per voxel: a linear (logistic) probe on the readers' averaged, standardised features, fitted on
+    the calibration sites (fibres, the teacher confident) against fibre-free texture. The readers otherwise never see
+    a voxel without fibres; and a linear score suits mixtures: where two populations cross the features are close to a
+    mix of each population's, and so is the score, so a crossing stays *fibres* (a softmax class for "no orientation"
+    takes such voxels for texture). ``predict`` gives the probability of fibres ``(Z, Y, X)``."""
+
+    def __init__(self, smooth: int = 3, l2: float = 1e-3, seed: int = 0):
+        self.prep = _Prep(smooth)
+        self.l2, self.seed = float(l2), int(seed)
+        self.mean = self.std = self.w = self.b = None
+
+    def fit(self, blocks, iso, n_sample: int = 120_000, prepped: bool = False):
+        """``blocks``: ``(F, d, w)`` as the other readers (the sites drawn by ``w``); ``iso``: feature fields of
+        fibre-free texture (drawn uniformly, as many samples)."""
+        pp = _IDENTITY if prepped else self.prep
+        Xp, _ = _draw([(F, None, w, pp) for F, _, w in blocks], max(1, n_sample // max(1, len(blocks))), self.seed)
+        Xn, _ = _draw([(F, None, torch.ones(F.shape[1:], device=F.device), pp) for F in iso], max(1, n_sample // max(1, len(iso))), self.seed + 1)
+        X = torch.cat([Xp, Xn]).float(); y = torch.cat([torch.ones(len(Xp)), torch.zeros(len(Xn))]).to(X.device)
+        self.mean, self.std = X.mean(0), X.std(0).clamp_min(1e-6)
+        Xs = (X - self.mean) / self.std
+        w = torch.zeros(X.shape[1], device=X.device, requires_grad=True); b = torch.zeros(1, device=X.device, requires_grad=True)
+        opt = torch.optim.LBFGS([w, b], max_iter=300, line_search_fn="strong_wolfe")
+
+        def closure():
+            opt.zero_grad()
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(Xs @ w + b, y) + self.l2 * (w ** 2).sum()
+            loss.backward(); return loss
+        opt.step(closure)
+        self.w, self.b = w.detach(), b.detach()
+        with torch.no_grad():
+            p = torch.sigmoid(Xs @ self.w + self.b)
+            self.fit_report = {"fibre_sites_mean": round(float(p[:len(Xp)].mean()), 4), "texture_mean": round(float(p[len(Xp):].mean()), 4),
+                               "accuracy": round(float(((p > 0.5).float() == y).float().mean()), 4)}
+        return self
+
+    def predict(self, F: torch.Tensor, prepped: bool = False, z_chunk: int | None = None) -> torch.Tensor:
+        f = F if prepped else self.prep(F); C = f.shape[0]
+        out = torch.empty(tuple(f.shape[1:]), device=f.device)
+        z_chunk = z_chunk or _slab(f.shape[1:], 8_000_000)
+        with torch.no_grad():
+            for z in range(0, f.shape[1], z_chunk):
+                fz = f[:, z:z + z_chunk].float()
+                out[z:z + fz.shape[1]] = torch.sigmoid(((fz.reshape(C, -1).T - self.mean) / self.std) @ self.w + self.b).reshape(fz.shape[1:])
+        return out
+
 
 class SignatureDictionary:
     """The mean standardised feature pattern of every orientation (kernel-smoothed over a hemisphere grid), and a
@@ -303,7 +407,7 @@ def direction_gains(dictionary: SignatureDictionary, readout: OrientationReadout
         Xs.append(dictionary.standardise(f.reshape(f.shape[0], -1)[:, idx].T)); Ds.append(d.reshape(3, -1)[:, idx].T)
         fr = f if (prepped or readout.prep.smooth == dictionary.prep.smooth) else readout.prep(F)
         with torch.no_grad():
-            Ps.append(torch.softmax(readout.net((fr.reshape(fr.shape[0], -1)[:, idx].T - readout.mean) / readout.std), 1))
+            Ps.append(readout.probs((fr.reshape(fr.shape[0], -1)[:, idx].T - readout.mean) / readout.std))
     Xn, D, P = torch.cat(Xs), torch.cat(Ds), torch.cat(Ps)
     K = dictionary._kernel((D @ u.T) ** 2)                                                 # (n, n_dirs): each sample's kernel on the grid
     hist = K.sum(0); dens = P.sum(0)
