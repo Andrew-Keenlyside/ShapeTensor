@@ -195,6 +195,58 @@ class DevVitEngine:
             acc /= acc.norm(dim=0, keepdim=True).clamp_min(1e-6)
         return acc.to(self.out_dtype)
 
+    def decoder1(self, vol: torch.Tensor) -> torch.Tensor:
+        """The first decoder stage (216 channels, a quarter of the resolution: one cell per 4³ voxels), blended across
+        tiles as :meth:`_blended` blends the output (the blend window at the cells' resolution), the patch grid (period 2
+        cells) removed by ``[1, 2, 1] / 4`` per axis: ``(216, ceil(Z/4), ceil(Y/4), ceil(X/4))`` float32, cell ``i``
+        covering voxels ``4i .. 4i + 3``. Tiles start every ``stride`` voxels (a multiple of 4 is required)."""
+        if self.stride % 4 or any(sh % 4 for s_ in self.shifts for sh in s_) or self.ctx % 4:
+            raise ValueError("decoder1 needs stride, shifts and context in multiples of 4")
+        net = load_devvit(self.device)
+        mod = dict(net.named_modules())["up_projection.decode.0"]
+        store = {}
+        h = mod.register_forward_hook(lambda m, i, o: store.__setitem__("f", o.detach().float()))
+        try:
+            v = (vol.to(self.device).float() / 255.0).clamp_(0, 1)
+            shape = tuple(v.shape); S, P = self.stride, self.ctx
+            cshape = tuple(-(-n // 4) for n in shape)
+            starts = []
+            for n in shape:
+                k = max(1, math.ceil((n + 2 * P - TILE) / S) + 1)
+                starts.append([-P + i * S for i in range(k)])
+            smax = max(max(sh) for sh in self.shifts)
+            pad_hi = max(st[-1] + TILE - n for st, n in zip(starts, shape)) + smax + 4
+            vp = _pad(v, P, pad_hi); del v
+            W = tile_window(self.blend if self.blend != "core" else "hann", TILE // 4, self.device)
+            acc = torch.zeros((216,) + cshape, dtype=torch.float32, device=self.device)
+            wsum = torch.zeros(cshape, dtype=torch.float32, device=self.device)
+            tiles = list(itertools.product(*starts))
+            for sh in self.shifts:
+                for b0 in range(0, len(tiles), self.batch):
+                    group = tiles[b0:b0 + self.batch]
+                    x = torch.stack([vp[z + P + sh[0]:z + P + sh[0] + TILE, y + P + sh[1]:y + P + sh[1] + TILE, xx + P + sh[2]:xx + P + sh[2] + TILE]
+                                     for z, y, xx in group])
+                    self._forward(x); f = store["f"]                                                  # (B, 216, 32, 32, 32)
+                    for k, (z, y, xx) in enumerate(group):
+                        o = ((z + sh[0]) // 4, (y + sh[1]) // 4, (xx + sh[2]) // 4)                    # the window's origin in cells
+                        lo = [max(0, a) for a in o]; hi = [min(n, a + TILE // 4) for a, n in zip(o, cshape)]
+                        if any(hh <= ll for ll, hh in zip(lo, hi)):
+                            continue
+                        ws = tuple(slice(ll - a, hh - a) for ll, hh, a in zip(lo, hi, o)); cs = tuple(slice(ll, hh) for ll, hh in zip(lo, hi))
+                        acc[(slice(None),) + cs] += f[(k, slice(None)) + ws] * W[ws][None]
+                        wsum[cs] += W[ws]
+                    del f, x
+            acc /= wsum.clamp_min(1e-6)[None]
+        finally:
+            h.remove()
+        k3 = torch.tensor([1.0, 2.0, 1.0], device=acc.device) / 4.0
+        x = acc[:, None]
+        for ax in range(3):
+            shp = [1, 1, 1, 1, 1]; shp[2 + ax] = 3
+            pad = [0, 0, 0, 0, 0, 0]; pad[2 * (2 - ax)] = 1; pad[2 * (2 - ax) + 1] = 1
+            x = F.conv3d(F.pad(x, pad, mode="replicate"), k3.view(shp))
+        return x[:, 0]
+
     def describe(self) -> dict:
         return {"engine": self.name, "tile": TILE, "core": self.core, "context": self.ctx, "shifts": self.shifts, "l2": self.l2,
                 "n_channels": self.n_channels, "amp": self.amp, "batch": self.batch, "blend": self.blend, "stride": self.stride, "grid_filter": self.grid_filter}
