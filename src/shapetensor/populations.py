@@ -278,6 +278,8 @@ def label_populations(dirs: torch.Tensor, mass: torch.Tensor, *, max_angle_deg: 
     idx = torch.arange(V, device=dev).reshape(shp)
     src, dst, cost = [], [], []
     for o in _half_offsets(connectivity):
+        if any(abs(d) >= n for d, n in zip(o, shp)):                                             # a one-voxel axis (2-D): no neighbours along it
+            continue
         a_sl = tuple(slice(max(0, -d), n - max(0, d)) for d, n in zip(o, shp))
         b_sl = tuple(slice(sa.start + d, sa.stop + d) for sa, d in zip(a_sl, o))
         A = dirs[(slice(None), slice(None)) + a_sl]; B = dirs[(slice(None), slice(None)) + b_sl]

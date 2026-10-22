@@ -114,3 +114,19 @@ def test_orientations_anisotropic_spacing_returns_the_input_shape():
     v = lines((32, 48, 48), (0.0, 0.0, 1.0), n=150, seed=7)
     out = orientations(v, spacing=(1.5, 1.0, 1.0), device=DEV, scale=6.0, n_dirs=64, iters=60)
     assert out["vec"].shape == (3, 32, 48, 48) and out["vecs"].shape[0] == 2
+
+
+def test_two_dimensional_array():
+    g = torch.Generator().manual_seed(8)
+    Y = X = 96
+    img = torch.full((Y, X), 160.0)
+    yy, xx = torch.meshgrid(torch.arange(Y, dtype=torch.float32), torch.arange(X, dtype=torch.float32), indexing="ij")
+    for _ in range(60):                                                                             # dark lines along x
+        y0 = float(torch.rand(1, generator=g)) * Y
+        img -= 40 * torch.exp(-0.5 * ((yy - y0) / 1.2) ** 2)
+    img += 8 * torch.randn((Y, X), generator=g)
+    out = orientations(img, device=DEV, scale=8.0, n_dirs=96, iters=60)
+    assert out["vec"].shape == (3, Y, X) and out["vecs"].shape == (2, 3, Y, X)
+    core = (slice(30, 66), slice(30, 66))
+    e = torch.rad2deg(torch.acos(out["vec"][2][core].abs().clamp(max=1)))                        # x is the last component
+    assert float(e.median()) < 10.0 and float(out["vec"][0].abs().max()) < 1e-6

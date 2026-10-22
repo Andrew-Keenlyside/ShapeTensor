@@ -430,3 +430,55 @@ The isotropic structure tensor is immune because its sigma = 1 derivatives are a
 reads the local gradient, not the correlation at a lag. **Open:** a null for the acquisition's anisotropy that does not
 absorb real orientations -- from a noise-only region (air, a vessel lumen), from the highest frequency band only, or as
 the median profile over many regions of a volume.
+
+**The shell and the null, settled (00:00-00:15 Montreal; the clock above was read wrong by an hour -- the night was
+younger than it said).** Phantom lattice scores by lag shell (`scripts/dev_chain.py`; bundle N1 / bend N1 / band 90 both
+within 15 / band 60 / crossing 60 N2 and both within 15):
+
+| shell (x scale), lag weighting | bundle | bend | band 90 | band 60 | crossing 60 |
+| --- | --- | --- | --- | --- | --- |
+| 0.25-0.65, count (the first build) | 0.96 | 0.86 | 0.77 | 0.94 | 0.83 / 0.57 |
+| 0.25-0.65, uniform | 0.97 | 0.91 | 0.81 | 0.94 | 0.86 / 0.49 |
+| **0.2-0.45, count** | 0.91 | 0.85 | **0.95** | **0.99** | 0.96 / 0.69 |
+| 0.2-0.45, uniform | 0.63 | 0.78 | 0.89 | 0.92 | 1.00 / 0.98 |
+
+On the real 256^3 block against the structure tensor's confident cells (median angle / within 15 deg; the share of
+white-matter first lobes near z; white matter N0/N1/N2): 0.25-0.65 count 48.7 deg / 0.20, z 0.64; 0.2-0.45 count
+**14.7 deg / 0.50**, z 0.64, N 0.08/0.02/0.90 (the z population is now the *second* almost everywhere); 0.2-0.45 uniform
+19.5 / 0.35. The short shell with the lattice's own weighting is the default: it is better on the phantoms' crossings
+and bands and agrees with the structure tensor where the structure tensor is confident; the acquisition's z lobe
+remains in the field as a second population in most white matter.
+
+**The acquisition null** (`acquisition_null=True`): the mean lift profile of the positions *below the presence floor*
+(structure-free by the null's own standard) subtracted from every lift -- label-free, and nothing is subtracted on a
+block without such positions. Real block, short shell: z share of first lobes 0.64 -> 0.41, all-white-matter agreement
+with the structure tensor 58.8 -> 41.3 deg, but the confident-cell agreement 14.7 -> 20.1 deg and N0 0.08 -> 0.44 (much of
+the white matter's measured presence *was* the acquisition); phantoms: band 90 both-within-15 0.95 -> 0.81, band 60 0.99
+-> 0.80, singles unchanged or better (bend 0.85 -> 0.93, straight 0.98). Kept as an option. The earlier low-presence-
+quantile variant (the lowest 10-30% of presence, not only below the floor) reached 12.6 deg / 0.58 with the uniform
+weighting but takes a fibre share from a block full of one bundle; not adopted.
+
+**Resolution (00:25 Montreal).** The phantoms downsampled 2x to 40 um with `scale` halved to 5: lags 1.0-2.2 voxels, high-
+pass 1.5 -- the floor rose to 0.14 (from 0.05) and the chain lost the bundle (N1 0.34) and the crossing (N0 0.98): a lag
+under 2 voxels reads the point-spread function and a high-pass under the texture's period removes the texture. With
+floors in voxels (lags >= 2, shell at least 1.6 wide, high-pass >= 3): 40 um at scale 6 -- bundle N1 0.96 / 2.2 deg, band
+90 overlap N2 0.82 with both within 15 deg 0.64, crossing 60 N2 0.96 / 0.64 -- against 20 um at scale 10 -- 0.94 / 2.1,
+0.96 / 0.96, 0.89 / 0.36. The floors are now built into `Orientations` (`r_min = max(0.2 scale, 2)`, `r_max = max(0.45
+scale, r_min + 1.6)`, `sigma_m = max(0.3 scale, 3)`); at scale 10 nothing changes.
+
+**The final suite on the release defaults (00:45 Montreal; `results/dev_pipeline/acceptance_v4`).** Tracking, chain /
+structure tensor: band crossings through on their own band 0.89 / 0.06 (90 deg), 0.86 / 0.42 (60), 0.89 / 0.40 (45), switched
+0.00-0.11 / 0.55-0.65; T-junction false continuation 0 / 0; free end 0.02 / 0.40; intermixed crossings within 15 deg of their
+population end to end 0.99 & 0.99 / 0.10 & 0.22 (90), 0.67 & 0.91 / 0 (60), 0.79 & 0.34 / 0.02 (45); bend through the turn
+0.39, 0.92, 0.99 / 0.92, 0.85, 0.99 by radius. Lattice: bundle N1 0.94 / 2.1 deg; band overlaps N2 0.96 / 0.99 / 0.91 with both
+within 15 deg 0.96 / 0.97 / 0.91; intermixed N2 0.96 / 0.89 / 0.65, both within 15 deg 0.95 / 0.36 / 0.34; texture N0 1.00.
+Identities: coverage 0.98-1.00, leakage 0.05-0.15. Against the criteria set before the build, what remains open is the
+tightest bend, identity leakage, and the pair at 60 / 45 deg intermixed crossings. 2-D arrays are supported (a one-slice
+volume, in-plane lags, a semicircle grid; `tests/test_chain.py`).
+
+**The final VOI run (release defaults; `/hdd/andrew/shapetensor_runs/S-21-46_20um_cortex_v3d`).** 8 chunks of 384^3, 62-81 s
+each, 673 s, 2265 populations stitched. Central 384^3: white matter N0/N1/N2 0.11/0.06/0.83 -- the in-plane population and
+the acquisition's z population side by side, z usually the stronger. Tracking from 20 000 white-matter seeds: chain median
+3.5 mm (p90 7.7), 82% at least 1 mm, none folded, 28% of steps on the second vector, 30% of stops where no vector is
+present; structure tensor 8.2 mm (the sub-volume), 99%, 8% folded. The first run (first build, before the first-vector
+rule) had 2.0 mm and 58% absent stops.

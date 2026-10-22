@@ -12,7 +12,7 @@ second moment at an infinitesimal lag: it is to the lift what the diffusion tens
 
 ## Exact on the lattice
 
-The lags are the integer vectors of the shell `0.25 scale ≤ |l| ≤ 0.65 scale` (554 of them at the default scale,
+The lags are the integer vectors of the shell `0.2 scale ≤ |l| ≤ 0.45 scale` (about 180 of them at the default scale,
 one of each ± pair), so no value is interpolated and no direction is blurred more than another. Each lag's products
 are pooled onto cells of `step` voxels, summed into the directions of a hemisphere grid (160 Fibonacci directions)
 with an angular kernel of 8°, and averaged over the window on the lattice. The cost is one shifted product per lag
@@ -56,7 +56,7 @@ over 6° of angle.
 ```python
 from shapetensor.lift import hemisphere, lift, presence, self_response, response_matrix, deconvolve
 grid = hemisphere(160, "cuda")
-O = lift(v, grid, r_min=2.5, r_max=6.5, sigma_w=10.0, sigma_m=3.0, step=4, origin=2)       # (160, z, y, x)
+O = lift(v, grid, r_min=2.0, r_max=4.5, sigma_w=10.0, sigma_m=3.0, step=4, origin=2)       # (160, z, y, x)
 R, n = self_response(O, grid)                                                              # the block's own response
 f = deconvolve(O, response_matrix(R, grid))                                                # the sharpened distribution
 ```
@@ -65,4 +65,6 @@ f = deconvolve(O, response_matrix(R, grid))                                     
 
 `orientations(image, spacing=(dz, dy, dx))` resamples the array to its finest axis, lifts there and resamples the
 field back. A `(K, Z, Y, X)` array is read as channels whose products add (several stains, several derived fields).
-Two-dimensional arrays are read as one-slice volumes with the lags confined to the plane (`dims=2`; in preparation).
+A two-dimensional array is read as a one-slice volume with the lags confined to the plane and a semicircle of
+directions (`orientations()` does this when given a `(Y, X)` array; the vectors come back as `(3, Y, X)` with a zero z
+component, so the same consumers work).

@@ -87,3 +87,21 @@ order tensors, autocorrelation and Fourier methods, tensor voting, fibre orienta
   rules.md status.
 - Open at 03:45: VOI tractography numbers and figure → docs/data.md; a quick test of angular smoothing in the
   carry-forward for the tight bend; the speed bench on an idle GPU; commit.
+- 03:45–05:00: acceptance scorer fixed (seeds on the stub, through = beyond the crossing, thick grids); acceptance run
+  3; VOI run (670 s, 8 chunks); the slow Python relabel in `stitch_labels` vectorised; artefact resilience script and
+  table; docs/README/CHANGELOG/results log/rules.md; first commit 7572cc5.
+- 05:00–06:20: the real-data finding (the lift reads z, the rotation axis): diagnosed by lift variants against the
+  confident structure tensor on a 256³ block; spectrum null implemented (removes z, but also real orientations on a
+  single block → option, off by default); band-pass option; radially uniform lag weights and the 0.2–0.45 shell (19.5°
+  vs 48.7°) → collapsed the phantom suite in a quick run (the self-response found no single-lobe cells) → reverted to
+  the validated defaults with a response fallback; the first vector carried everywhere; voxel N tied to the weight
+  threshold. Final acceptance and VOI runs launched 06:21.
+- Open for the morning: the acquisition-anisotropy null (data.md lists three candidates); validating the shorter shell
+  on the phantoms with the response fallback in place; identity leakage; the tight bend; 2-D arrays; a fast solve.
+- **Clock correction.** The Montreal times above from "02:30" on were read about an hour late from a wrong mental
+  clock; the machine's own `date` (UK) is the reference: the first commit was 05:0x UK (00:0x Montreal), not 06:30.
+- 00:05–00:50 Montreal: the real-data z problem worked properly: the lag shell shortened to 0.2–0.45 scale (count
+  weights) — real block 48.7° → 14.7° from the confident structure tensor, and the phantoms' crossings improved (band 90
+  through 0.64 → 0.89); the acquisition null from below-floor positions built and measured (option); voxel floors on the
+  lengths after the 40 µm check; 2-D arrays; the one CPU test tolerance; final suite `acceptance_v4`; the final VOI run
+  `S-21-46_20um_cortex_v3d`; a two-seed suite `acceptance_seeds2`.

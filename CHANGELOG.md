@@ -22,9 +22,17 @@ Nothing is trained on the analysed data; one scale parameter.
   `band_crossing(only_second=True)` (a free end) and `texture`; `tracking.track(headings=)`.
 - `shapetensor()` runs the chain (`scale`, `multi`, `weights`, `labels`, `spacing`); `shapetensor.orientations()`
   returns everything. CLI: `run`, `block`, `structure-tensor`, `validate`, `phantom`, `demo`, `bench`, `stats`.
+- Two-dimensional arrays: a one-slice volume with in-plane lags and a semicircle of directions, vectors `(3, Y, X)`.
+  Voxel floors on the lengths tied to `scale` (lags ≥ 2 voxels, high-pass ≥ 3), so the same tissue at a coarser
+  voxel size is read with a smaller `scale` and the lift never measures the point-spread function.
+- The first vector is carried everywhere at its presence weight (the single field is never cut); only the extra
+  vectors are thresholded. The self-response loosens its selection and falls back to a 33° Gaussian profile when a
+  block offers too few single-lobe positions. Options for the real-data problem of §35: `lags`, `radial`,
+  `fine_scale`, `null="spectrum"`, `momentum_angular_deg`.
 - Findings recorded in `TCA_FIELD_RESULTS.md` §35: the high-pass at `0.3 scale` removes most boundary rings; ring atoms
   in the deconvolution dictionary absorb true 90° crossings and were dropped; an N-independent presence; the lattice
-  phase must be shared between chunks for exact seams.
+  phase must be shared between chunks for exact seams; on the HiP-CT volume the exact-lag lift reads the acquisition's
+  anisotropy along the rotation axis (the open problem, with the measured remedies).
 - The 0.2 pipeline (anatomix features, populations unmixed per block) stays importable: `shapetensor.pipeline`,
   `.separate`, `.tensors`, `.merge`, `.features`, `.dev`, `.fibre_sets`, `.lagodf`, `.lagtca`, `.regions`,
   `.classical`; its validation and the kNN population model under `shapetensor.archive`; its docs under `docs/archive`.

@@ -31,8 +31,12 @@ import torch.nn.functional as Fn
 from .filters import gaussian
 
 
-def hemisphere(n: int = 160, device="cpu") -> torch.Tensor:
-    """Roughly uniform unit vectors on a hemisphere (z >= 0), a Fibonacci set, ``(n, 3)`` in (z, y, x)."""
+def hemisphere(n: int = 160, device="cpu", dims: int = 3) -> torch.Tensor:
+    """Roughly uniform unit vectors on a hemisphere (z >= 0), a Fibonacci set, ``(n, 3)`` in (z, y, x); with ``dims=2``
+    a semicircle in the (y, x) plane (z = 0), ``n`` directions over 180°."""
+    if dims == 2:
+        phi = (torch.arange(n, dtype=torch.float64) + 0.5) * math.pi / n
+        return torch.stack([torch.zeros(n, dtype=torch.float64), torch.sin(phi), torch.cos(phi)], 1).float().to(device)
     i = torch.arange(n, dtype=torch.float64) + 0.5
     z = i / n
     phi = i * math.pi * (3 - math.sqrt(5))
@@ -41,8 +45,9 @@ def hemisphere(n: int = 160, device="cpu") -> torch.Tensor:
 
 
 def shell_lags(r_min: float, r_max: float, dims: int = 3) -> np.ndarray:
-    """The integer lag vectors ``(n, dims)`` with ``r_min <= |l| <= r_max`` on one half of the lattice (the first
-    nonzero component positive): every lag and its negative are read together."""
+    """The integer lag vectors ``(n, 3)`` in (z, y, x) with ``r_min <= |l| <= r_max`` on one half of the lattice (the
+    first nonzero component positive): every lag and its negative are read together. With ``dims=2`` the lags lie in
+    the (y, x) plane (z = 0)."""
     R = int(math.ceil(r_max))
     ax = np.arange(-R, R + 1)
     L = np.stack(np.meshgrid(*([ax] * dims), indexing="ij"), -1).reshape(-1, dims)
@@ -50,7 +55,8 @@ def shell_lags(r_min: float, r_max: float, dims: int = 3) -> np.ndarray:
     L = L[(n >= r_min) & (n <= r_max)]
     first = np.argmax(L != 0, axis=1)
     keep = L[np.arange(len(L)), first] > 0
-    return L[keep].astype(np.int64)
+    L = L[keep].astype(np.int64)
+    return np.concatenate([np.zeros((len(L), 1), np.int64), L], 1) if dims == 2 else L
 
 
 def direction_weights(grid: torch.Tensor, lags: np.ndarray, kernel_deg: float, radial: str = "uniform") -> torch.Tensor:
@@ -68,20 +74,27 @@ def direction_weights(grid: torch.Tensor, lags: np.ndarray, kernel_deg: float, r
     return W / W.sum(1, keepdim=True).clamp_min(1e-12)
 
 
-def _pool(x: torch.Tensor, step: int, origin: int) -> torch.Tensor:
-    """``x (Z, Y, X)`` box-averaged onto cells of ``step`` voxels centred on ``origin + step * i`` (the cell of position
-    ``i`` covers voxels ``origin - step // 2 + step * i ...``), replicate-padded at the faces."""
-    if step == 1:
+def _axes(step, origin):
+    """Per-axis ``(step, origin)`` tuples from scalars or tuples."""
+    st = (step,) * 3 if isinstance(step, int) else tuple(int(s) for s in step)
+    og = (origin,) * 3 if isinstance(origin, int) else tuple(int(o) for o in origin)
+    return st, og
+
+
+def _pool(x: torch.Tensor, step, origin) -> torch.Tensor:
+    """``x (Z, Y, X)`` box-averaged onto cells of ``step`` voxels per axis (a scalar or a tuple) centred on
+    ``origin + step * i`` (the cell of position ``i`` covers voxels ``origin - step // 2 + step * i ...``),
+    replicate-padded at the faces; an axis with step 1 is left as it is."""
+    st, og = _axes(step, origin)
+    if all(s == 1 for s in st):
         return x
-    lo = step // 2 - origin
     pad = []
-    for n in reversed(x.shape):
-        hi = (-(n + lo)) % step
-        pad += [max(lo, 0), hi + max(-lo, 0) if lo < 0 else hi]
+    for n, s, o in zip(reversed(x.shape), reversed(st), reversed(og)):
+        lo = s // 2 - o
+        hi = (-(n + lo)) % s
+        pad += [max(lo, 0), hi]
     xp = Fn.pad(x[None, None], pad, mode="replicate")
-    if lo < 0:
-        xp = xp[:, :, -lo:, -lo:, -lo:]
-    return Fn.avg_pool3d(xp, step)[0, 0]
+    return Fn.avg_pool3d(xp, st)[0, 0]
 
 
 def lift(v: torch.Tensor, grid: torch.Tensor, *, r_min: float = 2.5, r_max: float = 6.5, sigma_w: float = 10.0, sigma_m: float = 8.0,
@@ -108,7 +121,8 @@ def lift(v: torch.Tensor, grid: torch.Tensor, *, r_min: float = 2.5, r_max: floa
     var = _pool((Fc * Fc).sum(0), step, origin)
     O = torch.zeros((grid.shape[0],) + tuple(cells), device=Fc.device)
     Q = torch.zeros_like(O) if w is not None else None
-    sw = sigma_w / step
+    st_, _ = _axes(step, origin)
+    sw = tuple((sigma_w / s_) if n_ > 1 else 0.0 for s_, n_ in zip(st_, cells))                   # no window along a one-voxel axis (2-D)
     for b0 in range(0, len(L), lag_batch):
         Lb = L[b0:b0 + lag_batch]
         P = torch.empty((len(Lb),) + tuple(cells), device=Fc.device)
@@ -127,12 +141,12 @@ def lift(v: torch.Tensor, grid: torch.Tensor, *, r_min: float = 2.5, r_max: floa
         if w is not None:
             Q += (W[:, b0:b0 + lag_batch] @ Pw.reshape(len(Lb), -1)).reshape(grid.shape[0], *cells)
         del P, Pw
-    if sw > 0:
+    if any(x_ > 0 for x_ in sw):
         O = gaussian(O, sw, truncate=3.0); var = gaussian(var, sw, truncate=3.0)
         if Q is not None:
             Q = gaussian(Q, sw, truncate=3.0)
     if Q is not None:                                                                          # each direction over the weight of its own pairs,
-        wvar = gaussian(_pool(w * w, step, origin), sw, truncate=3.0) if sw > 0 else _pool(w * w, step, origin)
+        wvar = _pool(w * w, step, origin); wvar = gaussian(wvar, sw, truncate=3.0) if any(x_ > 0 for x_ in sw) else wvar
         return (O / Q.clamp_min(1e-12)) / (var / wvar.clamp_min(1e-12)).clamp_min(1e-12)[None]   # the variance over the weight of its voxels
     return O / var.clamp_min(1e-12)[None]
 

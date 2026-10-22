@@ -28,21 +28,26 @@ from .populations import label_populations, lobe_ring_ratio, momentum, peaks, ri
 class Orientations:
     """The pipeline's parameters, all tied to ``scale`` (the window σ in voxels) unless given; see the module notes."""
 
-    def __init__(self, *, scale: float = 10.0, n_dirs: int = 160, step: int | None = None, lags=(0.25, 0.65), kernel_deg: float = 8.0,
+    def __init__(self, *, scale: float = 10.0, n_dirs: int = 160, step: int | None = None, lags=(0.2, 0.45), kernel_deg: float = 8.0, dims: int = 3,
                  mean_scale: float = 0.3, fine_scale: float = 0.0, excise: float = 3.0, radial: str = "count",
                  nmax: int = 2, min_sep_deg: float = 30.0, rel: float = 0.3, min_share: float = 0.15,
                  momentum: bool = True, reach: int | None = None, sigma_along: float | None = None, momentum_angular_deg: float = 0.0,
                  valley: float = 0.0, angular_deg: float = 6.0, bin_deg: float = 2.5, iters: int = 300,
                  max_ring: float = 0.35, min_prominence: float = 5.0, ring_rel: float = 1.0, ring_on: str = "fodf", rings: bool = False, max_sheet_share: float = 0.5, presence_mode: str = "excess",
                  null_q: float = 0.99, full_factor: float = 2.0, min_weight: float = 0.2, null_crop: int = 256, null: str = "isotropic",
+                 acquisition_null: bool = False, min_null_cells: int = 500,
                  label_angle_deg: float = 20.0, min_fixels: int = 8, device: str = "cuda"):
-        self.scale = float(scale); self.device = device
-        self.grid = hemisphere(n_dirs, device)
+        self.scale = float(scale); self.device = device; self.dims = int(dims)
+        self.grid = hemisphere(n_dirs if self.dims == 3 else max(16, n_dirs // 4), device, dims=self.dims)
         self.step = int(step) if step is not None else max(1, int(round(self.scale / 2.5)))
         self.origin = self.step // 2
-        self.r_min, self.r_max = lags[0] * self.scale, lags[1] * self.scale
-        self.lags = shell_lags(self.r_min, self.r_max)
-        self.sigma_m = float(mean_scale) * self.scale; self.sigma_f = float(fine_scale) * self.scale; self.kernel_deg = float(kernel_deg); self.excise = float(excise)
+        self.steps = (self.step,) * 3 if self.dims == 3 else (1, self.step, self.step)                  # per axis: a 2-D array is a one-slice volume
+        self.origins = (self.origin,) * 3 if self.dims == 3 else (0, self.origin, self.origin)
+        # lengths tied to the scale, with floors in voxels: a lag under 2 voxels measures the point-spread function, not the
+        # structure, and a high-pass under 3 voxels removes the texture itself (at 40 um the same tissue is scale 5-6)
+        self.r_min = max(lags[0] * self.scale, 2.0); self.r_max = max(lags[1] * self.scale, self.r_min + 1.6)
+        self.lags = shell_lags(self.r_min, self.r_max, self.dims)
+        self.sigma_m = max(float(mean_scale) * self.scale, 3.0); self.sigma_f = float(fine_scale) * self.scale; self.kernel_deg = float(kernel_deg); self.excise = float(excise)
         self.radial = str(radial)
         self.nmax, self.min_sep_deg, self.rel, self.min_share = int(nmax), float(min_sep_deg), float(rel), float(min_share)
         self.momentum = bool(momentum); self.valley = float(valley); self.momentum_angular_deg = float(momentum_angular_deg)
@@ -54,7 +59,7 @@ class Orientations:
         self.null_q, self.full_factor, self.min_weight, self.null_crop = float(null_q), float(full_factor), float(min_weight), int(null_crop)
         if null not in ("isotropic", "spectrum"):
             raise ValueError("null must be 'isotropic' or 'spectrum'")
-        self.null = null; self.bias = None
+        self.null = null; self.bias = None; self.acquisition_null = bool(acquisition_null); self.min_null_cells = int(min_null_cells)
         self.label_angle_deg, self.min_fixels = float(label_angle_deg), int(min_fixels)
         self.edge = self.r_max + 2 * self.scale                                                     # voxels too near a face to trust
         self.response = None; self.last_floor = None
@@ -69,13 +74,15 @@ class Orientations:
             from .st import excision_weights
             weights = excision_weights(v if v.dim() == 3 else v[0], factor=self.excise)
         return lift(v, self.grid, r_min=self.r_min, r_max=self.r_max, sigma_w=self.scale, sigma_m=self.sigma_m, sigma_f=self.sigma_f,
-                    step=self.step, origin=self.origin, kernel_deg=self.kernel_deg, lags=self.lags, weights=weights, radial=self.radial)
+                    step=self.steps, origin=self.origins, kernel_deg=self.kernel_deg, lags=self.lags, weights=weights, radial=self.radial)
 
     def interior(self, vshape, cshape) -> torch.Tensor:
         """1 at lattice positions at least ``edge`` voxels from every face of the block, else 0."""
         m = torch.ones(tuple(cshape), device=self.device)
         for ax, (n, c) in enumerate(zip(vshape, cshape)):
-            x = self.origin + self.step * torch.arange(c, device=self.device, dtype=torch.float32)
+            if n == 1:                                                                             # a one-voxel axis (2-D): no faces to keep away from
+                continue
+            x = self.origins[ax] + self.steps[ax] * torch.arange(c, device=self.device, dtype=torch.float32)
             ok = ((x >= self.edge) & (x <= n - 1 - self.edge)).float()
             shp = [1, 1, 1]; shp[ax] = c; m = m * ok.view(shp)
         return m
@@ -97,6 +104,23 @@ class Orientations:
         orientations (a whole volume's calibration region), not on one bundle."""
         O, inner = self._null_lift(v, mask, seed, isotropic=False)
         b = O.reshape(O.shape[0], -1)[:, inner.flatten()].mean(1) if bool(inner.any()) else O.reshape(O.shape[0], -1).mean(1)
+        return b - b.median()
+
+    def acquisition_bias(self, O: torch.Tensor, floor: float, vshape, mask=None) -> torch.Tensor | None:
+        """The **acquisition null**: the mean lift profile ``(n_dirs,)`` (minus its median direction) over the interior
+        positions whose presence lies *below the floor* -- positions the null itself calls structure-free, so whatever
+        they correlate along is the acquisition's (a point-spread function longer along the rotation axis, ring arcs,
+        slice-wise structure), not tissue. Subtracted from the lift it removes that anisotropy everywhere; a block with
+        fewer than ``min_null_cells`` such positions (one bundle filling it) subtracts nothing. Label-free and
+        self-consistent: on isotropic noise the profile is flat."""
+        p = presence(O, self.presence_mode)
+        sel = (self.interior(vshape, O.shape[1:]) > 0) & (p < floor)
+        if mask is not None:
+            m = Fn.avg_pool3d(mask.to(self.device).float()[None, None], self.steps, stride=self.steps)[0, 0]
+            sel = sel & (m[:O.shape[1], :O.shape[2], :O.shape[3]] > 0.5) if m.shape == O.shape[1:] else sel
+        if int(sel.sum()) < self.min_null_cells:
+            return None
+        b = O.reshape(O.shape[0], -1)[:, sel.flatten()].mean(1)
         return b - b.median()
 
     def null_floor(self, v: torch.Tensor, mask=None, seed: int = 0, bias: torch.Tensor | None = None) -> float:
@@ -125,6 +149,11 @@ class Orientations:
         bias = self.bias if bias is None else bias
         if bias is None and self.null == "spectrum":
             bias = self.null_profile(v, mask)
+        if bias is None and self.acquisition_null:                                                  # from the block's own structure-free positions
+            f0 = self.null_floor(v, mask) if isinstance(floor, str) else float(floor)
+            bias = self.acquisition_bias(O, f0, v.shape[-3:], mask)
+            if isinstance(floor, str):
+                floor = f0                                                                          # the surrogate's floor (its profile is flat; the bias leaves it unchanged)
         if bias is not None:
             O = O - bias.view(-1, 1, 1, 1)
         R = response if response is not None else self.response
@@ -144,13 +173,17 @@ class Orientations:
         if self.momentum:
             g = momentum(g, self.grid, sigma_along=self.sigma_along, reach=self.reach, angular_deg=self.momentum_angular_deg)
         wt = g.sum(0)                                                                              # the weight after bridging
+        nbr = None if self.dims == 3 else 1.3 * 180.0 / self.grid.shape[0]
         dirs, share = peaks(g / wt.clamp_min(1e-12)[None], self.grid, nmax=self.nmax, rel=self.rel, min_mass=self.min_share,
-                            min_sep_deg=self.min_sep_deg, valley=self.valley)
-        if self.ring_rel < 1.0:                                                                    # a further lobe on a sheet's ring is not a population
+                            min_sep_deg=self.min_sep_deg, valley=self.valley, nbr_deg=nbr)
+        if self.ring_rel < 1.0 and self.dims == 3:                                                 # a further lobe on a sheet's ring is not a population
             rr = lobe_ring_ratio(g / wt.clamp_min(1e-12)[None] if self.ring_on == "fodf" else O, self.grid, dirs, share)
             share = share * (rr <= self.ring_rel).float()
-        ring, prom = ring_fraction(g, self.grid, dirs, share)
-        sheet = ((ring > self.max_ring) & (prom < self.min_prominence) & (wt >= self.min_weight)) | (sheet_share > self.max_sheet_share)
+        if self.dims == 3:
+            ring, prom = ring_fraction(g, self.grid, dirs, share)
+            sheet = ((ring > self.max_ring) & (prom < self.min_prominence) & (wt >= self.min_weight)) | (sheet_share > self.max_sheet_share)
+        else:                                                                                      # in 2-D a boundary is a line: a direction, not a ring
+            ring = torch.zeros_like(wt); prom = torch.zeros_like(wt); sheet = torch.zeros_like(wt, dtype=torch.bool)
         mass = share * ((wt >= self.min_weight) & ~sheet).float()[None] * wt[None]                 # N = 0 below the weight floor and on sheets
         out = {"N": (mass > 0).sum(0), "mass": mass, "share": share, "dirs_cells": dirs, "presence": p, "weight": wt, "fodf": g,
                "ring": ring, "prominence": prom, "sheet": sheet, "sheet_share": sheet_share, "floor": float(floor), "response": R, "lift": O,
@@ -166,9 +199,9 @@ class Orientations:
         a grid_sample grid ``(1, zs, Y, X, 3)`` in (x, y, z) order, normalised to the cell lattice."""
         Z, Y, X = shape
         ax = []
-        for n, c, lo, hi in ((Z, cs[0], z0, z1), (Y, cs[1], 0, Y), (X, cs[2], 0, X)):
+        for (n, c, lo, hi), s_, o_ in zip(((Z, cs[0], z0, z1), (Y, cs[1], 0, Y), (X, cs[2], 0, X)), self.steps, self.origins):
             j = torch.arange(lo, hi, device=self.device, dtype=torch.float32)
-            ax.append(((j - self.origin) / self.step) * (2.0 / max(c - 1, 1)) - 1.0)
+            ax.append(((j - o_) / s_) * (2.0 / max(c - 1, 1)) - 1.0)
         gz, gy, gx = torch.meshgrid(*ax, indexing="ij")
         return torch.stack([gx, gy, gz], -1)[None]
 
@@ -193,7 +226,8 @@ class Orientations:
             w_s = Fn.grid_sample(wt[None, None], grd, mode="bilinear", padding_mode="border", align_corners=True)[0, 0]
             s_s = Fn.grid_sample(sheet[None, None], grd, mode="nearest", padding_mode="border", align_corners=True)[0, 0]
             tot = gs.sum(0).clamp_min(1e-12)
-            d, share = peaks(gs / tot[None], self.grid, nmax=K, rel=self.rel, min_mass=self.min_share, min_sep_deg=self.min_sep_deg, valley=self.valley)
+            d, share = peaks(gs / tot[None], self.grid, nmax=K, rel=self.rel, min_mass=self.min_share, min_sep_deg=self.min_sep_deg, valley=self.valley,
+                             nbr_deg=None if self.dims == 3 else 1.3 * 180.0 / self.grid.shape[0])
             not_sheet = (s_s < 0.5).float(); keep = (w_s >= self.min_weight).float() * not_sheet
             wk = torch.cat([not_sheet[None], keep[None].expand(K - 1, -1, -1, -1)]) if K > 1 else not_sheet[None]      # the first vector everywhere (weighted), the extras thresholded
             vecs[:, :, z0:z1] = d; weights[:, z0:z1] = share * w_s[None] * wk
@@ -201,9 +235,9 @@ class Orientations:
             if T is not None:
                 T[:, z0:z1] = torch.stack([c @ gs.reshape(nd, -1) for c in (gx * gx, gy * gy, gz * gz, gx * gy, gx * gz, gy * gz)]).reshape(6, z1 - z0, Y, X)
             if labs is not None:                                                                   # the label of the nearest cell's best-aligned fixel
-                cz = ((torch.arange(z0, z1, device=dev) - self.origin) / self.step).round().long().clamp(0, cs[0] - 1)
-                cy = ((torch.arange(Y, device=dev) - self.origin) / self.step).round().long().clamp(0, cs[1] - 1)
-                cx = ((torch.arange(X, device=dev) - self.origin) / self.step).round().long().clamp(0, cs[2] - 1)
+                cz = ((torch.arange(z0, z1, device=dev) - self.origins[0]) / self.steps[0]).round().long().clamp(0, cs[0] - 1)
+                cy = ((torch.arange(Y, device=dev) - self.origins[1]) / self.steps[1]).round().long().clamp(0, cs[1] - 1)
+                cx = ((torch.arange(X, device=dev) - self.origins[2]) / self.steps[2]).round().long().clamp(0, cs[2] - 1)
                 Lc = lab_c[:, cz][:, :, cy][:, :, :, cx]                                             # (K, zs, Y, X)
                 Dc = dirs_c[:, :, cz][:, :, :, cy][:, :, :, :, cx]                                   # (K, 3, zs, Y, X)
                 for r in range(K):
@@ -231,10 +265,16 @@ class Orientations:
 
 def orientations(image, *, spacing=None, device: str = "cuda", **kwargs) -> dict:
     """The whole chain on one array ``(Z, Y, X)`` (numpy, cupy or torch; grey levels or any scalar field; ``(K, Z, Y, X)``
-    channels add). ``spacing (dz, dy, dx)``: anisotropic voxels are resampled to the finest axis for the analysis and the
+    channels add; a 2-D array ``(Y, X)`` gives vectors ``(3, Y, X)`` with a zero z component). ``spacing (dz, dy, dx)``: anisotropic voxels are resampled to the finest axis for the analysis and the
     field is resampled back. Keyword arguments are :class:`Orientations` parameters (``scale`` above all)."""
     from .st import _to_torch, from_isotropic, spacing_ratio, to_isotropic
     v = _to_torch(image, device, torch.float32)
+    if v.dim() == 2:                                                                               # a 2-D array: one slice, in-plane lags; the slice axis squeezed out below
+        out = Orientations(device=device, dims=2, **kwargs).run(v[None])
+        for k in ("vecs", "weights", "labels", "vec", "weight", "N", "sheet"):
+            if k in out:
+                out[k] = out[k].squeeze(-3)
+        return out
     sp = spacing_ratio(spacing)
     vi = to_isotropic(v, sp) if sp is not None else v
     out = Orientations(device=device, **kwargs).run(vi)

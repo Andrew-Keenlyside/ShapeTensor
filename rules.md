@@ -337,14 +337,17 @@ pull two ways:
 | Stage | Built | Against your design |
 | --- | --- | --- |
 | Lift (shape space) | `lift.py`: the array lifted to positions × directions by its local lagged autocorrelation on an integer-lag shell, on a lattice; null from the block's isotropic surrogate; response from the block itself; excision inside the correlation | The lift is the classical "shape space": it holds any number of populations and the structure tensor is its zero-lag moment. anatomix is not in the chain (optional engine for later presence weighting); R7 read as "classical after the embedding, embedding optional" |
-| Separation | `populations.peaks` after deconvolution: N per position from the data, N ≤ 2 and ≥ 30° by default (R1) | Meets R1; intermixed 90° crossings lose a third of cells to low presence; 45° unresolved |
+| Separation | `populations.peaks` after deconvolution: N per position from the data, N ≤ 2 and ≥ 30° by default (R1) | Meets R1; intermixed 90° crossing N2 0.96 with both within 15° at 0.95; 60° / 45° two lobes found (N2 0.89 / 0.65) but not both to 15° (0.36 / 0.34) |
 | Momentum | `populations.momentum`: along each direction, bridge where both sides hold, never extend a free end; 0.5 mm at 20 µm (R2) | Meets R2; per-population straight/bending calibration not built; the tightest bend (0.3 mm radius) is partly lost |
 | Identities | `populations.label_populations` + `volume.stitch_labels` across chunks (R3) | Meets R3 (one label through a bend, two through a crossing; leakage 4–15%) |
 | Weighting | presence weight (N-independent excess over the median) from the surrogate floor; single field never cut; multi-vector field thresholded (R5) | Meets R5 except the intensity-correlation weight (not built) |
 | Native resolution, generality | `field.py`: the field at every input voxel; `orientations(spacing=)` for anisotropic voxels; channels add; tested in unit tests (R6) | Meets R6 for 3-D; 2-D arrays not yet; multi-resolution phantom scores not yet |
 | Volume driver | `volume.run_volume`: chunks with a halo that reproduce a one-pass result exactly (shared floor and response), multi-process, label stitching (R12) | Meets R12; a solve argument full/fibre/fast (R11) not built |
-| Tracking (the aim) | `validate.py`: through-crossing on its own band 0.64/0.81/0.68 at 90/60/45° (structure tensor 0.07/0.42/0.40); T and free end never extended | Below the 0.9 target but the structure tensor's switching is removed; see docs/validation.md |
-| Artefacts | not re-tested for the new chain (R9 open) | — |
+| Tracking (the aim) | `validate.py`: through-crossing on its own band 0.89/0.86/0.89 at 90/60/45° (structure tensor 0.06/0.42/0.40), switched 0.00–0.11 (0.55–0.65); T-junction and free end never extended (0.00 / 0.02 against the structure tensor's 0.40 past a free end); intermixed 90° crossing: streamlines stay on their population at 0.99 (0.10–0.22) | At or just under the 0.9 target; the tightest bend (0.3 mm radius) is the open case (0.39 vs 0.92); see docs/validation.md |
+| Resolution | voxel floors on the lags (≥ 2) and the high-pass (≥ 3) keep the chain working at 40 µm with `scale` 6 (bundle 0.96 / 2.2°, band 90 N2 0.82) | Meets R6's multi-resolution test for one step of 2× |
+| 2-D arrays | `orientations()` on a `(Y, X)` array: in-plane lags, a semicircle grid, vectors `(3, Y, X)` | Meets the "any array" claim for 2-D |
+| Artefacts | `scripts/artefacts_chain.py`: streaks up to 2× the fibre contrast cost 1–6° (structure tensor 2–16°); rings make the block a sheet (R9 partly) | Rings open |
+| Real data | the VOI run (`scripts/voi_cortex.py`): the lift reads the acquisition's z-anisotropy in low-coherence white matter (two thirds of first lobes near the rotation axis); remedies measured, none adopted as default (results log §35, docs/data.md) | **The open problem** |
 
 ### Conflicts between instructions (for you to settle)
 

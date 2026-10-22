@@ -73,20 +73,23 @@ HiP-CT crop (20° of dispersion within a population). Full tables in `docs/valid
 
 | phantom | measure | shape | structure tensor |
 |---|---|---|---|
-| band crossing 90° / 60° / 45° | streamlines through the crossing on their own band | 0.74 / 0.81 / 0.68 | 0.07 / 0.42 / 0.40 |
-| | switched to the other band | 0.04 / 0.12 / 0.19 | 0.65 / 0.55 / 0.55 |
+| band crossing 90° / 60° / 45° | streamlines through the crossing on their own band | 0.89 / 0.86 / 0.89 | 0.06 / 0.42 / 0.40 |
+| | switched to the other band | 0.00 / 0.11 / 0.05 | 0.65 / 0.55 / 0.55 |
 | T-junction | false continuation past the T | 0.00 | 0.00 |
-| a bundle that ends in texture | streamlines continuing past the end | 0.00 | 0.40 |
-| intermixed crossing 90° / 60° | streamlines staying within 15° of their population | 0.57–0.67 | 0.00–0.22 |
-| bend of radius 0.3 / 0.8 / 1.3 mm | through the 90° turn | 0.52 / 0.83 / 0.99 | 0.92 / 0.85 / 0.99 |
-| single populations | direction, median | 3–6° | 3–6° |
+| a bundle that ends in texture | streamlines continuing past the end | 0.02 | 0.40 |
+| intermixed crossing 90° / 60° | streamlines staying within 15° of their population | 0.99 / 0.67–0.91 | 0.10–0.22 / 0.00 |
+| bend of radius 0.3 / 0.8 / 1.3 mm | through the 90° turn | 0.39 / 0.92 / 0.99 | 0.92 / 0.85 / 0.99 |
+| single populations | direction, median | 2–7° | 3–6° |
 | texture | populations found | none | (always one) |
 
 The tightest bend — a turn of 15 voxels inside a 0.2 mm window — is the case the structure tensor still tracks better,
-and the remaining open items (through-crossing short of 0.9, identity leakage of 4–15%, intermixed 45° crossings
-unresolved) are listed with their numbers in the validation page. **On real HiP-CT data the lift also reads the
-acquisition's own anisotropy** (structure constant along the rotation axis), which an isotropic null cannot separate
-from tissue; `docs/data.md` shows the effect and the measured remedies, and this is the first open problem.
+and the remaining open items (identity leakage of 5–15%, the pair at 60° and 45° intermixed crossings not both
+resolved to 15°) are listed with their numbers in the validation page. **On real HiP-CT data the lift also reads the
+acquisition's own anisotropy** — a population along the rotation axis in most of the white matter beside the in-plane
+one, which agrees with the structure tensor where the latter is confident (15° median); an isotropic null cannot
+separate it from tissue. `docs/data.md` shows the effect, the tractography (median streamline 3.5 mm, none folded,
+against 8 mm to the edge with 8% folded for the structure tensor) and the measured remedies; it is the first open
+problem.
 
 ## Speed
 

@@ -7,7 +7,7 @@ parameter sets the scale; the others are bounds and switches with defaults that 
 
 | parameter | default | what it is |
 |---|---|---|
-| `scale` | 10 voxels | the window σ. Tied to it: the lags (`0.25–0.65 scale`), the lattice step (`scale / 2.5`), the high-pass (`0.3 scale`), the carry-forward Gaussian (`1.2 scale`) and reach (`2.4 scale`), the trusted margin (`0.65 scale + 2 scale`). At 20 µm, 10 is a 0.2 mm window and a 0.5 mm reach; at 50 µm the same tissue scale is `scale=4`. |
+| `scale` | 10 voxels | the window σ. Tied to it: the lags (`0.2–0.45 scale`), the lattice step (`scale / 2.5`), the high-pass (`0.3 scale`), the carry-forward Gaussian (`1.2 scale`) and reach (`2.4 scale`), the trusted margin (`0.45 scale + 2 scale`). At 20 µm, 10 is a 0.2 mm window and a 0.5 mm reach; at 50 µm the same tissue scale is `scale=4`. |
 
 Choose it as you would the structure tensor's ρ: large enough that a window holds several structures of the
 population, small enough that the population does not turn much inside it. Resolution changes mean a proportional
@@ -32,9 +32,10 @@ change of `scale`; nothing else.
 | `excise` | 3.0 | voxels whose coarse gradient exceeds this × the median are left out of the correlation; 0 to disable |
 | `mean_scale` | 0.3 | the high-pass σ as a fraction of `scale`. 0.3 keeps the fibre texture (periods of 3–10 voxels at 20 µm) and removes the slow structure of boundaries; 0.8 let a fascicle's boundary lift to a ring whose far point became a false second population (bend fascicles with one population 0.56 → 0.86 from 0.8 to 0.3) |
 | `presence_mode` | `"excess"` | the lobe mass above the median (N-independent); `"peak"` the peak height (halves at a crossing) |
-| `lags` | (0.25, 0.65) | the shell of lag radii as fractions of `scale` (2.5–6.5 voxels at the default). Shorter lags (0.2, 0.45) with `radial="uniform"` follow the structure tensor more closely on the HiP-CT volume (19° against 48° at its confident voxels) but were not validated on the phantoms in time; see the results log |
+| `lags` | (0.2, 0.45) | the shell of lag radii as fractions of `scale` (2–4.5 voxels at the default). The first build used (0.25, 0.65): sharper on the phantoms' intermixed crossings at the cost of reading the acquisition's anisotropy on the HiP-CT volume (48° from the confident structure tensor against 15°); see the results log |
 | `radial` | `"count"` | how the shell's lags are weighted per direction: the lattice's own count (`∝ r²`, the longest lags dominate) or `"uniform"` (`1 / r²`, every radius alike) |
 | `fine_scale` | 0 | a low-pass (fraction of `scale`) before the high-pass: a band-pass that keeps voxel-scale acquisition structure out of the correlation (0.1 = 1 voxel at the default); little effect on the HiP-CT volume |
+| `acquisition_null` | off | subtract the mean lift profile of the positions *below the floor* (what structure-free positions correlate along is the acquisition's): on the HiP-CT block it halves the share of first lobes along the rotation axis (0.64 → 0.41) and costs 10–15% of the phantoms' crossing cells; `min_null_cells` (500) positions are needed, else nothing is subtracted |
 | `null` | `"isotropic"` | the surrogate the presence floor is measured on. `"spectrum"` keeps the block's full, anisotropic power spectrum and subtracts the surrogate's mean directional lift from every lift: it removes what the acquisition alone puts into the field (a point-spread function longer along the rotation axis, rings), but also a region's dominant real orientation, so it must be measured on a region with many orientations (`run_volume(null="spectrum")` on its calibration region) |
 | `momentum_angular_deg` | 0 | an angular smoothing inside the carry-forward so bends are followed; 8° changed the tight bend by less than 1% |
 | `max_ring`, `min_prominence` | 0.35, 5 | the sheet rule |

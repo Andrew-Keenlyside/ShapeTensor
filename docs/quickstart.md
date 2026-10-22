@@ -27,7 +27,7 @@ vec_st = st.structure_tensor(image, rho=10.0)                                   
 | `spacing` | voxel size per axis `(dz, dy, dx)` for anisotropic data | isotropic |
 | `nmax`, `min_sep_deg` | the most populations per voxel and their least separation | 2, 30° |
 
-Give the block context on every face: the field is unreliable within `0.65 scale + 2 scale` voxels of a face (27 at
+Give the block context on every face: the field is unreliable within `0.45 scale + 2 scale` voxels of a face (25 at
 the default), where the weight is zero.
 
 ## A whole volume
