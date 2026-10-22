@@ -66,11 +66,12 @@ class Orientations:
 
     # -- the lattice stages ---------------------------------------------------------------------------------------
 
-    def lift(self, v: torch.Tensor, weights: torch.Tensor | None = None) -> torch.Tensor:
+    def lift(self, v: torch.Tensor, weights: torch.Tensor | None = None, excise: bool | None = None) -> torch.Tensor:
         """The lift of ``v``; with ``excise`` > 0 and no ``weights`` given, voxels whose coarse gradient exceeds ``excise``
-        x the median (a boundary, a vessel wall) are left out of the correlation (:func:`shapetensor.st.excision_weights`)."""
+        x the median (a boundary, a vessel wall) are left out of the correlation (:func:`shapetensor.st.excision_weights`).
+        For a multichannel field (features) pass the ``weights`` from the image, or ``excise=False``."""
         v = v.to(self.device)
-        if weights is None and self.excise > 0:
+        if weights is None and self.excise > 0 and (excise if excise is not None else v.dim() == 3):
             from .st import excision_weights
             weights = excision_weights(v if v.dim() == 3 else v[0], factor=self.excise)
         return lift(v, self.grid, r_min=self.r_min, r_max=self.r_max, sigma_w=self.scale, sigma_m=self.sigma_m, sigma_f=self.sigma_f,
@@ -91,9 +92,11 @@ class Orientations:
         v = v.to(self.device)
         sl = tuple(slice(max(0, (n - self.null_crop) // 2), max(0, (n - self.null_crop) // 2) + min(n, self.null_crop)) for n in v.shape[-3:])
         vc = v[(...,) + sl].contiguous(); mc = None if mask is None else mask.to(self.device)[sl].contiguous()
-        s = iso_surrogate(vc if vc.dim() == 3 else vc[0], mc, seed, isotropic=isotropic)
-        O = self.lift(s)
-        return O, self.interior(s.shape, O.shape[1:]) > 0
+        if vc.dim() == 3:
+            s = iso_surrogate(vc, mc, seed, isotropic=isotropic); O = self.lift(s)
+        else:                                                                                  # a multichannel field: one surrogate per channel
+            s = torch.stack([iso_surrogate(vc[k], mc, seed + k, isotropic=isotropic) for k in range(vc.shape[0])]); O = self.lift(s, excise=False)
+        return O, self.interior(s.shape[-3:], O.shape[1:]) > 0
 
     def null_profile(self, v: torch.Tensor, mask=None, seed: int = 0) -> torch.Tensor:
         """The **spectrum null**'s directional bias ``(n_dirs,)``: the mean lift, over the interior positions of the

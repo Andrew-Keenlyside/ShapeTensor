@@ -494,3 +494,41 @@ reach 3 cells 0.45, reach 3 with sigma 1.5 cells 0.41, momentum off 0.36 -- whil
 carry-forward (through 0.89 default, 0.71 at reach 3, 0.60 off). The turn of 15 voxels is lost at the window (scale 10,
 lattice step 4), not in the smoothing along the direction; a smaller scale there, or a curved continuation (the
 orientation-score diffusion of Duits et al.), is the remedy. Defaults unchanged.
+
+## 36. From dev-vit to separated populations: what the full 32-D output holds (2026-10-22, daytime)
+
+Scripts `scripts/ab_anatomix_lift.py`, `devvit_separation.py`, `devvit_harmonic.py`, `devvit_ordering.py`,
+`devvit_partition.py`; results under `results/dev_pipeline/{ab_anatomix,ab_anatomix_raw,devvit_separation,devvit_harmonic,
+devvit_ordering,devvit_partition}`. All on the raw 32-channel output (`l2=False`, float32; the engines' default per-voxel L2
+normalisation had been discarding the response magnitude -- a handling flaw, fixed for these tests, not the cause of what
+follows). No PCA anywhere.
+
+- **The lift of the feature field** (the intensity chain with F in place of the image). enc2: no lobe on a bundle, a lobe
+  along x on every phantom and on fibre-free texture (mean lift within 15 deg of x +0.25 against y +0.06, z +0.08: a network
+  anisotropy), populations in 71-83% of fibre-free cells. dev-vit: a correct but broad lobe on the bundle (5 deg), the
+  intermixed crossings unresolved (both within 15 deg 0.30 at 90, 0.01-0.23 at 60 over lag shells of 2-4.5 / 4-9 / 6-13
+  voxels), the band crossing's bands read as sheets (rings) and the overlap's second lobe along the extrusion axis. dev-vit's
+  presence map of the band crossing is the cleanest of the three fields; as a direction space it fails the lift's three
+  requirements (additivity, angular order, a measurable response).
+- **The signature's angular order.** dev-vit's window-mean feature against fibre angle (12 reference bundles): harmonics to
+  l = 2 explain 42% of the angular variance, l <= 4 70%, l <= 6 77% -- unlike enc2 (98% second order). The code is above the
+  structure tensor's order. NNLS onto the 12 signatures: crossing 90 N2 0.47 (both within 15 deg 0.23), 60 N2 0.38 (0.04),
+  band overlap 0.
+- **A harmonic readout** (ridge regression from all 32 channels to [1, cos 2t, sin 2t, (cos 4t, sin 4t)], fitted on the
+  references): degree 2 never finds two populations (N2 0.00 everywhere: a planar tensor); degree 4 finds them -- crossing
+  60 N2 0.77, both within 15 deg 0.46; crossing 90 N2 0.91, pair 16 deg, both 0.22; 45 found, pair 21 deg; the band overlap
+  still one lobe (N1 0.66). The best dev-vit-only separation measured.
+- **Deconvolve-then-separate vs separate-then-deconvolve** on that readout: on the band crossing and the T-junction the
+  window-mean readout fails outright (two populations in 58-69% of fibre-free cells; single bands 28-47 deg off) -- a 0.4 mm
+  band in grey-matter texture gives a window mean off the dictionary -- so the ordering cannot be judged there; on the
+  intermixed 60 deg crossing the four orderings differ by <= 0.04 (readout 0.52, + carry-forward along each direction 0.55,
+  W smoothed along its dominant axis 0.55, sliceTCA 0.52).
+- **The per-voxel cloud** (no window mean). Band-1-only vs band-2-only voxels separate perfectly (Fisher 53, accuracy 1.00)
+  -- but so do two halves of the intermixed crossing that both hold both populations (0.95): the per-voxel feature carries
+  position and tile context. Inside the band overlap 55% of voxels project toward band 1, 1.7% toward band 2: the crossing
+  is a third region of the shape space, not a superposition. A label-free two-way split with a Gaussian-null gap criterion
+  accepts a split in 99% of windows (phantom and HiP-CT alike, cortex and white matter): smooth fields cluster by position.
+- **Conclusion.** anatomix answers "what tissue, in what context"; the population information is present only as a
+  window-level angular code of degree ~4, which resolves 60 deg crossings at about half the cells and cannot assign voxels
+  to populations. Hence `notes/plan_population_model.md`: a model supervised on population content, with the acquisition's
+  signature as a training nuisance, replacing the lift.
