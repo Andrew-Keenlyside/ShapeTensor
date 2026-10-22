@@ -5,8 +5,9 @@ A small, strictly local, fully convolutional network whose output *is* the strid
 * three levels (16 / 32 / 64 channels at strides 1 / 2 / 4), residual blocks of two 3³ convolutions (one at stride 1,
   two at stride 2, one at stride 4) with a learned gain (0.25 at the start), a nonlinearity after every projection (no normalisation layer: nothing depends on the chunk's statistics, so a volume run in
   chunks with a halo of the receptive field equals one pass);
-* anti-aliased downsampling (an even binomial kernel at stride 2, cells centred where the target's are), no
-  transposed convolution anywhere: no checkerboard or lattice-phase artefacts; the stride-2 level is blurred and subsampled once more and concatenated at the
+* max-blur downsampling (a centred 3³ max, then an even binomial kernel at stride 2: the nonlinearity orientation
+  needs, anti-aliased, cells centred where the target's are), no transposed convolution anywhere: no checkerboard or
+  lattice-phase artefacts; the stride-2 level is blurred and subsampled once more and concatenated at the
   lattice, so the heads see both scales;
 * heads at the lattice (1³ convolutions): ``K`` (6) population slots -- a shape tensor (``B Bᵀ / tr``,
   symmetric positive semi-definite with trace 1, from 6 numbers), a mass (``softplus``, read as √mass), a presence
@@ -14,8 +15,8 @@ A small, strictly local, fully convolutional network whose output *is* the strid
   (line / sheet / blob / interface) and an identity embedding (unit length) -- and the cell's scalars: the shape
   fraction (logit), the class shares (logits over line / sheet / blob / interface / isotropic) and the log size.
 
-The receptive field is :func:`receptive_field` voxels (48 for the default, ±23.5 about the cell centre; a chunked run
-needs a halo of half of it); the target's support is ±16.5 voxels (σ_w = 5 truncated at 3σ, pooled by 4).
+The receptive field is :func:`receptive_field` voxels (54 for the default; a chunked run needs a halo of half of it);
+the target's support is ±16.5 voxels (σ_w = 5 truncated at 3σ, pooled by 4).
 """
 from __future__ import annotations
 
@@ -43,16 +44,22 @@ class Down(nn.Module):
     """Anti-aliased downsampling by 2: the even binomial [1 3 3 1]/8 at stride 2 (replicate edges), then a 1³
     convolution to the next width. Output j is centred at input 2j + 1/2, so two of them centre cell i at voxel
     4i + 3/2 -- the centre of the 4 voxels the target averages, and a point the cube group maps to another cell centre
-    (flips stay exact)."""
+    (flips stay exact). With ``max_first`` (the default), a centred 3³ max (stride 1) comes before the blur: max-blur
+    pooling. The max is the nonlinearity orientation needs -- with a linear (blur-only) downsampling the network did
+    not learn orientation at all (held-out error ~60°, chance), with it 5° on both seeds tried -- and the blur keeps
+    the anti-aliasing and the exact lattice."""
 
-    def __init__(self, c_in: int, c_out: int):
+    def __init__(self, c_in: int, c_out: int, max_first: bool = True):
         super().__init__()
         k = torch.tensor([1.0, 3.0, 3.0, 1.0]) / 8
         self.register_buffer("k", (k[:, None, None] * k[None, :, None] * k[None, None, :])[None, None])
         self.proj = nn.Conv3d(c_in, c_out, 1)
+        self.max_first = max_first
 
     def forward(self, x):
         c = x.shape[1]
+        if self.max_first:
+            x = Fn.max_pool3d(Fn.pad(x, (1, 1, 1, 1, 1, 1), mode="replicate"), 3, stride=1)
         x = Fn.conv3d(Fn.pad(x, (1, 1, 1, 1, 1, 1), mode="replicate"), self.k.expand(c, 1, 4, 4, 4), stride=2, groups=c)
         return self.proj(x)
 

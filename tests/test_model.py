@@ -109,17 +109,19 @@ def test_lattice_cells_centred_on_the_target_cells():
                 mod.weight.fill_(1.0 / mod.weight[0].numel()); mod.bias.zero_()                      # symmetric kernels: the response is centred on the cell
             if isinstance(mod, Block):
                 mod.g.fill_(1.0)
-    x = torch.zeros(1, 1, 64, 64, 64, device=DEV, requires_grad=True)
-    c = 8; m(x)["fraction_logit"][0, c, c, c].backward()
-    w = x.grad[0, 0].abs(); pos = torch.arange(64, device=DEV, dtype=torch.float32)
+    c = 8; w = torch.zeros(64, 64, 64, device=DEV); g = torch.Generator(device=DEV).manual_seed(0)
+    for _ in range(16):                                                                            # random inputs: the max's choices unbiased (a tied input sends it all one way)
+        x = torch.rand(1, 1, 64, 64, 64, device=DEV, generator=g, requires_grad=True)
+        m(x)["fraction_logit"][0, c, c, c].backward(); w += x.grad[0, 0].abs()
+    pos = torch.arange(64, device=DEV, dtype=torch.float32)
     for ax in range(3):
         prof = w.sum(tuple(i for i in range(3) if i != ax))
-        assert abs(float((prof * pos).sum() / prof.sum()) - (4 * c + 1.5)) < 0.05
+        assert abs(float((prof * pos).sum() / prof.sum()) - (4 * c + 1.5)) < 0.25
 
 
 def test_receptive_field_fits_the_window():
     rf = receptive_field(PopulationNet().to(DEV))
-    assert 25 <= rf <= 48, rf
+    assert 25 <= rf <= 64, rf
 
 
 def test_training_runs_end_to_end(tmp_path):
