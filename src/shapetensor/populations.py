@@ -30,7 +30,7 @@ def _base_grid(cs, device):
 
 
 def momentum(O: torch.Tensor, grid: torch.Tensor, *, sigma_along: float = 3.0, reach: int = 6, angular_deg: float = 0.0,
-             dir_batch: int = 40) -> torch.Tensor:
+             dir_batch: int = 40, smooth: bool = True) -> torch.Tensor:
     """Population-specific smoothing of distributions ``O (n_dirs, Z, Y, X)`` (lattice cells). For each direction ``u``
     (after an optional angular smoothing of ``angular_deg`` so bends are followed):
 
@@ -40,6 +40,9 @@ def momentum(O: torch.Tensor, grid: torch.Tensor, *, sigma_along: float = 3.0, r
     * the result ``min(max(sm, bridge), max(O, bridge))``: a dip between two holding sides (a crossing, a gap) is lifted
       to the bridge, a spike is smoothed, and beyond a free end the smoothing's tail is cut by the cell's own value, so
       nothing is extended.
+
+    With ``smooth=False`` only the bridge is applied, ``max(O, bridge)``: dips are lifted, nothing is smoothed (for
+    sharp, already-smoothed distributions, where smoothing along a bending field would split a lobe).
 
     All directions of a batch are sampled in one call per lag (``dir_batch`` at a time)."""
     nd = O.shape[0]; cs = tuple(O.shape[1:]); dev = O.device
@@ -67,7 +70,10 @@ def momentum(O: torch.Tensor, grid: torch.Tensor, *, sigma_along: float = 3.0, r
                 sm = sm + wt[t - 1] * s
                 torch.maximum(acc, s, out=acc)
         bridge = torch.minimum(fw, bw)
-        out[d0:d0 + dir_batch] = torch.minimum(torch.maximum(sm, bridge), torch.maximum(O[d0:d0 + dir_batch], bridge))
+        if smooth:
+            out[d0:d0 + dir_batch] = torch.minimum(torch.maximum(sm, bridge), torch.maximum(O[d0:d0 + dir_batch], bridge))
+        else:
+            out[d0:d0 + dir_batch] = torch.maximum(O[d0:d0 + dir_batch], bridge)
     return out
 
 
