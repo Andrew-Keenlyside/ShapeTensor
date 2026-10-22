@@ -39,7 +39,8 @@ from shapetensor import st
 from shapetensor.experimental import fibre_sets as FS
 from shapetensor.phantoms import BEND_GRID, BEND_RADII, BEND_WIDTH, Grid, TextureParams, build, finish
 from shapetensor.pipeline import apply, calibrate
-from shapetensor.validate import ANGLES, SETTINGS, score
+from shapetensor.validate import ANGLES, SETTINGS
+from shapetensor.archive.validate_released import score
 
 OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/home/andrew/bridge_wmcov/shapetensor/prototypes/fibre_sets")
 if __import__("os").environ.get("QUICK") == "1":

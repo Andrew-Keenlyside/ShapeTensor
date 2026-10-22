@@ -7,8 +7,9 @@
 * ``bend`` — three fascicles turning through 90° in grey-matter-level tissue (where a population defined by one
   direction splits a single bundle); ``straight=True`` is its control, the same fascicles without the turn,
 * ``band_crossing`` — two straight fascicles crossing at ``cross_deg`` in grey-matter-level tissue (two populations
-  that must stay apart where they overlap and each stay whole on either side).
-  Both are prototypes' phantoms, not yet part of the validation.
+  that must stay apart where they overlap and each stay whole on either side); ``t_junction`` stops the second at the
+  first, ``only_second`` leaves the stopped second alone (a free end),
+* ``texture`` — fibre-free texture: nothing to orient.
 
 Conventions. Arrays are ``(Z, Y, X)``; vectors are ``(z, y, x)``. Fibres are straight lines in x–z planes at random
 y (the tissue is extruded along y), splatted into a density that darkens the tissue, with a mixture of widths,
@@ -303,7 +304,8 @@ def bend(grid: Grid, tex: TextureParams, rng, centre=BEND_CENTRE, radii=BEND_RAD
     return img, tr, {"centre_mm": list(centre), "radii_mm": list(radii), "width_mm": width, "straight": straight}
 
 
-def band_crossing(grid: Grid, tex: TextureParams, rng, cross_deg: float = 90.0, width: float = 0.4, t_junction: bool = False, device="cuda"):
+def band_crossing(grid: Grid, tex: TextureParams, rng, cross_deg: float = 90.0, width: float = 0.4, t_junction: bool = False, device="cuda",
+                  only_second: bool = False):
     """Two straight fascicles ``width`` mm wide through the core's centre, at 45 ± ``cross_deg`` / 2 (as ``crossing``),
     in grey-matter-level tissue. Truth: ``dir1`` / ``dir2`` the two directions where each fascicle is (``dir1`` the only
     one where a single fascicle is), ``npop`` 1 or 2, ``region`` 2 in the fascicles and 1 elsewhere, and the masks
@@ -320,9 +322,12 @@ def band_crossing(grid: Grid, tex: TextureParams, rng, cross_deg: float = 90.0, 
     corridor2 = bands[1].copy()
     if t_junction:
         bands[1] = bands[1] & (signed[0] <= 0)
+    if only_second:                                                                           # a free end: the stopped second band alone in texture
+        bands[0] = np.zeros_like(bands[0])
     sp = Splat(grid, tex, rng, device)
     for a, m in zip((a1, a2), bands):
-        add_population(sp, a, 1.0, region2d=m)
+        if m.any():
+            add_population(sp, a, 1.0, region2d=m)
     tr = blank_truth(grid)
     b1, b2 = bands
     tr["dir1"][b1] = direction(a1); tr["dir1"][b2 & ~b1] = direction(a2); tr["dir2"][b1 & b2] = direction(a2)
@@ -331,10 +336,18 @@ def band_crossing(grid: Grid, tex: TextureParams, rng, cross_deg: float = 90.0, 
     inside = b1 | b2
     img = finish(grid, tex, np.where(inside, tex.levels["wm"], tex.levels["gm"]).astype(np.float32),
                  np.where(inside, tex.amp, 0.0).astype(np.float32), sp.render(), rng)
-    return img, tr, {"cross_deg": cross_deg, "angles": [a1, a2], "width_mm": width, "t_junction": t_junction}
+    return img, tr, {"cross_deg": cross_deg, "angles": [a1, a2], "width_mm": width, "t_junction": t_junction, "only_second": only_second}
 
 
-PHANTOMS = {"bundle": bundle, "crossing": crossing, "interface": interface, "bend": bend, "band_crossing": band_crossing}
+def texture(grid: Grid, tex: TextureParams, rng, level: str = "gm", device="cuda"):
+    """Fibre-free texture at the ``level`` grey value (the noise alone): nothing to orient. Truth ``npop`` 0."""
+    Z, X = grid.shape[0], grid.shape[2]
+    tr = blank_truth(grid); tr["region"][:] = 1
+    img = finish(grid, tex, np.full((Z, X), tex.levels[level], np.float32), np.zeros((Z, X), np.float32), torch.zeros(grid.shape, device=device), rng)
+    return img, tr, {"level": level}
+
+
+PHANTOMS = {"bundle": bundle, "crossing": crossing, "interface": interface, "bend": bend, "band_crossing": band_crossing, "texture": texture}
 
 
 def build(name: str, seed: int = 0, grid: Grid | None = None, tex: TextureParams | None = None, texture: float = 1.0, device="cuda", **kwargs):

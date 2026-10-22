@@ -1,90 +1,51 @@
 # Parameters
 
-What each parameter does to the field, one at a time, on the HiP-CT block of [real data](data.md) (S-21-46, 20 µm,
-a 192³ block calibrated on the 384³ around it), the rest at their defaults. Every strip shows the shape tensor's
-single field as DEC colour (R = |x|, G = |y|, B = |z|) at every voxel. The titles give the populations found and the
-median angle of the field from the default run's over the tissue.
+Everything is a keyword of `shapetensor.field.Orientations` (and so of `shapetensor()` and `shapetensor run`). One
+parameter sets the scale; the others are bounds and switches with defaults that hold across the phantom set.
 
-```bash
-python scripts/parameters.py                # docs/img/params_<name>.png, results/parameters.json
-```
+## The one that matters
 
-Two things are *not* parameters: the feature layer (encoder block 2 of anatomix, the layer where orientation is a
-linear code) and the teacher (the excised structure tensor at the output `rho`). Changing the scale at which the
-shape is read means resampling the image; see [the pipeline](pipeline/index.md).
+| parameter | default | what it is |
+|---|---|---|
+| `scale` | 10 voxels | the window σ. Tied to it: the lags (`0.25–0.65 scale`), the lattice step (`scale / 2.5`), the high-pass (`0.3 scale`), the carry-forward Gaussian (`1.2 scale`) and reach (`2.4 scale`), the trusted margin (`0.65 scale + 2 scale`). At 20 µm, 10 is a 0.2 mm window and a 0.5 mm reach; at 50 µm the same tissue scale is `scale=4`. |
 
-What the strips show overall: the field's *direction* is set by the scales and by which populations are found, and
-by nothing else. The weight floor and the sub-window size leave it unchanged; a different population count or a
-different pair of populations moves it by 9–16° at the median on this low-coherence block, where several readings
-of the tissue are plausible. The readout's fit is not bit-reproducible on the GPU, so the exact populations a run
-finds, and these numbers, vary a little between runs.
+Choose it as you would the structure tensor's ρ: large enough that a window holds several structures of the
+population, small enough that the population does not turn much inside it. Resolution changes mean a proportional
+change of `scale`; nothing else.
 
-## The scales: `rho` and `sigma`
+## Bounds on the populations
 
-`rho` is the integration window of every tensor: the teacher, each population's tensor and the baseline structure
-tensor. It is the one scale a user should normally touch. Smaller windows follow the fibres more closely and carry
-more noise (the structure tensor's swirl defects at ρ 5, three populations found); larger ones smooth the field and
-blur crossings and bends further. The bottom row is the excised structure tensor at the same `rho`: the two fields
-move together, which is what makes the comparison like for like. At ρ 20 the teacher is smoother than the fascicles
-of this block and one population is found.
+| parameter | default | effect |
+|---|---|---|
+| `nmax` | 2 | the most populations a position can hold |
+| `min_sep_deg` | 30° | the least angle between two populations; below the response's width (about 33° at half height on HiP-CT texture) two lobes are not resolved anyway |
+| `rel` | 0.3 | a further lobe must hold this fraction of the strongest. Lower (0.2) keeps more second populations in crossings (band crossings: both within 15° 0.77 → 0.85 at 90°, 0.94 → 0.98 at 60°) and admits more false seconds in single fascicles (bend 0.86 → 0.74) |
+| `min_share` | 0.15 | a further lobe must hold this share of the position's distribution |
+| `min_weight` | 0.2 | the presence weight below which a position has no population (N = 0); the single field is not affected |
+| `valley` | 0 | if set, a further lobe must stand above the saddle between it and the strongest by this fraction of its height (a shoulder test; off: shoulders are rare after deconvolution) |
 
-![rho](img/params_rho.png)
+## Switches and rules from the data
 
-`sigma` is the derivative scale. At half a voxel the gradients see the noise and the teacher, and so the field,
-change character (24° from the default); at two voxels the fibre texture (period about 5 voxels at 20 µm) is
-blurred before it is differentiated, every tensor loses contrast and one population is found.
+| parameter | default | effect |
+|---|---|---|
+| `momentum` | on | the carry-forward along each direction; off for a per-position reading |
+| `excise` | 3.0 | voxels whose coarse gradient exceeds this × the median are left out of the correlation; 0 to disable |
+| `mean_scale` | 0.3 | the high-pass σ as a fraction of `scale`. 0.3 keeps the fibre texture (periods of 3–10 voxels at 20 µm) and removes the slow structure of boundaries; 0.8 let a fascicle's boundary lift to a ring whose far point became a false second population (bend fascicles with one population 0.56 → 0.86 from 0.8 to 0.3) |
+| `presence_mode` | `"excess"` | the lobe mass above the median (N-independent); `"peak"` the peak height (halves at a crossing) |
+| `lags` | (0.25, 0.65) | the shell of lag radii as fractions of `scale` (2.5–6.5 voxels at the default). Shorter lags (0.2, 0.45) with `radial="uniform"` follow the structure tensor more closely on the HiP-CT volume (19° against 48° at its confident voxels) but were not validated on the phantoms in time; see the results log |
+| `radial` | `"count"` | how the shell's lags are weighted per direction: the lattice's own count (`∝ r²`, the longest lags dominate) or `"uniform"` (`1 / r²`, every radius alike) |
+| `fine_scale` | 0 | a low-pass (fraction of `scale`) before the high-pass: a band-pass that keeps voxel-scale acquisition structure out of the correlation (0.1 = 1 voxel at the default); little effect on the HiP-CT volume |
+| `null` | `"isotropic"` | the surrogate the presence floor is measured on. `"spectrum"` keeps the block's full, anisotropic power spectrum and subtracts the surrogate's mean directional lift from every lift: it removes what the acquisition alone puts into the field (a point-spread function longer along the rotation axis, rings), but also a region's dominant real orientation, so it must be measured on a region with many orientations (`run_volume(null="spectrum")` on its calibration region) |
+| `momentum_angular_deg` | 0 | an angular smoothing inside the carry-forward so bends are followed; 8° changed the tight bend by less than 1% |
+| `max_ring`, `min_prominence` | 0.35, 5 | the sheet rule |
+| `null_q`, `full_factor` | 0.99, 2 | the surrogate quantile that sets the floor, and where the weight reaches 1 |
+| `n_dirs`, `kernel_deg` | 160, 8° | the hemisphere grid and the angular kernel the lags are binned with |
+| `label_angle_deg`, `min_fixels` | 20°, 8 | identities: the alignment that links neighbouring fixels; the smallest population labelled |
+| `iters`, `angular_deg`, `bin_deg` | 300, 6°, 2.5° | the deconvolution's iterations, the smoothing after it, the response's angular bins |
 
-![sigma](img/params_sigma.png)
+## What is measured, not set
 
-## The feature average: `smooth`
-
-The features are box-averaged over `smooth`³ voxels before the readers are fitted and before the activations are
-thresholded for the tissue mask. The activation of a rectified filter oscillates with the phase of the fibre
-texture; a 3³ average (the default) integrates it. Without it the activations spike voxel by voxel, the null is
-lower and the second population is not confirmed; a 5³ box blurs the layers at the scale of the box and leaves the
-field within 3° of the default.
-
-![smooth](img/params_smooth.png)
-
-## Finding the populations: `nmax`, `min_sep_deg`, `window`, `iterations`
-
-These decide *how many* populations the block is unmixed onto, not how any tensor integrates. The top row is the
-single field; the bottom row is the second vector of the multi-vector field with its activation as brightness,
-black where only one population was found.
-
-`nmax` caps the number of populations. With one population the single field is the excised structure tensor
-weighted by that population's activation (15° from the default here). With two the block has two readings that
-differ by 9°: the default (candidates from the 64³ sub-windows, up to three confirmed) and the pair found with
-`nmax` 2 or `window` 0, which is the same pair.
-
-![nmax](img/params_nmax.png)
-
-`min_sep_deg` is the angle below which two candidate populations are the same one. Smaller values let the
-shoulders of one dispersed population count as two (at 15° a different pair is found, 16° from the default); at
-40° the two populations of this block are merged into one.
-
-![min_sep_deg](img/params_min_sep_deg.png)
-
-`window` is the size of the sub-windows in which candidate populations are looked for, 0 for the block only. A
-population confined to one region of the block is found through its sub-window; 64 and 96 give the same result here.
-
-![window](img/params_window.png)
-
-`iterations` is the number of joint refinements of the populations from their own layers after the candidates are
-confirmed one by one. One pass or four leave the field within 4–5° of the default on this block.
-
-![iterations](img/params_iterations.png)
-
-## Little or no effect on the field: `tensor_floor`, `tissue`
-
-`tensor_floor` is the weight floor of every population tensor, as a fraction of the null. It keeps a population's
-tensor defined where its activation is zero and is not a lever on the field (0.3° between 0 and 0.1; also
-`notes/results_log.md` §27).
-
-![tensor_floor](img/params_tensor_floor.png)
-
-`tissue` is the optional mask of the voxels to read (here the grey level above the air/tissue threshold). It
-chooses where the teacher is sampled and where the excision looks for steps; it is never applied to the vectors,
-and on a block that is all tissue it changes the field by 4°.
-
-![tissue](img/params_tissue.png)
+The presence floor (on the block's surrogate) and the response (on the block's own single-lobe positions; when fewer
+than 200 qualify the selection is loosened, and failing that a Gaussian profile of 33° half-width, the phantoms'
+value, is used). For a whole volume both are measured once on a calibration region; `run_volume(floor=, response=)`
+accepts given values, so a run can be reproduced exactly or a volume calibrated on a chosen region.

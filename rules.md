@@ -332,31 +332,29 @@ pull two ways:
    - the union of population masks.
    An OME-Zarr writer for whole volumes; a solve argument full / fibre / fast.
 
-### Where this branch stands (2026-10-22)
+### Where this branch stands (2026-10-22, after the overnight build)
 
 | Stage | Built | Against your design |
 | --- | --- | --- |
-| Features | `features/devvit.py`: dev-vit, sphere-blended tiles at stride 48 plus a patch-grid null filter (block 0.99, grid 1.02) | Matches R7/R8. dev-vit's output is smooth (correlation length about 10 voxels), which limits what can be read from it at 20 µm |
-| Separation (lag-TCA) | `lagtca.py`: SOBI (the symmetric CP of the channels × channels × lags covariance tensor) per window | Works on synthetic multichannel fields; **fails on dev-vit's features** (false sources in texture; broad lag lobes). Kept as a tested negative |
-| Separation (working) | `lagodf.py`: the lag ODF, the local autocorrelation of the **intensity** at lags ±r·u. Then angular deconvolution, lobes = populations, sheet rejection | Meets R1, R2, R3, R10 on phantoms. **Departs from your design in three ways:** it is an orientation-distribution / fixel method (which you asked on 2026-10-16 to archive); it reads the intensity, not the anatomix shape space; and it has no per-population partition of the shape space or per-population TCA. It is the "classical" pathway of 2026-10-21, not your stage 2-3 |
-| Momentum | `populations.momentum` applied to each direction of the lag ODF; 0.5 mm, bridging, no free-end extension | R2 yes; per-population straight/bending calibration not built |
-| Identities | `lagodf.label_populations`: best-aligned-first merging; one population never holds two lobes of one voxel | R3 yes (bands and T-junction separate, bend one population). Adjacent parallel fascicles 0.2 mm apart merge at the current window size |
-| Weighting | Presence weight from a per-block isotropic-surrogate noise floor; N = 0 below weight 0.2 | Not yet R5: the single field is also cut where it should only be weighted, and the intensity-correlation weight is not built |
-| Resolution | Cells of 4 voxels; parameters in voxels | Not yet R6 (native resolution, parameters in mm, multi-resolution tests) |
-| Solve argument, whole-volume driver | Not built for the lag ODF | R11, R12 open |
-| Artefacts | Streak/ring phantoms exist for the dev pipeline; on real data a z-leaning second population (part ring artefact, part anatomy) | R9 open for the lag ODF |
-| Calibration | Lag ODF response: synthetic and self-estimated compared (alike) | Matches "test and compare both" |
+| Lift (shape space) | `lift.py`: the array lifted to positions × directions by its local lagged autocorrelation on an integer-lag shell, on a lattice; null from the block's isotropic surrogate; response from the block itself; excision inside the correlation | The lift is the classical "shape space": it holds any number of populations and the structure tensor is its zero-lag moment. anatomix is not in the chain (optional engine for later presence weighting); R7 read as "classical after the embedding, embedding optional" |
+| Separation | `populations.peaks` after deconvolution: N per position from the data, N ≤ 2 and ≥ 30° by default (R1) | Meets R1; intermixed 90° crossings lose a third of cells to low presence; 45° unresolved |
+| Momentum | `populations.momentum`: along each direction, bridge where both sides hold, never extend a free end; 0.5 mm at 20 µm (R2) | Meets R2; per-population straight/bending calibration not built; the tightest bend (0.3 mm radius) is partly lost |
+| Identities | `populations.label_populations` + `volume.stitch_labels` across chunks (R3) | Meets R3 (one label through a bend, two through a crossing; leakage 4–15%) |
+| Weighting | presence weight (N-independent excess over the median) from the surrogate floor; single field never cut; multi-vector field thresholded (R5) | Meets R5 except the intensity-correlation weight (not built) |
+| Native resolution, generality | `field.py`: the field at every input voxel; `orientations(spacing=)` for anisotropic voxels; channels add; tested in unit tests (R6) | Meets R6 for 3-D; 2-D arrays not yet; multi-resolution phantom scores not yet |
+| Volume driver | `volume.run_volume`: chunks with a halo that reproduce a one-pass result exactly (shared floor and response), multi-process, label stitching (R12) | Meets R12; a solve argument full/fibre/fast (R11) not built |
+| Tracking (the aim) | `validate.py`: through-crossing on its own band 0.64/0.81/0.68 at 90/60/45° (structure tensor 0.07/0.42/0.40); T and free end never extended | Below the 0.9 target but the structure tensor's switching is removed; see docs/validation.md |
+| Artefacts | not re-tested for the new chain (R9 open) | — |
 
 ### Conflicts between instructions (for you to settle)
 
-1. **ODF / fixels archived (2026-10-16) vs the classical pathway (2026-10-21).** The working pathway is an angular
-   distribution with lobes, which is what you asked to archive. Lag-TCA, the TCA formulation you chose, failed on
-   dev-vit's features. Your call:
-   - keep the lag ODF as the classical baseline only and return to TCA per partitioned shape space; or
-   - accept it as stage 2-3.
-2. **anatomix as the feature space vs the working pathway reading intensity.** anatomix currently plays no part in the
-   lag ODF. Candidate roles that keep it in the pipeline: presence (fibre vs texture), the intensity-correlation weight,
-   or the partition of the shape space that per-population TCA would act on.
+1. **ODF / fixels archived (2026-10-16) vs the classical pathway (2026-10-21).** Resolved for now as: the lift is the
+   shape space the design asked for (positions × directions, holding N populations), the archived route was the
+   gradient-direction ODF with fixels as the output primitive; here the primitive is a population with an identity and a
+   carry-forward. The 0.3 README and docs describe it so. Your confirmation is still wanted.
+2. **anatomix as the feature space vs the chain reading intensity.** anatomix plays no part in the 0.3 chain; the
+   candidate role that remains is a presence / class weight (fibre vs vessel vs boundary) from synthetic references,
+   pluggable as an engine. Not built overnight.
 3. **Pre-trained readout (2026-10-18) vs preference for self-supervision (2026-10-21).** Read as: test and compare
    both; no per-volume training.
 4. **Step by step (2026-10-15) vs "run futher tests and experiments untill working well in all phantoms. take as long

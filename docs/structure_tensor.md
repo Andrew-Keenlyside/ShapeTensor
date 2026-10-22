@@ -31,8 +31,8 @@ The interface failure has a direct remedy inside the tensor: leave the boundary'
 coarse magnitude (σ = 3 voxels) exceeds three times the median are given zero weight and the window average is
 renormalised by the surviving weight. Nothing changes in clear tissue (the test suite checks that a block with no
 step is untouched), and at a step the error drops to the clear-tissue level. The *excised* structure tensor is the
-package's baseline, its default `structure_tensor`, the teacher of the pipeline's stage 2, and the excision is
-built into every population tensor of stage 3.
+package's baseline, its default `structure_tensor`, and the same rule leaves boundary voxels out of the chain's
+correlation (`Orientations(excise=3.0)`).
 
 ```python
 Sx = st.excised_structure_tensor_3d(image, 1.0, 10.0, factor=3.0, mask=tissue)

@@ -6,35 +6,39 @@
 
 # ShapeTensor
 
-Fibre orientation fields of high-resolution white-matter volumes (HiP-CT at 20 µm, serial histology, light-sheet)
-from a pretrained shape-feature space, on the GPU. One pipeline, four stages:
+Orientation fields of any array — one or several directions per voxel, chosen by the data — on the GPU. A
+replacement for the structure tensor where structures cross, bend or end.
 
-1. **Shape features** — the block through a contrast-agnostic 3-D UNet (anatomix), read at the encoder layer
-   whose channels encode fibre orientation.
-2. **Separating populations in the shape space** — the orientation code is read without labels (the structure
-   tensor at confident sites is the teacher); the populations present are found, and every voxel is unmixed onto
-   their signatures: one **activation layer per population**, a full-volume image of that population's shape.
-3. **One tensor per population** — the image's structure tensor with the gradients weighted by the population's
-   activation.
-4. **Merging** — one vector per voxel from the merged population tensors, or every population's vector with its
-   activation as weight. No masks anywhere: the weights say where a population is present.
+The structure tensor holds one axis per voxel: at a crossing it reports the bisector, at a boundary it is dragged
+into the plane of the step, past the end of a bundle it keeps going on texture, and it has no memory from one voxel
+to the next. A tracker following it switches bundle at every crossing. ShapeTensor is built so that a tracker
+arriving at a crossing leaves along the population it came in on, and stops where nothing is present. Five stages,
+all classical, nothing trained on the analysed data, one scale parameter:
 
-The classic structure tensor and its boundary-robust (*excised*) form are the baseline, at the same σ and ρ as
-every tensor in the pipeline, so every comparison is like for like.
+1. **Lift** — the array becomes a field over positions × directions: its local autocorrelation read on a shell of
+   lags. A population of structures along `d` lifts to a lobe at `d`; independent populations add. The structure
+   tensor is this field's zero-lag second moment, which can hold one direction; the lifted field holds any number.
+2. **Separate** — each position's lobes are its populations, N from the data (0, 1, 2, …), after the single-population
+   response (measured on the block itself) is deconvolved. Presence is judged against the block's own null — a
+   surrogate with its power spectrum and no anisotropy — and sheets are recognised, never read as crossings.
+3. **Carry forward** — each direction's share of the field is smoothed *along that direction* and bridged where it
+   holds on both sides, never past a free end: a population continues through a crossing on the evidence of its own
+   arms; a bundle that ends is not extended.
+4. **Identify** — neighbouring lobes that are each other's best-aligned are joined, best first, under the rule that one
+   population never holds two lobes of one position: identities 1, 2, 3, … that follow a bundle through its bends and
+   crossings.
+5. **Field** — the lifted field is read at every input voxel: a weighted single field everywhere (never cut), and
+   co-located vectors with weights and identities where populations coexist.
 
 <div align="center">
 <img src="docs/img/pipeline_overview.png" alt="the pipeline" width="100%" />
-<img src="docs/img/overview_S2146.png" alt="the pipeline on a HiP-CT block" width="100%" />
 </div>
-
-The idea, and the same stages on a 192³ block of HiP-CT (S-21-46, 20 µm): the image, its voxels in the shape
-space, the two populations found there, their activation layers, each population's field, and the combined fields.
 
 ## Install
 
 ```bash
 git clone https://github.com/Andrew-Keenlyside/ShapeTensor.git && cd ShapeTensor
-pip install -e ".[anatomix]"       # torch (CUDA), numpy, scipy, zarr >= 3, matplotlib; anatomix + monai (weights from the HF hub)
+pip install -e .                   # torch (CUDA), numpy, scipy, zarr >= 3, numba, matplotlib
 ```
 
 ## Use
@@ -42,61 +46,70 @@ pip install -e ".[anatomix]"       # torch (CUDA), numpy, scipy, zarr >= 3, matp
 ```python
 import shapetensor as st
 
-vec     = st.shapetensor(image, rho=10.0)                               # (3, Z, Y, X): one direction per voxel, (x, y, z)
-vecs, w = st.shapetensor(image, rho=10.0, multi=True, weights=True)     # (N, 3, Z, Y, X) + (N, Z, Y, X): every population, by activation
-vec     = st.structure_tensor(image, rho=10.0)                          # the excised structure tensor: the baseline
-out     = st.population_field(image, rho=10.0)                          # modes, activation layers, both fields, masks, the null
+vec        = st.shapetensor(image, scale=10.0)                                             # (3, Z, Y, X): the strongest direction, (x, y, z)
+vecs, w, l = st.shapetensor(image, scale=10.0, multi=True, weights=True, labels=True)      # co-located vectors, weights, identities
+vec        = st.structure_tensor(image, rho=10.0)                                          # the excised structure tensor: the baseline
+out        = st.orientations(image, scale=10.0)                                            # everything, including the lattice stages
 ```
 
 ```bash
-shapetensor run brain.ome.zarr out.zarr --level 0 --rho 10        # a whole volume, chunked with halos, calibrated once
-shapetensor structure-tensor brain.ome.zarr st.zarr --rho 10      # the baseline in the structure-tensor package's layout
-shapetensor validate --out validation                              # the three phantoms at the texture of the real crop
+shapetensor run brain.ome.zarr field.zarr --level 0 --scale 10 --chunk 384 384 384 --tissue-threshold 80
+shapetensor structure-tensor brain.ome.zarr st.zarr --level 0 --rho 10 --arrays vec gap --float16
+shapetensor validate --out validation      # the phantoms and the tracking tests
+shapetensor demo                           # a 90° band crossing through the chain, tracked, no data needed
 ```
 
-`image` is a `(Z, Y, X)` numpy, cupy or torch array of grey levels; the result comes back as the same kind.
-`rho` is the integration window in voxels (0.2 mm at 20 µm); `docs/parameters.md` shows what each parameter does to
-the field. Documentation: `mkdocs serve` or the `docs/` pages.
+`image` is a `(Z, Y, X)` numpy, cupy or torch array (channels `(K, Z, Y, X)` add; `spacing=(dz, dy, dx)` for
+anisotropic voxels); the result comes back as the same kind, in the `structure-tensor` package's layout, so the single
+field substitutes wherever that is consumed. `scale` is the window in voxels (0.2 mm at 20 µm); the lags, the lattice,
+the carry-forward reach and the trusted margin are tied to it. No mask is applied to any output: the weights say where
+a population is present. A whole volume is computed chunk by chunk with a halo and one shared null, so it has no
+seams; several GPUs split the chunks.
 
 ## What the phantoms show
 
-Three phantoms with truth, at 20 µm with the texture matched to a real HiP-CT crop (20° of fibre dispersion within
-a population) — a single bundle, a 60° crossing and a bundle across a tissue step. Every figure in the package has
-the same columns: the image, the excised structure tensor, the shape space with the populations found in it, one
-activation layer per population, the shape tensor's single field, and the first vector of its multi-vector field.
+The same deterministic tracker, seeds, step and turning limit on both fields; the texture matched to a real 20 µm
+HiP-CT crop (20° of dispersion within a population). Full tables in `docs/validation.md`.
 
-<div align="center">
-<img src="docs/img/validation_calibrated.png" alt="validation" width="100%" />
-</div>
+| phantom | measure | shape | structure tensor |
+|---|---|---|---|
+| band crossing 90° / 60° / 45° | streamlines through the crossing on their own band | 0.74 / 0.81 / 0.68 | 0.07 / 0.42 / 0.40 |
+| | switched to the other band | 0.04 / 0.12 / 0.19 | 0.65 / 0.55 / 0.55 |
+| T-junction | false continuation past the T | 0.00 | 0.00 |
+| a bundle that ends in texture | streamlines continuing past the end | 0.00 | 0.40 |
+| intermixed crossing 90° / 60° | streamlines staying within 15° of their population | 0.57–0.67 | 0.00–0.22 |
+| bend of radius 0.3 / 0.8 / 1.3 mm | through the 90° turn | 0.52 / 0.83 / 0.99 | 0.92 / 0.85 / 0.99 |
+| single populations | direction, median | 3–6° | 3–6° |
+| texture | populations found | none | (always one) |
 
-- At a **tissue step** the plain structure tensor is dragged 35° into the boundary; the excision removes the
-  effect, and the pipeline inherits it (the excision is inside every population tensor).
-- At a **crossing** the structure tensor reports the bisector, 24° from either population. The pipeline finds the
-  two populations on every seed; the first vector of its multi-vector field is 11° from the nearest population at
-  the median, the stronger population's own tensor at each voxel. The pair is not resolved per voxel at this
-  dispersion: the second vector is indicative.
-- On a **single bundle**, and on the real block where the structure tensor is confident, the single field
-  reproduces the excised structure tensor.
+The tightest bend — a turn of 15 voxels inside a 0.2 mm window — is the case the structure tensor still tracks better,
+and the remaining open items (through-crossing short of 0.9, identity leakage of 4–15%, intermixed 45° crossings
+unresolved) are listed with their numbers in the validation page. **On real HiP-CT data the lift also reads the
+acquisition's own anisotropy** (structure constant along the rotation axis), which an isotropic null cannot separate
+from tissue; `docs/data.md` shows the effect and the measured remedies, and this is the first open problem.
 
-The numbers are in `docs/validation.md`; the research behind every design decision, with all its numbers, in
-`notes/`.
+## Speed
+
+RTX A6000: about 7 s for a 256³ block (the excised structure tensor 1.4 s); a whole volume in 384³ chunks at
+70–100 s per chunk including its 56-voxel halo, several GPUs in parallel. `shapetensor bench` times both on your GPU.
 
 ## Layout
 
 ```
 src/shapetensor/
-  __init__.py     shapetensor(), structure_tensor(), population_field()
-  features/       the engines: anatomix_enc2 (default), anatomix48, anatomix16, jet, intensity
-  separate.py     stage 2: the dictionary, the orientation readout, the unmixing, the null
-  tensors.py      stage 3: the population tensor
-  merge.py        stage 4: the single field, the multi-vector field, export
-  pipeline.py     calibrate / apply / population_field / run_volume
-  st.py           the structure tensor (plain, excised), eigen, the structure-tensor layout, run_volume
-  phantoms.py     bundle | crossing | interface, with truth
-  validate.py     the validation
+  __init__.py     shapetensor(), orientations(), structure_tensor()
+  lift.py         1. the lift: lattice lags, the null (isotropic surrogate), the response, the deconvolution
+  populations.py  2-4. carry-forward (momentum), lobes, sheets, identities
+  field.py        Orientations: the chain on a block and the field at every voxel
+  volume.py       whole arrays chunk by chunk (no seams), label stitching
+  validate.py     the acceptance suite: phantoms, scores, tracking against the structure tensor
+  st.py           the structure tensor (plain, excised), eigen, the structure-tensor layout, whole volumes
+  phantoms.py     bundle | crossing | interface | bend | band_crossing (T-junction, free end) | texture, with truth
   tracking.py     a deterministic streamline tracker over multi-vector grids
-  viz.py, stats.py, filters.py, pca.py, cli.py
-  archive/        the ODF / fixel and TCA routes (importable, not maintained)
-tests/            pytest
-notes/            the research log, review and plans
+  artefacts.py, viz.py, stats.py, filters.py, cli.py
+  pipeline.py, separate.py, tensors.py, merge.py, features/, dev.py, ...   the 0.2 pipeline (anatomix shape features), importable
+  archive/        earlier routes
+tests/            pytest (CPU)
+docs/             mkdocs; docs/archive the 0.2 pages
+notes/            the research log, review and plans; TCA_FIELD_RESULTS.md the measurements
 ```

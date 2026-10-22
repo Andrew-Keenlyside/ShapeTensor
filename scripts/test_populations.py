@@ -28,7 +28,7 @@ import torch
 from shapetensor.features import make_engine
 from shapetensor.fibre_sets import References, iso_textures
 from shapetensor.phantoms import BEND_GRID, Grid, build, direction
-from shapetensor.populations import PopulationModel
+from shapetensor.archive.population_model import PopulationModel
 from shapetensor.validate import ANGLES, angle_deg
 
 OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/home/andrew/bridge_wmcov/shapetensor/results/dev_pipeline/populations")

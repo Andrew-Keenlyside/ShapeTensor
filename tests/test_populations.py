@@ -4,7 +4,8 @@ import math
 import torch
 
 from shapetensor.classical import lobes
-from shapetensor.populations import kernel_odf, momentum
+from shapetensor.archive.population_model import kernel_odf
+from shapetensor.populations import momentum
 from shapetensor.separate import hemisphere
 
 

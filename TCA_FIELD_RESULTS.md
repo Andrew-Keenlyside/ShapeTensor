@@ -349,3 +349,84 @@ hold two populations; the second lobes lean toward z (within 20° of z: 15-17% v
 darker tissue's mean lag ODF is highest along z (0.088 vs 0.058 in-plane). Structure constant along z includes the
 gyrus's own boundaries (the slab is 1.9 mm thick) and faint ring-artefact arcs (z-mean of the high-passed slab), so
 part of that second lobe may be acquisition, not anatomy.
+
+## 35. The chain rebuilt: lift, populations, carry-forward, identities, field (2026-10-22, overnight)
+
+Branch `dev-pipeline`. The brief: a literature review, then a clean general pipeline that meets the acceptance criteria
+and the speed benchmark, tested on a HiP-CT VOI with tractography, and the docs rewritten. `notes/overnight_2026-10-22.md`
+has the review and the plan; this section the measurements.
+
+**The lift on the lattice** (`shapetensor.lift`). The lags are the integer vectors of the shell 0.25-0.65 x scale (554 at
+scale 10, one of each +/- pair) read by slicing, so no value is interpolated; each lag's products are box-pooled onto the
+4-voxel lattice before the window, and binned into 160 directions with an 8 deg kernel. 256^3 block: 2.1 s against 10.0 s
+for the interpolated lag ODF (section 34); on the 90 deg intermixed crossing the raw lift (before deconvolution) has both
+lobes within 15 deg at 0.66 of cells against 0.29. Trilinear shifts had blurred the correlation by a direction-dependent
+amount.
+
+**Two failure modes diagnosed and their fixes.**
+- *Weight dropouts in the 90 deg intermixed crossing* (N = 0 at a third of cells). Not the presence measure: `presence`
+  as the mean positive excess over the median (N-independent) replaces the peak height, but the crossing's presence is
+  genuinely low (median 0.062 against 0.108 for a bundle at the same texture, floor 0.048): two dense populations halve
+  each other's normalised correlation. Kept as a documented limit.
+- *False second populations in single fascicles* (bend N1 0.54, straight 0.81): the second lobes lie along the
+  phantom's extrusion axis y (median 5.5 deg from y, 87 deg from the fibre): the far point of the fascicle boundary's
+  ring (a sheet that contains the fibre direction). Tried and dropped: a valley (saddle) test on the deconvolved field
+  (inert: the deconvolution breaks a ring into spikes); a lobe-vs-ring ratio on the raw lift (kills 90 deg crossings:
+  the 33 deg response's tails between two lobes look like a ring); ring atoms in the deconvolution dictionary (absorb
+  true crossings: two orthogonal lobes with these tails are a ring; crossing 90 N2 0.58 -> 0.03); a lobe-shape test
+  after subtracting lobe 1's predicted tail (does not separate). What works: a stronger high-pass before the lift,
+  sigma_m = 0.3 scale (3 voxels) instead of 0.8 scale, which removes the boundary's slow structure and keeps the fibre
+  texture: bend N1 0.54 -> 0.86, straight 0.81 -> 0.97, band 90 both-within-15 0.50 -> 0.77, band 60 0.72 -> 0.94;
+  excision inside the correlation (pairs weighted w(x) w(x+l), per-direction normalisation) adds a little on the 90 deg
+  bands (0.66 -> 0.77 with both). `rel` 0.2 trades the other way (crossings up, singles down); 0.3 kept.
+
+**Phantom set at scale 10, one seed** (`shapetensor validate`; full table in `docs/validation.md`). Lattice: bundle N1
+0.97 / 3.1 deg; bend 0.90 / 4.3; texture N0 1.00; band crossings 90/60/45 overlap N2 0.78/0.96/0.60, both within 15 deg
+0.72/0.86/0.54; T false extension 0.00; intermixed 90/60/45 N2 0.57/0.69/0.41. Identities: one label through the bend
+(coverage 0.99); bands 0.89-0.97 each, leakage 0.04-0.15. **Tracking** (the same tracker, seeds, step and turning limit
+for both fields; through = the streamline ends beyond the crossing on its own band): band 90 through 0.64 (structure
+tensor 0.07, which switches band at 0.65), band 60 0.81 (0.42), band 45 0.68 (0.40); T-junction false continuation 0.00
+(0.00); free end: 0.00 continue past the end (structure tensor 0.40, through texture); intermixed crossings, streamlines
+within 15 deg of their seeded population end to end: 0.57/0.63 at 90 deg (0.10/0.22), 0.50/0.67 at 60 (0/0), 0.24/0.19 at
+45 (0.02/0.01). The bend: through the turn 0.52/0.83/0.99 by radius 0.3/0.8/1.3 mm (structure tensor 0.92/0.85/0.99): the
+tightest turn (15 voxels inside a 0.2 mm window) is read on the lattice at the window's scale and the carry-forward runs
+straight, so the structure tensor, per voxel, tracks it better.
+
+**Scorer lessons.** The first tracking scores were wrong for the metric, not the field: seeds for the T and free end
+landed on the empty side of the stub (the shape field's streamlines had length 0 and the structure tensor's 2.5 mm of
+texture tracking); "through" required the streamline to stay inside a 0.4 mm corridor over 2-3 mm, which lateral drift
+of a few degrees fails for both methods; the phantom grids were 32 voxels thick in y, so streamlines left through the y
+faces. Fixed: seeds on the stub, through = beyond the crossing along the seeded band, grids 96 voxels thick.
+
+**Chunking.** Every stage is local, so a halo of r_max + 3 scale + reach (56 voxels, rounded to the lattice step) with
+one floor and one response per volume reproduces a one-pass result on each chunk's core: median 0.6 deg (p99 15 deg)
+before the halo was rounded to the step, below 1 deg after (`tests/test_chain.py`). The halo costs (384 + 112)^3 / 384^3
+= 2.2x the voxels at a 384^3 chunk. Labels are per chunk, made unique by offset and joined across faces by the same
+alignment rule (`volume.stitch_labels`).
+
+**Speed** (A6000, the GPU shared with a second job for part of the night): the lattice chain 2.5-4 s and the field at
+every voxel 1-2 s on a 192 x 96 x 192 block; the whole-volume run on the 768^3 VOI in 384^3 chunks, 70-105 s per chunk
+(496^3 with the halo, 122 M voxels; about 0.6-0.8 M core voxels/s). The structure tensor: 1.4 s per 256^3 (11.8 M voxels/s).
+
+**Real data (05:00-06:00): the lift reads the acquisition.** On the 768^3 cortex VOI the chain's strongest population
+was along z (the rotation axis) at 66% of white-matter voxels, where the excised structure tensor is in-plane (5% near
+z), and 55% of white matter held two populations. Traced on a 256^3 block against the structure tensor at its confident
+cells (top 30% by gap): the first version of the lift (shell 0.25-0.65 scale, high-pass 0.3 scale) 48.7 deg median,
+0.64 near z; the old trilinear lag ODF (section 34) 18.8 deg, 0.40 near z. The exact integer lags see slice-wise,
+voxel-scale structure along z that trilinear interpolation (a low-pass on the shifted field) had blurred away, and the
+lattice has ~r^2 lags at radius r, so the longest lags -- where fibre correlation has decayed but the acquisition's
+z-correlation persists -- dominated the direction bins. Three remedies measured:
+- a band-pass (a 0.7-2 voxel low-pass before the high-pass): 37-45 deg, little gain;
+- radially uniform lag weights (1 / r^2) and a shorter shell, 0.2-0.45 scale (lags 2-4.5 voxels at scale 10): 19.5 deg
+  median, within 15 deg 0.35 at the confident cells (0.2-0.45 with the lattice's own weighting: 31.6 deg); adopted as
+  the default. The z share of first lobes over *all* white matter stays 0.6-0.7: in the low-coherence tissue the
+  acquisition's anisotropy still wins;
+- a **spectrum null**: a surrogate with the block's full (anisotropic) power spectrum and random phases, its mean
+  directional lift subtracted from every lift. It removes the z population completely (0.66 -> 0.00) -- and, on a single
+  block, also the block's dominant real orientation (agreement with the structure tensor 78 deg, white matter weight 0):
+  the global spectrum cannot tell the acquisition from a region's preferred fibre direction. Kept as an option
+  (`null="spectrum"`), to be measured on a region with many orientations; off by default.
+The isotropic structure tensor is immune because its sigma = 1 derivatives are a band-pass at the texture scale and it
+reads the local gradient, not the correlation at a lag. **Open:** a null for the acquisition's anisotropy that does not
+absorb real orientations -- from a noise-only region (air, a vessel lumen), from the highest frequency band only, or as
+the median profile over many regions of a volume.
