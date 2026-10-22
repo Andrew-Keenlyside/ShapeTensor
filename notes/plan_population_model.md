@@ -186,3 +186,34 @@ notes/plan_population_model.md   this plan
   the line's lobe and the step's ring at the step and the lobe alone away from it — the acceptance test for the model:
   recovery of the lobe at the boundary as a function of fibre contrast / step / noise.
 - Tests: `tests/test_learn.py` (8, CPU or GPU, 3 s).
+
+## 12. The rebuild after the adversarial review (22 Oct, night) -- supersedes §2.1, §3, §4, §5 and §11 where they differ
+
+Two reviews (data; loss / training / outputs) found the generator's labels did not match its images, the window
+target turned bends into crossings, a density-space loss learned only lines, and the plan's network and engine broke
+chunking and re-read the image. Rebuilt in four stages (commits 47ce84b, 27f3ecd, 22dac4d, 074ca33):
+
+1. **Generator** (`learn/generator.py`): stationary random fields (padded beyond the blur, exact kernel variance);
+   labels are shape tensors accumulated from what was rendered (t tᵀ, (I - n nᵀ)/2, a blob's normalised second
+   moment); occupancy a volume fraction normalised analytically; volume-fraction compositing (occluders hide the labels
+   under them); crossing groups at a drawn angle sharing one volume fraction, later fibres yielding (interdigitated);
+   arc fields for bends of drawn radius; warps that never fold (det J > 0.2), tensors moved as J⁻¹ S J⁻ᵀ; a drawn
+   acquisition axis for every slice-wise nuisance, rings and cupping about a random rotation axis, streaks at a random
+   angle, artefacts in float and one display window; per-layer visibility (contrast to noise after the chain, lower
+   confidence bound) scaling label mass; interface weight from the region means (orientation- and scale-free);
+   modality content priors.
+2. **Target** (`learn/targets.py`): each layer pooled on its own (σ_w = 5, stride 4, cells at 4i + 1.5): K = 4 slots
+   per cell (trace-1 tensor, mass = the population's own visible volume, kind, layer id), merged within 20° for the same
+   kind; fraction, class shares, size. A bend is one population with lower linearity; populations come only from
+   distinct layers; faint populations keep their own mass.
+3. **Model, loss, training** (`learn/model.py`, `losses.py`, `train.py`): a 365 k-parameter local network, no
+   normalisation layers, even-binomial anti-aliased downsampling (cells on the target's centres; flips exact),
+   receptive field 48 voxels; exact slot matching (24 permutations) with per-degree-balanced tensor costs, √mass,
+   kind, classes, fraction, size, Hellinger on rendered densities, contrastive identity; on-the-fly generation into a
+   replay buffer with exact cube-group augmentation.
+4. **Engine** (`learn/engine.py`): every output from the network's output; per-population carry-forward in the slots'
+   space plus the bridge-only density step; sheets reported as their own normal field; chunked volumes exact with a
+   halo of half the receptive field plus the reach.
+
+Open: the trained model's numbers (smoke run at 96³ locally; the H100 run needs permission on pryor); identity
+linking still by direction (embeddings are output, not yet used to link); training crops at one lattice phase only.
