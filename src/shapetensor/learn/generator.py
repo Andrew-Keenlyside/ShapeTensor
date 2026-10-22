@@ -399,7 +399,10 @@ def background(shape, style: str, g: torch.Generator, device, scale: float = 1.0
     u = lambda a, b: float(a + (b - a) * torch.rand(1, generator=g, device=device))
     lu = lambda a, b: float(math.exp(u(math.log(a), math.log(b))))
     extra = []
-    if style == "regions":
+    if style == "flat":                                                                        # a uniform background (feasibility tests)
+        lab = torch.zeros(shape, dtype=torch.long, device=device); R = torch.full(shape, u(70, 190), device=device)
+        img = R + 2 * smooth_noise(shape, 1.0, g, device)
+    elif style == "regions":
         nl = int(torch.randint(3, 9, (1,), generator=g, device=device)); lab = label_map(shape, nl, u(6, 25) * scale, g, device)
         R = (40 + 170 * torch.rand(nl, device=device, generator=g))[lab]; img = R + 6 * smooth_noise(shape, 2.0 * scale, g, device)
     elif style == "tissue":
@@ -450,11 +453,11 @@ def _composite(bg: torch.Tensor, R: torch.Tensor, layers: list, device):
 
 
 def sample(shape=(128, 128, 128), k_layers: int | None = None, seed: int = 0, device="cuda", scale: float | None = None, style: str | None = None,
-           content: str = "general", crossing: bool | None = None, cross_deg: float | None = None) -> Sample:
+           content: str = "general", crossing: bool | None = None, cross_deg: float | None = None, kinds: tuple | None = None) -> Sample:
     """A clean sample: a background, an optional crossing group (``crossing``; None draws it with p 0.5: two or three
     line layers sharing one region, the first two at ``cross_deg``, None drawing 20-90°), ``k_layers`` further random
-    layers (None draws 0-3), composited as volume fractions, plus the interface and isotropic states so that every
-    voxel's state is defined. ``scale`` multiplies every size (None draws it: 0.5-2.5, 1.5-4 for ``content="mri"``)."""
+    layers (None draws 0-3; ``kinds`` restricts their kinds), composited as volume fractions, plus the interface and
+    isotropic states so that every voxel's state is defined. ``style`` ``"flat"``: a uniform background (tests). ``scale`` multiplies every size (None draws it: 0.5-2.5, 1.5-4 for ``content="mri"``)."""
     g = torch.Generator(device=device).manual_seed(seed)
     u = lambda a, b: float(a + (b - a) * torch.rand(1, generator=g, device=device))
     lu = lambda a, b: float(math.exp(u(math.log(a), math.log(b))))
@@ -500,7 +503,8 @@ def sample(shape=(128, 128, 128), k_layers: int | None = None, seed: int = 0, de
         rec["crossing"] = {"n": n, "theta_deg": None if independent else round(theta, 1), "independent": independent, "weights": [round(x, 3) for x in w], "fraction": round(phi, 3)}
     K = k_layers if k_layers is not None else int(torch.randint(0, 4, (1,), generator=g, device=device))
     for _ in range(K):
-        L = random_layer(shape, g, device, scale=scale, content=content)
+        kind = None if kinds is None else kinds[int(torch.randint(0, len(kinds), (1,), generator=g, device=device))]
+        L = random_layer(shape, g, device, kind=kind, scale=scale, content=content)
         L.occupancy, L.tensor = render_layer(L, shape, g, device)
         layers.append(L)
     img = _composite(bg, R, layers, device)

@@ -14,7 +14,7 @@ A curriculum, against the collapse to constant outputs seen when everything is a
   (classes, fraction, size) and the identity term off for the first 20% of steps, ramped in by 40%.
 
 AdamW (``lr`` 3e-4), warm-up then cosine, bf16 autocast, clipping at 5. A fixed held-out set (seeds from 10^7, full
-strength) is scored every ``val_every`` steps with metrics that can see learning: the matched slot axes' error against
+strength, ``strength1``) is scored every ``val_every`` steps with metrics that can see learning: the matched slot axes' error against
 the untrained network's (the chance level of a best-of-K match), the spread and correlation of the predicted fraction
 (a collapsed network is constant), and the engine's population count against the target's. ``--overfit N``: a fixed
 set of N pairs and no refresh, scored on those pairs (a sanity check that the loss can be driven down).
@@ -40,9 +40,10 @@ HALF = ("slots", "mass", "fraction", "classes", "size")
 SCALARS = ("classes", "fraction", "size", "identity")
 
 
-def make(seed: int, size: int, device, strength: float = 1.0) -> tuple[torch.Tensor, dict]:
-    """One training pair: the 8-bit image and its lattice target (floats in half precision)."""
-    s, d = draw((size,) * 3, seed=seed, device=device, strength=strength)
+def make(seed: int, size: int, device, strength: float = 1.0, gen: dict | None = None) -> tuple[torch.Tensor, dict]:
+    """One training pair: the 8-bit image and its lattice target (floats in half precision). ``gen``: arguments for
+    :func:`~shapetensor.learn.generator.draw` (a modality, a background style, crossing groups, layer kinds, ...)."""
+    s, d = draw((size,) * 3, seed=seed, device=device, strength=strength, **(gen or {}))
     t = target(s, d)
     out = {k: (t[k].half() if k in HALF else t[k]) for k in TKEYS}
     out["kind"] = out["kind"].to(torch.int8); out["layer"] = out["layer"].to(torch.int16)
@@ -65,14 +66,14 @@ def stack(pairs, g=None, aug: bool = True):
 
 
 class Buffer:
-    def __init__(self, n: int, size: int, device, seed0: int = 0, strength: float = 1.0, log=print):
-        self.size, self.device, self.next = size, device, seed0
+    def __init__(self, n: int, size: int, device, seed0: int = 0, strength: float = 1.0, log=print, gen: dict | None = None):
+        self.size, self.device, self.next, self.gen = size, device, seed0, gen
         t0 = time.time()
         self.items = [self._make(strength) for _ in range(n)]
         log(f"buffer: {n} pairs at {size}^3 (strength {strength:.2f}) in {time.time() - t0:.0f} s")
 
     def _make(self, strength):
-        item = make(self.next, self.size, self.device, strength); self.next += 1
+        item = make(self.next, self.size, self.device, strength, self.gen); self.next += 1
         return item
 
     def refresh(self, k: int, g: torch.Generator, strength: float):
@@ -135,14 +136,14 @@ def evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
 
 def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: int = 4, buffer: int = 128, refresh: int = 1, lr: float = 3e-4,
           warmup: int = 500, margin: int = 4, val_n: int = 32, val_every: int = 500, log_every: int = 25, seed: int = 0, device: str = "cuda",
-          strength0: float = 0.15, overfit: int = 0, resume: str | None = None):
+          strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None):
     from .engine import PopulationEngine
     outd = Path(out); outd.mkdir(parents=True, exist_ok=True)
     logf = open(outd / "log.jsonl", "a")
     def log(msg):
         print(msg, flush=True)
     args = dict(steps=steps, size=size, batch=batch, accum=accum, buffer=buffer, refresh=refresh, lr=lr, warmup=warmup, margin=margin, val_n=val_n,
-                seed=seed, strength0=strength0, overfit=overfit)
+                seed=seed, strength0=strength0, strength1=strength1, overfit=overfit, gen=gen)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
     model = PopulationNet().to(device)
     rf = receptive_field(model)
@@ -152,12 +153,12 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
         ck = torch.load(resume, map_location=device)
         model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); start = ck["step"]
     sched = lambda s: min(1.0, (s + 1) / warmup) * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * min(s, steps) / steps)))
-    strength = lambda s: 1.0 if overfit else strength0 + (1 - strength0) * min(1.0, s / (0.5 * steps))
+    strength = lambda s: strength1 if overfit else strength0 + (strength1 - strength0) * min(1.0, s / (0.5 * steps))
     ramp = lambda s: min(1.0, max(0.0, (s / steps - 0.2) / 0.2))                                     # the cell scalars: 0 until 20%, full by 40%
     grid = hemisphere(160, device)
     log(f"model: {sum(p.numel() for p in model.parameters())} parameters, receptive field {rf} voxels; args {args}")
-    buf = Buffer(overfit or buffer, size, device, seed0=seed * 1_000_000 + start * refresh, strength=strength(start), log=log)
-    val = buf.items[:min(val_n, overfit)] if overfit else [make(10_000_000 + i, size, device, 1.0) for i in range(val_n)]   # overfit: score the training pairs
+    buf = Buffer(overfit or buffer, size, device, seed0=seed * 1_000_000 + start * refresh, strength=strength(start), log=log, gen=gen)
+    val = buf.items[:min(val_n, overfit)] if overfit else [make(10_000_000 + i, size, device, strength1, gen) for i in range(val_n)]   # overfit: score the training pairs
     engine = PopulationEngine(model, device=device)
     v0 = evaluate(model, val, grid, margin, device, engine)
     logf.write(json.dumps({"step": start, "baseline": True, **v0}) + "\n"); logf.flush()
@@ -203,10 +204,11 @@ def main():
     ap.add_argument("--refresh", type=int, default=1); ap.add_argument("--lr", type=float, default=3e-4); ap.add_argument("--margin", type=int, default=4)
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
-    ap.add_argument("--warmup", type=int, default=500)
+    ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
+    ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
-          seed=a.seed, strength0=a.strength0, overfit=a.overfit, resume=a.resume)
+          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume)
 
 
 if __name__ == "__main__":
