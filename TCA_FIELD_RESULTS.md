@@ -482,3 +482,9 @@ the acquisition's z population side by side, z usually the stronger. Tracking fr
 3.5 mm (p90 7.7), 82% at least 1 mm, none folded, 28% of steps on the second vector, 30% of stops where no vector is
 present; structure tensor 8.2 mm (the sub-volume), 99%, 8% folded. The first run (first build, before the first-vector
 rule) had 2.0 mm and 58% absent stops.
+
+**A volume-median null (00:40 Montreal).** The per-direction median of the mean lift profile over 60 sub-blocks (192^3) of
+the VOI: z +0.016 against in-plane -0.007 on average, but the in-plane profile itself ranges -0.058 to +0.043 -- the VOI's
+dominant in-plane fibre direction leaks into any global profile on a volume this small. Subtracted, it halves the z share
+(0.64 -> 0.37) and halves the agreement with the confident structure tensor (14.7 -> 30.1 deg; white matter weight median
+0.82 -> 0.24). Not adopted; the acquisition null remains open (candidates in docs/data.md).

@@ -63,6 +63,14 @@ phantom (bundle 2.1°, bend 3.1°, bands 3–7°, interface 4.3°), the excised 
 voxels; at a crossing the structure tensor reports the bisector and the chain its strongest population, which a
 single-vector consumer should prefer (crossing 60°: 18.5° against 30.1° from the nearer population).
 
+## A second seed
+
+The same suite on a second seed of every phantom (`results/dev_pipeline/acceptance_seeds2`): band crossings through on
+their own band 1.00 / 0.99 / 0.67 at 90° / 60° / 45° (seed 1: 0.89 / 0.86 / 0.89), switched 0.00 / 0.00 / 0.17; T-junction
+0.00; free end 0.17 (seed 1: 0.02); intermixed crossings within 15° end to end 0.99 & 0.99, 0.87 & 0.83, 0.88 & 0.45; the
+bend 0.41 / 0.98 / 0.95; the overlaps' N = 2 at 1.00 / 1.00 / 0.91; texture N = 0 at 1.00. The 45° band and the free end
+are the two measures that move between seeds by more than a few percent.
+
 ## Resolution
 
 The same phantoms downsampled 2× to 40 µm and run with `scale=6` (the lag shell and the high-pass stop at their
