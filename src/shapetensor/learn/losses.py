@@ -13,8 +13,9 @@ Per lattice cell the predicted ``K`` slots are matched to the target's ``K`` slo
 Plus, per cell: the class shares (soft-label cross-entropy), the fraction (binary cross-entropy against the soft
 target), the log size (L1 where defined), a **Hellinger** distance between the rendered densities of the predicted and
 target slots on a direction grid (the chain's view: lobes, rings, flat), and an **identity** term: a contrastive loss
-between the embeddings of matched slots in neighbouring cells, the slot of the same layer the positive. Only cells whose
-receptive field lies inside the crop (``margin`` cells from the edge) count.
+between the embeddings of matched slots in neighbouring cells, the slot of the same layer the positive, batch-wide
+negatives. Only cells ``margin`` cells from the crop's edge count (4 cells = 16 voxels: the receptive field reaches
+±23.5 voxels, but 99% of a trained network's gradient mass lies within ±12).
 """
 from __future__ import annotations
 
@@ -28,7 +29,8 @@ from .targets import render_odf
 
 WF = torch.tensor([1.0, 1.0, 1.0, 2.0, 2.0, 2.0])
 KIND_WEIGHT = torch.tensor([1.0, 4.0, 1.0, 4.0])          # line, sheet, blob, interface
-WEIGHTS = {"shape": 1.0, "mass": 1.0, "kind": 0.1, "classes": 0.5, "fraction": 0.5, "size": 0.1, "hellinger": 1.0, "identity": 0.1}
+WEIGHTS = {"shape": 1.0, "mass": 1.0, "presence": 0.5, "kind": 0.1, "classes": 0.5, "fraction": 0.5, "size": 0.1, "hellinger": 1.0, "identity": 0.1}
+PRESENT = 0.005                    # a target slot with at least this mass is a population (presence 1); below, empty (presence 0)
 
 
 def _cells(x: torch.Tensor, margin: int) -> torch.Tensor:
@@ -41,10 +43,10 @@ def _cells(x: torch.Tensor, margin: int) -> torch.Tensor:
 def match(pred: dict, tgt: dict, m_full: float = 0.02):
     """The least-cost assignment of predicted to target slots per cell. Returns the per-cell matched cost ``(B, z, y,
     x)``, its parts, and ``perm (B, K, z, y, x)``: the predicted slot matched to each target slot."""
-    S, rm, kl = pred["slots"].float(), pred["root_mass"].float(), pred["kind"].float()                  # (B,K,6,c), (B,K,c), (B,K,nk,c)
+    S, rm, kl, pl = pred["slots"].float(), pred["root_mass"].float(), pred["kind"].float(), pred["presence_logit"].float()   # (B,K,6,c), (B,K,c), (B,K,nk,c), (B,K,c)
     St, mt, kt = tgt["slots"].float(), tgt["mass"].float(), tgt["kind"]
     B, K = rm.shape[:2]; dev = rm.device
-    present = mt > 0
+    present = mt > PRESENT
     d = S[:, :, None] - St[:, None]                                                                       # (B, Kp, Kt, 6, c)
     dS = (d ** 2 * WF.to(dev).view(1, 1, 1, 6, 1, 1, 1)).sum(3)                                           # (B, Kp, Kt, c)
     kw = KIND_WEIGHT.to(dev)[kt.clamp_min(0)] * (mt / m_full).clamp(max=1).sqrt() * present               # (B, Kt, c)
@@ -52,14 +54,15 @@ def match(pred: dict, tgt: dict, m_full: float = 0.02):
     mass = (rm[:, :, None] - mt.clamp_min(0).sqrt()[:, None]) ** 2
     logp = Fn.log_softmax(kl, 2)                                                                          # (B, Kp, nk, c)
     kind = -torch.gather(logp[:, :, None].expand(-1, -1, K, -1, -1, -1, -1), 3, kt.clamp_min(0)[:, None, :, None].expand(-1, K, -1, -1, -1, -1, -1)).squeeze(3) * present[:, None]
-    C = WEIGHTS["shape"] * shape + WEIGHTS["mass"] * mass + WEIGHTS["kind"] * kind                         # (B, Kp, Kt, c)
+    pres = Fn.binary_cross_entropy_with_logits(pl[:, :, None].expand(-1, -1, K, *pl.shape[2:]), present[:, None].expand(-1, K, -1, *present.shape[2:]).float(), reduction="none")
+    C = WEIGHTS["shape"] * shape + WEIGHTS["mass"] * mass + WEIGHTS["presence"] * pres + WEIGHTS["kind"] * kind   # (B, Kp, Kt, c)
     perms = torch.tensor(list(itertools.permutations(range(K))), device=dev)                               # (P, K): target slot k <- predicted perms[p, k]
     kt_idx = torch.arange(K, device=dev)
     costs = C[:, perms, kt_idx[None].expand_as(perms)].sum(2)                                             # (B, P, c)
     best = costs.argmin(1)                                                                                # (B, c)
     perm = perms[best].movedim(-1, 1)                                                                     # (B, K, c)
     sel = lambda X: torch.gather(X, 1, perm.unsqueeze(1)).squeeze(1)                                      # X (B, Kp, Kt, c) -> (B, Kt, c): X[b, perm[b, t], t]
-    parts = {"shape": sel(shape).sum(1), "mass": sel(mass).sum(1), "kind": sel(kind).sum(1)}
+    parts = {"shape": sel(shape).sum(1), "mass": sel(mass).sum(1), "presence": sel(pres).sum(1), "kind": sel(kind).sum(1)}
     return costs.min(1).values, parts, perm
 
 
@@ -70,35 +73,52 @@ def gather_slots(x: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
     return torch.gather(x, 1, perm[:, :, None].expand(-1, -1, x.shape[2], *perm.shape[2:]))
 
 
-def identity_loss(embed: torch.Tensor, perm: torch.Tensor, tgt: dict, tau: float = 0.1, m_min: float = 0.02, axis: int = 0) -> torch.Tensor:
+def identity_loss(embed: torch.Tensor, perm: torch.Tensor, tgt: dict, tau: float = 0.1, m_min: float = 0.02, axis: int = 0, n_neg: int = 8,
+                  g: torch.Generator | None = None) -> torch.Tensor:
     """Contrastive identity: for each target slot with mass > ``m_min``, its matched embedding against the matched
     embeddings of the neighbouring cell (one step along ``axis``) -- the slot with the same layer the positive, the
-    others (present ones) the negatives. Only cells where the neighbour has the layer and at least two slots count."""
+    neighbour's other present slots and ``n_neg`` present slots drawn from anywhere in the batch (other cells, other
+    samples, other layers) the negatives. The batch-wide negatives rule out a trivial solution (a constant embedding
+    per slot index separates the slots of one cell but not populations across the batch)."""
     e = gather_slots(embed.float(), perm)                                                                  # (B, K, E, c)
     lay, m = tgt["layer"], tgt["mass"]
-    dim = 3 + axis
+    B, K, E = e.shape[:3]
+    dim = 3 + axis; a = 2 + axis
     e0, e1 = e.narrow(dim, 0, e.shape[dim] - 1), e.narrow(dim, 1, e.shape[dim] - 1)
-    a = 2 + axis
     l0, l1 = lay.narrow(a, 0, lay.shape[a] - 1), lay.narrow(a, 1, lay.shape[a] - 1)
     m0, m1 = m.narrow(a, 0, m.shape[a] - 1), m.narrow(a, 1, m.shape[a] - 1)
     logits = torch.einsum("bie...,bje...->bij...", e0, e1) / tau                                          # (B, K, K, c)
-    cand = (m1 > m_min)[:, None]                                                                          # (B, 1, K, c)
+    cand = (m1 > m_min)[:, None]
     logits = logits.masked_fill(~cand, -1e4)
     pos = (l0[:, :, None] == l1[:, None]) & cand & (l0[:, :, None] >= 0)
-    has = pos.any(2) & (m0 > m_min) & (cand.sum(2) >= 2)                                                   # (B, K, c)
+    has = pos.any(2) & (m0 > m_min)
     if not bool(has.any()):
         return embed.sum() * 0.0
-    lse = torch.logsumexp(logits, 2)
-    lpos = torch.logsumexp(logits.masked_fill(~pos, -1e4), 2)
-    return (lse - lpos)[has].mean()
+    # batch-wide negatives: present slots of other layers or other samples
+    flat_e = e.movedim(2, -1).reshape(-1, E); flat_l = lay.reshape(-1); flat_b = torch.arange(B, device=e.device).view(B, 1, *([1] * (lay.dim() - 2))).expand_as(lay).reshape(-1)
+    ok = m.reshape(-1) > m_min
+    pool_e, pool_l, pool_b = flat_e[ok], flat_l[ok], flat_b[ok]
+    anchors = e0.movedim(2, -1)[has]                                                                       # (n, E)
+    a_l = l0[has]; a_b = torch.arange(B, device=e.device).view(B, 1, *([1] * (l0.dim() - 2))).expand_as(l0)[has]
+    idx = torch.randint(0, pool_e.shape[0], (anchors.shape[0], n_neg), generator=g).to(e.device)          # drawn on the CPU generator
+    neg = pool_e[idx]; neg_ok = (pool_l[idx] != a_l[:, None]) | (pool_b[idx] != a_b[:, None])             # a different population
+    neg_logits = torch.einsum("ne,nke->nk", anchors, neg) / tau
+    neg_logits = neg_logits.masked_fill(~neg_ok, -1e4)
+    loc = logits.movedim(2, -1)[has]                                                                       # (n, K)
+    locpos = pos.movedim(2, -1)[has]
+    lse = torch.logsumexp(torch.cat([loc, neg_logits], 1), 1)
+    lpos = torch.logsumexp(loc.masked_fill(~locpos, -1e4), 1)
+    return (lse - lpos).mean()
 
 
-def loss(pred: dict, tgt: dict, grid: torch.Tensor, margin: int = 3, kappa: float = 20.0, axis: int = 0) -> tuple[torch.Tensor, dict]:
-    """The total loss and its parts (floats), over the cells ``margin`` from the crop's edge."""
+def loss(pred: dict, tgt: dict, grid: torch.Tensor, margin: int = 4, kappa: float = 20.0, axis: int = 0, weights: dict | None = None,
+         g: torch.Generator | None = None) -> tuple[torch.Tensor, dict]:
+    """The total loss and its parts (floats), over the cells ``margin`` from the crop's edge; ``weights`` overrides
+    :data:`WEIGHTS` for the per-cell terms (a curriculum)."""
     P = {k: _cells(v, margin) for k, v in pred.items()}
     T = {k: _cells(v, margin) if torch.is_tensor(v) and v.dim() >= 4 else v for k, v in tgt.items()}
     cost, parts, perm = match(P, T)
-    out = {"shape": parts["shape"].mean(), "mass": parts["mass"].mean(), "kind": parts["kind"].mean()}
+    out = {"shape": parts["shape"].mean(), "mass": parts["mass"].mean(), "presence": parts["presence"].mean(), "kind": parts["kind"].mean()}
     logq = Fn.log_softmax(P["class_logits"].float(), 1)
     out["classes"] = -(T["classes"].float() * logq).sum(1).mean()
     out["fraction"] = Fn.binary_cross_entropy_with_logits(P["fraction_logit"].float(), T["fraction"].float())
@@ -106,9 +126,10 @@ def loss(pred: dict, tgt: dict, grid: torch.Tensor, margin: int = 3, kappa: floa
     out["size"] = (P["log_size"].float() - T["size"].float().clamp_min(0.3).log()).abs()[sm].mean() if bool(sm.any()) else cost.sum() * 0.0
     f_pred = torch.stack([render_odf(P["slots"][b].float(), P["mass"][b].float(), grid, kappa) for b in range(P["mass"].shape[0])])
     f_tgt = torch.stack([render_odf(T["slots"][b].float(), T["mass"][b].float(), grid, kappa) for b in range(T["mass"].shape[0])])
-    out["hellinger"] = ((f_pred.clamp_min(0).sqrt() - f_tgt.clamp_min(0).sqrt()) ** 2).mean()
-    out["identity"] = identity_loss(P["embed"], perm, T, axis=axis)
-    total = sum(WEIGHTS[k] * v for k, v in out.items())
+    out["hellinger"] = (((f_pred + 1e-6).sqrt() - (f_tgt + 1e-6).sqrt()) ** 2).mean()          # eps: a finite gradient at zero density
+    out["identity"] = identity_loss(P["embed"], perm, T, axis=axis, g=g)
+    W = {**WEIGHTS, **(weights or {})}
+    total = sum(W[k] * v for k, v in out.items() if k not in ("shape", "mass", "presence", "kind")) + cost.mean()
     return total, {k: float(v) for k, v in out.items()}
 
 

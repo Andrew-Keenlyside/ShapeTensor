@@ -25,7 +25,7 @@ def _exact_pred(T):
     slots = torch.where(T["mass"][:, :, None] > 0, T["slots"], torch.tensor([1, 1, 1, 0, 0, 0.0], device=DEV).view(1, 1, 6, 1, 1, 1) / 3)
     kind = 30.0 * torch.nn.functional.one_hot(T["kind"].clamp_min(0), 4).movedim(-1, 2).float()
     f = T["fraction"].clamp(1e-4, 1 - 1e-4)
-    return {"slots": slots, "mass": T["mass"], "root_mass": T["mass"].sqrt(), "kind": kind,
+    return {"slots": slots, "mass": T["mass"], "root_mass": T["mass"].sqrt(), "kind": kind, "presence_logit": torch.where(T["mass"] > 0.005, 30.0, -30.0),
             "embed": torch.nn.functional.normalize(torch.randn(*T["mass"].shape[:2], 8, *T["mass"].shape[2:], device=DEV), dim=2),
             "fraction_logit": torch.log(f / (1 - f)), "class_logits": torch.log(T["classes"] + 1e-8), "log_size": T["size"].clamp_min(0.3).log()}
 
@@ -40,7 +40,7 @@ def test_exact_prediction_costs_nothing(sample_target):
     _, _, T = sample_target
     P = _exact_pred(T)
     _, parts = loss(P, T, hemisphere(160, DEV), margin=1)
-    assert parts["shape"] < 1e-6 and parts["mass"] < 1e-6 and parts["kind"] < 1e-3 and parts["hellinger"] < 1e-6, parts
+    assert parts["shape"] < 1e-6 and parts["mass"] < 1e-6 and parts["presence"] < 1e-6 and parts["kind"] < 1e-3 and parts["hellinger"] < 1e-5, parts
 
 
 def test_loss_ignores_slot_order(sample_target):
@@ -48,8 +48,9 @@ def test_loss_ignores_slot_order(sample_target):
     P = _exact_pred(T)
     P = {k: (v + 0.05 * torch.randn_like(v) if k in ("root_mass",) else v) for k, v in P.items()}
     K = P["mass"].shape[1]; perm = [(i * 5 + 2) % K for i in range(K)]                          # a permutation of the K slots
-    Pp = {k: (v[:, perm] if k in ("slots", "mass", "root_mass", "kind", "embed") else v) for k, v in P.items()}
-    a, _ = loss(P, T, hemisphere(160, DEV), margin=1); b, _ = loss(Pp, T, hemisphere(160, DEV), margin=1)
+    Pp = {k: (v[:, perm] if k in ("slots", "mass", "root_mass", "presence_logit", "kind", "embed") else v) for k, v in P.items()}
+    w = {"identity": 0.0}                                                                       # the identity term draws random negatives
+    a, _ = loss(P, T, hemisphere(160, DEV), margin=1, weights=w); b, _ = loss(Pp, T, hemisphere(160, DEV), margin=1, weights=w)
     assert abs(float(a) - float(b)) < 1e-4 * max(1.0, abs(float(a)))
 
 
@@ -119,6 +120,6 @@ def test_receptive_field_fits_the_window():
 
 def test_training_runs_end_to_end(tmp_path):
     from shapetensor.learn.train import train
-    train(str(tmp_path), steps=4, size=48, batch=2, buffer=3, refresh=1, val_n=1, val_every=4, margin=1, device=DEV)
+    train(str(tmp_path), steps=4, size=48, batch=2, accum=2, buffer=3, refresh=1, val_n=1, val_every=4, margin=1, warmup=2, device=DEV)
     ck = torch.load(tmp_path / "model.pt", map_location=DEV)
     assert ck["step"] == 4 and (tmp_path / "log.jsonl").exists()
