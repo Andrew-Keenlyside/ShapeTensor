@@ -100,10 +100,25 @@ def test_faint_populations_keep_their_mass():
     from shapetensor.learn.targets import _pool
     own = _pool(torch.stack([L.occupancy for L in s.layers[:4]]), 6.0, 4)                     # each population's own pooled volume
     present = (own > 1e-3).sum(0)
-    ok = ((t["mass"] > 1e-3).sum(0) == present.clamp(max=4)).float().mean()
+    ok = ((t["mass"] > 1e-3).sum(0) == present.clamp(max=6)).float().mean()
     assert float(ok) > 0.97 and float((present == 4).float().mean()) > 0.1, (float(ok), float((present == 4).float().mean()))
     want = (own * (own > 1e-3)).sum(0)                                                        # masses are the populations' own volumes, not renormalised
     assert torch.allclose(t["mass"].sum(0), want, rtol=0.02, atol=1e-4)
+
+
+def test_blobs_merge_whatever_their_axis():
+    from shapetensor.learn.generator import eye6
+    shape = (32, 32, 32); ones = torch.ones(shape, dtype=torch.bool, device=DEV); g = torch.Generator(device=DEV).manual_seed(9)
+    n = []
+    for d in ((1.0, 0, 0), (0, 1.0, 0), (0, 0, 1.0), (0.577, 0.577, 0.577)):
+        f = torch.tensor(d, device=DEV).view(3, 1, 1, 1).expand(3, *shape).contiguous()
+        a = Layer("blob", f, 1.5, 3.5, 2.0, ones, 50.0); a.occupancy, a.tensor = render_layer(a, shape, g, DEV)          # blobs everywhere
+        c = Layer("blob", f, 1.0, 1.0, 0.0, ones, 50.0, occupancy=torch.full(shape, 0.2, device=DEV), tensor=eye6(DEV).view(6, 1, 1, 1).expand(6, *shape) / 3)
+        layers = [a, c]; bg = torch.full(shape, 100.0, device=DEV); img = _composite(bg, bg.clone(), layers, DEV)
+        s = Sample(img, layers, bg, torch.zeros(shape, dtype=torch.long, device=DEV), "flat", 1.0, "general", {}, bg.clone())
+        t = target(s, clean(s))
+        n.append(float(((t["mass"] > 1e-3) & (t["kind"] == 2)).sum(0).float().mean()))
+    assert max(n) < 1.01 and min(n) > 0.99, n                                                     # one blob population, whichever way the blobs point
 
 
 def test_invisible_layer_is_isotropic():

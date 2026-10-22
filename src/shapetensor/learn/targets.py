@@ -1,7 +1,7 @@
 """The population model's target: the populations in each lattice cell, pooled per layer.
 
 Each layer (population) is pooled on its own over the window: its visible volume ``w_k = occupancy_k * visibility_k``
-and its shape tensor weighted by it, Gaussian-smoothed (``sigma_w`` voxels) and averaged to the lattice (``step``).
+(presence) and its shape tensor -- blended towards isotropic where its orientation visibility is low -- weighted by it, Gaussian-smoothed (``sigma_w`` voxels) and averaged to the lattice (``step``).
 So a bend broadens one population's tensor (lower linearity) and never adds a population; populations appear only as
 distinct layers. In each cell the layers are merged where they are the same population to the eye (same kind, axes
 within ``merge_deg``), sorted by mass, and kept in ``K`` slots:
@@ -11,9 +11,9 @@ within ``merge_deg``), sorted by mass, and kept in ``K`` slots:
   population keeps its own small mass, a strong one its large mass);
 * ``kind (K, z, y, x)`` -- line / sheet / blob / interface (0-3), -1 empty; ``layer (K, z, y, x)`` -- the dominant
   layer's index (the population's identity across cells), -1 empty;
-* ``fraction`` -- the cell's visible shape volume (the sum of the masses, interfaces included);
-* ``classes (5, z, y, x)`` -- soft shares of line / sheet / blob / interface / isotropic, summing to one (an invisible
-  layer's volume counts as isotropic);
+* ``fraction`` -- the cell's visible shape volume (lines, sheets, blobs; an interface is a boundary, not a volume);
+* ``classes (5, z, y, x)`` -- soft shares of line / sheet / blob / interface / isotropic, summing to one: the volume's
+  shares (an invisible layer's volume counts as isotropic) and the boundary's weight, normalised together;
 * ``size`` -- the shapes' mass-weighted radius (voxels), with ``size_mask`` where it is defined.
 
 :func:`render_odf` turns slots into an orientation density on the sphere (for display, the chain's peak reader, and an
@@ -27,7 +27,7 @@ import torch
 import torch.nn.functional as Fn
 
 from ..filters import gaussian
-from .generator import Sample, full3
+from .generator import Sample, eig3
 
 KINDS = ("line", "sheet", "blob", "interface")
 CLASSES = ("line", "sheet", "blob", "interface", "isotropic")
@@ -42,20 +42,25 @@ def _pool(x: torch.Tensor, sigma_w: float, step: int) -> torch.Tensor:
 def _axis(T: torch.Tensor, kind: torch.Tensor) -> torch.Tensor:
     """The axis of tensors ``T (6, n)``: the largest eigenvector for lines and blobs, the smallest (the normal) for
     sheets and interfaces. ``(3, n)``."""
-    _, V = torch.linalg.eigh(full3(T.T))
-    big, small = V[..., -1], V[..., 0]
+    _, V = eig3(T)                                                                               # (3, 3, n): V[i] for the i-th smallest eigenvalue
     planar = (kind == 1) | (kind == 3)
-    return torch.where(planar[:, None], small, big).T
+    return torch.where(planar[None], V[0], V[2])
 
 
-def target(s: Sample, drawn: dict, *, step: int = 4, sigma_w: float = 5.0, K: int = 4, merge_deg: float = 20.0, min_mass: float = 1e-3) -> dict:
+def target(s: Sample, drawn: dict, *, step: int = 4, sigma_w: float = 5.0, K: int = 6, merge_deg: float = 20.0, min_mass: float = 1e-3) -> dict:
     """The lattice target of a drawn sample (``drawn`` from :func:`~shapetensor.learn.generator.nuisance`, or the clean
-    labels as ``{"occupancy", "tensors", "visibility"}``). See the module docstring."""
+    labels as ``{"occupancy", "tensors", "visibility"}``; visibility per layer ``(K,)`` or a local map ``(K, Z, Y, X)``).
+    See the module docstring."""
     occ, T, vis = drawn["occupancy"], drawn["tensors"], drawn["visibility"]
     dev = occ.device; L = len(s.layers)
     shapes = [k for k, Lr in enumerate(s.layers) if Lr.role != "isotropic"]
     kind_of = torch.tensor([KINDS.index("interface" if s.layers[k].role == "interface" else s.layers[k].kind) for k in shapes], device=dev)
-    w = occ[shapes] * vis[shapes].view(-1, 1, 1, 1)                                             # visible volume per layer
+    vis = vis.view(-1, 1, 1, 1) if vis.dim() == 1 else vis
+    w = occ[shapes] * vis[shapes]                                                               # visible volume per layer (an interface: its visible step weight)
+    ov = drawn.get("orientation_visibility")
+    if ov is not None:                                                                          # seen, orientation not recoverable: the tensor towards isotropic
+        ov = ov.view(-1, 1, 1, 1) if ov.dim() == 1 else ov
+        T = T * ov[:, None] + (1 - ov[:, None]) * torch.tensor([1, 1, 1, 0, 0, 0.0], device=dev).view(1, 6, 1, 1, 1) / 3
     m = _pool(w, sigma_w, step)                                                                 # (S, z, y, x)
     M = torch.stack([_pool(w[i][None] * T[k], sigma_w, step) for i, k in enumerate(shapes)])   # (S, 6, z, y, x)
     cs = m.shape[1:]; n = m[0].numel(); S_ = len(shapes)
@@ -72,7 +77,8 @@ def target(s: Sample, drawn: dict, *, step: int = 4, sigma_w: float = 5.0, K: in
         t = tens[li, :, ar].T; mj = mass[li, ar]; kj = kind_of[li]                              # (6, n), (n,), (n,)
         ax = _axis(t, kj)
         live = mj > min_mass
-        same = (skind == kj[None]) & ((saxis * ax[None]).sum(1).abs() >= cosmin) & (smass > 0)
+        aligned = ((saxis * ax[None]).sum(1).abs() >= cosmin) | (kj[None] == 2)                  # blobs are one population whatever their (weak) axis
+        same = (skind == kj[None]) & aligned & (smass > 0)
         has = same.any(0) & live
         best = torch.where(same, smass, torch.full_like(smass, -1.0)).argmax(0)                   # merge into the heaviest matching slot
         free = (smass <= 0).float().argmax(0); nfree = (smass <= 0).any(0)
@@ -90,17 +96,21 @@ def target(s: Sample, drawn: dict, *, step: int = 4, sigma_w: float = 5.0, K: in
     o2 = smass.argsort(0, descending=True)                                                     # merging can reorder masses
     g = lambda x: torch.gather(x, 0, o2) if x.dim() == 2 else torch.gather(x, 0, o2[:, None].expand_as(x))
     slots, smass, skind, slayer = g(slots), g(smass), g(skind), g(slayer)
-    # scalars: fraction, class shares, size
-    fraction = mass.sum(0).clamp(0, 1)
+    # scalars: the shape fraction (volume: shapes only), class shares (the volume's shares plus the boundary), size
+    shape_like = torch.tensor([s.layers[k].role == "shape" for k in shapes], device=dev)
+    ms = mass * shape_like[:, None]
+    fraction = ms.sum(0).clamp(0, 1)
     cls = torch.zeros(len(CLASSES), n, device=dev)
     for i, k in enumerate(shapes):
         cls[int(kind_of[i])] += mass[i]
-    cls = cls * (fraction / mass.sum(0).clamp_min(1e-9))[None]
-    cls[-1] = (1 - cls[:-1].sum(0)).clamp_min(0)
+    cls[-1] = (1 - fraction).clamp_min(0)                                                       # the isotropic remainder of the volume
+    cls = cls / cls.sum(0, keepdim=True).clamp_min(1e-9)
     radius = torch.tensor([s.layers[k].radius for k in shapes], device=dev)
-    shape_like = torch.tensor([s.layers[k].role == "shape" for k in shapes], device=dev)
-    ms = mass * shape_like[:, None]
-    size = (ms * radius[:, None]).sum(0) / ms.sum(0).clamp_min(1e-9)
+    st = drawn.get("stretch")
+    rs_m = (ms * radius[:, None]).sum(0)
+    if st is not None:                                                                          # a warp scales the shapes locally
+        rs_m = rs_m * _pool(st[None], sigma_w, step).reshape(-1)
+    size = rs_m / ms.sum(0).clamp_min(1e-9)
     rs = lambda x: x.reshape(x.shape[:-1] + cs)
     return {"slots": rs(slots), "mass": rs(smass), "kind": rs(skind), "layer": rs(slayer), "fraction": rs(fraction), "classes": rs(cls),
             "size": rs(size), "size_mask": rs(ms.sum(0) > 0.01), "dropped": rs(dropped), "step": step, "sigma_w": sigma_w}

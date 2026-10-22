@@ -47,7 +47,7 @@ def test_loss_ignores_slot_order(sample_target):
     _, _, T = sample_target
     P = _exact_pred(T)
     P = {k: (v + 0.05 * torch.randn_like(v) if k in ("root_mass",) else v) for k, v in P.items()}
-    perm = [2, 0, 3, 1]
+    K = P["mass"].shape[1]; perm = [(i * 5 + 2) % K for i in range(K)]                          # a permutation of the K slots
     Pp = {k: (v[:, perm] if k in ("slots", "mass", "root_mass", "kind", "embed") else v) for k, v in P.items()}
     a, _ = loss(P, T, hemisphere(160, DEV), margin=1); b, _ = loss(Pp, T, hemisphere(160, DEV), margin=1)
     assert abs(float(a) - float(b)) < 1e-4 * max(1.0, abs(float(a)))
@@ -67,7 +67,9 @@ def test_cube_augmentation_is_exact(sample_target):
     g = torch.Generator().manual_seed(4)
     for _ in range(3):
         perm, flips = cube_transform(g)
-        dr = {"occupancy": apply_cube(d["occupancy"], perm, flips), "tensors": apply_cube(d["tensors"], perm, flips, tensor6=True), "visibility": d["visibility"]}
+        dr = {"occupancy": apply_cube(d["occupancy"], perm, flips), "tensors": apply_cube(d["tensors"], perm, flips, tensor6=True),
+              "visibility": apply_cube(d["visibility"], perm, flips), "orientation_visibility": apply_cube(d["orientation_visibility"], perm, flips),
+              "stretch": apply_cube(d["stretch"], perm, flips)}
         T2 = target(s, dr)
         for k in ("mass", "fraction", "classes"):
             assert torch.allclose(T2[k], apply_cube(T[k][0], perm, flips), atol=1e-4), k

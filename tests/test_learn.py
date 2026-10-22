@@ -38,9 +38,9 @@ def test_smooth_noise_stationary():
 @pytest.mark.parametrize("kind,radius,length", [("line", 0.8, 60.0), ("line", 1.5, 60.0), ("line", 3.0, 60.0), ("sheet", 0.8, 12.0),
                                                 ("sheet", 2.0, 12.0), ("blob", 1.5, 3.0), ("blob", 3.0, 6.0)])
 def test_isolated_shape_is_one_voxel_full(kind, radius, length):
-    shape = (48, 48, 48); region = torch.zeros(shape, dtype=torch.bool, device=DEV); region[24, 24, 24] = True
+    shape = (48, 48, 48); region = torch.ones(shape, dtype=torch.bool, device=DEV)
     d = torch.tensor([0.3, 0.5, 0.81], device=DEV); d = d / d.norm()
-    L = Layer(kind, d.view(3, 1, 1, 1).expand(3, *shape).contiguous(), radius, length, 0.0, region, 50.0)
+    L = Layer(kind, d.view(3, 1, 1, 1).expand(3, *shape).contiguous(), radius, length, 0.0, region, 50.0, seeds=torch.tensor([[24.0, 24.0, 24.0]], device=DEV))
     occ, T = render_layer(L, shape, torch.Generator(device=DEV).manual_seed(0), DEV)
     assert 0.8 <= float(occ.max()) <= 1.0, float(occ.max())
     if kind == "line":
@@ -65,14 +65,20 @@ def test_labels_match_rendered_shapes(kind):
     assert m.sum() > 200 and float(err.median()) < 10.0, (int(m.sum()), float(err.median()))
 
 
-def test_blob_tensor_monotone_in_elongation():
-    d = torch.tensor([[0.0, 0.0, 1.0]], device=DEV)
-    aniso = []
-    for L in (0.0, 1.0, 2.0, 3.0, 5.0):
-        from shapetensor.learn.generator import full3
-        ev = torch.linalg.eigvalsh(full3(blob_tensor(d, 1.0, L)))[0].flip(0)
-        aniso.append(float(ev[0] - ev[1]))
-    assert aniso[0] < 1e-6 and all(b > a for a, b in zip(aniso, aniso[1:])), aniso
+@pytest.mark.parametrize("radius,length", [(1.0, 0.0), (1.0, 2.5), (0.6, 2.0), (2.0, 5.0)])
+def test_blob_label_is_the_rendered_moment(radius, length):
+    from shapetensor.learn.generator import full3
+    shape = (40, 40, 40); d = torch.tensor([0.0, 0.6, 0.8], device=DEV); g = torch.Generator(device=DEV).manual_seed(0)
+    x = torch.stack(torch.meshgrid(*(torch.arange(n, device=DEV, dtype=torch.float32) for n in shape), indexing="ij")).reshape(3, -1)
+    M = torch.zeros(3, 3, device=DEV)
+    for k in range(16):                                                                           # the label is the expected moment: over sub-voxel positions
+        seed = 20.0 + torch.rand(1, 3, device=DEV, generator=g)
+        L = Layer("blob", d.view(3, 1, 1, 1).expand(3, *shape).contiguous(), radius, length, 0.0, torch.ones(shape, dtype=torch.bool, device=DEV), 50.0, seeds=seed)
+        occ, T = render_layer(L, shape, g, DEV)
+        w = occ.reshape(-1); mu = (x * w).sum(1) / w.sum(); dx = x - mu[:, None]
+        Mk = (dx[:, None] * dx[None] * w).sum(-1) / w.sum(); M += Mk / Mk.trace() / 16          # the rendered blob's normalised second moment
+    lab = full3(blob_tensor(d[None], radius, length))[0]
+    assert torch.allclose(torch.linalg.eigvalsh(M), torch.linalg.eigvalsh(lab), atol=0.02), (torch.linalg.eigvalsh(M), torch.linalg.eigvalsh(lab))
 
 
 def test_volume_fractions_and_tensors():
@@ -80,15 +86,17 @@ def test_volume_fractions_and_tensors():
         for m in MODALITIES:
             s, d = draw((40, 40, 40), seed=seed, device=DEV, modality=m)
             occ = torch.stack([L.occupancy for L in s.layers])
+            vol = torch.tensor([L.role != "interface" for L in s.layers], device=DEV)               # the volume budget: shapes and the isotropic remainder
             assert occ.min() >= 0 and occ.max() <= 1 + 1e-5
-            assert torch.allclose(occ.sum(0), torch.ones_like(occ[0]), atol=1e-4)
-            assert torch.allclose(d["occupancy"].sum(0), torch.ones_like(occ[0]), atol=1e-3)
+            assert torch.allclose(occ[vol].sum(0), torch.ones_like(occ[0]), atol=1e-4)
+            assert torch.allclose(d["occupancy"][vol].sum(0), torch.ones_like(occ[0]), atol=1e-3)
+            assert d["visibility"].shape == occ.shape and d["visibility"].min() >= 0 and d["visibility"].max() <= 1
             T = d["tensors"]
             assert torch.allclose(T[:, :3].sum(1), torch.ones_like(T[:, 0]), atol=1e-3)
             from shapetensor.learn.generator import full3
             assert float(torch.linalg.eigvalsh(full3(T.movedim(1, -1))).min()) > -1e-3
             assert torch.isfinite(d["image"]).all() and d["image"].min() >= 0 and d["image"].max() <= 255
-            assert d["visibility"].shape == (len(s.layers),) and "axis" in d["record"]
+            assert "axis" in d["record"]
 
 
 def test_occluder_hides_what_is_under_it():
@@ -116,9 +124,13 @@ def test_crossing_group_angle_and_density():
     assert m.sum() > 100 and float(err.median()) < 8.0, float(err.median())
     tot = sum(L.occupancy for L in grp)
     assert float(tot.max()) <= 1.0 + 1e-5
-    phi = s.record["crossing"]["fraction"]; region = grp[0].region
-    r = float(tot[region].mean()) / phi
-    assert 0.75 < r < 1.25, r                                                                    # the group fills its region to the drawn volume fraction, as one population would
+    rs = []
+    for k in range(6):                                                                          # few thick fibres make one sample's fill noisy: average
+        sk = sample((64, 64, 64), k_layers=0, seed=20 + k, device=DEV, style="tissue", crossing=True, scale=1.0)
+        gk = [L for L in sk.layers if L.group == 0]
+        rs.append(float(sum(L.occupancy for L in gk)[gk[0].region].mean()) / sk.record["crossing"]["fraction"])
+    r = sum(rs) / len(rs)
+    assert 0.75 < r < 1.15, rs                                                                    # the group fills its region to the drawn volume fraction
 
 
 def test_warp_never_folds():
@@ -173,16 +185,90 @@ def test_acquisition_axis_and_artefact_geometry():
     assert len(streak_angles) >= 5 and max(streak_angles) - min(streak_angles) > 60
 
 
-def test_visibility_tracks_contrast_to_noise():
-    shape = (40, 40, 40); g = torch.Generator(device=DEV).manual_seed(0); ones = torch.ones(shape, dtype=torch.bool, device=DEV)
+def _fibres(shape=(48, 48, 48), radius=1.0, fraction=0.15, seed=0):
+    g = torch.Generator(device=DEV).manual_seed(seed); ones = torch.ones(shape, dtype=torch.bool, device=DEV)
+    from shapetensor.learn.generator import density_for
     d = torch.tensor([0.0, 0.6, 0.8], device=DEV).view(3, 1, 1, 1).expand(3, *shape).contiguous()
-    occ, _ = render_layer(Layer("line", d, 1.0, 60.0, 1.5, ones, 50.0), shape, g, DEV)
-    noise = torch.randn(shape, device=DEV, generator=g)
-    strong = visibility(100 + 60 * occ + 10 * noise, occ[None], [1.0])
-    faint = visibility(100 + 15 * occ + 300 * noise, occ[None], [1.0])
-    assert float(strong[0]) > 0.95 and float(faint[0]) < 0.2, (float(strong[0]), float(faint[0]))
-    R = 100 + 30.0 * (torch.arange(40, device=DEV) >= 20).float().view(40, 1, 1).expand(shape)
-    assert float(visibility(R + 5 * noise, R[None], [STEP_FULL])[0]) > 0.95
+    occ, _ = render_layer(Layer("line", d, radius, 60.0, density_for("line", radius, 60.0, fraction), ones, 50.0), shape, g, DEV)
+    return occ, g
+
+
+def _vis(img, occ, rng=None):
+    kw = {} if rng is None else {"t_lo": rng[0], "t_hi": rng[1]}
+    v = visibility(img, occ[None], [1.0], radii=[1.0], **kw)[0]
+    return float((v * occ).sum() / occ.sum())
+
+
+def test_visibility_tracks_presence_and_orientation():
+    from shapetensor.learn.generator import ORIENTATION_T
+    occ, g = _fibres()
+    noise = torch.randn(occ.shape, device=DEV, generator=g)
+    for img, pres, orient in ((100 + 60 * occ + 10 * noise, (0.95, 1.01), (0.95, 1.01)),            # CNR 6: there, orientation clear
+                              (100 + 20 * occ + 200 * noise, (0.0, 0.15), (0.0, 0.01)),             # CNR 0.1: barely there, orientation lost
+                              (100 + 50 * occ + 50 * noise, (0.8, 1.01), (0.5, 1.01))):             # CNR 1
+        p, o = _vis(img, occ), _vis(img, occ, ORIENTATION_T)
+        assert pres[0] <= p <= pres[1] and orient[0] <= o <= orient[1], (p, o)
+    R = 100 + 30.0 * (torch.arange(48, device=DEV) >= 24).float().view(48, 1, 1).expand(occ.shape)
+    vi = visibility(R + 5 * noise, R[None], [STEP_FULL], radii=[1.0])[0]
+    assert float(vi[20:28].mean()) > 0.9
+
+
+def test_visibility_is_local():
+    occ, g = _fibres(shape=(48, 48, 96))
+    sd = torch.ones_like(occ) * 5; sd[:, :, 48:] = 300                                            # the right half drowned in noise
+    img = 100 + 60 * occ + sd * torch.randn(occ.shape, device=DEV, generator=g)
+    from shapetensor.learn.generator import ORIENTATION_T
+    for rng, right_max in ((None, 0.4), (ORIENTATION_T, 0.05)):                                  # presence, orientation
+        kw = {} if rng is None else {"t_lo": rng[0], "t_hi": rng[1]}
+        v = visibility(img, occ[None], [1.0], radii=[1.0], **kw)[0]
+        left = float((v * occ)[:, :, 8:36].sum() / occ[:, :, 8:36].sum()); right = float((v * occ)[:, :, 60:88].sum() / occ[:, :, 60:88].sum())
+        assert left > 0.9 and right < right_max, (rng, left, right)
+
+
+def test_featureless_region_is_invisible():
+    shape = (80, 80, 80); g = torch.Generator(device=DEV).manual_seed(1)
+    occ = torch.zeros(shape, device=DEV); occ[8:72, 8:72, 8:72] = 1.0; occ = gaussian(occ, 1.0)   # a uniformly filled slab: no shapes to see inside
+    img = 100 + 60 * occ + 5 * torch.randn(shape, device=DEV, generator=g)
+    v = visibility(img, occ[None], [1.0], radii=[1.0])[0]
+    assert float(v[36:44, 36:44, 36:44].mean()) < 0.05                                            # beyond the window's reach (3 sigma_v + the high-pass) of the slab's edges
+
+
+def test_layers_do_not_saturate():
+    from shapetensor.learn.generator import random_layer
+    sat = []
+    for k in range(24):
+        g = torch.Generator(device=DEV).manual_seed(k)
+        L = random_layer((64, 64, 64), g, DEV, kind="line")
+        occ, _ = render_layer(L, (64, 64, 64), g, DEV)
+        sat.append(float((occ[L.region] > 0.95).float().mean()))
+    assert sum(x > 0.5 for x in sat) <= 1, sat
+
+
+def test_no_falloff_at_the_faces():
+    occ, _ = _fibres(shape=(64, 64, 64), fraction=0.2)
+    face = torch.cat([occ[:6].flatten(), occ[-6:].flatten(), occ[:, :6].flatten(), occ[:, -6:].flatten(), occ[:, :, :6].flatten(), occ[:, :, -6:].flatten()]).mean()
+    centre = occ[16:48, 16:48, 16:48].mean()
+    assert abs(float(face / centre) - 1) < 0.15, float(face / centre)
+
+
+def test_interface_survives_additive_layers():
+    shape = (48, 48, 48)
+    R = 100 + 40.0 * (torch.arange(48, device=DEV) >= 24).float().view(48, 1, 1).expand(shape).contiguous()
+    occ, g = _fibres(fraction=0.4)
+    d = torch.tensor([0.0, 0.6, 0.8], device=DEV).view(3, 1, 1, 1).expand(3, *shape).contiguous()
+    L = Layer("line", d, 1.0, 60.0, 1.0, torch.ones(shape, dtype=torch.bool, device=DEV), 40.0, occupancy=occ, tensor=eye6(DEV).view(6, 1, 1, 1).expand(6, *shape) / 3)
+    layers = [L]; _composite(R.clone(), R, layers, DEV)
+    _, w = interface(R)
+    assert torch.allclose(layers[1].occupancy, w, atol=1e-5)                                      # the step's full weight under the fibres
+    assert torch.allclose(layers[0].occupancy + layers[2].occupancy, torch.ones(shape, device=DEV), atol=1e-5)
+
+
+def test_crossing_groups_include_independent_fields():
+    flags = []
+    for k in range(16):
+        s = sample((32, 32, 32), k_layers=0, seed=200 + k, device=DEV, crossing=True, scale=1.0)
+        flags.append(s.record["crossing"]["independent"])
+    assert 2 <= sum(flags) <= 12, flags
 
 
 def test_boundary_sample_has_both_states():
