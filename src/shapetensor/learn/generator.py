@@ -77,6 +77,7 @@ class Layer:
     coherence: float = 1.0         # the field's coherence, for the record
     kappa: float = 0.0             # the Bingham concentration of the shape's orientation state
     occupancy: torch.Tensor | None = None
+    role: str = "shape"            # "shape" (a rendered population), "interface" (a region boundary), "isotropic" (the flat remainder)
 
 
 def _step_along(pos: torch.Tensor, fld: torch.Tensor, shape) -> torch.Tensor:
@@ -139,7 +140,7 @@ def random_layer(shape, g: torch.Generator, device, kind: str | None = None, sca
     else:
         length, density = radius * lu(0.5, 2.5), lu(0.2, 3.0) / scale ** 3
     region = region_mask(shape, lu(8, 40) * scale, u(0.3, 1.0) if u(0, 1) < 0.7 else 1.0, g, device)
-    contrast = u(25, 140) * (1 if u(0, 1) < 0.5 else -1)
+    contrast = u(15, 140) * (1 if u(0, 1) < 0.5 else -1)                                       # faint to strong; 15 grey levels is faint under the noise
     occluding = u(0, 1) < 0.2
     aspect = length / (2 * radius)
     kappa = {"line": min(2 * aspect ** 2, 60.0), "sheet": min(2 * aspect ** 2, 60.0), "blob": max(0.0, 2 * (aspect - 1) ** 2)}[kind]
@@ -153,30 +154,96 @@ def random_layer(shape, g: torch.Generator, device, kind: str | None = None, sca
 @dataclass
 class Sample:
     image: torch.Tensor            # (Z, Y, X) float, grey levels 0-255 (clean)
-    layers: list                   # Layer, each with .occupancy (Z, Y, X)
+    layers: list                   # Layer, each with .occupancy (Z, Y, X); the last two are the background's interface and isotropic states
     background: torch.Tensor       # (Z, Y, X) the background before the layers
     labels: torch.Tensor           # (Z, Y, X) the background's label map
+    style: str = "regions"         # the background style
+    scale: float = 1.0             # the length multiplier the sample was drawn at
 
 
-def sample(shape=(128, 128, 128), k_layers: int | None = None, seed: int = 0, device="cuda", scale: float = 1.0) -> Sample:
+BACKGROUNDS = ("regions", "tissue", "cells")
+
+
+def background(shape, style: str, g: torch.Generator, device, scale: float = 1.0):
+    """The background before the layers: ``regions`` (anatomix: a random label map, an intensity per label),
+    ``tissue`` (two or three broad regions -- grey/white matter -- with gentle texture), ``cells`` (a dense field of
+    small blobs: a cell stain). Returns the image, the label map, the interface normal field and its weight (the
+    boundaries of the regions as sheets; a step of 25 grey levels or more is a full sheet, fainter steps fade), and the
+    extra layers the style brings (the cells as a blob population)."""
+    u = lambda a, b: float(a + (b - a) * torch.rand(1, generator=g, device=device))
+    extra = []
+    if style == "regions":
+        nl = int(torch.randint(3, 9, (1,), generator=g, device=device)); lab = label_map(shape, nl, u(6, 25) * scale, g, device)
+        inten = 40 + 170 * torch.rand(nl, device=device, generator=g); img = inten[lab] + 6 * smooth_noise(shape, 2.0 * scale, g, device)
+    elif style == "tissue":
+        nl = int(torch.randint(2, 4, (1,), generator=g, device=device)); lab = label_map(shape, nl, u(25, 60) * scale, g, device)
+        inten = 60 + 150 * torch.rand(nl, device=device, generator=g); img = inten[lab] + u(8, 25) * smooth_noise(shape, u(1.0, 3.0) * scale, g, device)
+    else:                                                                                      # cells: a blob population on a flat background
+        lab = torch.zeros(shape, dtype=torch.long, device=device); base = u(120, 220)
+        n = smooth_noise(shape, u(1.2, 2.5) * scale, g, device); cells = gaussian((n > u(0.8, 1.6)).float(), 0.8 * scale); cells = cells / cells.max().clamp_min(1e-6)
+        img = base + 5 * smooth_noise(shape, 1.0, g, device)
+        L = Layer("blob", direction_field(shape, 8.0 * scale, g, device), 1.2 * scale, 1.2 * scale, 0.0, torch.ones(shape, dtype=torch.bool, device=device), -u(60, 140), False, 0.0, 0.0, occupancy=cells)
+        img = img + L.contrast * cells; extra.append(L)
+    # the interfaces between regions as sheets: the normal from the smoothed image's gradient at the label boundaries
+    sm = gaussian(img, 1.5 * scale); gr = torch.stack(torch.gradient(sm, dim=(0, 1, 2)), 0); mag = gr.norm(dim=0)
+    edge = torch.zeros(shape, dtype=torch.bool, device=device)
+    for ax in range(3):
+        d = lab != torch.roll(lab, 1, dims=ax); edge |= d | torch.roll(d, -1, dims=ax)
+    bw = (gaussian(edge.float(), 1.0 * scale) * mag / (0.27 * 25)).clamp(0, 1)                   # a step of 25 grey levels, blurred by 1.5 voxels, peaks at 0.27*25 per voxel
+    normal = gr / gr.norm(dim=0, keepdim=True).clamp_min(1e-6)
+    return img, lab, normal, bw, extra
+
+
+def sample(shape=(128, 128, 128), k_layers: int | None = None, seed: int = 0, device="cuda", scale: float | None = None, style: str | None = None) -> Sample:
+    """A clean sample. ``scale`` multiplies every length (None draws it log-uniformly in 0.5-2.5: the shapes' sizes in
+    voxels vary as the voxel size would). Its layers end with two **background states** so that every voxel has an
+    orientation state: the interfaces of the background's regions (a sheet layer, normal = the boundary normal, present
+    under any additive layer crossing it) and the isotropic remainder (a blob layer with kappa 0): a full-volume target,
+    not one for the shapes only."""
     g = torch.Generator(device=device).manual_seed(seed)
     u = lambda a, b: float(a + (b - a) * torch.rand(1, generator=g, device=device))
-    nl = int(torch.randint(3, 9, (1,), generator=g, device=device))
-    lab = label_map(shape, nl, u(6, 25) * scale, g, device)
-    inten = 40 + 170 * torch.rand(nl, device=device, generator=g)
-    bg = inten[lab] + 6 * smooth_noise(shape, 2.0 * scale, g, device)                            # a little texture inside regions
-    img = bg.clone()
+    if scale is None:
+        scale = float(math.exp(u(math.log(0.5), math.log(2.5))))
+    style = style or BACKGROUNDS[int(torch.randint(0, len(BACKGROUNDS), (1,), generator=g, device=device))]
+    bg, lab, normal, bw, layers = background(shape, style, g, device, scale)
+    img = bg.clone(); vis = torch.ones(shape, device=device)                                     # how much of the background is still seen
     K = k_layers if k_layers is not None else int(torch.randint(1, 5, (1,), generator=g, device=device))
-    layers = []
     for _ in range(K):
         L = random_layer(shape, g, device, scale=scale); occ = render_layer(L, shape, g, device)
         L.occupancy = occ
         if L.occluding:
-            img = torch.where(occ > 0.5, torch.full_like(img, u(30, 225)), img)
+            img = torch.where(occ > 0.5, torch.full_like(img, u(30, 225)), img); vis = vis * (1 - occ)
         else:
             img = img + L.contrast * occ
         layers.append(L)
-    return Sample(img.clamp(0, 255), layers, bg, lab)
+    rest = (1 - torch.stack([L.occupancy for L in layers]).sum(0)).clamp(0, 1) if layers else torch.ones(shape, device=device)
+    ones = torch.ones(shape, dtype=torch.bool, device=device)
+    iface = Layer("sheet", normal, 1.0, 1.0, 0.0, ones, 0.0, False, 0.0, 25.0, occupancy=bw * vis, role="interface")
+    iso = Layer("blob", direction_field(shape, 8.0, g, device), 1.0, 1.0, 0.0, ones, 0.0, False, 0.0, 0.0, occupancy=rest * (1 - bw), role="isotropic")
+    layers += [iface, iso]
+    return Sample(img.clamp(0, 255), layers, bg, lab, style, scale)
+
+
+def boundary_sample(shape=(96, 96, 96), step: float = 60.0, contrast: float = 20.0, angle_deg: float = 30.0, seed: int = 0, device="cuda",
+                    radius: float = 1.0, density: float = 1.5) -> Sample:
+    """The boundary case, controlled: two half-spaces (an intensity ``step`` across z = Z/2) and one line population of
+    ``contrast`` whose direction is ``angle_deg`` from the boundary normal, crossing it. The target at the boundary has
+    both states, the sheet (the step) and the line (the fibres): the fibres must be read through the step."""
+    g = torch.Generator(device=device).manual_seed(seed)
+    Z, Y, X = shape; zz = torch.arange(Z, device=device).float()[:, None, None]
+    half = torch.sigmoid((zz - Z / 2) / 0.6).expand(shape)
+    base = 90.0; img = base + step * half + 4 * smooth_noise(shape, 2.0, g, device)
+    lab = (half > 0.5).long()
+    t = math.radians(angle_deg); d = torch.tensor([math.cos(t), 0.0, math.sin(t)], device=device).view(3, 1, 1, 1).expand((3,) + tuple(shape)).contiguous()
+    ones = torch.ones(shape, dtype=torch.bool, device=device)
+    L = Layer("line", d, radius, float(Z) * 1.5, density, ones, contrast, False, 1e3, 60.0)
+    occ = render_layer(L, shape, g, device); L.occupancy = occ; img = img + contrast * occ
+    normal = torch.zeros((3,) + tuple(shape), device=device); normal[0] = 1.0
+    bw = (step / 25.0 * torch.exp(-((zz - Z / 2 + 0.5) ** 2) / (2 * 1.5 ** 2))).clamp(0, 1).expand(shape)
+    rest = (1 - occ).clamp(0, 1)
+    layers = [L, Layer("sheet", normal, 1.0, 1.0, 0.0, ones, 0.0, False, 0.0, 25.0, occupancy=bw, role="interface"),
+              Layer("blob", direction_field(shape, 8.0, g, device), 1.0, 1.0, 0.0, ones, 0.0, False, 0.0, 0.0, occupancy=rest * (1 - bw), role="isotropic")]
+    return Sample(img.clamp(0, 255), layers, base + step * half, lab, "boundary", 1.0)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -198,64 +265,139 @@ def _resample(vol: torch.Tensor, grid: torch.Tensor, mode="bilinear") -> torch.T
     return out[0, 0] if vol.dim() == 3 else out[0]
 
 
-def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0) -> dict:
-    """One draw of the nuisances on a clean sample. Returns the image ``(Z, Y, X)`` uint8-range float, the warped
-    occupancies ``(K, Z, Y, X)``, the warped and Jacobian-rotated fields ``(K, 3, Z, Y, X)``, and the draw's record."""
+#: per modality, the probability of each nuisance; a draw picks a modality (or "mixed") and then also applies every other
+#: nuisance with a small probability, so typical and atypical combinations are both seen
+MODALITIES = {
+    "hipct":     {"warp": 0.7, "invert": 0.5, "bend": 0.7, "bias": 0.6, "aniso_psf": 0.6, "resolution": 0.3, "poisson": 0.8, "gaussian": 0.9, "speckle": 0.1,
+                  "rings": 0.6, "streaks": 0.5, "slice_jitter": 0.5, "fringes": 0.7, "cupping": 0.5, "seams": 0.3, "zingers": 0.4,
+                  "rician": 0.0, "gibbs": 0.0, "ghosting": 0.0, "thick": 0.1, "misalign": 0.0, "missing": 0.0, "stain": 0.0, "stripes": 0.1, "dust": 0.1, "mosaic": 0.0},
+    "ct":        {"warp": 0.7, "invert": 0.4, "bend": 0.7, "bias": 0.5, "aniso_psf": 0.5, "resolution": 0.5, "poisson": 0.8, "gaussian": 0.9, "speckle": 0.2,
+                  "rings": 0.5, "streaks": 0.6, "slice_jitter": 0.3, "fringes": 0.2, "cupping": 0.7, "seams": 0.2, "zingers": 0.3,
+                  "rician": 0.0, "gibbs": 0.1, "ghosting": 0.0, "thick": 0.2, "misalign": 0.0, "missing": 0.0, "stain": 0.0, "stripes": 0.1, "dust": 0.1, "mosaic": 0.0},
+    "mri":       {"warp": 0.8, "invert": 0.5, "bend": 0.8, "bias": 0.9, "aniso_psf": 0.5, "resolution": 0.6, "poisson": 0.0, "gaussian": 0.3, "speckle": 0.0,
+                  "rings": 0.0, "streaks": 0.0, "slice_jitter": 0.2, "fringes": 0.0, "cupping": 0.0, "seams": 0.0, "zingers": 0.1,
+                  "rician": 0.9, "gibbs": 0.6, "ghosting": 0.4, "thick": 0.6, "misalign": 0.0, "missing": 0.0, "stain": 0.0, "stripes": 0.0, "dust": 0.0, "mosaic": 0.0},
+    "histology": {"warp": 0.9, "invert": 0.6, "bend": 0.8, "bias": 0.7, "aniso_psf": 0.6, "resolution": 0.5, "poisson": 0.3, "gaussian": 0.7, "speckle": 0.3,
+                  "rings": 0.0, "streaks": 0.1, "slice_jitter": 0.8, "fringes": 0.0, "cupping": 0.0, "seams": 0.3, "zingers": 0.2,
+                  "rician": 0.0, "gibbs": 0.0, "ghosting": 0.0, "thick": 0.7, "misalign": 0.7, "missing": 0.3, "stain": 0.7, "stripes": 0.5, "dust": 0.5, "mosaic": 0.5},
+}
+MODALITIES["mixed"] = {k: 0.35 for k in MODALITIES["hipct"]}
+CROSS_MIX = 0.08                   # every nuisance outside the chosen modality's profile is still drawn with this probability
+
+
+def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, modality: str | None = None) -> dict:
+    """One draw of the nuisances on a clean sample, under a modality profile (``hipct`` / ``ct`` / ``mri`` /
+    ``histology`` / ``mixed``; None picks one at random) with cross-mixing. Returns the image ``(Z, Y, X)`` uint8-range
+    float, the warped occupancies ``(K, Z, Y, X)``, the warped and Jacobian-transformed fields ``(K, 3, Z, Y, X)``, and
+    the draw's record."""
     g = torch.Generator(device=device).manual_seed(seed + 7919)
     u = lambda a, b: float(a + (b - a) * torch.rand(1, generator=g, device=device))
     lu = lambda a, b: float(math.exp(u(math.log(a), math.log(b))))
-    img = s.image.clone(); Z, Y, X = img.shape; rec = {}
+    names = list(MODALITIES); modality = modality or names[int(torch.randint(0, len(names), (1,), generator=g, device=device))]
+    P = MODALITIES[modality]
+    on = lambda key: u(0, 1) < max(P.get(key, 0.0), CROSS_MIX)
+    img = s.image.clone(); Z, Y, X = img.shape; rec = {"modality": modality}
     occ = torch.stack([L.occupancy for L in s.layers]); fld = torch.stack([L.field for L in s.layers])
-    # elastic warp: a smooth displacement; labels follow; direction vectors by the Jacobian
-    if u(0, 1) < 0.8 * strength:
+    # elastic warp: a smooth displacement; labels follow; orientations by the Jacobian (tangents J^-1 t, normals J^T n)
+    if on("warp"):
         amp = u(0, 6) * strength; sig = lu(8, 30)
         disp = torch.stack([smooth_noise((Z, Y, X), sig, g, device) * amp for _ in range(3)])
         grid = _warp_grid(disp)
         img = _resample(img, grid); occ = _resample(occ, grid)
-        J = torch.stack([torch.stack(torch.gradient(disp[i], dim=(0, 1, 2)), 0) for i in range(3)])      # (3, 3, Z, Y, X): d disp_i / d x_j
-        J = J + torch.eye(3, device=device).view(3, 3, 1, 1, 1)
+        J = torch.stack([torch.stack(torch.gradient(disp[i], dim=(0, 1, 2)), 0) for i in range(3)]) + torch.eye(3, device=device).view(3, 3, 1, 1, 1)
         fw = _resample(fld.reshape(-1, Z, Y, X), grid).reshape(fld.shape)
-        # the warped image is W(x) = I(phi(x)), phi = x + disp, J = D phi: a tangent t (lines, blobs) at phi(x) is J^{-1} t at
-        # x; a normal n (sheets) is J^T n (gradients transform covariantly)
-        Jm = J.permute(2, 3, 4, 0, 1); Ji = torch.linalg.inv(Jm + 1e-3 * torch.eye(3, device=device)).permute(3, 4, 0, 1, 2)
-        Jt = J.permute(1, 0, 2, 3, 4)
+        Jm = J.permute(2, 3, 4, 0, 1); Ji = torch.linalg.inv(Jm + 1e-3 * torch.eye(3, device=device)).permute(3, 4, 0, 1, 2); Jt = J.permute(1, 0, 2, 3, 4)
         out = []
         for k, L in enumerate(s.layers):
-            M = Jt if L.kind == "sheet" else Ji
-            v = torch.einsum("ijzyx,jzyx->izyx", M, fw[k]); out.append(v / v.norm(dim=0, keepdim=True).clamp_min(1e-6))
+            v = torch.einsum("ijzyx,jzyx->izyx", Jt if L.kind == "sheet" else Ji, fw[k]); out.append(v / v.norm(dim=0, keepdim=True).clamp_min(1e-6))
         fld = torch.stack(out); rec["warp"] = (round(amp, 2), round(sig, 1))
-    # intensity: polarity, a random monotone remap (gamma + a piecewise bend), a bias field
-    if u(0, 1) < 0.5:
+    # histology: section misalignment (a small random shift per z slice), missing sections, per-section stain variation
+    if on("misalign"):
+        sh = (u(0.3, 2.0) * torch.randn(Z, 2, device=device, generator=g)).round().long()
+        for z in range(Z):
+            img[z] = torch.roll(img[z], shifts=(int(sh[z, 0]), int(sh[z, 1])), dims=(0, 1))
+        rec["misalign"] = True
+    if on("missing"):
+        k = int(u(1, 4))
+        for _ in range(k):
+            z = int(u(1, Z - 2)); img[z] = img[z - 1] if u(0, 1) < 0.5 else torch.full_like(img[z], u(0, 255))
+        rec["missing_sections"] = k
+    if on("stain"):
+        img = img * (1 + u(0.05, 0.3) * torch.randn(Z, device=device, generator=g)).view(Z, 1, 1) + u(0, 20) * torch.randn(Z, device=device, generator=g).view(Z, 1, 1); rec["stain"] = True
+    # intensity: polarity, a random monotone remap (gamma + a bend), a bias field; MRI: a strong smooth bias
+    if on("invert"):
         img = 255 - img; rec["inverted"] = True
     gam = lu(0.5, 2.0); img = 255 * (img / 255).clamp(0, 1) ** gam; rec["gamma"] = round(gam, 2)
-    if u(0, 1) < 0.7:
+    if on("bend"):
         a, b = u(0.2, 0.8), u(0.2, 0.8); x = img / 255; img = 255 * torch.where(x < a, b * x / a, b + (1 - b) * (x - a) / (1 - a)); rec["bend"] = (round(a, 2), round(b, 2))
-    if u(0, 1) < 0.8:
-        bias = 1 + u(0.1, 0.5) * strength * smooth_noise((Z, Y, X), lu(20, 60), g, device); img = img * bias; rec["bias"] = True
-    # resolution and PSF: a random, possibly anisotropic Gaussian blur; a down-up resampling
+    if on("bias"):
+        amp = u(0.1, 0.5) * (1.6 if modality == "mri" else 1.0)
+        bias = 1 + amp * strength * smooth_noise((Z, Y, X), lu(20, 60), g, device); img = img * bias; rec["bias"] = round(amp, 2)
+    # CT: beam-hardening cupping (a smooth radial gradient about the rotation axis), phase-contrast fringes (edge overshoot)
+    if on("cupping"):
+        yy = torch.linspace(-1, 1, Y, device=device)[None, :, None]; xx = torch.linspace(-1, 1, X, device=device)[None, None, :]
+        cy, cx = u(-1, 1), u(-1, 1); r2 = ((yy - cy) ** 2 + (xx - cx) ** 2) / 2; img = img * (1 + u(-0.25, 0.25) * r2); rec["cupping"] = True
+    if on("fringes"):
+        a = u(0.3, 1.5); sb = lu(0.7, 2.0); img = img + a * (img - gaussian(img, sb)); rec["fringes"] = round(a, 2)
+    # mosaic vignetting (histology tiles): a periodic illumination with seams
+    if on("mosaic"):
+        T = int(lu(24, 64)); yy = torch.arange(Y, device=device) % T; xx = torch.arange(X, device=device) % T
+        vy = 1 - u(0.05, 0.25) * ((yy - T / 2).abs() / (T / 2)) ** 2; vx = 1 - u(0.05, 0.25) * ((xx - T / 2).abs() / (T / 2)) ** 2
+        img = img * (vy[None, :, None] * vx[None, None, :]); rec["mosaic"] = T
+    # resolution and PSF: a random, possibly anisotropic Gaussian blur; a down-up resampling; thick slices along one axis
     sig = [lu(0.3, 2.0) for _ in range(3)]
-    if u(0, 1) < 0.5:
-        sig = [sig[0] * lu(1.5, 4.0), sig[1], sig[2]]                                           # a PSF longer along one axis (the slice axis)
+    if on("aniso_psf"):
+        sig = [sig[0] * lu(1.5, 4.0), sig[1], sig[2]]
     img = gaussian(img, tuple(sig), truncate=3.0); rec["psf"] = [round(x, 2) for x in sig]
-    if u(0, 1) < 0.3:
+    if on("resolution"):
         f = lu(1.2, 2.5); small = Fn.interpolate(img[None, None], scale_factor=1 / f, mode="trilinear", align_corners=False)
         img = Fn.interpolate(small, size=(Z, Y, X), mode="trilinear", align_corners=False)[0, 0]; rec["resolution"] = round(f, 2)
-    # noise: Poisson (shot), Gaussian, speckle
-    if u(0, 1) < 0.6:
-        P = lu(15, 1500); img = torch.poisson((img / 255).clamp(0, 1) * P, generator=g) / P * 255; rec["poisson_photons"] = round(P)
-    if u(0, 1) < 0.9:
+    if on("thick"):
+        f = lu(2, 6); small = Fn.interpolate(img[None, None], size=(max(2, int(Z / f)), Y, X), mode="trilinear", align_corners=False)
+        img = Fn.interpolate(small, size=(Z, Y, X), mode="nearest" if u(0, 1) < 0.5 else "trilinear")[0, 0]; rec["thick_slices"] = round(f, 1)
+    # MRI: Gibbs ringing (k-space truncation), ghosting (a shifted faint replica along one axis), Rician noise
+    if on("gibbs"):
+        F = torch.fft.fftn(img); kz = torch.fft.fftfreq(Z, device=device).abs()[:, None, None]; ky = torch.fft.fftfreq(Y, device=device).abs()[None, :, None]; kx = torch.fft.fftfreq(X, device=device).abs()[None, None, :]
+        c = u(0.15, 0.35); keep = (kz <= c) & (ky <= c) & (kx <= c); img = torch.fft.ifftn(F * keep).real; rec["gibbs"] = round(c, 2)
+    if on("ghosting"):
+        ax = int(u(0, 3)); sh = int(u(Z // 6, Z // 2)); img = img + u(0.03, 0.2) * torch.roll(img, shifts=sh, dims=ax); rec["ghosting"] = (ax, sh)
+    # noise: Poisson (shot), Gaussian, Rician (magnitude of complex Gaussian), speckle
+    if on("poisson"):
+        Pn = lu(15, 1500); img = torch.poisson((img / 255).clamp(0, 1) * Pn, generator=g) / Pn * 255; rec["poisson_photons"] = round(Pn)
+    if on("gaussian"):
         sd = u(0, 30) * strength; img = img + sd * torch.randn(img.shape, device=device, generator=g); rec["gaussian_sd"] = round(sd, 1)
-    if u(0, 1) < 0.3:
+    if on("rician"):
+        sd = u(5, 45) * strength; img = torch.sqrt((img + sd * torch.randn(img.shape, device=device, generator=g)) ** 2 + (sd * torch.randn(img.shape, device=device, generator=g)) ** 2); rec["rician_sd"] = round(sd, 1)
+    if on("speckle"):
         img = img * (1 + u(0, 0.25) * torch.randn(img.shape, device=device, generator=g)); rec["speckle"] = True
-    # CT artefacts
-    if u(0, 1) < 0.35:
+    # CT artefacts: rings, streaks, stitching seams, zingers; histology: stripes, dust
+    if on("rings"):
         from ..artefacts import rings
-        img = torch.as_tensor(rings(img.round().clamp(0, 255).to(torch.uint8).cpu().numpy(), u(5, 60), seed=seed, device=device)[0], device=device).float(); rec["rings"] = True
-    if u(0, 1) < 0.35:
+        img = torch.as_tensor(rings(img.round().clamp(0, 255).to(torch.uint8).cpu().numpy(), u(3, 40), seed=seed, device=device)[0], device=device).float(); rec["rings"] = True
+    if on("streaks"):
         from ..artefacts import streaks
-        img = torch.as_tensor(streaks(img.round().clamp(0, 255).to(torch.uint8).cpu().numpy(), u(10, 80), spread_deg=u(5, 90), seed=seed, device=device)[0], device=device).float(); rec["streaks"] = True
-    # slice-wise intensity jitter (a slice axis)
-    if u(0, 1) < 0.4:
+        img = torch.as_tensor(streaks(img.round().clamp(0, 255).to(torch.uint8).cpu().numpy(), u(5, 50), spread_deg=u(5, 90), seed=seed, device=device)[0], device=device).float(); rec["streaks"] = True
+    if on("stripes"):
+        ax = int(u(1, 3)); n = int(u(2, 12)); amp = u(5, 30)
+        for _ in range(n):
+            i = int(u(0, (Y, X)[ax - 1] - 1)); w = int(u(1, 3))
+            if ax == 1:
+                img[:, i:i + w, :] += amp * (1 if u(0, 1) < 0.5 else -1)
+            else:
+                img[:, :, i:i + w] += amp * (1 if u(0, 1) < 0.5 else -1)
+        rec["stripes"] = n
+    if on("seams"):
+        for ax in range(3):
+            if u(0, 1) < 0.5:
+                i = int(u(Z // 4, 3 * Z // 4)); sl = [slice(None)] * 3; sl[ax] = slice(i, None); img[tuple(sl)] += u(-25, 25)
+        rec["seams"] = True
+    if on("zingers"):
+        n = int(lu(5, 200)); idx = (torch.rand(n, 3, device=device, generator=g) * torch.tensor([Z, Y, X], device=device)).long()
+        img[idx[:, 0], idx[:, 1], idx[:, 2]] = u(0, 255); rec["zingers"] = n
+    if on("dust"):
+        n = int(lu(2, 30)); idx = (torch.rand(n, 3, device=device, generator=g) * torch.tensor([Z, Y, X], device=device)).long()
+        spots = torch.zeros_like(img); spots[idx[:, 0], idx[:, 1], idx[:, 2]] = 1.0; spots = gaussian(spots, u(1.0, 3.0)); img = img + u(-200, 200) * spots / spots.max().clamp_min(1e-6); rec["dust"] = n
+    if on("slice_jitter"):
         img = img * (1 + u(0.02, 0.12) * torch.randn(Z, device=device, generator=g)).view(Z, 1, 1); rec["slice_jitter"] = True
     img = img.round().clamp(0, 255); rec["quantised"] = True
     return {"image": img, "occupancy": occ.clamp(0, 1), "fields": fld, "record": rec}
@@ -274,13 +416,45 @@ def bingham(grid: torch.Tensor, fld: torch.Tensor, kind: str, kappa: float) -> t
     return f / f.mean(0, keepdim=True).clamp_min(1e-9)
 
 
-def target(s: Sample, drawn: dict, grid: torch.Tensor, step: int = 4, sigma_w: float = 10.0) -> dict:
-    """The lattice target: ``odf (n, z, y, x)`` the occupancy-weighted mixture of the layers' Bingham functions,
-    window-averaged (``sigma_w`` voxels) and pooled to ``step``; ``occupancy (K, z, y, x)``; ``kind`` per layer."""
+CLASSES = ("line", "sheet", "blob", "interface", "isotropic")
+
+
+def target(s: Sample, drawn: dict, grid: torch.Tensor, step: int = 4, sigma_w=10.0, eps: float = 0.05) -> dict:
+    """The lattice target, defined at every cell:
+
+    * ``odf`` -- the orientation state of the **shapes present** (lines, sheets, blobs, interfaces): their occupancy-
+      weighted mixture of Bingham functions, window-averaged and normalised by the window's shape occupancy, so a faint
+      line is a clean lobe whatever its fraction; flat (unit) where there is nothing. ``(n, z, y, x)`` for one window
+      ``sigma_w`` (voxels), ``(W, n, z, y, x)`` for a tuple of windows (the scale a reader selects);
+    * ``fraction`` -- the shape occupancy of the window (0: flat background, 1: all shape): the mass the ODF lacks;
+    * ``classes`` -- the shares of ``CLASSES`` (line / sheet / blob / interface / isotropic), summing to one;
+    * ``occupancy`` per layer, ``size`` (the occupancy-weighted radius, voxels) and ``kappa`` (concentration), pooled.
+    """
     occ, fld = drawn["occupancy"], drawn["fields"]
-    K = occ.shape[0]; n = grid.shape[0]
+    n = grid.shape[0]
     acc = torch.zeros((n,) + tuple(occ.shape[1:]), device=occ.device)
+    tot = torch.zeros(occ.shape[1:], device=occ.device); size = torch.zeros_like(tot); kap = torch.zeros_like(tot)
+    cls = torch.zeros((len(CLASSES),) + tuple(occ.shape[1:]), device=occ.device)
     for k, L in enumerate(s.layers):
-        acc += occ[k][None] * bingham(grid, fld[k], L.kind, L.kappa)
-    pool = lambda x: Fn.avg_pool3d(gaussian(x, sigma_w, truncate=2.5)[None], step)[0]
-    return {"odf": pool(acc), "occupancy": pool(occ), "kinds": [L.kind for L in s.layers], "kappas": [round(L.kappa, 1) for L in s.layers]}
+        cls[CLASSES.index(L.role if L.role != "shape" else L.kind)] += occ[k]
+        if L.role == "isotropic":
+            continue
+        acc += occ[k][None] * bingham(grid, fld[k], L.kind, L.kappa); tot += occ[k]; size += occ[k] * L.radius; kap += occ[k] * L.kappa
+    windows = (sigma_w,) if isinstance(sigma_w, (int, float)) else tuple(sigma_w)
+    pool = lambda x, sw: Fn.avg_pool3d(gaussian(x, sw, truncate=2.5)[None], step)[0]
+    odf = torch.stack([(pool(acc, sw) + eps) / (pool(tot[None], sw) + eps) for sw in windows])
+    ptot = pool(tot[None], windows[0])[0]
+    return {"odf": odf[0] if isinstance(sigma_w, (int, float)) else odf, "windows": windows, "fraction": ptot.clamp(0, 1),
+            "classes": pool(cls, windows[0]) / pool(occ.sum(0, keepdim=True), windows[0]).clamp_min(1e-6), "occupancy": pool(occ, windows[0]),
+            "size": pool(size[None], windows[0])[0] / ptot.clamp_min(1e-6), "kappa": pool(kap[None], windows[0])[0] / ptot.clamp_min(1e-6),
+            "kinds": [L.kind for L in s.layers], "roles": [L.role for L in s.layers], "kappas": [round(L.kappa, 1) for L in s.layers]}
+
+
+def westin(odf: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
+    """The shape of an orientation state ``odf (n, ...)`` as Westin shares ``(3, ...)``: linear (one lobe), planar (a
+    girdle), spherical (flat), from the eigenvalues of its second moment on the sphere. They sum to one."""
+    w = odf / odf.sum(0, keepdim=True).clamp_min(1e-9)
+    T = torch.einsum("n...,ni,nj->...ij", w, grid, grid)
+    ev = torch.linalg.eigvalsh(T).flip(-1)                                                    # descending
+    l1 = ev[..., 0].clamp_min(1e-9)
+    return torch.stack([(ev[..., 0] - ev[..., 1]) / l1, (ev[..., 1] - ev[..., 2]) / l1, ev[..., 2] / l1])

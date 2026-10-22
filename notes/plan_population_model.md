@@ -162,3 +162,27 @@ notes/plan_population_model.md   this plan
   window distribution; crossings below the kernel's angular width stay unresolved (the generator's dispersion sets it).
 - **Learned axis bias**: the axis test after every run.
 - **Over-smoothing by the UNet**: GroupNorm, a small receptive field, and the lattice output keep it a window statistic.
+
+## 11. Amendments (22 Oct, evening): full-volume targets, modality profiles, scale
+
+- **Every voxel has a state.** `sample()` appends two background states to the layers: the *interfaces* of the
+  background's regions (a sheet whose normal is the boundary normal, present under any additive layer that crosses it,
+  removed only where an occluding layer hides it; a step of ≥ 25 grey levels is a full sheet, fainter ones fade) and the
+  *isotropic remainder* (κ = 0). `target()` gives, at every lattice cell: the `odf` of the **shapes present** (lines,
+  sheets, blobs, interfaces; normalised by their occupancy, flat where nothing is), the shape `fraction` of the window,
+  the `classes` shares (line / sheet / blob / interface / isotropic), `size` (occupancy-weighted radius) and `kappa`.
+  The isotropic remainder is deliberately *not* mass in the ODF: it would dilute a faint line's lobe by its fraction;
+  the fraction and classes carry that.
+- **Scale is drawn** per sample (log-uniform 0.5–2.5 × every length) and the target can be given several windows
+  (`sigma_w=(5, 10, 20)` → `(W, n, z, y, x)`): the latent must hold the state at each, and a reader selects the window
+  (population scale) and reads `size` (shape scale).
+- **Modality profiles** (`MODALITIES`): hipct / ct / mri / histology / mixed, each a probability per nuisance, with every
+  other nuisance still drawn at `CROSS_MIX` = 0.08. Added nuisances: phase-contrast fringes, beam-hardening cupping,
+  stitching seams, zingers (CT); Rician noise, Gibbs ringing, ghosting, thick slices (MRI); section misalignment,
+  missing sections, per-section stain variation, stripes, dust, mosaic vignetting (histology / BigBrain).
+- **Background styles**: `regions` (anatomix), `tissue` (two or three broad regions, grey/white-like), `cells` (a blob
+  population on a flat background).
+- **The boundary case** (`boundary_sample`): a step with faint fibres crossing it at 30° to the normal. The target has
+  the line's lobe and the step's ring at the step and the lobe alone away from it — the acceptance test for the model:
+  recovery of the lobe at the boundary as a function of fibre contrast / step / noise.
+- Tests: `tests/test_learn.py` (8, CPU or GPU, 3 s).
