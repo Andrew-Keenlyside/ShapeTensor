@@ -217,3 +217,24 @@ chunking and re-read the image. Rebuilt in four stages (commits 47ce84b, 27f3ecd
 
 Open: the trained model's numbers (smoke run at 96³ locally; the H100 run needs permission on pryor); identity
 linking still by direction (embeddings are output, not yet used to link); training crops at one lattice phase only.
+
+## 13. Stage 5: the re-review (22 Oct, late) -- commits 51b505d, 9102e61
+
+The re-review verified 12 of 13 generator fixes and 7 of 8 model fixes and found, beyond them:
+
+- **Training collapsed**: both smoke runs (96³, batch 4, 2000-3000 steps) gave constant outputs (fraction, classes,
+  tensors, masses independent of the input; axis error at the best-of-K chance level ~43°). Contributing causes found:
+  closed residual branches (zero-initialised gains), labels of structures the images did not show (the old global
+  visibility was ~1 almost always), nuisance chains that often erased orientation, per-batch mean chasing at batch 4.
+  Remedies in place: open gains, local scale-free visibility (presence scales mass, orientation blends the tensor to
+  isotropic), a strength curriculum, orientation-first loss weights, effective batch 16, lr 3e-4, collapse detectors
+  in validation. Whether these fix it is the next experiment (an overfit-64 check, then a streaming smoke run).
+- **Data**: saturated line layers (now a drawn volume fraction), interface erased by additive layers (now a boundary
+  outside the volume budget), face fall-off (padded seeding, deposition confined to the region), K = 4 overflow (K = 6),
+  blob merging axis-dependent, constant-angle crossings (40% independent fields), visibility global/scale-blind.
+- **Engine**: empty slots turned into populations (presence head + absolute-mass gate), peak-picking on the grid lost
+  30° crossings (populations read from slots), carry-forward mixing narrow crossings (walks that follow each
+  population), halo too small for carry + bridge, exact fp32 10x slower than bf16 (bf16 default).
+
+Calibrations to revisit with a trained model: the orientation-visibility range (t 6-18, set below a local structure
+tensor's 8-25), the presence range (t 3-8), the bridge's spurious insertions (2-4% against an oracle).
