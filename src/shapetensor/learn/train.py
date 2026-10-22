@@ -17,7 +17,7 @@ AdamW (``lr`` 3e-4), warm-up then cosine, bf16 autocast, clipping at 5. A fixed 
 strength) is scored every ``val_every`` steps with metrics that can see learning: the matched slot axes' error against
 the untrained network's (the chance level of a best-of-K match), the spread and correlation of the predicted fraction
 (a collapsed network is constant), and the engine's population count against the target's. ``--overfit N``: a fixed
-set of N pairs and no refresh (a sanity check that the loss can be driven down).
+set of N pairs and no refresh, scored on those pairs (a sanity check that the loss can be driven down).
 """
 from __future__ import annotations
 
@@ -156,8 +156,8 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     ramp = lambda s: min(1.0, max(0.0, (s / steps - 0.2) / 0.2))                                     # the cell scalars: 0 until 20%, full by 40%
     grid = hemisphere(160, device)
     log(f"model: {sum(p.numel() for p in model.parameters())} parameters, receptive field {rf} voxels; args {args}")
-    val = [make(10_000_000 + i, size, device, 1.0) for i in range(val_n)]
     buf = Buffer(overfit or buffer, size, device, seed0=seed * 1_000_000 + start * refresh, strength=strength(start), log=log)
+    val = buf.items[:min(val_n, overfit)] if overfit else [make(10_000_000 + i, size, device, 1.0) for i in range(val_n)]   # overfit: score the training pairs
     engine = PopulationEngine(model, device=device)
     v0 = evaluate(model, val, grid, margin, device, engine)
     logf.write(json.dumps({"step": start, "baseline": True, **v0}) + "\n"); logf.flush()
@@ -203,9 +203,10 @@ def main():
     ap.add_argument("--refresh", type=int, default=1); ap.add_argument("--lr", type=float, default=3e-4); ap.add_argument("--margin", type=int, default=4)
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
+    ap.add_argument("--warmup", type=int, default=500)
     a = ap.parse_args()
-    train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, margin=a.margin, val_n=a.val_n, val_every=a.val_every, seed=a.seed,
-          strength0=a.strength0, overfit=a.overfit, resume=a.resume)
+    train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
+          seed=a.seed, strength0=a.strength0, overfit=a.overfit, resume=a.resume)
 
 
 if __name__ == "__main__":

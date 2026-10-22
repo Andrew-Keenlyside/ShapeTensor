@@ -44,7 +44,8 @@ def label_panels(ax_occ, ax_dir, s, d, ky):
         v, ev = principal(d["tensors"][k][:, :, ky], "min" if L.kind == "sheet" else "max")
         ev = ev.cpu().numpy()
         w = (ev[0] - ev[1]) / np.maximum(ev[0], 1e-6) if L.kind != "sheet" else (ev[1] - ev[2]) / np.maximum(ev[0], 1e-6)
-        dec += dec_rgb(v.cpu().numpy()) * (occ[k] * w * float(d["visibility"][k]))[..., None]
+        vis = d["visibility"][k][:, ky].cpu().numpy() * d.get("orientation_visibility", d["visibility"])[k][:, ky].cpu().numpy()
+        dec += dec_rgb(v.cpu().numpy()) * (occ[k] * w * vis)[..., None]
     ax_dir.imshow(dec.clip(0, 1))
 
 
@@ -52,9 +53,9 @@ def target_panels(ax_n, ax_dom, s, d, ky, step=4):
     """The lattice target: the number of populations per cell (slots with mass > 0.02) and the heaviest slot's axis
     (a line's direction, a sheet's normal) as DEC × its mass."""
     t = target(s, d); c = ky // step
-    N = (t["mass"] > 0.02).sum(0)[:, c].cpu().numpy()
+    N = ((t["mass"] > 0.02) & (t["kind"] == 0)).sum(0)[:, c].cpu().numpy()
     ax_n.imshow(N, cmap=matplotlib.colors.ListedColormap(["#1b1b1b", "#2a78d6", "#e34948", "#f0b429", "#ffffff"]), vmin=-0.5, vmax=4.5, interpolation="nearest")
-    ax_n.set_title(f"target: populations per cell (mass > 0.02)\nblack 0 · blue 1 · red 2 · yellow 3 · white 4", fontsize=8)
+    ax_n.set_title(f"target: line populations per cell (mass > 0.02)\nblack 0 · blue 1 · red 2 · yellow 3 · white 4", fontsize=8)
     k = t["kind"][0][:, c]; v_line, ev = principal(t["slots"][0][:, :, c], "max"); v_sheet, _ = principal(t["slots"][0][:, :, c], "min")
     planar = ((k == 1) | (k == 3))
     v = torch.where(planar[None], v_sheet, v_line)
@@ -79,12 +80,12 @@ def main():
         ax[0].set_title(f"seed {seed}: clean, '{s.style}', scale {s.scale:.2f}\n{', '.join(kinds) or 'background only'}" + (f"\ncrossing group {cr['n']} at {cr['theta_deg']}°" if cr else ""), fontsize=8)
         for j, d in enumerate(draws):
             ax[1 + j].imshow(d["image"][:, ky].cpu().numpy(), cmap="gray", vmin=0, vmax=255)
-            keys = [k for k in d["record"] if k not in ("modality", "gamma", "psf", "window", "visibility", "axis")]
+            keys = [k for k in d["record"] if k not in ("modality", "gamma", "psf", "window", "visibility", "orientation_visibility", "axis")]
             ax[1 + j].set_title(f"{d['record']['modality']} (axis {'zyx'[d['record']['axis']]}): " + ", ".join(keys)[:58] + f"\nvisibility {d['record']['visibility'][:-1]}", fontsize=7)
         label_panels(ax[5], ax[6], s, draws[0], ky)
         target_panels(ax[7], ax[8], s, draws[0], ky)
         ax[5].set_title("labels: occupancy (colour per layer; violet interface;\ngrey isotropic remainder)", fontsize=8)
-        ax[6].set_title("labels: line direction / sheet normal (DEC)\n× occupancy × linearity/planarity × visibility (hipct draw)", fontsize=8)
+        ax[6].set_title("labels: line direction / sheet normal (DEC)\n× occupancy × linearity/planarity × presence × orientation visibility", fontsize=8)
         for a_ in ax:
             a_.set_xticks([]); a_.set_yticks([])
         records[seed] = {"record": s.record, "layers": [{"kind": L.kind, "role": L.role, "radius": round(L.radius, 2), "length": round(L.length, 1), "density": round(L.density, 3),
