@@ -16,6 +16,7 @@ import numpy as np
 import torch
 
 from shapetensor.learn.generator import boundary_sample, nuisance, principal, sample
+from shapetensor.learn.targets import target
 from shapetensor.viz import dec_rgb
 
 DEV = "cuda"
@@ -47,11 +48,27 @@ def label_panels(ax_occ, ax_dir, s, d, ky):
     ax_dir.imshow(dec.clip(0, 1))
 
 
+def target_panels(ax_n, ax_dom, s, d, ky, step=4):
+    """The lattice target: the number of populations per cell (slots with mass > 0.02) and the heaviest slot's axis
+    (a line's direction, a sheet's normal) as DEC × its mass."""
+    t = target(s, d); c = ky // step
+    N = (t["mass"] > 0.02).sum(0)[:, c].cpu().numpy()
+    ax_n.imshow(N, cmap=matplotlib.colors.ListedColormap(["#1b1b1b", "#2a78d6", "#e34948", "#f0b429", "#ffffff"]), vmin=-0.5, vmax=4.5, interpolation="nearest")
+    ax_n.set_title(f"target: populations per cell (mass > 0.02)\nblack 0 · blue 1 · red 2 · yellow 3 · white 4", fontsize=8)
+    k = t["kind"][0][:, c]; v_line, ev = principal(t["slots"][0][:, :, c], "max"); v_sheet, _ = principal(t["slots"][0][:, :, c], "min")
+    planar = ((k == 1) | (k == 3))
+    v = torch.where(planar[None], v_sheet, v_line)
+    aniso = torch.where(planar, (ev[1] - ev[2]) / ev[0].clamp_min(1e-6), (ev[0] - ev[1]) / ev[0].clamp_min(1e-6))   # an isotropic slot has no axis: dark
+    wgt = ((t["mass"][0][:, c] / 0.3).clamp(0, 1) * aniso).cpu().numpy()
+    ax_dom.imshow((dec_rgb(v.cpu().numpy()) * wgt[..., None]).clip(0, 1), interpolation="nearest")
+    ax_dom.set_title("target: heaviest population's axis (DEC) × mass × anisotropy", fontsize=8)
+
+
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--out", default="/home/andrew/bridge_wmcov/shapetensor/results/dev_pipeline/learn_examples")
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3]); ap.add_argument("--size", type=int, default=128)
     a = ap.parse_args(); out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
-    rows = len(a.seeds) + 2; fig, axs = plt.subplots(rows, 7, figsize=(26, 3.9 * rows), facecolor="white")
+    rows = len(a.seeds) + 2; fig, axs = plt.subplots(rows, 9, figsize=(33, 3.9 * rows), facecolor="white")
     records = {}
     for r, seed in enumerate(a.seeds):
         s = sample((a.size,) * 3, seed=seed, device=DEV); ky = a.size // 2
@@ -65,6 +82,7 @@ def main():
             keys = [k for k in d["record"] if k not in ("modality", "gamma", "psf", "window", "visibility", "axis")]
             ax[1 + j].set_title(f"{d['record']['modality']} (axis {'zyx'[d['record']['axis']]}): " + ", ".join(keys)[:58] + f"\nvisibility {d['record']['visibility'][:-1]}", fontsize=7)
         label_panels(ax[5], ax[6], s, draws[0], ky)
+        target_panels(ax[7], ax[8], s, draws[0], ky)
         ax[5].set_title("labels: occupancy (colour per layer; violet interface;\ngrey isotropic remainder)", fontsize=8)
         ax[6].set_title("labels: line direction / sheet normal (DEC)\n× occupancy × linearity/planarity × visibility (hipct draw)", fontsize=8)
         for a_ in ax:
@@ -84,6 +102,7 @@ def main():
         label_panels(ax[3 * j + 2], ax[6] if j == 1 else None, s, d, ky)
         ax[3 * j + 2].set_title("occupancy per population", fontsize=8)
     ax[6].set_title("60° group: directions (DEC)", fontsize=8)
+    target_panels(ax[7], ax[8], s, d, ky)
     for a_ in ax:
         a_.set_xticks([]); a_.set_yticks([])
     # the boundary case
@@ -95,6 +114,7 @@ def main():
         label_panels(ax[3 * j + 2], ax[6] if j == 1 else None, b, d, Zb // 2)
         ax[3 * j + 2].set_title("occupancy: fibres (blue), interface (violet)", fontsize=8)
     ax[6].set_title("boundary (step 120): directions (DEC)", fontsize=8)
+    target_panels(ax[7], ax[8], b, d, Zb // 2)
     for a_ in ax:
         a_.set_xticks([]); a_.set_yticks([])
     fig.suptitle("Synthesis for the population model: layered shapes over a background, one acquisition per modality (acquisition axis drawn), "
