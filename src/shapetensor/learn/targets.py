@@ -54,7 +54,8 @@ def target(s: Sample, drawn: dict, *, step: int = 4, sigma_w: float = 5.0, K: in
     occ, T, vis = drawn["occupancy"], drawn["tensors"], drawn["visibility"]
     dev = occ.device; L = len(s.layers)
     shapes = [k for k, Lr in enumerate(s.layers) if Lr.role != "isotropic"]
-    kind_of = torch.tensor([KINDS.index("interface" if s.layers[k].role == "interface" else s.layers[k].kind) for k in shapes], device=dev)
+    kname = lambda L: "interface" if L.role == "interface" else ("blob" if L.kind == "solid" else L.kind)   # compact solids: blob-class (their tensors carry their shape)
+    kind_of = torch.tensor([KINDS.index(kname(s.layers[k])) for k in shapes], device=dev)
     vis = vis.view(-1, 1, 1, 1) if vis.dim() == 1 else vis
     w = occ[shapes] * vis[shapes]                                                               # visible volume per layer (an interface: its visible step weight)
     ov = drawn.get("orientation_visibility")
@@ -111,15 +112,26 @@ def target(s: Sample, drawn: dict, *, step: int = 4, sigma_w: float = 5.0, K: in
     if st is not None:                                                                          # a warp scales the shapes locally
         rs_m = rs_m * _pool(st[None], sigma_w, step).reshape(-1)
     size = rs_m / ms.sum(0).clamp_min(1e-9)
+    # per-slot descriptors (thickness, hollowness, angularity): each population's own, mass-weighted over its layers
+    Dsc = drawn.get("descriptors")
+    sdesc = torch.zeros(K, 3, n, device=dev)
+    if Dsc is not None:
+        pooled = torch.stack([_pool(w[i][None] * Dsc[k], sigma_w, step) for i, k in enumerate(shapes)]).reshape(S_, 3, n) / mass.reshape(S_, 1, n).clamp_min(1e-9)
+        lay_of = {k: i for i, k in enumerate(shapes)}
+        idx = torch.tensor([lay_of.get(int(v), 0) for v in range(L)], device=dev)
+        li = idx[slayer.clamp_min(0)]                                                            # (K, n): the slot's dominant layer (index into shapes)
+        sdesc = torch.gather(pooled.permute(1, 0, 2), 1, li[None].expand(3, -1, -1)).permute(1, 0, 2) * (slayer >= 0)[:, None]
     rs = lambda x: x.reshape(x.shape[:-1] + cs)
     return {"slots": rs(slots), "mass": rs(smass), "kind": rs(skind), "layer": rs(slayer), "fraction": rs(fraction), "classes": rs(cls),
-            "size": rs(size), "size_mask": rs(ms.sum(0) > 0.01), "dropped": rs(dropped), "step": step, "sigma_w": sigma_w}
+            "size": rs(size), "size_mask": rs(ms.sum(0) > 0.01), "dropped": rs(dropped), "step": step, "sigma_w": sigma_w,
+            "thickness": rs(sdesc[:, 0]), "hollowness": rs(sdesc[:, 1]), "angularity": rs(sdesc[:, 2])}
 
 
 def clean(s: Sample) -> dict:
     """The clean sample's labels in the form :func:`target` takes (visibility 1)."""
     occ = torch.stack([L.occupancy for L in s.layers]); T = torch.stack([L.tensor for L in s.layers])
-    return {"occupancy": occ, "tensors": T, "visibility": torch.ones(occ.shape[0], device=occ.device)}
+    D = torch.stack([L.desc if L.desc is not None else torch.zeros((3,) + tuple(occ.shape[1:]), device=occ.device) for L in s.layers])
+    return {"occupancy": occ, "tensors": T, "descriptors": D, "visibility": torch.ones(occ.shape[0], device=occ.device)}
 
 
 def render_odf(slots: torch.Tensor, mass: torch.Tensor, grid: torch.Tensor, kappa: float = 20.0) -> torch.Tensor:

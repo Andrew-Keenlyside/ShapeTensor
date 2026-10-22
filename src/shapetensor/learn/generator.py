@@ -194,6 +194,17 @@ class Layer:
     occupancy: torch.Tensor | None = None   # (Z, Y, X) volume fraction 0-1
     tensor: torch.Tensor | None = None      # (6, Z, Y, X) shape tensor, trace 1
     seeds: torch.Tensor | None = None       # (n, 3) explicit seed positions (None: drawn at ``density``)
+    # the shape grammar (see render_layer): a line's cross-section, a sheet's leaflets, a compact solid's primitive
+    section: str = "disc"          # lines: "disc" (Gaussian profile) | "ring" (hollow: a wall) | "ellipse" (ribbon) | "superellipse" (square-ish)
+    section_aspect: float = 1.0    # ellipse: minor / major axis
+    section_exp: float = 2.0       # superellipse exponent (2: disc; > 2 square-ish; < 2 diamond-ish)
+    wall: float = 0.4              # ring: wall thickness as a fraction of the radius
+    bilayer: float = 0.0           # sheets: the gap between two leaflets (voxels); 0: one solid sheet
+    primitive: str = "superquadric"  # solids: "superquadric" | "polyhedron" | "shard"
+    axes: tuple = (1.0, 1.0, 1.0)  # solids: semi-axes as multiples of the radius, along (u, v, the field)
+    exps: tuple = (1.0, 1.0)       # superquadric exponents (1, 1: ellipsoid; -> 0: box-like; 2: octahedral)
+    shell: float = 0.0             # solids: shell thickness (voxels); 0: solid
+    desc: torch.Tensor | None = None        # (3, Z, Y, X) per-voxel descriptors: thickness (voxels), hollowness, angularity (0-1)
 
 
 def _at(pos: torch.Tensor, fld: torch.Tensor, shape) -> torch.Tensor:
@@ -277,11 +288,197 @@ def density_for(kind: str, radius: float, length: float, fraction: float, step: 
     return 1000.0 * fraction / shape_volume(kind, radius, length, step)
 
 
+def layer_density(layer: "Layer", fraction: float, step: float = 0.5) -> float:
+    """Seeds per 1000 voxels for a volume ``fraction`` of the layer's shapes, whatever their grammar."""
+    if layer.kind == "solid":
+        return 1000.0 * fraction / solid_volume(layer)
+    if layer.kind == "line" and layer.section != "disc":
+        return 1000.0 * fraction / max(section_area(layer) * layer.length, 1.0)
+    vol = shape_volume(layer.kind, layer.radius, layer.length, step)
+    return 1000.0 * fraction / (vol * (2 if (layer.kind == "sheet" and layer.bilayer > 0) else 1))
+
+
+DESCRIPTORS = ("thickness", "hollowness", "angularity")
+
+
+def _section_offsets(layer: Layer, h: float, device) -> torch.Tensor:
+    """The (u, w) offsets filling a line's cross-section on a grid of spacing ``h``, ``(m, 2)``."""
+    r = max(layer.radius, 0.5)
+    n = int(math.ceil(r / h))
+    c = torch.arange(-n, n + 1, device=device, dtype=torch.float32) * h
+    U, W = torch.meshgrid(c, c, indexing="ij"); U, W = U.flatten(), W.flatten()
+    if layer.section == "ring":
+        rr = (U ** 2 + W ** 2).sqrt(); keep = (rr <= r) & (rr >= r * (1 - layer.wall))
+    elif layer.section == "ellipse":
+        keep = (U / r) ** 2 + (W / (r * layer.section_aspect)) ** 2 <= 1
+    elif layer.section == "superellipse":
+        keep = (U / r).abs() ** layer.section_exp + (W / r).abs() ** layer.section_exp <= 1
+    else:
+        keep = U ** 2 + W ** 2 <= r * r
+    return torch.stack([U[keep], W[keep]], 1)
+
+
+def section_area(layer: Layer) -> float:
+    """The cross-section's area (voxels²)."""
+    r = max(layer.radius, 0.5)
+    if layer.section == "ring":
+        return math.pi * r * r * (1 - (1 - layer.wall) ** 2)
+    if layer.section == "ellipse":
+        return math.pi * r * r * layer.section_aspect
+    if layer.section == "superellipse":
+        p = layer.section_exp
+        return 4 * r * r * math.gamma(1 + 1 / p) ** 2 / math.gamma(1 + 2 / p)
+    return math.pi * r * r
+
+
+def section_angularity(layer: Layer) -> float:
+    """0 for round sections; towards 1 for square (superellipse exponent >> 2) or diamond (<< 2) sections."""
+    if layer.section != "superellipse":
+        return 0.0
+    return float(min(1.0, abs(math.log(layer.section_exp / 2.0)) / math.log(4.0)))
+
+
+def _paths(layer: Layer, seeds: torch.Tensor, shape, step: float):
+    """Points along each seed's streamline of the field (both ways, ``length`` in all) and their tangents."""
+    d_seed = _at(seeds, layer.field, shape)
+    P = [seeds]; D = [d_seed]
+    for sgn in (1.0, -1.0):
+        p = seeds.clone(); d0 = d_seed
+        for _ in range(_line_half(layer.length, step)):
+            d = _at(p, layer.field, shape)
+            d = torch.where((d * d0).sum(1, keepdim=True) < 0, -d, d)                           # keep the sense of travel along an axial field
+            d0 = d
+            p = p + sgn * step * d; P.append(p.clone()); D.append(d)
+    return torch.stack(P, 1), torch.stack(D, 1)                                                 # (n, steps, 3)
+
+
+def _frame(d: torch.Tensor, ref: torch.Tensor):
+    """Unit vectors e1, e2 perpendicular to ``d (..., 3)``, from a reference ``ref`` (falls back where parallel)."""
+    e1 = torch.linalg.cross(d, ref.expand_as(d))
+    alt = torch.linalg.cross(d, torch.roll(ref, 1, dims=-1).expand_as(d))
+    e1 = torch.where(e1.norm(dim=-1, keepdim=True) > 1e-3, e1, alt)
+    e1 = e1 / e1.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    return e1, torch.linalg.cross(d, e1)
+
+
+def _keep(P: torch.Tensor, layer: Layer, shape, exclude):
+    idx = P.round().long()
+    inside = ((idx >= 0) & (idx < torch.tensor(shape, device=P.device))).all(-1)
+    for i, n_ in enumerate(shape):
+        idx[..., i] = idx[..., i].clamp(0, n_ - 1)
+    keep = inside & layer.region[idx[..., 0], idx[..., 1], idx[..., 2]]
+    if exclude is not None:
+        keep &= ~exclude[idx[..., 0], idx[..., 1], idx[..., 2]]
+    return keep
+
+
+def _sdf(prim: str, xs: torch.Tensor, exps, N: torch.Tensor | None, cut: torch.Tensor | None) -> torch.Tensor:
+    """Signed distance (in units of the smallest semi-axis, approximately) of points ``xs (..., 3)`` already scaled
+    by the semi-axes: a superquadric of ``exps``, a convex polyhedron of face normals ``N (n_obj, k, 3)`` at unit-ish
+    offsets (stored in ``N``'s norm), a shard (the polyhedron cut by the plane ``cut (n_obj, 4)``)."""
+    if prim == "superquadric":
+        e1, e2 = exps
+        a = (xs[..., 0].abs() + 1e-9) ** (2 / e2) + (xs[..., 1].abs() + 1e-9) ** (2 / e2)
+        F = a ** (e2 / e1) + (xs[..., 2].abs() + 1e-9) ** (2 / e1)
+        return F ** (e1 / 2) - 1
+    off = N.norm(dim=-1)                                                                        # (n_obj, k) face offsets
+    nn_ = N / off[..., None]
+    d = torch.bmm(xs, nn_.transpose(1, 2)) - off[:, None, :]                                    # (n_obj, b, k): every face at once
+    sd = torch.maximum(d.amax(-1), xs.norm(dim=-1) - 1.5)                                     # bounded: random faces need not enclose the centre
+    if prim == "shard" and cut is not None:
+        sd = torch.maximum(sd, torch.bmm(xs, cut[:, :3, None])[..., 0] - cut[:, 3:4])
+    return sd
+
+
+def render_solids(layer: Layer, shape, g: torch.Generator, device, exclude: torch.Tensor | None = None, edge: float = 0.7):
+    """Compact solids, one per seed, rendered from signed distance functions: superquadrics (smooth ellipsoids to
+    box-like), convex polyhedra (crystals with facets and sharp edges) and shards (polyhedra cut by a plane), solid or
+    as shells. Each object's long axis follows the layer's field at its centre (the population's orientation); its
+    semi-axes are ``radius * axes``. Its label is the normalised second moment of its own rendered mass (any shape:
+    a needle is linear, a platelet planar, a cube or sphere isotropic); its descriptors are its smallest semi-axis
+    (thickness), its shell (hollowness: 1 - shell / smallest semi-axis) and its angularity (0 for an ellipsoid; 1 for
+    a polyhedron or shard; a superquadric by its exponents). Returns occupancy, tensor, descriptor maps."""
+    u = lambda a, b: float(a + (b - a) * torch.rand(1, generator=g, device=device))
+    seeds = _seeds(layer, shape, g, device); n = seeds.shape[0]
+    r = max(layer.radius, 0.5); ax = torch.tensor(layer.axes, device=device, dtype=torch.float32) * r   # (3,) semi-axes in the object frame (u, v, w)
+    cap = max(4.0, min(shape) / 6.0)                                                             # objects larger than this are regions, not shapes
+    if float(ax.max()) > cap:
+        ax = ax * (cap / float(ax.max()))
+    H = int(math.ceil(float(ax.max()) * (1.5 if layer.primitive != "superquadric" else 1.05) + 1.5 + layer.shell))
+    o = torch.arange(-H, H + 1, device=device, dtype=torch.float32)
+    grid = torch.stack(torch.meshgrid(o, o, o, indexing="ij"), -1).reshape(-1, 3)              # (b, 3) box offsets
+    w = _at(seeds, layer.field, shape)                                                           # each object's long axis
+    ref = torch.randn((n, 3), device=device, generator=g)
+    e1, e2 = _frame(w, ref)
+    R = torch.stack([e1, e2, w], -1)                                                             # (n, 3, 3): columns u, v, w
+    N = cut = None
+    if layer.primitive in ("polyhedron", "shard"):
+        k = int(u(6, 10))
+        N = torch.nn.functional.normalize(torch.randn((n, k, 3), device=device, generator=g), dim=-1) * (1 + 0.25 * torch.rand((n, k, 1), device=device, generator=g))
+        if layer.primitive == "shard":
+            cut = torch.cat([torch.nn.functional.normalize(torch.randn((n, 3), device=device, generator=g), dim=-1),
+                             (-0.4 + 0.6 * torch.rand((n, 1), device=device, generator=g))], 1)
+    smin = float(ax.min())
+    dens = torch.zeros(shape, device=device); T = torch.zeros((6,) + tuple(shape), device=device); D = torch.zeros((3,) + tuple(shape), device=device)
+    hol = (1 - layer.shell / smin) if layer.shell > 0 else 0.0
+    ang = 1.0 if layer.primitive != "superquadric" else float(min(1.0, max(abs(math.log(e)) for e in layer.exps) / math.log(5.0)))
+    batch = max(1, int(2e7 // (grid.shape[0] * (N.shape[1] if N is not None else 1))))
+    for b0 in range(0, n, batch):
+        sl = slice(b0, min(n, b0 + batch)); c = seeds[sl]; m = c.shape[0]
+        base = c.round()
+        X = base[:, None] + grid[None]                                                            # (m, b, 3) voxel positions
+        rel = X - c[:, None]
+        xo = torch.einsum("mbi,mij->mbj", rel, R[sl])                                             # object frame
+        xs = xo / ax
+        sd = _sdf(layer.primitive, xs, layer.exps, None if N is None else N[sl], None if cut is None else cut[sl]) * smin
+        if layer.shell > 0:
+            sd = sd.abs() - layer.shell / 2
+        occ = (0.5 - sd / edge).clamp(0, 1)                                                       # partial volume over ~ edge voxels
+        occ = occ * _keep(X, layer, shape, exclude)
+        mass = occ.sum(1).clamp_min(1e-6)
+        mu = (occ[..., None] * rel).sum(1) / mass[:, None]
+        dx = rel - mu[:, None]
+        C = torch.einsum("mb,mbi,mbj->mij", occ, dx, dx) / mass[:, None, None]
+        C = C / C.diagonal(dim1=-2, dim2=-1).sum(-1)[:, None, None].clamp_min(1e-9)
+        t6 = sym6(C)                                                                              # (m, 6)
+        idx = X.round().long(); ok = ((idx >= 0) & (idx < torch.tensor(shape, device=device))).all(-1) & (occ > 0)
+        ii = idx[ok]; ww = occ[ok]; tt = t6[:, None].expand(-1, X.shape[1], -1)[ok]
+        dens.index_put_((ii[:, 0], ii[:, 1], ii[:, 2]), ww, accumulate=True)
+        Tf = T.view(6, -1); flat = (ii[:, 0] * shape[1] + ii[:, 1]) * shape[2] + ii[:, 2]
+        Tf.index_add_(1, flat, (ww[:, None] * tt).T)
+        dval = torch.tensor([smin, hol, ang], device=device)
+        D.view(3, -1).index_add_(1, flat, ww[None] * dval[:, None])
+    occ = dens.clamp(0, 1)
+    tensor = torch.where(dens[None] > 1e-6, T / dens.clamp_min(1e-6)[None], eye6(device).view(6, 1, 1, 1) / 3)
+    desc = torch.where(dens[None] > 1e-6, D / dens.clamp_min(1e-6)[None], torch.zeros_like(D))
+    return occ, tensor, desc
+
+
+def solid_volume(layer: Layer, device="cpu") -> float:
+    """The volume of one of the layer's solids (voxels): an ellipsoid estimate scaled by the primitive's fill."""
+    r = max(layer.radius, 0.5); a = [x * r for x in layer.axes]
+    v = 4 / 3 * math.pi * a[0] * a[1] * a[2]
+    if layer.primitive == "superquadric":
+        e = sum(layer.exps) / 2; v *= min(1.9, max(0.5, 1.0 + 0.9 * (1 - e)))                     # box-like fills more, pinched less
+    elif layer.primitive == "shard":
+        v *= 0.7
+    if layer.shell > 0:
+        v *= min(1.0, 3 * layer.shell / max(min(a), 1e-3))
+    return max(v, 1.0)
+
+
 def render_layer(layer: Layer, shape, g: torch.Generator, device, step: float = 0.5, exclude: torch.Tensor | None = None):
     """The layer's occupancy ``(Z, Y, X)`` (a volume fraction: 1 at the centre of an isolated shape, overlaps capped at
     1) and shape tensor ``(6, Z, Y, X)`` (trace 1; the local mean of the deposited shapes' tensors). Shapes grow from
     random seeds in the region along the field (lines, blobs) or as discs perpendicular to it (sheets); points in
     ``exclude`` are not deposited (a fibre yielding to another population's fibre)."""
+    if layer.kind == "solid":
+        occ, tensor, layer.desc = render_solids(layer, shape, g, device, exclude)
+        return occ, tensor
+    if layer.hollow and layer.kind == "line":
+        layer.section = "ring"
+    if layer.kind == "line" and layer.section != "disc":
+        return _render_section(layer, shape, g, device, step, exclude)
     seeds = _seeds(layer, shape, g, device)
     if layer.kind in ("line", "blob"):
         tens = line_tensor if layer.kind == "line" else (lambda d: blob_tensor(d, layer.radius, layer.length, step))
@@ -302,6 +499,9 @@ def render_layer(layer: Layer, shape, g: torch.Generator, device, step: float = 
         off = _sheet_offsets(layer.length, step, device)                                       # the seed itself is not deposited twice
         P = (seeds[:, None] + off[None, :, :1] * e1[:, None] + off[None, :, 1:] * e2[:, None]).reshape(-1, 3)
         V = sheet_tensor(n)[:, None].expand(-1, off.shape[0], -1).reshape(-1, 6)
+        if layer.bilayer > 0:                                                                  # two leaflets, the gap between them hollow
+            nn_ = n[:, None].expand(-1, off.shape[0], -1).reshape(-1, 3)
+            P = torch.cat([P + 0.5 * layer.bilayer * nn_, P - 0.5 * layer.bilayer * nn_]); V = torch.cat([V, V])
     idx = P.round().long()
     inside = ((idx >= 0) & (idx < torch.tensor(shape, device=device))).all(1)
     for i, n_ in enumerate(shape):
@@ -314,26 +514,64 @@ def render_layer(layer: Layer, shape, g: torch.Generator, device, step: float = 
     r = max(layer.radius, 0.5)
     db = gaussian(dens, r, truncate=3.0); Tb = gaussian(T, r, truncate=3.0)
     tensor = torch.where(db[None] > 1e-6, Tb / db.clamp_min(1e-6)[None], eye6(device).view(6, 1, 1, 1) / 3)
-    occ = db / _peak(layer.kind, r, layer.length, step, device)
-    if layer.hollow and layer.kind == "line":
-        ri = 0.55 * r
-        inner = gaussian(dens, ri, truncate=3.0) / _peak("line", ri, layer.length, step, device)
-        occ = (occ - inner) / _wall_peak(r, ri)
-    return occ.clamp(0, 1), tensor
+    occ = (db / _peak(layer.kind, r, layer.length, step, device)).clamp(0, 1)
+    hol = layer.bilayer / (layer.bilayer + 2 * r) if (layer.kind == "sheet" and layer.bilayer > 0) else 0.0
+    layer.desc = torch.tensor([r, hol, 0.0], device=device).view(3, 1, 1, 1) * (occ > 0)[None]
+    return occ, tensor
+
+
+def _render_section(layer: Layer, shape, g, device, step: float, exclude):
+    """A line population with a non-round or hollow cross-section: the section (ring, ellipse, superellipse) filled
+    with points on a grid of spacing ``h`` and swept along each streamline, its frame turning with the path; occupancy
+    = the points' density over the sampling density (1 inside a shape, an anti-aliased edge), label ``t tᵀ``."""
+    seeds = _seeds(layer, shape, g, device)
+    r = max(layer.radius, 0.5); h = 0.5 if r <= 3 else r / 6
+    if layer.section == "ring":
+        layer.wall = max(layer.wall, min(1.0, 1.0 / r))                                          # a wall of a voxel or more: thinner cannot be drawn on the grid
+    P, D = _paths(layer, seeds, shape, step)                                                     # (n, s, 3)
+    off = _section_offsets(layer, h, device)                                                    # (m, 2)
+    ref = torch.nn.functional.normalize(torch.randn((P.shape[0], 1, 3), device=device, generator=g), dim=-1)
+    e1, e2 = _frame(D, ref)                                                                     # (n, s, 3)
+    n_pts = P.shape[0] * P.shape[1] * off.shape[0]
+    stride = max(1, int(math.ceil(n_pts / 3e7)))                                                # a cap on the points: sparser sampling of the path
+    P, D, e1, e2 = P[:, ::stride], D[:, ::stride], e1[:, ::stride], e2[:, ::stride]
+    Q = P[:, :, None] + off[None, None, :, :1] * e1[:, :, None] + off[None, None, :, 1:] * e2[:, :, None]   # (n, s, m, 3)
+    V = line_tensor(D)[:, :, None].expand(-1, -1, off.shape[0], -1)
+    Q, V = Q.reshape(-1, 3), V.reshape(-1, 6)
+    keep = _keep(Q, layer, shape, exclude); Q, V = Q[keep], V[keep]
+    dens, T = _splat(Q, V, shape, device)
+    db = gaussian(dens, 0.6, truncate=3.0); Tb = gaussian(T, 0.6, truncate=3.0)
+    occ = (db * (step * stride) * h * h).clamp(0, 1)                                            # points per voxel at full sampling: 1 / (step h²)
+    tensor = torch.where(db[None] > 1e-6, Tb / db.clamp_min(1e-6)[None], eye6(device).view(6, 1, 1, 1) / 3)
+    hol = (1 - layer.wall) if layer.section == "ring" else 0.0
+    thick = r * (layer.section_aspect if layer.section == "ellipse" else 1.0)
+    layer.desc = torch.tensor([thick, hol, section_angularity(layer)], device=device).view(3, 1, 1, 1) * (occ > 0)[None]
+    return occ, tensor
 
 
 CONTENT = ("general", "mri", "histology")
 
 
+KINDS_DRAWN = ("line", "sheet", "blob", "solid")
+
+
 def random_layer(shape, g: torch.Generator, device, kind: str | None = None, scale: float = 1.0, content: str = "general",
                  field: torch.Tensor | None = None, density: float | None = None, region: torch.Tensor | None = None) -> Layer:
-    """A random population. ``scale`` multiplies every size (the voxel size within the trained range); bends and the
-    field's coherence are drawn in voxels, independent of the scale, so tight bends occur at every scale."""
+    """A random population from the shape grammar. ``scale`` multiplies every size (the voxel size within the trained
+    range); bends and the field's coherence are drawn in voxels, independent of the scale, so tight bends occur at
+    every scale.
+
+    * ``line``: swept along the field -- a solid Gaussian-profile disc (fibres), or a sharp cross-section: a ring
+      (hollow fibres, vessels; wall 0.2-0.6 of the radius), an ellipse (ribbons), a superellipse (square-ish);
+    * ``sheet``: discs perpendicular to the field, one leaflet or two (bilayer: a hollow membrane);
+    * ``blob``: short Gaussian extrusions (cells, nuclei, grains);
+    * ``solid``: compact objects from signed distance functions -- superquadrics (smooth ellipsoids to box-like),
+      convex polyhedra (crystals), shards; isotropic, needle or platelet proportions; solid or shells (vesicles)."""
     u = lambda a, b: float(a + (b - a) * torch.rand(1, generator=g, device=device))
     lu = lambda a, b: float(math.exp(u(math.log(a), math.log(b))))
+    pick = lambda opts, w: opts[int(torch.multinomial(torch.tensor(w, device=device, dtype=torch.float32), 1, generator=g))]
     if kind is None:
-        w = torch.tensor([0.4, 0.4, 0.2] if content == "mri" else [1 / 3, 1 / 3, 1 / 3], device=device)
-        kind = ("line", "sheet", "blob")[int(torch.multinomial(w, 1, generator=g))]
+        kind = pick(KINDS_DRAWN, [0.4, 0.4, 0.2, 0.0] if content == "mri" else [0.35, 0.25, 0.15, 0.25])
     radius = max(lu(0.6, 3.0) * scale, 1.2 if content == "mri" else 0.6)
     coh, bend = 0.0, 0.0
     if field is None:
@@ -341,22 +579,39 @@ def random_layer(shape, g: torch.Generator, device, kind: str | None = None, sca
             bend = lu(8, 60); field = arc_field(shape, bend, g, device)
         else:
             coh = max(lu(6, 60), 3 * radius); field = direction_field(shape, coh, g, device)
+    extra = {}
     if kind == "line":
         length = lu(20, 120) * scale
+        sec = pick(("disc", "ring", "ellipse", "superellipse"), [0.55, 0.25, 0.1, 0.1] if content != "mri" else [0.5, 0.4, 0.05, 0.05])
+        if sec != "disc":
+            radius = max(radius, lu(1.2, 4.0) * scale)                                               # a resolvable section
+            extra = {"section": sec, "wall": max(u(0.2, 0.6), 1.0 / radius), "section_aspect": lu(0.25, 0.7), "section_exp": lu(0.6, 8.0)}
     elif kind == "sheet":
         length = lu(6, 30) * scale
-    else:
+        if u(0, 1) < 0.2:
+            extra = {"bilayer": u(1.5, 4.0) * radius}
+    elif kind == "blob":
         length = radius * lu(0.5, 2.5)
-    phi = lu(0.02, 0.5) * (0.3 if content == "mri" and kind == "line" else 1.0)                # the layer's volume fraction (MRI: sparse tubes)
-    density = density_for(kind, radius, length, phi) if density is None else density
+    else:
+        radius = lu(1.0, 6.0) * scale
+        shape_kind = pick(("iso", "needle", "platelet", "any"), [0.35, 0.25, 0.2, 0.2])
+        axes = {"iso": (1.0, 1.0, 1.0), "needle": (1.0, 1.0, lu(2.0, 6.0)), "platelet": (lu(2.0, 5.0), lu(2.0, 5.0), 1.0),
+                "any": (lu(0.6, 2.0), lu(0.6, 2.0), lu(0.6, 3.0))}[shape_kind]
+        prim = pick(("superquadric", "polyhedron", "shard"), [0.5, 0.3, 0.2])
+        exps = (lu(0.2, 2.0), lu(0.2, 2.0)) if u(0, 1) < 0.6 else (1.0, 1.0)
+        shell = u(0.8, 0.45 * radius * min(axes)) if (u(0, 1) < 0.25 and radius * min(axes) > 2.5) else 0.0
+        length = 2 * radius * max(axes)
+        extra = {"primitive": prim, "axes": axes, "exps": exps, "shell": shell}
+    phi = lu(0.02, 0.3 if kind == "solid" else 0.5) * (0.3 if content == "mri" and kind == "line" else 1.0)   # the layer's volume fraction (MRI: sparse tubes)
     if region is None:
         region = region_mask(shape, lu(8, 40) * scale, u(0.3, 1.0) if u(0, 1) < 0.7 else 1.0, g, device)
     contrast = u(15, 140) * (1 if u(0, 1) < 0.5 else -1)                                       # faint to strong
     occluding = u(0, 1) < 0.2
     if occluding:
         contrast = u(30, 225)
-    hollow = kind == "line" and u(0, 1) < (0.3 if content == "mri" else 0.15)
-    return Layer(kind, field, radius, length, density, region, contrast, occluding, hollow, coh, bend)
+    L = Layer(kind, field, radius, length, 0.0, region, contrast, occluding, False, coh, bend, **extra)
+    L.density = layer_density(L, phi) if density is None else density
+    return L
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -419,6 +674,7 @@ def background(shape, style: str, g: torch.Generator, device, scale: float = 1.0
         r = 1.2 * scale
         L = Layer("blob", direction_field(shape, 8.0, g, device), r, r, 0.0, torch.ones(shape, dtype=torch.bool, device=device),
                   u(50, 140) * (1 if u(0, 1) < 0.35 else -1), occupancy=cells, tensor=eye6(device).view(6, 1, 1, 1).expand(6, *shape) / 3)
+        L.desc = torch.tensor([r, 0.0, 0.0], device=device).view(3, 1, 1, 1) * (cells > 0)[None]
         extra.append(L)
     return img, lab, R, extra
 
@@ -449,6 +705,9 @@ def _composite(bg: torch.Tensor, R: torch.Tensor, layers: list, device):
     # shapes' and the isotropic remainder's, summing to one
     layers.append(Layer("sheet", normal, 1.0, 1.0, 0.0, ones, 0.0, role="interface", occupancy=bw * vis, tensor=sheet_tensor(normal.movedim(0, -1)).movedim(-1, 0)))
     layers.append(Layer("blob", normal, 1.0, 1.0, 0.0, ones, 0.0, role="isotropic", occupancy=rest, tensor=eye6(device).view(6, 1, 1, 1).expand(6, *shape) / 3))
+    for L in layers:
+        if L.desc is None:                                                                        # layers made outside render_layer
+            L.desc = torch.tensor([max(L.radius, 0.5) if L.role == "shape" else 0.0, 0.0, 0.0], device=device).view(3, 1, 1, 1) * (L.occupancy > 0)[None]
     return img
 
 
@@ -487,8 +746,7 @@ def sample(shape=(128, 128, 128), k_layers: int | None = None, seed: int = 0, de
                 fields.append(companion_field(L0.field, u(20, 90), coh, g, device))
         group = [L0] + [random_layer(shape, g, device, kind="line", scale=scale, content=content, field=fields[k], region=region) for k in range(1, n)]
         for Lk, wk in zip(group, w):                                                            # seeds per 1000 voxels for the layer's share of the volume
-            Lk.hollow = False
-            Lk.density = density_for("line", Lk.radius, Lk.length, phi * wk)
+            Lk.density = layer_density(Lk, phi * wk)
         con = u(15, 140) * (1 if u(0, 1) < 0.5 else -1)
         same = u(0, 1) < 0.8                                                                     # usually one material
         for Lk in group:
@@ -692,6 +950,7 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     on = lambda key: u(0, 1) < max(P.get(key, 0.0), CROSS_MIX) * (1.0 if key in KEEP else sg)
     img = s.image.clone().float(); Z, Y, X = img.shape; rec = {"modality": modality}
     occ = torch.stack([L.occupancy for L in s.layers]); T = torch.stack([L.tensor for L in s.layers])
+    Dsc = torch.stack([L.desc if L.desc is not None else torch.zeros((3,) + tuple(img.shape), device=device) for L in s.layers])   # (K, 3, Z, Y, X)
     R = s.regions if s.regions is not None else torch.zeros_like(img)
     K = occ.shape[0]; stretch = torch.ones_like(img)
     # ---- geometry: an elastic warp; labels follow; shape tensors by the Jacobian (S -> J⁻¹ S J⁻ᵀ), never folding
@@ -713,6 +972,8 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
         S = S / S.diagonal(dim1=-2, dim2=-1).sum(-1)[..., None, None].clamp_min(1e-9)
         T = sym6(S).permute(0, 4, 1, 2, 3).contiguous(); rec["warp"] = (round(amp, 2), round(sig, 1), round(det, 2))
         stretch = torch.linalg.det(J).clamp_min(1e-3) ** (-1.0 / 3.0)                            # shapes appear this much larger in the warped image
+        Dsc = _resample(Dsc.reshape(K * 3, Z, Y, X), grid).reshape(K, 3, Z, Y, X)
+        Dsc[:, 0] = Dsc[:, 0] * stretch[None]
     # ---- the acquisition frame: the acquisition axis becomes dim 0 for every photometric nuisance
     ax = int(torch.randint(0, 3, (1,), generator=g, device=device)); rec["axis"] = ax
     img = img.movedim(ax, 0).contiguous(); A, B, C = img.shape
@@ -838,7 +1099,7 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     ovis = torch.where(iso, torch.ones_like(t), ((t - ORIENTATION_T[0]) / (ORIENTATION_T[1] - ORIENTATION_T[0])).clamp(0, 1))
     wmean = lambda v: [round(float((x * o).sum() / o.sum().clamp_min(1e-6)), 2) for x, o in zip(v, occ)]   # occupancy-weighted means, for the record
     rec["visibility"] = wmean(vis); rec["orientation_visibility"] = wmean(ovis)
-    return {"image": img, "occupancy": occ, "tensors": T, "visibility": vis, "orientation_visibility": ovis, "stretch": stretch, "record": rec}
+    return {"image": img, "occupancy": occ, "tensors": T, "descriptors": Dsc, "visibility": vis, "orientation_visibility": ovis, "stretch": stretch, "record": rec}
 
 
 def draw(shape=(128, 128, 128), seed: int = 0, device="cuda", modality: str | None = None, strength: float = 1.0, **kw):

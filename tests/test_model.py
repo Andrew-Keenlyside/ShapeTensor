@@ -71,10 +71,14 @@ def test_cube_augmentation_is_exact(sample_target):
         dr = {"occupancy": apply_cube(d["occupancy"], perm, flips), "tensors": apply_cube(d["tensors"], perm, flips, tensor6=True),
               "visibility": apply_cube(d["visibility"], perm, flips), "orientation_visibility": apply_cube(d["orientation_visibility"], perm, flips),
               "stretch": apply_cube(d["stretch"], perm, flips)}
+        dr["descriptors"] = apply_cube(d["descriptors"], perm, flips)
         T2 = target(s, dr)
-        for k in ("mass", "fraction", "classes"):
+        for k in ("fraction", "classes"):
             assert torch.allclose(T2[k], apply_cube(T[k][0], perm, flips), atol=1e-4), k
-        m = T2["mass"] > 0.01
+        A = apply_cube(T["mass"][0], perm, flips)
+        assert torch.allclose(T2["mass"].sum(0), A.sum(0), atol=1e-4)                                # the cell's populations' total: exact
+        assert float(((T2["mass"] - A).abs() > 1e-4).any(0).float().mean()) < 1e-3                  # slots: exact up to ties at the 20° merge threshold
+        m = (T2["mass"] > 0.01) & ((T2["mass"] - A).abs() < 1e-4).all(0)[None]
         a = apply_cube(T["slots"][0], perm, flips, tensor6=True)
         assert torch.allclose(T2["slots"].movedim(1, -1)[m], a.movedim(1, -1)[m], atol=1e-3)
 

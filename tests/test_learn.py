@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from shapetensor.filters import gaussian
-from shapetensor.learn.generator import (MODALITIES, STEP_FULL, Layer, _composite, blob_tensor, boundary_sample, draw, eye6, gibbs,
+from shapetensor.learn.generator import (MODALITIES, STEP_FULL, Layer, _composite, blob_tensor, boundary_sample, draw, eig3, eye6, gibbs,
                                          interface, nuisance, principal, render_layer, sample, smooth_noise, visibility)
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -43,9 +43,9 @@ def test_isolated_shape_is_one_voxel_full(kind, radius, length):
     L = Layer(kind, d.view(3, 1, 1, 1).expand(3, *shape).contiguous(), radius, length, 0.0, region, 50.0, seeds=torch.tensor([[24.0, 24.0, 24.0]], device=DEV))
     occ, T = render_layer(L, shape, torch.Generator(device=DEV).manual_seed(0), DEV)
     assert 0.8 <= float(occ.max()) <= 1.0, float(occ.max())
-    if kind == "line":
+    if kind == "line" and radius >= 3.0:                                                         # a resolvable lumen: a wall of a voxel or more, a lumen of more
         L.hollow = True; occ, _ = render_layer(L, shape, torch.Generator(device=DEV).manual_seed(0), DEV)
-        assert 0.75 <= float(occ.max()) <= 1.0 and float(occ[24, 24, 24]) < 0.35
+        assert 0.6 <= float(occ.max()) <= 1.0 and float(occ[24, 24, 24]) < 0.35                # a thin wall: partial volume
 
 
 @pytest.mark.parametrize("kind", ["line", "sheet"])
@@ -278,3 +278,83 @@ def test_boundary_sample_has_both_states():
     prof = iface.occupancy.mean((1, 2))
     assert float(prof[23]) > 0.95 * float(prof.max()) and float(prof[24]) > 0.95 * float(prof.max()) and float(prof[:16].max()) < 1e-3
     assert float(line.occupancy[20:28].mean()) > 0.05
+
+
+# ---- the shape grammar: every family's labels and descriptors describe what it draws
+
+def _one(kind, shape=(48, 48, 48), d=(0.0, 0.0, 1.0), seed_pos=(24.0, 24.0, 24.0), **kw):
+    dd = torch.tensor(d, device=DEV); dd = dd / dd.norm()
+    L = Layer(kind, dd.view(3, 1, 1, 1).expand(3, *shape).contiguous(), kw.pop("radius", 3.0), kw.pop("length", 60.0), 0.0,
+              torch.ones(shape, dtype=torch.bool, device=DEV), 50.0, seeds=torch.tensor([seed_pos], device=DEV), **kw)
+    occ, T = render_layer(L, shape, torch.Generator(device=DEV).manual_seed(0), DEV)
+    return L, occ, T
+
+
+def test_ring_section_is_hollow():
+    L, occ, T = _one("line", section="ring", wall=0.4, radius=4.0)                              # a vessel along x
+    lumen = float(occ[24, 24, 24]); wall = float(occ[24, 24 + 3, 24])                            # centre vs 3 voxels out (radius 4, wall 1.6)
+    assert lumen < 0.15 and wall > 0.7, (lumen, wall)
+    v, ev = principal(T, "max")
+    m = occ > 0.5
+    assert float(_angle(v, torch.tensor([0, 0, 1.0], device=DEV).view(3, 1, 1, 1))[m].median()) < 3.0
+    assert abs(float(L.desc[1][m].median()) - 0.6) < 0.02 and abs(float(L.desc[0][m].median()) - 4.0) < 0.05
+
+
+def test_ellipse_section_is_flattened():
+    L, occ, _ = _one("line", section="ellipse", section_aspect=0.3, radius=5.0)
+    sl = occ[:, :, 24]                                                                             # the cross-section (z, y) at x = 24
+    zz, yy = torch.meshgrid(torch.arange(48, device=DEV, dtype=torch.float32), torch.arange(48, device=DEV, dtype=torch.float32), indexing="ij")
+    w = sl / sl.sum(); mz, my = (w * zz).sum(), (w * yy).sum()
+    C = torch.tensor([[float((w * (zz - mz) ** 2).sum()), float((w * (zz - mz) * (yy - my)).sum())],
+                      [float((w * (zz - mz) * (yy - my)).sum()), float((w * (yy - my) ** 2).sum())]])
+    ev = torch.linalg.eigvalsh(C)
+    assert 0.2 < float((ev[0] / ev[1]).sqrt()) < 0.45, float((ev[0] / ev[1]).sqrt())             # minor/major ~ the aspect
+
+
+def test_bilayer_sheet_has_two_leaflets():
+    L, occ, T = _one("sheet", bilayer=6.0, radius=1.0, length=14.0)                              # normal along x: leaflets at x = 21 and 27
+    prof = occ[24, 24, 16:33]
+    assert float(prof[8]) < 0.2 and float(prof[5]) > 0.6 and float(prof[11]) > 0.6, prof.tolist()
+    assert float(L.desc[1][occ > 0.5].median()) > 0.5
+
+
+@pytest.mark.parametrize("axes,expect", [((1.0, 1.0, 4.0), "line"), ((4.0, 4.0, 1.0), "plane"), ((1.0, 1.0, 1.0), "iso")])
+def test_solids_label_their_shape(axes, expect):
+    L, occ, T = _one("solid", primitive="superquadric", axes=axes, exps=(1.0, 1.0), radius=3.0, d=(0.2, 0.3, 0.93))
+    m = occ > 0.5
+    val, vec = eig3(T)
+    lin = ((val[2] - val[1]) / val[2])[m].median(); pla = ((val[1] - val[0]) / val[2])[m].median()
+    d = torch.tensor([0.2, 0.3, 0.93], device=DEV); d = (d / d.norm()).view(3, 1, 1, 1)
+    if expect == "line":
+        assert float(lin) > 0.7 and float(_angle(vec[2], d)[m].median()) < 3.0
+    elif expect == "plane":
+        assert float(pla) > 0.7 and float(_angle(vec[0], d)[m].median()) < 3.0
+    else:
+        assert float(lin) < 0.15 and float(pla) < 0.15
+
+
+def test_solid_shell_is_hollow():
+    L, occ, T = _one("solid", primitive="superquadric", axes=(1.0, 1.0, 1.0), radius=8.0, shell=2.0)
+    assert float(occ[24, 24, 24]) < 0.05 and float(occ[24, 24, 32]) > 0.7                         # an empty centre, a wall at the radius (7-9 voxels out)
+    assert float(L.desc[1][occ > 0.5].median()) > 0.6
+
+
+@pytest.mark.parametrize("prim", ["polyhedron", "shard"])
+def test_crystals_are_angular_and_bounded(prim):
+    L, occ, T = _one("solid", primitive=prim, axes=(1.0, 1.0, 2.0), radius=5.0)
+    assert float(occ.max()) > 0.9
+    faces = torch.cat([occ[0].flatten(), occ[-1].flatten(), occ[:, 0].flatten(), occ[:, -1].flatten(), occ[:, :, 0].flatten(), occ[:, :, -1].flatten()])
+    assert float(faces.max()) < 1e-6                                                               # bounded: nothing reaches the block's faces
+    assert float(L.desc[2][occ > 0.5].median()) > 0.99
+
+
+def test_descriptors_reach_the_target():
+    from shapetensor.learn.targets import target
+    found = {"hollow": False, "angular": False}
+    for sd in range(12):
+        s, d = draw((48, 48, 48), seed=700 + sd, device=DEV, k_layers=3)
+        t = target(s, d)
+        for k in ("thickness", "hollowness", "angularity"):
+            assert torch.isfinite(t[k]).all() and float(t[k].min()) >= 0
+        found["hollow"] |= bool((t["hollowness"] > 0.2).any()); found["angular"] |= bool((t["angularity"] > 0.5).any())
+    assert all(found.values()), found
