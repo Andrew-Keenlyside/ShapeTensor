@@ -488,3 +488,9 @@ the VOI: z +0.016 against in-plane -0.007 on average, but the in-plane profile i
 dominant in-plane fibre direction leaks into any global profile on a volume this small. Subtracted, it halves the z share
 (0.64 -> 0.37) and halves the agreement with the confident structure tensor (14.7 -> 30.1 deg; white matter weight median
 0.82 -> 0.24). Not adopted; the acquisition null remains open (candidates in docs/data.md).
+
+**The tightest bend is not the carry-forward's doing (00:55 Montreal).** Through the 0.3 mm-radius turn: default 0.39,
+reach 3 cells 0.45, reach 3 with sigma 1.5 cells 0.41, momentum off 0.36 -- while the 90 deg band crossing needs the
+carry-forward (through 0.89 default, 0.71 at reach 3, 0.60 off). The turn of 15 voxels is lost at the window (scale 10,
+lattice step 4), not in the smoothing along the direction; a smaller scale there, or a curved continuation (the
+orientation-score diffusion of Duits et al.), is the remedy. Defaults unchanged.
