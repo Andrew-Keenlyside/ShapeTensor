@@ -31,8 +31,14 @@ all classical, nothing trained on the analysed data, one scale parameter:
    co-located vectors with weights and identities where populations coexist.
 
 <div align="center">
-<img src="docs/img/pipeline_overview.png" alt="the pipeline" width="100%" />
+<img src="docs/img/pipeline_overview_0.3.png" alt="the pipeline on a 90° band crossing" width="100%" />
 </div>
+
+The chain on a 90° band-crossing phantom, every panel from its own intermediates (`scripts/figure_pipeline.py`): the
+lifted distribution at a position in the overlap and its two lobes; presence against the floor; the crossed band's
+direction carried through the other band by its arms; identities; the co-located vectors; the single field beside the
+structure tensor's bisector; and streamlines from the same seeds, passing through in one field and switching band in
+the other.
 
 ## Install
 

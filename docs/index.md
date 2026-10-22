@@ -40,7 +40,9 @@ vec        = st.structure_tensor(image, rho=10.0)                               
 One parameter matters: `scale`, the window in voxels; every other length is tied to it. The excised structure tensor
 at the same window is the baseline in every comparison.
 
-![pipeline overview](img/pipeline_overview.png)
+![the chain on a band crossing](img/pipeline_overview_0.3.png)
+
+The chain on a 90° band-crossing phantom, every panel from its own intermediates (`scripts/figure_pipeline.py`).
 
 Read [the pipeline](pipeline/index.md) for each stage, [parameters](parameters.md) for what can be set,
 [validation](validation.md) for what the phantoms and the tracking tests show, and [real data](data.md) for the
