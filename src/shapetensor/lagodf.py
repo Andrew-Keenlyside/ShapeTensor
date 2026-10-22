@@ -12,7 +12,9 @@ Per position (on a lattice of ``step`` voxels):
 
 1. :func:`lag_odf` -- ``ρ(r u)`` over ``n_dirs`` hemisphere directions, averaged over ``radii``, the products
    smoothed by a Gaussian window ``sigma_w`` (the local estimate) after removing a local mean (``sigma_m``);
-2. :func:`presence` -- the peak's height above the median direction: no fibres, no peak (the sensitivity weight);
+2. :func:`presence` -- the peak's height above the median direction: no fibres, no peak. The sensitivity weight rises
+   from the presence noise floor -- by default measured per block on an isotropic surrogate with the block's own power
+   spectrum (:func:`iso_surrogate`; its 99th percentile) -- to twice it;
 3. :func:`deconvolve` -- the angular blur of one population (its **response**, :func:`response_profile`: from synthetic
    bundles or from the block's own most anisotropic positions, :func:`self_response`) removed by non-negative least
    squares, which sharpens the lobes so that crossings separate;
@@ -96,6 +98,21 @@ def lag_odf(F: torch.Tensor, grid: torch.Tensor, *, radii=(3.0, 6.0), sigma_w: f
         else:
             O[d] = a / var.clamp_min(1e-12)
     return O
+
+
+def iso_surrogate(v: torch.Tensor, mask=None, seed: int = 0) -> torch.Tensor:
+    """A random field with the block's radially averaged power spectrum (random phases): the same scales and contrast,
+    no anisotropy -- the null for :func:`presence`. ``mask`` restricts the spectrum to the tissue (zero elsewhere)."""
+    v = v.float()
+    x = v - v.mean() if mask is None else torch.where(mask, v - v[mask].mean(), torch.zeros_like(v))
+    P = torch.fft.fftn(x).abs() ** 2
+    k = torch.stack(torch.meshgrid(*(torch.fft.fftfreq(n, device=v.device) for n in v.shape), indexing="ij")).norm(dim=0)
+    nb = 256; idx = (k / k.max() * (nb - 1)).round().long()
+    prof = torch.zeros(nb, device=v.device).scatter_add_(0, idx.flatten(), P.flatten()) / torch.bincount(idx.flatten(), minlength=nb).clamp_min(1)
+    g = torch.Generator(device=v.device).manual_seed(seed)
+    s = torch.fft.ifftn(torch.fft.fftn(torch.randn(v.shape, device=v.device, generator=g)) * prof[idx].sqrt()).real
+    ref = x[mask] if mask is not None else x
+    return s / s.std().clamp_min(1e-12) * ref.std()
 
 
 def presence(O: torch.Tensor) -> torch.Tensor:
@@ -231,6 +248,7 @@ class LagODF:
                  origin: int = 2, response=None, bin_deg: float = 2.5, iters: int = 300, angular_deg: float = 6.0,
                  nmax: int = 2, rel: float = 0.3, min_sep_deg: float = 30.0, floor: float = 0.06, full: float = 0.12,
                  min_share: float = 0.15, momentum: bool = False, sigma_along: float = 3.0, reach: int = 6, max_ring: float = 0.35,
+                 null_q: float = 0.99, full_factor: float = 2.0, null_crop: int = 256,
                  min_prominence: float = 5.0, edge: float | None = None, device="cuda"):
         self.grid = hemisphere(n_dirs, device)
         self.radii, self.sigma_w, self.sigma_m, self.step, self.origin = tuple(radii), float(sigma_w), float(sigma_m), int(step), int(origin)
@@ -240,6 +258,8 @@ class LagODF:
         self.momentum, self.sigma_along, self.reach, self.device = bool(momentum), float(sigma_along), int(reach), device
         self.max_ring, self.min_prominence = float(max_ring), float(min_prominence)
         self.edge = float(edge) if edge is not None else max(self.radii) + 2 * self.sigma_w             # voxels too near a face to trust
+        self.null_q, self.full_factor, self.null_crop = float(null_q), float(full_factor), int(null_crop)
+        self.last_floor = None
 
     def odf(self, v: torch.Tensor) -> torch.Tensor:
         return lag_odf(v.to(self.device), self.grid, radii=self.radii, sigma_w=self.sigma_w, sigma_m=self.sigma_m, step=self.step,
@@ -263,18 +283,37 @@ class LagODF:
             shp = [1, 1, 1]; shp[ax] = c; m = m * ok.view(shp)
         return m
 
-    def weight(self, p: torch.Tensor) -> torch.Tensor:
-        """Sensitivity weight from presence: 0 at ``floor``, 1 from ``full``, linear between."""
-        return ((p - self.floor) / max(self.full - self.floor, 1e-6)).clamp(0, 1)
+    def null_floor(self, v: torch.Tensor, mask=None) -> float:
+        """The ``null_q`` quantile of :func:`presence` on the block's isotropic surrogate (its interior, a central crop
+        of at most ``null_crop`` voxels per axis)."""
+        s = iso_surrogate(v.to(self.device), mask)
+        sl = tuple(slice(max(0, (n - self.null_crop) // 2), max(0, (n - self.null_crop) // 2) + min(n, self.null_crop)) for n in s.shape)
+        sc = s[sl].contiguous(); pn = presence(self.odf(sc))
+        inner = self.interior(sc.shape, pn.shape) > 0
+        vals = pn[inner] if inner.any() else pn.flatten()
+        return float(torch.quantile(vals[:: max(1, vals.numel() // 500_000)], self.null_q))
 
-    def populations(self, v: torch.Tensor, *, O=None, response=None, use_momentum=None) -> dict:
+    def weight(self, p: torch.Tensor, floor: float | None = None) -> torch.Tensor:
+        """Sensitivity weight from presence: 0 at the floor, 1 from ``full_factor`` x the floor (``floor`` /
+        ``full`` when the floor is fixed), linear between."""
+        lo = self.floor if floor is None else floor
+        hi = self.full if floor is None else self.full_factor * floor
+        return ((p - lo) / max(hi - lo, 1e-6)).clamp(0, 1)
+
+    def populations(self, v: torch.Tensor, *, O=None, response=None, use_momentum=None, floor="null", mask=None) -> dict:
+        """``floor="null"`` (default): the presence floor from the block's isotropic surrogate (:meth:`null_floor`,
+        tissue ``mask`` optional); a number: that floor (weight 1 from ``full_factor`` x it); None: the fixed
+        ``floor`` / ``full``."""
         O = self.odf(v) if O is None else O
         R = response if response is not None else self.response
         if R is None:
             R, _ = self_response(O, self.grid, bin_deg=self.bin_deg)
         A = response_matrix(R, self.grid, self.bin_deg)
         f = angular_smooth(deconvolve(O, A, self.iters), self.grid, self.angular_deg)
-        p = presence(O); w = self.weight(p) * self.interior(v.shape[-3:], O.shape[1:])
+        if isinstance(floor, str):
+            floor = self.null_floor(v, mask)
+        self.last_floor = floor
+        p = presence(O); w = self.weight(p, floor) * self.interior(v.shape[-3:], O.shape[1:])
         g = f / f.sum(0, keepdim=True).clamp_min(1e-12) * w[None]                                 # sums to the weight
         if self.momentum if use_momentum is None else use_momentum:
             from .populations import momentum

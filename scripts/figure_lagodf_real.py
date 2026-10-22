@@ -79,7 +79,7 @@ def main():
     O = model.odf(v); log("lag odf", tuple(O.shape))
     R_self, n_self = self_response(O, model.grid, bin_deg=model.bin_deg)
     R = R_self if a.response == "self" else synthetic_response(model)
-    o = model.populations(v, O=O, response=R); log("populations")
+    o = model.populations(v, O=O, response=R, mask=tissue); log("populations, floor", round(model.last_floor, 4))
     labels, table = label_populations(o["dirs_cells"], o["mass"], max_angle_deg=20.0, min_fixels=20); log("labels", len(table))
     k = HALF_Z; kc = (k - model.origin) // model.step
     g = img[k].astype(np.float32); g = np.clip((g - np.percentile(g, 1)) / max(np.ptp(np.percentile(g, [1, 99])), 1e-6), 0, 1)
@@ -126,7 +126,7 @@ def main():
     plt.tight_layout(rect=(0, 0, 1, 0.96)); path = OUT / f"lagodf_vs_st_{tag}.png"; fig.savefig(path, dpi=95); log("figure", path)
     Nt = o["N"].cpu().numpy(); tc = tissue[model.origin::model.step, model.origin::model.step, model.origin::model.step].cpu().numpy()[:Nt.shape[0], :Nt.shape[1], :Nt.shape[2]]
     agree = np.degrees(np.arccos(np.clip(np.abs((dst * D1).sum(0)), 0, 1)))[tis & (Nf >= 1)]
-    rep = {"settings": vars(a), "self response cells": n_self, "response": [round(float(x), 3) for x in R[::4]],
+    rep = {"settings": vars(a), "presence floor (null q99)": round(model.last_floor, 4), "self response cells": n_self, "response": [round(float(x), 3) for x in R[::4]],
            "tissue cells by N": {int(n): round(float(((Nt == n) & tc).sum() / max(tc.sum(), 1)), 3) for n in range(3)},
            "tissue cells sheet": round(float((o["sheet"].cpu().numpy() & tc).sum() / max(tc.sum(), 1)), 3),
            "ring fraction q10/50/90 (weight >= min)": [round(float(x), 3) for x in np.quantile(o["ring"].cpu().numpy()[(o["weight"] >= model.min_weight).cpu().numpy() & tc], [0.1, 0.5, 0.9])],

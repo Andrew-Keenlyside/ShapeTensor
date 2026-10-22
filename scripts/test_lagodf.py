@@ -73,6 +73,7 @@ def main():
             for mom in (False, True):
                 o = model.populations(v, O=O, response=R, use_momentum=mom)
                 rr[f"{rname} response, {'momentum' if mom else 'no momentum'}"] = TP.score(o, tr, grid, meta); del o
+                rr["presence floor"] = round(model.last_floor, 4)
         res["cases"][name] = rr; log(name, json.dumps(rr))
         json.dump(res, open(out / f"lagodf_{tag}.json", "w"), indent=1)
         del O; torch.cuda.empty_cache()

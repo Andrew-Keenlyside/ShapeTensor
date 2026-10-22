@@ -336,3 +336,16 @@ populations (coverage 0.88/0.89, 0.56/0.65, the latter limited by N = 2 detectio
 three fascicles (0.2 mm apart) share one label: the 10-voxel window's leakage joins them, below this resolution they
 are one orientation population. Real slab: 137 populations of >= 20 fixels; the largest runs along x in the white
 matter under the cortex with a second, interleaved one in the same cells.
+
+**White-matter coverage** (2026-10-22). On the real slab the populations missed much of the white matter. Stage by
+stage (WM = the brighter multi-Otsu class, diagnostic only): every WM cell lost was lost at the presence weight (46%
+below weight 0.2); sheets, lobes and labelling dropped none. The fixed floor (0.06 / full 0.12) had been tuned on the
+phantoms, whose noise is higher than the real data's: real WM presence q10/50/90 = 0.036/0.079/0.189. The floor is now
+measured per block: the 99th percentile of presence on an isotropic surrogate with the block's own radially averaged
+power spectrum (`lagodf.iso_surrogate`, random phases; `LagODF.null_floor`), weight 1 from twice it. Phantoms: floor
+0.057-0.061 (the old fixed value; results unchanged, texture N0 1.00). Real slab: floor 0.031; WM cells above it 94%
+(was 64%), the darker tissue 68% (was 36%). The darker cortex band stays largely below weight 0.2. Most WM cells now
+hold two populations; the second lobes lean toward z (within 20° of z: 15-17% vs 6% for uniform directions) and the
+darker tissue's mean lag ODF is highest along z (0.088 vs 0.058 in-plane). Structure constant along z includes the
+gyrus's own boundaries (the slab is 1.9 mm thick) and faint ring-artefact arcs (z-mean of the high-passed slab), so
+part of that second lobe may be acquisition, not anatomy.

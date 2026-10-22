@@ -50,7 +50,7 @@ def test_two_intermixed_populations_give_two_lobes():
     O1 = m.odf(_tubes(d1, seed=3) + _noise(seed=4))
     core = torch.zeros(O1.shape[1:], dtype=torch.bool); core[1:-1, 1:-1, 1:-1] = True
     m.response = response_profile(O1, d1.view(3, 1, 1, 1).expand(3, *O1.shape[1:]), m.grid, core)
-    o = m.populations(_tubes(d1, seed=5) + _tubes(d2, seed=6) + _noise(seed=7))
+    o = m.populations(_tubes(d1, seed=5) + _tubes(d2, seed=6) + _noise(seed=7), floor=None)
     D, M = o["dirs_cells"][:, :, 1:-1, 1:-1, 1:-1], o["mass"][:, 1:-1, 1:-1, 1:-1]
     two = (M > 0).sum(0) == 2
     assert float(two.float().mean()) >= 0.6, float(two.float().mean())
@@ -100,3 +100,11 @@ def test_label_populations_keeps_two_crossing_bundles_and_follows_a_bend():
     a = {int(v) for v in lab[0, :4, :, 2:4].flatten()} | {int(v) for v in lab[0, 8:10, :, 8:].flatten()}
     b = {int(v) for v in lab[0, 4:6, :, 6:].flatten()} | {int(v) for v in lab[1, 4:6, :, 2:4].flatten()}
     assert len(a) == 1 and len(b) == 1 and a != b and 0 not in a | b, (a, b, table)
+
+
+def test_isotropic_surrogate_removes_presence():
+    from shapetensor.lagodf import iso_surrogate
+    grid = hemisphere(90); v = _tubes(_unit([0.0, 0.6, 0.8]), count=80) + _noise()
+    p = presence(lag_odf(v, grid, sigma_w=6.0, step=4, origin=10)[:, 1:-1, 1:-1, 1:-1])
+    ps = presence(lag_odf(iso_surrogate(v), grid, sigma_w=6.0, step=4, origin=10)[:, 1:-1, 1:-1, 1:-1])
+    assert float(ps.median()) < 0.5 * float(p.median()), (float(ps.median()), float(p.median()))
