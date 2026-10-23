@@ -86,6 +86,11 @@ def per_draw(net, item, lmax):
     Sp = gather_slots(Pc["slots"], perm)
     p_ax = _axes(Sp.movedim(2, -1), kt)
     out = {"slot_single": ang(p_ax, t_ax)[single], "slot_shared": ang(p_ax, t_ax)[shared]}
+    if "axis" in Pc:                                                                                  # the axis head of the matched slot
+        ah = gather_slots(Pc["axis"], perm)                                                           # (1, K, 3, c)
+        out["axis_head_single"] = ang(torch.nn.functional.normalize(ah, dim=2).movedim(2, -1), t_ax)[single]
+        _, Vm_ = eig3(Pc["mixture"][0])
+        out["mix_axis_head_single"] = ang(torch.nn.functional.normalize(Pc["mix_axis"][0], dim=0).movedim(0, -1)[None, None], t_ax)[single]
     sv, _ = eig3(Sp.movedim(2, 0)); plin = (sv[2] - sv[1]) / sv[2].clamp_min(1e-9)                 # matched slot's linearity
     out["slot_linearity_single"] = plin[single]
     # false lines: cells with no line target (mass > 0.05) where a present predicted slot is a line of linearity > 0.5
@@ -151,7 +156,7 @@ def score(a):
         fk = f"untrained ({tuple(args.get('widths', (16, 32, 64)))}, sh {lmax})"
         if fk not in table:                                                                            # a floor per width / head set
             table[fk] = summarise([per_draw(floor, it, lmax) for it in items], np.random.default_rng(0))
-    keys = ["slot_single", "slot_orderfree_single", "slot_shared", "mix_single", "slot_linearity_single", "false_line_noline",
+    keys = ["slot_single", "slot_orderfree_single", "slot_shared", "mix_single", "axis_head_single", "mix_axis_head_single", "slot_linearity_single", "false_line_noline",
             "sh_top1_single", "sh_near3_single", "sh_near3_shared", "sh_false_second_single", "sh_cross_detect", "sh_cross_err", "st_single", "st_shared"]
     print(f"bank: {len(items)} draws, gen {bank['gen']}, strength {bank['strength']}")
     for name, res in table.items():
