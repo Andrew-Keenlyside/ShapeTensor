@@ -22,7 +22,7 @@ import torch
 from shapetensor.learn.generator import eig3
 from shapetensor.learn.losses import augment
 from shapetensor.learn.model import PopulationNet
-from shapetensor.learn.sh import peaks
+from shapetensor.learn.sh import peaks_gated
 from shapetensor.learn.train import make, stack
 
 DEV = "cuda"
@@ -53,7 +53,7 @@ def main():
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
             P0 = net(x)
         _, Vm0 = eig3(P0["mixture"][0].float()[:, k0:k1, k0:k1, k0:k1]); m0 = Vm0[2][:, line]
-        s0 = peaks(P0["sh"][0].float()[:, k0:k1, k0:k1, k0:k1].flatten(1)[:, line.flatten()], lmax, nmax=1)[0][0] if lmax else None
+        s0 = peaks_gated(P0["sh"][0].float()[:, k0:k1, k0:k1, k0:k1].flatten(1)[:, line.flatten()], lmax, nmax=1)[0][0] if lmax else None
         mean = x.mean()
         for B in BS:
             lo, hi = max(c0 - B, 0), min(c1 + B, size)
@@ -63,7 +63,7 @@ def main():
             _, Vm = eig3(P["mixture"][0].float()[:, k0:k1, k0:k1, k0:k1]); mb = Vm[2][:, line]
             res[B]["mix_t"].append(ang(mb, ta)); res[B]["mix_d"].append(ang(mb, m0))
             if lmax:
-                sb = peaks(P["sh"][0].float()[:, k0:k1, k0:k1, k0:k1].flatten(1)[:, line.flatten()], lmax, nmax=1)[0][0]
+                sb = peaks_gated(P["sh"][0].float()[:, k0:k1, k0:k1, k0:k1].flatten(1)[:, line.flatten()], lmax, nmax=1)[0][0]
                 res[B]["sh_t"].append(ang(sb, ta)); res[B]["sh_d"].append(ang(sb, s0))
     med = lambda L: float(torch.cat(L).median()) if L else float("nan")
     fig, ax = plt.subplots(1, 2, figsize=(13, 4.5), facecolor="white")

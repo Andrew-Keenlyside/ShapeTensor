@@ -32,7 +32,7 @@ from shapetensor.learn.generator import draw
 from shapetensor.learn.losses import apply_cube, cube_transform
 from shapetensor.learn.model import PopulationNet
 from shapetensor.learn.query import _sample, cube_points, sample_density, voxel_density
-from shapetensor.learn.sh import peaks
+from shapetensor.learn.sh import peaks, peaks_gated
 
 DEV = "cuda"
 SIGMAS = (1.5, 2.0, 3.0, 5.0, 8.0, 12.0)
@@ -78,7 +78,7 @@ def main():
             ct = sample_density(Fr, pts, sv).T                                                         # (c, Q)
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
                 cp = net(img[None, None], pts[None], sv[None])["q_sh"][0].float().T
-            td, tv = peaks(ct, lmax, rel=0.3); pd, pv = peaks(cp, lmax, rel=0.3)
+            td, tv, _ = peaks_gated(ct, lmax); pd, pv, _ = peaks_gated(cp, lmax)                       # calibrated (review 5)
             one = (tv[0] > 0) & (tv[1] == 0) & (ct[0] > 0.1 * math.sqrt(4 * math.pi))
             two = (tv[1] > 0) & (ct[0] > 0.1 * math.sqrt(4 * math.pi))
             R = rec[sig]
@@ -90,7 +90,7 @@ def main():
             if sig >= 3:                                                                               # half resolution, same physical points and scale
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
                     ch = net(half[None, None], ((pts - 0.5) / 2)[None], (sv / 2)[None])["q_sh"][0].float().T
-                hd, _ = peaks(ch, lmax, rel=0.3)
+                hd, _, _ = peaks_gated(ch, lmax)
                 if bool(one.any()):
                     R["e_half"].append(ang(hd[0][:, one], td[0][:, one]))
         print(f"sample {i} done", flush=True)
