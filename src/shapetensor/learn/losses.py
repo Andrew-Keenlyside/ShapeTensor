@@ -107,7 +107,7 @@ def match(pred: dict, tgt: dict, m_full: float = 0.02):
     # may only exchange slots whose target masses tie (within TIE of each other) or are both empty -- free matching let
     # the assignment wander from cell to cell and step to step, and no slot learned orientation
     from . import targets as _T
-    key = mt if _T.ORDER == "mass" else _T.salience(St, mt, 2)                                            # ties judged on the slots' order key
+    key = mt if _T.ORDER == "mass" else _T.salience(St, mt, 2) + 1e-3 * mt                                # ties judged on the slots' order key
     mk, mj = key[:, :, None], key[:, None, :]                                                             # (B, Kt, 1, c), (B, 1, Kt, c)
     ratio = torch.minimum(mk, mj) / torch.maximum(mk, mj).clamp_min(1e-9)
     pk, pj = present[:, :, None], present[:, None, :]

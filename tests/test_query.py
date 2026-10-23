@@ -91,6 +91,6 @@ def test_context_mask_keeps_the_cube_and_measures_context():
     x = torch.rand(1, 1, 32, 32, 32, device=DEV)
     pts = torch.tensor([[[16.0, 16.0, 16.0], [16.0, 20.0, 16.0], [16.0, 30.0, 16.0]]], device=DEV)
     xm, ctx = context_mask(x, pts, torch.tensor([6.0], device=DEV))
-    assert torch.equal(xm[..., 10:23, 10:23, 10:23], x[..., 10:23, 10:23, 10:23])
+    assert torch.allclose(xm[..., 14:19, 14:19, 14:19], x[..., 14:19, 14:19, 14:19])               # 4 voxels inside the faces: untouched
     assert torch.allclose(xm[..., 0, 0, 0], x.mean().view(1, 1))
     assert torch.allclose(ctx, torch.tensor([[6.0, 2.0, -8.0]], device=DEV))

@@ -50,18 +50,19 @@ CONTEXT = None                     # (lo, hi): also train the query decoder on c
 
 def context_mask(x: torch.Tensor, points: torch.Tensor, half: torch.Tensor):
     """Copies of images ``x (B, 1, Z, Y, X)`` visible only inside a cube of half-width ``half (B,)`` around each
-    sample's first query point, the rest the image's mean; and each query's visible context (its distance to the
-    cube's faces, clipped by the volume's), ``(B, Q)``."""
+    sample's first query point, blended to the image's mean over a 4-voxel cosine taper inside the faces (a hard step
+    would read as an interface); and each query's visible context (its distance to the cube's faces), ``(B, Q)``."""
     B = x.shape[0]; size = torch.tensor(x.shape[-3:], device=x.device, dtype=points.dtype)
     c = points[:, 0]                                                                                  # (B, 3)
     lo = (c - half[:, None]).clamp(min=0); hi = torch.minimum(c + half[:, None], size - 1)
     ar = [torch.arange(n, device=x.device, dtype=points.dtype) for n in x.shape[-3:]]
-    inside = torch.ones(B, *x.shape[-3:], dtype=torch.bool, device=x.device)
+    depth = torch.full((B, *x.shape[-3:]), 1e9, device=x.device, dtype=points.dtype)                 # distance inside the cube (< 0 outside)
     for j in range(3):
         a = ar[j].view(*([1] * (j + 1)), -1, *([1] * (2 - j)))
-        inside &= (a >= lo[:, j].view(B, 1, 1, 1)) & (a <= hi[:, j].view(B, 1, 1, 1))
+        depth = torch.minimum(depth, torch.minimum(a - lo[:, j].view(B, 1, 1, 1), hi[:, j].view(B, 1, 1, 1) - a))
+    w = (0.5 - 0.5 * torch.cos(math.pi * (depth / 4).clamp(0, 1)))                                   # a 4-voxel cosine taper: no hard step
     mean = x.mean(dim=(2, 3, 4), keepdim=True)
-    xm = torch.where(inside[:, None], x, mean)
+    xm = w[:, None] * x + (1 - w[:, None]) * mean
     ctx = torch.minimum(points - lo[:, None], hi[:, None] - points).amin(-1)                        # (B, Q); < 0: outside
     return xm, ctx
 QUERY = None                       # {"n_points", "n_levels", "lmax"}: draw query targets per sample (set by train())
@@ -185,7 +186,7 @@ def _evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
                     xm, ctx = context_mask(x, T["q_points"], torch.tensor([hb], device=x.device))
                     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device != "cpu"):
                         Pm = model(xm, T["q_points"], T["q_sigma"], ctx)
-                    kq = ctx[0] >= 2.0
+                    kq = ctx[0] >= torch.clamp(1.5 * T["q_sigma"][0], min=2.0)
                     if bool(kq.any()):
                         ctx_eval.setdefault(hb, []).append((Pm["q_sh"][0].float()[kq], T["q_sh"][0].float()[kq]))
         _, _, perm = match(Pc, Tc)
@@ -407,7 +408,7 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
                 xm, ctx = context_mask(x, T["q_points"], half)
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device != "cpu"):
                     Pm = model(xm, T["q_points"], T["q_sigma"], ctx)
-                keep = ctx >= 2.0                                                                     # queries with at least 2 voxels of context
+                keep = ctx >= torch.clamp(1.5 * T["q_sigma"], min=2.0)                                # queries whose scale the visible context covers
                 if bool(keep.any()):
                     qp_, qt_ = Pm["q_sh"].float()[keep].T[None], T["q_sh"].float()[keep].T[None]       # (1, c, n)
                     nc_ = qt_.shape[1] - 3 * DESC_NC

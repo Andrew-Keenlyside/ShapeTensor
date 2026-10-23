@@ -62,14 +62,15 @@ def main():
     size = args["size"]; gen = args.get("gen") or {}; sg = args.get("strength1", 1.0)
     rec = {s: {"e": [], "st": [], "two_t": 0, "two_hit": 0, "dist": [], "e_half": []} for s in SIGMAS}
     for i in range(a.n):
-        s, d = draw((size,) * 3, seed=10_000_000 + i, device=DEV, strength=sg, **gen)
+        size = 96                                                                                     # large enough that the half-resolution input (48³)
+        s, d = draw((size,) * 3, seed=10_000_000 + i, device=DEV, strength=sg, **gen)                   # keeps the scored points away from padding
         F = voxel_density(s, d, lmax)
         perm, flips = cube_transform(torch.Generator().manual_seed(i))
         img = apply_cube(d["image"].float() / 255.0, perm, flips)
         Fr = torch.einsum("ij,j...->i...", __import__("shapetensor.learn.query", fromlist=["sh_rotation"]).sh_rotation(perm, flips, lmax, DEV),
                           apply_cube(F, perm, flips))
         g = torch.Generator(device=DEV).manual_seed(i)
-        lo, hi = 14.0, size - 15.0
+        lo, hi = 30.0, size - 31.0
         pts = lo + (hi - lo) * torch.rand(a.q, 3, generator=g, device=DEV)
         half = Fn.avg_pool3d(img[None, None], 2)[0, 0]
         for sig in SIGMAS:
