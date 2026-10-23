@@ -55,4 +55,41 @@ Diagnosis before the loops:
 
 | loop | change | run | slot axis | mixture axis | N agree | reviewer: strongest | reviewer: weakest | next |
 |---|---|---|---|---|---|---|---|---|
-| 1 | shape-aware matching (--distinct 0.2) | R4d: full generator 0.3 | 41.6 (R4 42.4) | 18.5 (18.4) | 0.29 (0.27) | (review 1) | (review 1) | |
+| 1 | shape-aware matching (--distinct 0.2) | R4d: full generator 0.3 | 41.6 (R4 42.4) | 18.5 (18.4) | 0.29 (0.27) | the targets: exact, matching-free density, peaks find axes to 2.9 deg | the slot output: mass-ranked set + Frobenius loss hedges to round tensors (linearity 0.11 vs 0.88) | fix the metric; SH alone; curriculum; salience order |
+
+## Review 1 and the corrected metric (02:00 Montreal)
+
+Review 1 (independent agent) found: (1) `evaluate()` used the training run's matching options, so `--distinct`
+changed the metric itself (same weights at step 0: 53.1 vs 45.4 deg) -- scored under one rule R4d is no better than
+R4; (2) "half the error is ordering" is not supported -- best-of-six is biased low (the untrained network scores
+28.7), and on single-line cells, where there is no ordering choice, R4 is still 19 deg against 8.5 for a structure
+tensor; (3) the gradient-dominance measurement was 2 batches and a stuck term keeps a large gradient by construction;
+(4) the overfit test shows the 8-sample run failed, not that learning is blocked; (5) the slot output hedges towards
+round tensors on the full generator. Recommended: one reference metric, the SH density alone, a curriculum from the
+working regime, salience (anisotropic mass) ordering; hold the presence band and the query decoder.
+
+Evaluation is now under one reference matching rule, on held-out draws each under a fixed cube rotation, with
+single-line cells (the line is the only anisotropic population) and shared cells reported apart, next to a structure
+tensor (gradient sigma 1, window 5) on the same cells (`ref_*` keys).
+
+**Under the corrected metric the picture changes:**
+
+| model | data scored | slot single | slot shared | mixture single | structure tensor single / shared |
+|---|---|---|---|---|---|
+| R2 (narrow, flat, 2000) | flat | 5.6 | -- | 5.6 | 5.4 / -- |
+| R4 (narrow, full, 2000) | full | 46.0 | 47.7 | 47.5 | 11.3 / 36.5 |
+| R2 | full | 13.4 | 39.7 | 10.7 | 13.8 / 37.5 |
+| L01 (narrow, backgrounds, 1500) | full | 39.9 | 51.3 | 37.0 | 13.8 / 37.5 |
+| **P1 (wide 32/64/128, full + crossings, 1000)** | full | **15.0** | **38.5** | **13.6** | 13.8 / 37.5 |
+| R2 | backgrounds | 12.3 | 44.5 | 10.5 | 11.4 / 16.4 |
+| **P1** | backgrounds | 19.7 | **19.1** | 16.6 | 11.4 / 16.4 |
+
+* R4's apparent 42 deg was flattered by an orientation bias of the unrotated held-out draws (a constant axis scores
+  22 deg there); rotated, it is at chance: the narrow network learned nothing on the full generator.
+* **Capacity is the blocker**: the wide network (1.45 M parameters) reached the structure tensor's level on the full
+  generator in 1000 steps; the narrow one (0.37 M) learned nothing in 2000. P1 had been stopped on the old metric; it
+  is resumed from its step-1000 checkpoint as the long track.
+* Training from scratch on hard data with the narrow network fails, while the narrow network trained on flat data
+  transfers (13.4 single on the full generator): consistent with capacity plus a curriculum effect.
+* Loops 2-4 (narrow, several changes at once) were stopped unfinished; the loops continue on the wide network, one
+  factor at a time against a wide baseline (W0).
