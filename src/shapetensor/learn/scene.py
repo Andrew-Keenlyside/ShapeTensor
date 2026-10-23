@@ -447,7 +447,7 @@ class Scene:
 
     FAMILIES = {"bundle": 0.24, "tree": 0.11, "network": 0.05, "helix": 0.04, "sheet": 0.09, "foam": 0.04, "porous": 0.03,
                 "cells": 0.09, "crystals": 0.04, "radial": 0.04, "plywood": 0.04, "fascicles": 0.05, "trabecular": 0.03,
-                "tubules": 0.04, "epithelium": 0.03, "dendrite": 0.02, "gland": 0.02, "neuron": 0.03}
+                "tubules": 0.04, "epithelium": 0.03, "dendrite": 0.02, "gland": 0.02, "neuron": 0.03, "neuropil": 0.03}
 
     def __init__(self, shape, seed: int, device="cuda", voxel_um: float | None = None, content: str = "general"):
         self.shape = tuple(shape); self.device = device; self.r = Rng(seed, device); self.seed = seed
@@ -1127,6 +1127,32 @@ class Scene:
         self.record["families"].append({"neuron": {"file": fsel.stem, "cell_type": str(z["cell_type"]) if "cell_type" in z else "", "chains": len(curves)}})
         return out
 
+    def neuropil(self):
+        """Neuropil: dense, short, tortuous thin fibres (axons and dendrites, 0.1-1.5 um radius) in random directions and
+        small somata (3-8 um), filling the canvas -- resolvable at a micron or two, partial-volume texture at 20 um;
+        isotropic in aggregate, locally oriented where a fibre is resolved."""
+        r = self.r; dev = self.device
+        rf = r.lu(0.1, 1.5) / self.voxel_um
+        L = r.lu(20, 200) / self.voxel_um
+        if L < 3:
+            return None
+        L = min(L, 0.5 * max(self.shape))
+        n = int(min(700, r.u(0.3, 1.0) * 700))
+        S = max(8, int(L / H))
+        start = r.rand(n, 3) * torch.tensor(self.shape, device=dev, dtype=torch.float32)
+        P = smooth_paths(start, r.unit(n), torch.full((n,), L, device=dev), S, torch.full((n,), r.lu(0.05, 0.4), device=dev), max(L / 4, 1.0), r)
+        rad = torch.full((n, S), max(rf, 0.05), device=dev) * torch.exp(0.2 * r.randn(n, 1))
+        cv = curves_like(P, rad, r, obj=self.ids(n, rad[:, 0]), seg=torch.zeros(n, dtype=torch.long, device=dev), contrast=self.contrast(10, 90))
+        out = [Group("neuropil", "line", float(rad.median()), float(cv.contrast[0, 0]), curves=[cv])]
+        rs = r.lu(3, 8) / self.voxel_um
+        if rs >= 0.4:                                                                           # somata among the fibres
+            m = int(min(400, r.u(0.2, 1.0) * np.prod(self.shape) / (40 * rs) ** 3 * 8 + 1))
+            C = r.rand(m, 3) * torch.tensor(self.shape, device=dev, dtype=torch.float32)
+            A = _rot(r, m) @ torch.diag_embed(torch.stack([torch.full((m,), rs, device=dev)] * 2 + [torch.full((m,), rs * r.u(1.0, 1.6), device=dev)], 1))
+            out.append(self._solids(C, A, "somata", self.ids(m, rs)))
+        self.record["families"].append({"neuropil": {"fibres": n, "fibre_um": round(rf * self.voxel_um, 2), "length_um": round(L * self.voxel_um), "somata_um": round(rs * self.voxel_um, 1)}})
+        return out
+
     def crystals(self):
         """Compact solids (polyhedra, shards, superquadrics), placed without overlap, each its own object: a blob
         population whose tensors are the solids' second moments (rendered as points: no device synchronisation)."""
@@ -1341,7 +1367,9 @@ class Scene:
         return cv
 
     # ---- the scene
-    def build(self, families: dict | None = None, n_groups: tuple = (1, 5), layout_p: float = 0.3):
+    def build(self, families: dict | None = None, n_groups: tuple = (1, 5), layout_p: float = 0.3, underlay_p: float = 0.4):
+        """The scene's families; with probability ``underlay_p`` a neuropil underlay as well (real tissue is full of it),
+        unless the families given exclude neuropil."""
         r = self.r
         if r.p(layout_p):
             self.layout()
@@ -1378,6 +1406,10 @@ class Scene:
             if gs is None:
                 continue
             for g_ in (gs if isinstance(gs, list) else [gs]):
+                self.groups.append(g_)
+        if (families is None or families.get("neuropil", self.FAMILIES["neuropil"]) > 0) and r.p(underlay_p):
+            gs = self.neuropil()                                                       # the underlay
+            for g_ in (gs or []):
                 self.groups.append(g_)
         if not self.groups:                                                    # at least one population
             g_ = self.bundle()
@@ -1442,17 +1474,18 @@ class _CacheProxy:
 _CACHE = _CacheProxy()
 
 
-def render_scene(canvas, scene_seed: int, device, voxel_um=None, families=None, n_groups=(1, 5), layout_p=0.3, content="general", style=None):
+def render_scene(canvas, scene_seed: int, device, voxel_um=None, families=None, n_groups=(1, 5), layout_p=0.3, content="general", style=None,
+                 underlay_p: float = 0.4):
     """The scene (cached: crops of one scene are drawn in sequence) and its background on the whole canvas -- a
     texture, regions and possibly a cell stain, so crops at any zoom of one scene share them."""
-    key = (tuple(canvas), scene_seed, str(device), voxel_um, str(families), tuple(n_groups), layout_p, content, style)
+    key = (tuple(canvas), scene_seed, str(device), voxel_um, str(families), tuple(n_groups), layout_p, content, style, underlay_p)
     _CACHE = _scene_cache()
     if key in _CACHE:
         _CACHE[key] = _CACHE.pop(key)                                       # most recently used last
     else:
         while len(_CACHE) >= CACHE_SCENES:                                  # a few scenes (training draws and paired renders interleave)
             _CACHE.pop(next(iter(_CACHE)))
-        sc = Scene(canvas, scene_seed, device, voxel_um, content).build(families, n_groups, layout_p)
+        sc = Scene(canvas, scene_seed, device, voxel_um, content).build(families, n_groups, layout_p, underlay_p)
         st = style or ["flat", "regions", "tissue", "cells"][sc.r.i(0, 3)]
         bgp = background(tuple(canvas), st, sc.r.g, device, 1.0, content, nprng=sc.r.np)
         _CACHE[key] = (sc, sc.render(), bgp, st)
@@ -1491,6 +1524,24 @@ def _point_map(pts: torch.Tensor, origin, zoom: int, shape, device) -> torch.Ten
             m.index_put_((idx[ok, 0], idx[ok, 1], idx[ok, 2]), torch.ones(int(ok.sum()), device=device), accumulate=True)
             m = gaussian(m, 1.0) * (2 * math.pi) ** 1.5
     return m
+
+
+def microstructure_texture(shape, rng: Rng, device) -> torch.Tensor:
+    """Unresolved microstructure (cells, neuropil, capillaries below the voxel) as image texture: a dense, isotropic,
+    fine-grained field -- sub-voxel blobs (a Poisson process of random density and brightness, blurred by a fraction
+    of a voxel to a voxel and a half) mixed with fine-scale noise; zero mean, unit spread, random polarity. Real 20 um
+    HiP-CT cortex is this kind of texture everywhere (locally incoherent, power at high frequencies); smooth noise
+    backgrounds are not (the domain-gap statistics, 23 Oct)."""
+    rho = rng.lu(0.003, 0.3)                                                                   # up to a dense, continuous speckle
+    pts = (rng.rand(*shape) < rho).float() * torch.exp(0.5 * rng.randn(*shape))
+    blobs = gaussian(pts, rng.u(0.4, 1.2), truncate=3.0)
+    blobs = (blobs - blobs.mean()) / blobs.std().clamp_min(1e-6)
+    fine = smooth_noise(shape, rng.u(0.0, 1.0), rng.g, device)
+    fine = (fine - fine.mean()) / fine.std().clamp_min(1e-6)
+    w = rng.u(0, 1)
+    t = w * blobs + (1 - w) * fine
+    t = (t - t.mean()) / t.std().clamp_min(1e-6)
+    return t if rng.p(0.5) else -t
 
 
 def sample_mask(shape, rng: Rng, device) -> torch.Tensor:
@@ -1576,7 +1627,8 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
                n_groups=(1, 5), layout_p: float = 0.3, content: str = "general", style: str | None = None, second_contrast: bool = False,
                zoom: int = 1, physics: str | None = None, p_physics: float = 0.75, p_warp: float = 0.5, acq_seed: int | None = None,
                crop: tuple | None = None, identity_min_r: float = 1.5, p_blend: float = 0.35, p_aniso: float = 0.25, p_scramble: float = 0.3,
-               p_texture: float = 0.5, p_merge: float = 0.25, p_boundary: float = 0.2, p_affine: float = 0.3):
+               p_texture: float = 0.5, p_merge: float = 0.25, p_boundary: float = 0.2, p_affine: float = 0.3, p_grain: float = 0.8,
+               underlay_p: float = 0.4):
     """A training pair from an object scene, in the format of :func:`~shapetensor.learn.generator.draw`: ``(Sample,
     drawn)``. Scenes are rendered on a ``canvas``³ grid and ``crops_per_scene`` consecutive seeds share one (cut at
     different places), so a scene's cost is spread over its crops.
@@ -1594,14 +1646,16 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     * before visibility is measured (so the targets ask only for what shows): ``p_texture`` -- each population's material
       varies inside it (its own grain and depth); ``p_merge`` -- populations as intense as the background or as another
       (SynthSeg's shared classes); ``p_boundary`` -- the specimen's edge (medium beyond it, nothing to find there);
-      ``p_affine`` -- a global shear and anisotropic scale with the warp (tensors, identities and descriptors follow).
+      ``p_affine`` -- a global shear and anisotropic scale with the warp (tensors, identities and descriptors follow);
+      ``p_grain`` -- unresolved microstructure as dense isotropic fine texture under the tissue (no orientation: the
+      targets do not change, the visibility measured after it).
 
     ``drawn`` also carries ``ids``/``id_frac`` (the two heaviest objects per voxel), ``identity`` (the object at the level
     the resolution separates: smaller than ``identity_min_r`` voxels -> its parent), ``descriptors5`` (per layer:
     log2(1 + size), relative wall, lumen fraction, flattening, angularity), ``desc_um``, ``points`` (branch points,
     endpoints), ``recoverability``, ``parents``, the voxel size and the physics."""
     sid = seed // max(1, crops_per_scene)
-    sc, ren, bgp, st = render_scene((canvas,) * 3, 7_000_000 + sid, device, voxel_um, families, n_groups, layout_p, content, style)
+    sc, ren, bgp, st = render_scene((canvas,) * 3, 7_000_000 + sid, device, voxel_um, families, n_groups, layout_p, content, style, underlay_p)
     r = Rng(seed, device); ra = Rng(acq_seed if acq_seed is not None else seed + 31337, device)
     names = ["hipct", "ct", "mri", "histology", "mixed"]; modality = modality or names[ra.i(0, 4)]
     ext = [s_ * zoom for s_ in shape]
@@ -1710,6 +1764,13 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
         nl = int(lab.max()) + 1; reg = torch.tensor([ra.u(-40, 40) for _ in range(nl)], device=device)[lab]
         img_main = g0 + off + reg; routes.append("scramble")
     img = img_main
+    if ra.p(p_grain):                                                                          # unresolved microstructure under the tissue
+        flat_ = img.flatten()[:: max(1, img.numel() // 100000)]
+        q5, q95 = torch.quantile(flat_.float(), torch.tensor([0.05, 0.95], device=device))
+        amp = ra.lu(0.3, 8.0) * float(q95 - q5) / 4                                           # real 20 um HiP-CT: texture over faint structures (domain gap, 23 Oct)
+        tex_ = microstructure_texture(shape, ra, device) * amp
+        img = img + (tex_ * M if M is not None else tex_)
+        routes.append("grain")
     if medium is not None:                                                                     # the medium set in grey levels after the physics:
         med, sd, tx, _ = medium                                                                # dark or bright whatever the image formation
         g0 = _grey(img) if mode != "additive" else img

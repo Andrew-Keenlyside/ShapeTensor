@@ -46,7 +46,7 @@ _KCACHE: dict = {}
 def _device_kernel(kernel, dtype, device) -> torch.Tensor:
     """The reversed kernel as a tensor on ``device``, cached (building it each call is a host-to-device copy and a
     synchronisation: a third of the synthetic generator's time)."""
-    a = np.ascontiguousarray(np.asarray(kernel, dtype=np.float64)[::-1])
+    a = np.array(np.asarray(kernel, dtype=np.float64)[::-1], copy=True)                   # a copy: a 1-tap reversed view keeps a negative stride
     key = (a.tobytes(), dtype, str(device))
     k = _KCACHE.get(key)
     if k is None:

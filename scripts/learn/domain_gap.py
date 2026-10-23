@@ -72,13 +72,13 @@ def coverage(R: np.ndarray, S: np.ndarray, ref: np.ndarray, k: int = 3) -> float
     return float((Drs.min(1) <= rad).mean())
 
 
-def full_mix(n: int, size: int, seed0: int, routes, canvas: int | None = None):
+def full_mix(n: int, size: int, seed0: int, routes, canvas: int | None = None, **gen_kw):
     """Crops from the training mixture at full difficulty (every family, physics and draw-time route), with or without
     the batch-time contrast routes."""
     from shapetensor.learn import augment as AU
     from shapetensor.learn.lobe_train import difficulty_gen
     from shapetensor.learn.scene import draw_scene
-    gen = difficulty_gen(1.0, {"canvas": canvas or 2 * size, "crops_per_scene": 4}); out = []
+    gen = difficulty_gen(1.0, {"canvas": canvas or 2 * size, "crops_per_scene": 4}); gen.update(gen_kw); out = []
     saved = dict(AU.P)
     if routes == "first":                                                                          # only the first round's batch-time routes
         for k in AU.P:
@@ -124,9 +124,9 @@ def main():
     print("real vs real coverage (the ceiling):", round(res["real_vs_real_coverage"], 2), flush=True)
     settings = [(f"{ph}_s{st}", lambda ph=ph, st=st: synth_crops(a.n, a.size, ph, st, 60_000_000 + 1000 * int(10 * st)))
                 for ph in ("additive", "xray", "darkfield", "histology", "pli", "mri") for st in (0.3, 0.6, 1.0)] if not a.mix_only else []
-    settings += [("mix (draw-time routes)", lambda: full_mix(3 * a.n, a.size, 61_000_000, False)),
-                 ("mix + first-round routes", lambda: full_mix(3 * a.n, a.size, 61_000_000, "first")),
-                 ("mix + all routes", lambda: full_mix(3 * a.n, a.size, 61_000_000, True))]
+    settings += [("old: no grain, no neuropil", lambda: full_mix(3 * a.n, a.size, 61_000_000, False, p_grain=0.0, underlay_p=0.0)),
+                 ("new: grain (0.3-3x) + neuropil", lambda: full_mix(3 * a.n, a.size, 61_000_000, False)),
+                 ("new + all routes", lambda: full_mix(3 * a.n, a.size, 61_000_000, True))]
     for name, fn in settings:
         S = np.stack([stats(x) for x in fn()])
         fd = frechet(R, S, R); cv = coverage(R, S, R); smd = (S.mean(0) - R.mean(0)) / (R.std(0) + 1e-6)

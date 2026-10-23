@@ -318,3 +318,23 @@ def test_real_cortical_layout_orders_the_layers():
         assert float(n.norm(dim=0).mean()) > 0.9
         ok += 1
     assert ok >= 6
+
+
+# ---- microstructure: texture and neuropil
+
+def test_microstructure_texture_is_fine_and_isotropic():
+    from shapetensor.learn.scene import microstructure_texture
+    t = microstructure_texture((48, 48, 48), Rng(3, DEV), DEV)
+    assert abs(float(t.mean())) < 1e-3 and abs(float(t.std()) - 1) < 1e-2
+    F = torch.fft.fftn(t); P = (F.real ** 2 + F.imag ** 2)
+    k = torch.fft.fftfreq(48, device=DEV); K = torch.sqrt(k[:, None, None] ** 2 + k[None, :, None] ** 2 + k[None, None, :] ** 2)
+    assert float(P[K > 0.15].sum() / P.sum()) > 0.25                                            # a good share of power at high frequencies
+
+
+def test_neuropil_family_and_underlay():
+    fam = {k: (1.0 if k == "neuropil" else 0.0) for k in Scene.FAMILIES}
+    sc = Scene((48, 48, 48), 2, DEV, 1.5).build(fam, (1, 1), 0.0); ren = sc.render()
+    names = [g["group"].name for g in ren["groups"]]
+    assert "neuropil" in names and all(torch.isfinite(g["tensor"]).all() for g in ren["groups"])
+    s, d = draw_scene((32, 32, 32), seed=7, device=DEV, strength=0.2, canvas=64, p_grain=1.0)
+    assert "grain" in d["record"]["routes"]
