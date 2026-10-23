@@ -42,6 +42,7 @@ TKEYS = ("slots", "mass", "kind", "layer", "fraction", "classes", "size", "size_
 HALF = ("slots", "mass", "fraction", "classes", "size")
 QKEYS = ("q_points", "q_sigma", "q_sh", "sh_t")
 SH_EXACT = 0                       # > 0: the SH head's lattice target from the exact per-voxel density to this order
+DESC_LMAX = 0                      # > 0: also the descriptor densities (thickness, hollowness, angularity) to this order
 QUERY = None                       # {"n_points", "n_levels", "lmax"}: draw query targets per sample (set by train())
 SCALARS = ("classes", "fraction", "size", "identity")
 LATE = ("mass", "presence", "kind", "hellinger")                                                   # after orientation: they swamp it if present from the start
@@ -56,7 +57,7 @@ def make(seed: int, size: int, device, strength: float = 1.0, gen: dict | None =
     F = None
     if SH_EXACT or (QUERY and QUERY.get("exact")):                                                     # the exact per-voxel density
         from .query import voxel_density
-        F = voxel_density(s, d, SH_EXACT or QUERY["lmax"])
+        F = voxel_density(s, d, SH_EXACT or QUERY["lmax"], desc_lmax=DESC_LMAX)
     if SH_EXACT:                                                                                       # lattice target: window sigma 5, 4³ average
         from .targets import _pool
         out["sh_t"] = _pool(F, 5.0, 4).half()
@@ -146,6 +147,7 @@ def _evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
     sh_one, sh_false, sh_det, sh_err2 = [], [], [], []
     q_eval = []
     ref = {k: [] for k in ("slot_single", "slot_shared", "mix_single", "st_single", "st_shared", "sh_single", "sh_shared")}
+    desc_err = []
     crop = lambda v: v[..., margin:-margin, margin:-margin, margin:-margin]
     for img, t in val:
         x, T = stack([(img, t)], aug=False)
@@ -187,6 +189,19 @@ def _evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
             pkv = pvv.reshape(3, *cs_)
             e_pk = torch.stack([torch.where(pkv[j][None, None] > 0, angv(pk[j][None, None], t_ax), torch.full_like(e_st, 90.0)) for j in range(3)]).amin(0)
             ref["sh_single"].append(e_pk[single]); ref["sh_shared"].append(e_pk[shared])
+        if "sh_t" in Tc and getattr(model, "desc_lmax", 0):                                              # descriptors at the target's top peak
+            from .sh import n_coef as _nc, peaks as _pk, real_sh as _rs
+            nsh_ = _nc(model.sh_lmax); nd_ = _nc(model.desc_lmax)
+            ctf = Tc["sh_t"][0].float().flatten(1); cpf = Pc["sh"][0].float().flatten(1)
+            strong = ctf[0] > 0.1 * math.sqrt(4 * math.pi)
+            if bool(strong.any()):
+                td_, _ = _pk(ctf[:, strong], model.sh_lmax, nmax=1, rel=0.3)
+                u_ = td_[0].T                                                                            # (n, 3)
+                Yd = _rs(u_, model.desc_lmax)                                                            # (n, nd)
+                def at(cf):
+                    f0 = (Yd * cf[:nd_, strong].T).sum(1).clamp_min(1e-6)
+                    return torch.stack([(Yd * cf[nsh_ + j * nd_: nsh_ + (j + 1) * nd_, strong].T).sum(1) / f0 for j in range(3)])
+                desc_err.append(at(cpf) - at(ctf))
         # the permutation-free mixture head against the target mixture, where the cell holds one line population
         one = sel[:, 0] & ~(mt[:, 1:] > 0.05).any(1)
         if bool(one.any()):
@@ -230,6 +245,10 @@ def _evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
     if engine is not None:
         out["val_N_agree"] = nagree / max(ntot, 1)
     cat = lambda L: torch.cat(L) if L else torch.zeros(0)
+    if desc_err:
+        de = torch.cat(desc_err, 1)                                                                        # (3, n)
+        for j, nm in enumerate(("thickness", "hollowness", "angularity")):
+            out[f"ref_desc_{nm}_mae"] = float(de[j].abs().median())
     for k_, L_ in ref.items():
         v_ = cat(L_)
         if v_.numel():
@@ -273,7 +292,7 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
           warmup: int = 500, margin: int = 4, val_n: int = 32, val_every: int = 500, log_every: int = 25, seed: int = 0, device: str = "cuda",
           strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None,
           widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None, query: int = 0,
-          simple: dict | None = None, p_simple=(0.0, 0.0), init: str | None = None, order: str = "mass", exact: bool = False):
+          simple: dict | None = None, p_simple=(0.0, 0.0), init: str | None = None, order: str = "mass", exact: bool = False, desc_lmax: int = 0):
     from .engine import PopulationEngine
     from . import losses as _losses
     _losses.PRESENCE_BAND = tuple(presence_band) if presence_band else None
@@ -281,8 +300,12 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     _targets.ORDER = order                                                                               # slot order of the targets (and of ties)
     global QUERY
     QUERY = {"n_points": query, "n_levels": 4, "lmax": sh_lmax, "exact": exact} if query else None
-    global SH_EXACT
+    global SH_EXACT, DESC_LMAX
     SH_EXACT = sh_lmax if (exact and sh_lmax) else 0
+    assert not desc_lmax or exact, "--desc-lmax needs --exact"
+    DESC_LMAX = desc_lmax
+    from .sh import n_coef as _nc
+    _losses.DESC_NC = _nc(desc_lmax) if desc_lmax else 0
     assert not query or sh_lmax, "--query needs --sh-lmax"
     if weights:
         _losses.WEIGHTS.update(weights)                                                                   # loss weights for this run
@@ -294,7 +317,7 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     args = dict(steps=steps, size=size, batch=batch, accum=accum, buffer=buffer, refresh=refresh, lr=lr, warmup=warmup, margin=margin, val_n=val_n,
                 seed=seed, strength0=strength0, strength1=strength1, overfit=overfit, gen=gen, widths=list(widths), distinct=distinct, sh_lmax=sh_lmax, lcn=lcn,
                 presence_band=list(presence_band) if presence_band else None, weights=weights, query=query,
-                simple=simple, p_simple=list(p_simple), init=init, order=order, exact=exact)
+                simple=simple, p_simple=list(p_simple), init=init, order=order, exact=exact, desc_lmax=desc_lmax)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
     model = PopulationNet.from_args(args).to(device)
     rf = receptive_field(model)
@@ -368,6 +391,7 @@ def main():
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
+    ap.add_argument("--desc-lmax", type=int, default=0, help="also predict the descriptor densities (thickness, hollowness, angularity) to this SH order (needs --exact; e.g. 4)")
     ap.add_argument("--exact", action="store_true", help="SH head and query targets from the exact per-voxel density (orientations present in the window) instead of the slots / per-layer mean tensors")
     ap.add_argument("--order", default="mass", choices=("mass", "salience"), help="target slot order: heaviest or most anisotropic mass first")
     ap.add_argument("--init", help="warm start: load the weights (not the optimiser or step) of this checkpoint")
@@ -383,7 +407,7 @@ def main():
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
-          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact)
+          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact, desc_lmax=a.desc_lmax)
 
 
 if __name__ == "__main__":

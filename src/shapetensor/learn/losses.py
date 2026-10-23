@@ -35,7 +35,7 @@ from .targets import render_odf
 WF = torch.tensor([1.0, 1.0, 1.0, 2.0, 2.0, 2.0])
 KIND_WEIGHT = torch.tensor([1.0, 4.0, 1.0, 4.0])          # line, sheet, blob, interface
 WEIGHTS = {"shape": 1.0, "mass": 1.0, "presence": 0.5, "kind": 0.1, "classes": 0.5, "fraction": 0.5, "size": 0.1, "hellinger": 1.0, "identity": 0.1, "mixture": 2.0,
-           "sh": 2.0, "query": 2.0}
+           "sh": 2.0, "query": 2.0, "descriptors": 0.5}
 PRESENT = 0.005                    # a target slot with at least this mass is a population (presence 1); below, empty (presence 0)
 TIE = 0.7                          # target slots whose masses are within this ratio may exchange their predicted slots
 PRESENCE_BAND = None               # None: presence trained on every slot; (lo, hi): slots whose target mass lies between
@@ -43,6 +43,17 @@ PRESENCE_BAND = None               # None: presence trained on every slot; (lo, 
 DISTINCT = None                    # None: rank order among all present slots; a float: kept only among slots whose
                                    # trace-1 eigenvalue spectra lie within this distance (ideal tensors: line-blob 0.82,
                                    # line-sheet 0.71, sheet-blob 0.41, two lines 0; window pooling shortens them)
+
+
+DESC_NC = 0                        # coefficients per descriptor density (0: none), set by train()
+
+
+def desc_loss(pred: torch.Tensor, tgt: torch.Tensor) -> torch.Tensor:
+    """Descriptor densities ``(B, 3 n, ...)``: each descriptor's squared error over its target energy (floored at a
+    tenth of the mean over the three plus the energy of mass 0.05 with descriptor 1 in every cell), averaged."""
+    n = pred.shape[1] // 3; e = [(tgt[:, j * n:(j + 1) * n] ** 2).sum() for j in range(3)]
+    fl = 0.1 * sum(e) / 3 + tgt[:, 0].numel() * (0.05 * math.sqrt(4 * math.pi)) ** 2               # + mass 0.05 with descriptor 1 everywhere
+    return sum(((pred[:, j * n:(j + 1) * n] - tgt[:, j * n:(j + 1) * n]) ** 2).sum() / (e[j] + fl) for j in range(3)) / 3
 
 
 def sh_loss(pred: torch.Tensor, tgt: torch.Tensor) -> torch.Tensor:
@@ -194,12 +205,19 @@ def loss(pred: dict, tgt: dict, grid: torch.Tensor, margin: int = 4, kappa: floa
     wmix = (tot / 0.05).clamp(max=1)
     out["mixture"] = ((((P["mixture"].float() - mix) ** 2) * WF.to(mix.device).view(1, 6, 1, 1, 1)).sum(1) * wmix).sum() / wmix.sum().clamp_min(1)
     if "q_sh" in P and "q_sh" in T:                                                                # the density at query points and scales
-        out["query"] = sh_loss(P["q_sh"].float().transpose(1, 2), T["q_sh"].float().transpose(1, 2))
+        qp, qt = P["q_sh"].float().transpose(1, 2), T["q_sh"].float().transpose(1, 2)
+        nc = qt.shape[1] - 3 * DESC_NC
+        out["query"] = sh_loss(qp[:, :nc], qt[:, :nc])
+        if DESC_NC:
+            out["descriptors"] = desc_loss(qp[:, nc:], qt[:, nc:])
     if "sh" in P:                                                                                    # the populations' density in SH, no matching:
         from .sh import bands, density_sh                                                           # each order's squared error over the batch's
-        lmax = 2 * (len(bands_for(P["sh"].shape[1])) - 1)                                           # energy in that order, averaged over the orders
-        ct = T["sh_t"].float() if "sh_t" in T else density_sh(T["slots"].float(), T["mass"].float(), lmax, kappa)
-        d2 = (P["sh"].float() - ct) ** 2
+        nsh = P["sh"].shape[1] - 3 * DESC_NC
+        lmax = 2 * (len(bands_for(nsh)) - 1)                                                        # energy in that order, averaged over the orders
+        ct = T["sh_t"].float()[:, :nsh] if "sh_t" in T else density_sh(T["slots"].float(), T["mass"].float(), lmax, kappa)
+        if DESC_NC and "sh_t" in T:
+            out["descriptors"] = out.get("descriptors", 0.0) + desc_loss(P["sh"].float()[:, nsh:], T["sh_t"].float()[:, nsh:])
+        d2 = (P["sh"].float()[:, :nsh] - ct) ** 2
         # floor: a tenth of the batch's order-0 energy plus that of mass 0.05 in every cell (order 0 = sqrt(4 pi) m) --
         # a batch without anisotropy, or without populations, does not divide by ~0
         floor = 0.1 * (ct[:, 0] ** 2).sum() + ct[:, 0].numel() * (0.05 * math.sqrt(4 * math.pi)) ** 2
@@ -241,6 +259,18 @@ def apply_cube(x: torch.Tensor, perm, flips, tensor6: bool = False) -> torch.Ten
     return x
 
 
+def _sh_block_rotation(perm, flips, n: int, device) -> torch.Tensor:
+    """The rotation of ``n`` SH channels: the density (its order from ``n - 3 DESC_NC``) and, after it, three descriptor
+    densities of ``DESC_NC`` coefficients each (rotations are block-diagonal by order, so theirs is the leading block)."""
+    from .query import sh_rotation
+    nsh = n - 3 * DESC_NC
+    R = sh_rotation(perm, flips, 2 * (len(bands_for(nsh)) - 1), device)
+    if not DESC_NC:
+        return R
+    Rd = R[:DESC_NC, :DESC_NC]
+    return torch.block_diag(R, Rd, Rd, Rd)
+
+
 def augment(image: torch.Tensor, tgt: dict, g: torch.Generator | None = None):
     """The same random cube-group element applied to an image ``(..., Z, Y, X)`` and its lattice target."""
     perm, flips = cube_transform(g)                                                             # drawn on the CPU
@@ -250,15 +280,11 @@ def augment(image: torch.Tensor, tgt: dict, g: torch.Generator | None = None):
             from .query import cube_points
             out[k] = cube_points(v, perm, flips, image.shape[-3:])
         elif k == "q_sh":
-            from .query import sh_rotation
-            from .losses import bands_for as _bf
-            R = sh_rotation(perm, flips, 2 * (len(_bf(v.shape[-1])) - 1), v.device)
-            out[k] = (v.float() @ R.T).to(v.dtype)
+            out[k] = (v.float() @ _sh_block_rotation(perm, flips, v.shape[-1], v.device).T).to(v.dtype)
         elif k == "q_sigma":
             out[k] = v
         elif k == "sh_t":                                                                           # an SH field: move the cells, rotate the coefficients
-            from .query import sh_rotation
-            R = sh_rotation(perm, flips, 2 * (len(bands_for(v.shape[-4])) - 1), v.device)
+            R = _sh_block_rotation(perm, flips, v.shape[-4], v.device)
             out[k] = torch.einsum("ij,j...->i...", R, apply_cube(v, perm, flips).float()).to(v.dtype)
         elif torch.is_tensor(v) and v.dim() >= 3:
             out[k] = apply_cube(v, perm, flips, tensor6=(k == "slots"))

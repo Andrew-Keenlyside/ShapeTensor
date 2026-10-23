@@ -83,7 +83,7 @@ def density_sh(slots: torch.Tensor, mass: torch.Tensor, lmax: int, kappa: float 
 def evaluate_sh(coef: torch.Tensor, lmax: int, dirs: torch.Tensor, n: int = 600) -> torch.Tensor:
     """The density at ``dirs (m, 3)`` from ``coef (c, ...)``: ``(m, ...)``."""
     Y = real_sh(dirs.to(coef.device), lmax)
-    return torch.einsum("mc,c...->m...", Y, coef.float())
+    return torch.einsum("mc,c...->m...", Y, coef[:Y.shape[1]].float())                               # extra channels (descriptor densities) ignored
 
 
 def peaks(coef: torch.Tensor, lmax: int, nmax: int = 3, rel: float = 0.5, min_sep_deg: float = 25.0, n: int = 400, chunk: int = 8192):

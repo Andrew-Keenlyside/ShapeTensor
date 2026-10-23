@@ -69,9 +69,9 @@ class PopulationNet(nn.Module):
     """Image ``(B, 1, Z, Y, X)`` (grey levels scaled to 0-1) -> a dict of lattice outputs at stride 4 (``Z/4``...)."""
 
     def __init__(self, K: int = 6, widths=(16, 32, 64), embed: int = 8, n_kinds: int = 4, n_classes: int = 5, sh_lmax: int = 0,
-                 lcn: float = 0.0, query: bool = False):
+                 lcn: float = 0.0, query: bool = False, desc_lmax: int = 0):
         super().__init__()
-        self.sh_lmax, self.lcn, self.has_query = sh_lmax, lcn, bool(query)
+        self.sh_lmax, self.lcn, self.has_query, self.desc_lmax = sh_lmax, lcn, bool(query), desc_lmax
         c0, c1, c2 = widths
         self.K, self.embed, self.n_kinds = K, embed, n_kinds
         self.stem = nn.Conv3d(2 if lcn else 1, c0, 3, padding=1)                                  # with ``lcn``: the image and its local contrast
@@ -85,19 +85,19 @@ class PopulationNet(nn.Module):
         self.scalars = nn.Conv3d(c2, 1 + n_classes + 1 + 6, 1)                                     # fraction, classes, log size, the mixture tensor
         if sh_lmax:                                                                                # the populations' density in even SH (permutation-free)
             from .sh import n_coef
-            self.sh = nn.Conv3d(c2, n_coef(sh_lmax), 1)
+            self.sh = nn.Conv3d(c2, n_coef(sh_lmax) + (3 * n_coef(desc_lmax) if desc_lmax else 0), 1)   # + descriptor densities
         if self.has_query:                                                                         # the density at any point and description scale
             from .query import QueryDecoder
             from .sh import n_coef
             assert sh_lmax, "the query decoder outputs SH: set sh_lmax"
-            self.query_dec = QueryDecoder(c0, c1, c2, n_coef(sh_lmax))
+            self.query_dec = QueryDecoder(c0, c1, c2, n_coef(sh_lmax) + (3 * n_coef(desc_lmax) if desc_lmax else 0))
 
     @classmethod
     def from_args(cls, args: dict | None) -> "PopulationNet":
         """The network a checkpoint's ``args`` describe (widths, SH order)."""
         args = args or {}
         return cls(widths=tuple(args.get("widths", (16, 32, 64))), sh_lmax=int(args.get("sh_lmax", 0) or 0), lcn=float(args.get("lcn", 0) or 0),
-                   query=bool(args.get("query", False)))
+                   query=bool(args.get("query", False)), desc_lmax=int(args.get("desc_lmax", 0) or 0))
 
     def local_contrast(self, x: torch.Tensor) -> torch.Tensor:
         """``(x - mean) / sd`` in a Gaussian window of sigma ``lcn`` voxels (sd floored at 0.01 of the 0-1 range), /3:

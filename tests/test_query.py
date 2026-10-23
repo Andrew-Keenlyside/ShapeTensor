@@ -68,3 +68,19 @@ def test_exact_lattice_density_commutes_with_the_cube_group():
         ref = _pool(voxel_density(s, _cube_drawn(d, perm, flips), 6), 5.0, 4)
         err = (t2["sh_t"] - ref).abs().max() / ref.abs().max()
         assert float(err) < 2e-2, (perm, flips, float(err))
+
+
+def test_descriptor_density_reads_the_layer_descriptor_at_the_peak():
+    """One line layer: thickness read at the density's top peak, f_q(u) / f(u), equals the layer's thickness."""
+    from shapetensor.learn.query import voxel_density
+    from shapetensor.learn.sh import n_coef, peaks, real_sh
+    from shapetensor.learn.targets import _pool
+    s, d = draw((48,) * 3, seed=8, device=DEV, strength=0.2, modality="hipct", style="flat", crossing=False, k_layers=1, kinds=["line"])
+    k = [i for i, L in enumerate(s.layers) if L.kind == "line"][0]
+    thick = float(d["descriptors"][k, 0][d["occupancy"][k] > 0.5].median())
+    F = _pool(voxel_density(s, d, 6, desc_lmax=4), 5.0, 4).flatten(1)
+    strong = F[0] > 0.3 * F[0].max()
+    D, _ = peaks(F[:, strong], 6, nmax=1)
+    Y = real_sh(D[0].T, 4); nd = n_coef(4); nsh = n_coef(6)
+    q = (Y * F[nsh:nsh + nd, strong].T).sum(1) / (Y * F[:nd, strong].T).sum(1)
+    assert abs(float(q.median()) - thick) < 0.15 * max(thick, 1.0), (float(q.median()), thick)
