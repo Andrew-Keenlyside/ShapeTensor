@@ -224,7 +224,10 @@ def loss(pred: dict, tgt: dict, grid: torch.Tensor, margin: int = 4, kappa: floa
         out["sh"] = sum(d2[:, b].sum() / ((ct[:, b] ** 2).sum() + floor) for b in bands(lmax)) / len(bands(lmax))
     W = {**WEIGHTS, **(weights or {})}
     total = sum(W[k] * v for k, v in out.items())
-    return total, {k: float(v) for k, v in out.items()}
+    parts = {k: float(v) for k, v in out.items()}
+    iso = torch.tensor([1, 1, 1, 0, 0, 0.0], device=mix.device).view(1, 6, 1, 1, 1) / 3              # the mixture term of a round prediction:
+    parts["mixture_floor"] = float(((((iso - mix) ** 2) * WF.to(mix.device).view(1, 6, 1, 1, 1)).sum(1) * wmix).sum() / wmix.sum().clamp_min(1))
+    return total, parts
 
 
 # ---------------------------------------------------------------------------------------------------------------

@@ -141,6 +141,7 @@ class Buffer:
         self.size, self.device, self.next, self.gen, self.simple = size, device, seed0, gen, simple
         t0 = time.time()
         self.items = [self._make(strength, p_simple) for _ in range(n)]
+        self.w = [anisotropy(t) for _, t in self.items]
         log(f"buffer: {n} pairs at {size}^3 (strength {strength:.2f}, simple share {p_simple:.2f}) in {time.time() - t0:.0f} s")
 
     def _make(self, strength, p_simple: float = 0.0):
@@ -151,11 +152,26 @@ class Buffer:
 
     def refresh(self, k: int, g: torch.Generator, strength: float, p_simple: float = 0.0):
         for _ in range(k):
-            self.items[int(torch.randint(0, len(self.items), (1,), generator=g))] = self._make(strength, p_simple)
+            i = int(torch.randint(0, len(self.items), (1,), generator=g))
+            self.items[i] = self._make(strength, p_simple); self.w[i] = anisotropy(self.items[i][1])
 
-    def batch(self, B: int, g: torch.Generator):
-        idx = torch.randint(0, len(self.items), (B,), generator=g).tolist()
+    def batch(self, B: int, g: torch.Generator, alpha: float = 0.0):
+        """``B`` pairs, uniformly or, with ``alpha > 0``, in proportion to their non-round target energy ** alpha."""
+        if alpha > 0:
+            p = torch.tensor(self.w, dtype=torch.float64).clamp_min(1e-12) ** alpha
+            idx = torch.multinomial(p / p.sum(), B, replacement=True, generator=g).tolist()
+        else:
+            idx = torch.randint(0, len(self.items), (B,), generator=g).tolist()
         return stack([self.items[i] for i in idx], g)
+
+
+def anisotropy(t: dict) -> float:
+    """A pair's non-round target energy: the cells' mean of sum_k m_k |S_k - I/3|^2 (the populations' deviatoric
+    energy, mass-weighted) -- category-free; what an orientation-learning batch is made of."""
+    S = t["slots"].float(); m = t["mass"].float()
+    iso = torch.tensor([1, 1, 1, 0, 0, 0.0], device=S.device).view(1, 6, 1, 1, 1) / 3
+    wf = torch.tensor([1, 1, 1, 2, 2, 2.0], device=S.device).view(1, 6, 1, 1, 1)
+    return float((m * ((S - iso) ** 2 * wf).sum(1)).sum(0).mean())
 
 
 def _axes(S: torch.Tensor, kind: torch.Tensor) -> torch.Tensor:
@@ -356,7 +372,8 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
           strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None,
           widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None, query: int = 0,
           simple: dict | None = None, p_simple=(0.0, 0.0), init: str | None = None, order: str = "mass", exact: bool = False, desc_lmax: int = 0,
-          context=None, late_start: int | None = None, scalar_window=None, cache: str | None = None):
+          context=None, late_start: int | None = None, scalar_window=None, cache: str | None = None,
+          gate: float | None = None, aniso=None):
     from .engine import PopulationEngine
     from . import losses as _losses
     _losses.PRESENCE_BAND = tuple(presence_band) if presence_band else None
@@ -386,7 +403,8 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
                 seed=seed, strength0=strength0, strength1=strength1, overfit=overfit, gen=gen, widths=list(widths), distinct=distinct, sh_lmax=sh_lmax, lcn=lcn,
                 presence_band=list(presence_band) if presence_band else None, weights=weights, query=query,
                 simple=simple, p_simple=list(p_simple), init=init, order=order, exact=exact, desc_lmax=desc_lmax,
-                context=list(context) if context else None, late_start=late_start, scalar_window=list(scalar_window) if scalar_window else None)
+                context=list(context) if context else None, late_start=late_start, scalar_window=list(scalar_window) if scalar_window else None,
+                gate=gate, aniso=list(aniso) if aniso else None)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
     model = PopulationNet.from_args(args).to(device)
     rf = receptive_field(model)
@@ -419,14 +437,23 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     logf.write(json.dumps({"step": start, "baseline": True, **v0}) + "\n"); logf.flush()
     log(f"  val {start} (baseline): " + " ".join(f"{k} {x:.4f}" for k, x in v0.items()))
     t0 = time.time(); run = {}
+    gstate = {"open": gate is None, "at": None, "ema": None}                                          # the gate: orientation only until it breaks away
+    alpha = lambda s_: aniso[0] * max(0.0, 1 - s_ / aniso[1]) if aniso else 0.0
     for step in range(start, steps):
+        if gate is not None and not gstate["open"]:
+            lr_now = lr * min(1.0, (step + 1) / warmup); r = 0.0; ro = 0.0                                # constant rate, orientation terms only
+        elif gate is not None:
+            s0 = gstate["at"]; prog = (step - s0) / max(steps - s0, 1)
+            lr_now = lr * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * prog)))
+            ro = min(1.0, (step - s0) / 300); r = min(1.0, max(0.0, (step - s0 - 300) / 300))
+        else:
+            lr_now = lr * sched(step); r = ramp(step); ro = oramp(step)
         for pg in opt.param_groups:
-            pg["lr"] = lr * sched(step)
-        r = ramp(step); ro = oramp(step)
+            pg["lr"] = lr_now
         W = {**{k: WEIGHTS[k] * r for k in SCALARS}, **{k: WEIGHTS[k] * ro for k in LATE}}
         opt.zero_grad(set_to_none=True); tot_v = 0.0; parts_acc = {}
         for _ in range(accum):
-            x, T = buf.batch(batch, g)
+            x, T = buf.batch(batch, g, alpha(step))
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device != "cpu"):
                 P = model(x, T.get("q_points"), T.get("q_sigma"))
             total, parts = loss(P, T, grid, margin, axis=int(torch.randint(0, 3, (1,), generator=g)), weights=W, g=g)
@@ -445,6 +472,14 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
             (total / accum).backward(); tot_v += float(total) / accum
             for k, v in parts.items():
                 parts_acc[k] = parts_acc.get(k, 0.0) + v / accum
+        if gate is not None and not gstate["open"]:                                                   # the mixture term against its round floor
+            ratio = parts_acc.get("mixture", 0.0) / max(parts_acc.get("mixture_floor", 1e-9), 1e-9)
+            gstate["ema"] = ratio if gstate["ema"] is None else 0.95 * gstate["ema"] + 0.05 * ratio
+            if step - start >= 50 and gstate["ema"] < gate:
+                gstate["open"], gstate["at"] = True, step + 1
+                log(f"gate open at step {step + 1}: mixture / round floor {gstate['ema']:.3f}")
+                logf.write(json.dumps({"step": step + 1, "gate_open": True, "ratio": gstate["ema"]}) + "\n"); logf.flush()
+        parts_acc["gate_ratio"] = gstate["ema"] if gstate["ema"] is not None else float("nan")
         gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0))
         opt.step()
         if not overfit:
@@ -452,7 +487,7 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
         for k, v in {**parts_acc, "total": tot_v, "grad_norm": gn}.items():
             run[k] = run.get(k, 0.0) + v
         if (step + 1) % log_every == 0:
-            rec = {"step": step + 1, "time_s": round(time.time() - t0, 1), "lr": lr * sched(step), "strength": strength(step), "scalar_weight": r,
+            rec = {"step": step + 1, "time_s": round(time.time() - t0, 1), "lr": lr_now, "strength": strength(step), "scalar_weight": r,
                    **{k: v / log_every for k, v in run.items()}}
             logf.write(json.dumps(rec) + "\n"); logf.flush(); run = {}
             log(f"step {step + 1} {rec['time_s']}s s={rec['strength']:.2f} total {rec['total']:.4f} shape {rec['shape']:.4f} mass {rec['mass']:.4f} "
@@ -473,6 +508,8 @@ def main():
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
+    ap.add_argument("--gate", type=float, default=None, help="orientation terms only, constant rate, until the mixture loss falls below this fraction of its round floor (EMA, e.g. 0.85); then the late terms and scalars ramp in and the rate decays")
+    ap.add_argument("--aniso", type=float, nargs=2, default=None, help="sample buffer pairs in proportion to their non-round target energy ** alpha, alpha annealed from A0 to 0 over STEPS (e.g. 1 600)")
     ap.add_argument("--cache", help="a directory caching the training and validation pairs on disk (shared by runs drawing the same pairs)")
     ap.add_argument("--late-start", type=int, default=None, help="step at which mass, presence, kind and Hellinger start ramping in (300 over 300 steps); default max(300, 5%% of steps)")
     ap.add_argument("--scalar-window", type=int, nargs=2, default=None, help="steps over which the cell scalars (classes, fraction, size, identity) ramp from 0 to full; default 20%%-40%% of steps")
@@ -493,7 +530,7 @@ def main():
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
-          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact, desc_lmax=a.desc_lmax, context=a.context, late_start=a.late_start, scalar_window=a.scalar_window, cache=a.cache)
+          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact, desc_lmax=a.desc_lmax, context=a.context, late_start=a.late_start, scalar_window=a.scalar_window, cache=a.cache, gate=a.gate, aniso=a.aniso)
 
 
 if __name__ == "__main__":
