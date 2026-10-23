@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 
 import torch
+import torch.nn.functional as Fn
 
 from ..lift import hemisphere
 from .generator import draw, eig3
@@ -113,9 +114,30 @@ def evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
     0.05, linearity > 0.5) and of the mixture head on cells with one line population; the predicted
     fraction's spread over the set and its correlation with the target's; the engine's population count (line
     populations, N) against the target's own (the same engine reading the target slots)."""
+    from . import losses as _L
+    saved = (_L.DISTINCT, _L.PRESENCE_BAND); _L.DISTINCT = None; _L.PRESENCE_BAND = None                  # one reference rule for every run
+    try:
+        return _evaluate(model, val, grid, margin, device, engine)
+    finally:
+        _L.DISTINCT, _L.PRESENCE_BAND = saved
+
+
+def st_axis_cells(x: torch.Tensor) -> torch.Tensor:
+    """A structure-tensor reference: the least-gradient direction (gradient sigma 1, window sigma 5) per 4³ cell of
+    an image ``(Z, Y, X)``: ``(3, z, y, x)``."""
+    from ..filters import gaussian
+    xs = gaussian(x.float(), 1.0, truncate=3.0); gz, gy, gx = torch.gradient(xs)
+    G = torch.stack([Fn.avg_pool3d(gaussian(c, 5.0, truncate=3.0)[None, None], 4)[0, 0] for c in (gz * gz, gy * gy, gx * gx, gz * gy, gz * gx, gy * gx)])
+    full = torch.stack([torch.stack([G[0], G[3], G[4]]), torch.stack([G[3], G[1], G[5]]), torch.stack([G[4], G[5], G[2]])])
+    _, V = torch.linalg.eigh(full.permute(2, 3, 4, 0, 1))
+    return V[..., :, 0].permute(3, 0, 1, 2)
+
+
+def _evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
     model.eval(); parts, errs, mix_errs, fp, ft, nagree, ntot = {}, [], [], [], [], 0.0, 0.0
     sh_one, sh_false, sh_det, sh_err2 = [], [], [], []
     q_eval = []
+    ref = {k: [] for k in ("slot_single", "slot_shared", "mix_single", "st_single", "st_shared", "sh_single", "sh_shared")}
     crop = lambda v: v[..., margin:-margin, margin:-margin, margin:-margin]
     for img, t in val:
         x, T = stack([(img, t)], aug=False)
@@ -136,6 +158,27 @@ def evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
         sel = (mt > 0.05) & (kt == 0) & (lin > 0.5)                                                       # cells where the target is a line with an axis
         if bool(sel.any()):
             errs.append(ang[sel])
+        # single cells (the line is the only anisotropic population) vs shared cells, under the reference rule
+        an = (tv[2] - tv[0]) / tv.sum(0).clamp_min(1e-9)                                                 # (1, K, c)
+        single_cell = (sel.sum(1) == 1) & (((mt > 0.05) & (an > 0.25)).sum(1) == 1)                      # (1, c)
+        single, shared = sel & single_cell[:, None], sel & ~single_cell[:, None]
+        ref["slot_single"].append(ang[single]); ref["slot_shared"].append(ang[shared])
+        t_ax = _axes(Tc["slots"].float().movedim(2, -1), kt)                                            # (1, K, c..., 3)
+        st_ax = crop(st_axis_cells(x[0, 0]))                                                            # (3, c...)
+        angv = lambda a_, b_: torch.rad2deg(torch.acos((a_ * b_).sum(-1).abs().clamp(max=1)))
+        e_st = angv(st_ax.movedim(0, -1)[None, None], t_ax)                                              # (1, K, c)
+        ref["st_single"].append(e_st[single]); ref["st_shared"].append(e_st[shared])
+        _, Vmx = eig3(Pc["mixture"][0].float())
+        e_mx = angv(Vmx[2].movedim(0, -1)[None, None], t_ax)
+        ref["mix_single"].append(e_mx[single])
+        if "sh" in Pc:
+            from .sh import peaks as _peaks
+            pdd, pvv = _peaks(Pc["sh"][0].float().flatten(1), model.sh_lmax, nmax=3, rel=0.3)            # (3, 3, N), (3, N)
+            cs_ = Pc["sh"].shape[2:]
+            pk = pdd.movedim(1, -1).reshape(3, *cs_, 3)                                                  # (3 peaks, c..., 3)
+            pkv = pvv.reshape(3, *cs_)
+            e_pk = torch.stack([torch.where(pkv[j][None, None] > 0, angv(pk[j][None, None], t_ax), torch.full_like(e_st, 90.0)) for j in range(3)]).amin(0)
+            ref["sh_single"].append(e_pk[single]); ref["sh_shared"].append(e_pk[shared])
         # the permutation-free mixture head against the target mixture, where the cell holds one line population
         one = sel[:, 0] & ~(mt[:, 1:] > 0.05).any(1)
         if bool(one.any()):
@@ -179,6 +222,10 @@ def evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
     if engine is not None:
         out["val_N_agree"] = nagree / max(ntot, 1)
     cat = lambda L: torch.cat(L) if L else torch.zeros(0)
+    for k_, L_ in ref.items():
+        v_ = cat(L_)
+        if v_.numel():
+            out[f"ref_{k_}"] = float(v_.median())
     if q_eval:
         out.update(query_metrics(q_eval, model.sh_lmax))
     if sh_one or sh_det:
@@ -218,7 +265,7 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
           warmup: int = 500, margin: int = 4, val_n: int = 32, val_every: int = 500, log_every: int = 25, seed: int = 0, device: str = "cuda",
           strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None,
           widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None, query: int = 0,
-          simple: dict | None = None, p_simple=(0.0, 0.0)):
+          simple: dict | None = None, p_simple=(0.0, 0.0), init: str | None = None):
     from .engine import PopulationEngine
     from . import losses as _losses
     _losses.PRESENCE_BAND = tuple(presence_band) if presence_band else None
@@ -235,12 +282,16 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     args = dict(steps=steps, size=size, batch=batch, accum=accum, buffer=buffer, refresh=refresh, lr=lr, warmup=warmup, margin=margin, val_n=val_n,
                 seed=seed, strength0=strength0, strength1=strength1, overfit=overfit, gen=gen, widths=list(widths), distinct=distinct, sh_lmax=sh_lmax, lcn=lcn,
                 presence_band=list(presence_band) if presence_band else None, weights=weights, query=query,
-                simple=simple, p_simple=list(p_simple))
+                simple=simple, p_simple=list(p_simple), init=init)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
     model = PopulationNet.from_args(args).to(device)
     rf = receptive_field(model)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     start = 0
+    if init:                                                                                           # warm start: weights only (new heads stay fresh)
+        sd = torch.load(init, map_location=device)["model"]; own = model.state_dict()
+        sd = {k: v for k, v in sd.items() if k in own and own[k].shape == v.shape}
+        model.load_state_dict(sd, strict=False); log(f"init: {len(sd)}/{len(own)} tensors from {init}")
     if resume:
         ck = torch.load(resume, map_location=device)
         model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); start = ck["step"]
@@ -254,7 +305,10 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     psimple = lambda s_: p_simple[0] + (p_simple[1] - p_simple[0]) * min(1.0, s_ / (0.5 * steps))     # the simple share: p0 -> p1 by half-way
     buf = Buffer(overfit or buffer, size, device, seed0=seed * 1_000_000 + start * refresh, strength=strength(start), log=log, gen=gen,
                  simple=simple, p_simple=psimple(start))
-    val = buf.items[:min(val_n, overfit)] if overfit else [make(10_000_000 + i, size, device, strength1, gen) for i in range(val_n)]   # overfit: score the training pairs
+    def rotated(i):                                                                                  # each held-out draw under a fixed cube element
+        img, t = make(10_000_000 + i, size, device, strength1, gen)
+        return augment(img, t, torch.Generator().manual_seed(i))
+    val = buf.items[:min(val_n, overfit)] if overfit else [rotated(i) for i in range(val_n)]   # overfit: score the training pairs
     engine = PopulationEngine(model, device=device)
     v0 = evaluate(model, val, grid, margin, device, engine)
     logf.write(json.dumps({"step": start, "baseline": True, **v0}) + "\n"); logf.flush()
@@ -302,6 +356,7 @@ def main():
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
+    ap.add_argument("--init", help="warm start: load the weights (not the optimiser or step) of this checkpoint")
     ap.add_argument("--simple", type=json.loads, default=None, help="a curriculum: draw() arguments of the simple regime (JSON), mixed in with --p-simple")
     ap.add_argument("--p-simple", type=float, nargs=2, default=[0.0, 0.0], help="share of simple samples at the start and from half-way (e.g. 0.8 0.2)")
     ap.add_argument("--query", type=int, default=0, help="query points per sample: train the decoder of the density at any point and scale (needs --sh-lmax)")
@@ -314,7 +369,7 @@ def main():
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
-          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple))
+          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init)
 
 
 if __name__ == "__main__":
