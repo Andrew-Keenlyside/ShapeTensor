@@ -93,3 +93,20 @@ tensor (gradient sigma 1, window 5) on the same cells (`ref_*` keys).
   transfers (13.4 single on the full generator): consistent with capacity plus a curriculum effect.
 * Loops 2-4 (narrow, several changes at once) were stopped unfinished; the loops continue on the wide network, one
   factor at a time against a wide baseline (W0).
+
+## While the wide loops train (02:00-03:30 Montreal)
+
+* The generator's line axes are near isotropic over 40 draws (mean |component| z, y, x = 0.47, 0.53, 0.51; share
+  within 26 deg of an axis 0.075 / 0.107 / 0.105, isotropic 0.10): the "constant axis scores 22 deg" on unrotated
+  draws came from few, coherent draws (8 with lines), not a generator bias -- the rotated metric removes it anyway.
+* Built: the exact per-voxel density (`--exact`), descriptor densities (`--desc-lmax`), salience order (`--order
+  salience`), query generality evaluation (`scripts/learn/query_eval.py`: scale sweep, off-lattice, half-resolution
+  input), real-data density glyphs at several scales (`scripts/learn/real_density.py`), context evaluation
+  (`scripts/learn/context_eval.py`).
+* Context used by P1 (step 1000): its mixture output stops changing once the input is visible to a half-width of
+  ~20 voxels around the scored block (change from full context 15 deg at 12, 5 at 16, 1 at 20, 0 from 24) -- the
+  effective context is ~+-20 voxels, inside the receptive field (54); its error against the target is lowest at 16
+  (12 deg) and 17.5 with full context (8 draws: noisy, but a hint that distant structure misleads it).
+* Context B as a query input (design, not built): train the decoder with the input outside a random cube of
+  half-width B around the queries replaced by the mean, B as an input; B beyond the receptive field needs a larger
+  trunk (dilations or a coarser level) -- the context evaluation above is the test.
