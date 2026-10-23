@@ -72,6 +72,22 @@ LATE = ("mass", "presence", "kind", "hellinger")                                
 
 
 CACHE = None                       # a directory: training pairs cached on disk, shared by runs drawing the same pairs
+_CODE_VERSION = None
+
+
+def _code_version() -> str:
+    """A hash of the sources that determine a pair (generator, targets, query, SH, filters): a changed generator never
+    serves stale cached pairs."""
+    global _CODE_VERSION
+    if _CODE_VERSION is None:
+        import hashlib
+        from pathlib import Path as _P
+        here = _P(__file__).parent
+        h = hashlib.sha1()
+        for f in (here / "generator.py", here / "targets.py", here / "query.py", here / "sh.py", here.parent / "filters.py"):
+            h.update(f.read_bytes())
+        _CODE_VERSION = h.hexdigest()[:12]
+    return _CODE_VERSION
 
 
 def make(seed: int, size: int, device, strength: float = 1.0, gen: dict | None = None) -> tuple[torch.Tensor, dict]:
@@ -82,7 +98,7 @@ def make(seed: int, size: int, device, strength: float = 1.0, gen: dict | None =
     import hashlib
     from pathlib import Path as _P
     from . import targets as _tg
-    key = json.dumps([seed, size, round(float(strength), 4), gen or {}, QUERY, SH_EXACT, DESC_LMAX, _tg.ORDER], sort_keys=True, default=str)
+    key = json.dumps([seed, size, round(float(strength), 4), gen or {}, QUERY, SH_EXACT, DESC_LMAX, _tg.ORDER, _code_version()], sort_keys=True, default=str)
     f = _P(CACHE) / (hashlib.sha1(key.encode()).hexdigest() + ".pt")
     if f.exists():
         try:
@@ -378,7 +394,7 @@ def query_metrics(q_eval, lmax: int) -> dict:
 def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: int = 4, buffer: int = 128, refresh: int = 1, lr: float = 3e-4,
           warmup: int = 500, margin: int = 4, val_n: int = 32, val_every: int = 500, log_every: int = 25, seed: int = 0, device: str = "cuda",
           strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None,
-          widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None, query: int = 0,
+          widths: tuple = (32, 64, 128), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None, query: int = 0,
           simple: dict | None = None, p_simple=(0.0, 0.0), init: str | None = None, order: str = "mass", exact: bool = False, desc_lmax: int = 0,
           context=None, late_start: int | None = None, scalar_window=None, cache: str | None = None,
           gate: float | None = None, aniso=None, shape_loss: str = "frobenius", simple_window: int | None = None,
@@ -548,7 +564,7 @@ def main():
     ap.add_argument("--lcn", type=float, default=0.0, help="add a local-contrast input channel ((x - mean) / sd in a Gaussian window of this sigma, voxels; e.g. 3)")
     ap.add_argument("--sh-lmax", type=int, default=0, help="also predict the populations' density in even SH to this order (permutation-free; e.g. 8)")
     ap.add_argument("--distinct", type=float, default=None, help="slot order kept only among populations whose eigenvalue spectra lie within this distance (e.g. 0.2); default: among all")
-    ap.add_argument("--widths", type=int, nargs=3, default=[16, 32, 64], help="channels at strides 1, 2, 4")
+    ap.add_argument("--widths", type=int, nargs=3, default=[32, 64, 128], help="channels at strides 1, 2, 4")
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,

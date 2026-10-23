@@ -213,6 +213,10 @@ Slots remain as a readout (peaks of f, with descriptor ratios at the peaks), tra
   (curriculum), `--lcn`, `--presence-band`, `--weights`, `--init`.
 * Evaluation under one reference matching rule on rotated held-out draws, single vs shared line cells, against a
   structure tensor; the density's nearest-peak error; descriptors at the target's top peak.
-* Evidence: under the corrected metric the narrow network (0.37 M) learned nothing on the full generator, the wide one
-  (1.45 M) reached the structure tensor's level in 1000 steps (single 15.0 / shared 38.5 vs 13.8 / 37.5) -- capacity
-  was the blocker the old metric hid. Single-factor wide runs (baseline, SH head, curriculum) under way.
+* Evidence (corrected by reviews 2-7): runs trained from scratch on the full generator collapse to round tensors
+  (the "round plateau") whatever the width or schedule (R4, W0, N1, D1); easy line-rich draws in the mix break it for
+  the wide network (W2: bank single 21.7 / shared 35.0, structure tensor 15.2 / 35.1; P1@2000 15.6 / 32.7). With the
+  same curriculum the narrow network did not improve on narrow runs without one (C1@1000 = R4@2000 within the
+  intervals): width matters with the curriculum, the narrow net's limit under the joint objective is unresolved (one
+  seed). Slots still hedge to round tensors and copy the first axis at crossings; the density head has not yet been
+  trained past the plateau. Default width is now 32/64/128.

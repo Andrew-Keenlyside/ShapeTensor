@@ -140,15 +140,17 @@ def summarise(draws, rng):
 
 def score(a):
     bank = torch.load(a.bank, weights_only=False); items = bank["items"]
-    table = {}
+    table, per_run = {}, {}
     for run in a.runs:
         ck = torch.load(Path(run) / "model.pt", map_location=DEV); args = ck["args"]; lmax = int(args.get("sh_lmax", 0) or 0)
         net = PopulationNet.from_args(args).to(DEV); net.load_state_dict(ck["model"]); net.eval()
         torch.manual_seed(0); floor = PopulationNet.from_args(args).to(DEV).eval()
         name = f"{Path(run).name}@{ck['step']}"
-        table[name] = summarise([per_draw(net, it, lmax) for it in items], np.random.default_rng(0))
-        if not any(k.startswith("untrained") for k in table):
-            table[f"untrained ({tuple(args.get('widths', (16, 32, 64)))})"] = summarise([per_draw(floor, it, lmax) for it in items], np.random.default_rng(0))
+        draws = [per_draw(net, it, lmax) for it in items]; per_run[name] = draws
+        table[name] = summarise(draws, np.random.default_rng(0))
+        fk = f"untrained ({tuple(args.get('widths', (16, 32, 64)))}, sh {lmax})"
+        if fk not in table:                                                                            # a floor per width / head set
+            table[fk] = summarise([per_draw(floor, it, lmax) for it in items], np.random.default_rng(0))
     keys = ["slot_single", "slot_orderfree_single", "slot_shared", "mix_single", "slot_linearity_single", "false_line_noline",
             "sh_top1_single", "sh_near3_single", "sh_near3_shared", "sh_false_second_single", "sh_cross_detect", "sh_cross_err", "st_single", "st_shared"]
     print(f"bank: {len(items)} draws, gen {bank['gen']}, strength {bank['strength']}")
@@ -158,6 +160,19 @@ def score(a):
             if k in res:
                 m, lo, hi, n, nd = res[k]
                 print(f"  {k:22s} {m:6.2f}  [{lo:6.2f}, {hi:6.2f}]  ({n} cells in {nd} draws)")
+    names = list(per_run)
+    if len(names) > 1:                                                                                  # paired differences against the first run
+        ref = names[0]; rng = np.random.default_rng(1)
+        print(f"\npaired differences (run - {ref}), 90% bootstrap over the same draws:")
+        for nm in names[1:]:
+            for k in ("slot_single", "slot_shared", "mix_single", "sh_top1_single"):
+                A, B = per_run[nm], per_run[ref]
+                if not all(k in d for d in A) or not all(k in d for d in B):
+                    continue
+                stat = lambda D, idx: np.median(np.concatenate([D[i][k] for i in idx]))
+                full = stat(A, range(len(A))) - stat(B, range(len(B)))
+                bs = [stat(A, idx) - stat(B, idx) for idx in (rng.integers(0, len(A), len(A)) for _ in range(500))]
+                print(f"  {nm:40s} {k:16s} {full:+6.2f}  [{np.percentile(bs, 5):+6.2f}, {np.percentile(bs, 95):+6.2f}]")
     if a.json:
         Path(a.json).write_text(json.dumps(table, indent=1))
 

@@ -278,5 +278,10 @@ confounded; its parts are covered by tests and by D2 / F1).
 | W2 wide 32/64/128 | 21.7 [19.3, 24.4] | 35.0 [31.8, 38.2] | 20.5 [18.0, 23.1] | 0.20 |
 | untrained narrow | 59.4 | 56.5 | 61.7 | 0.68 |
 
-With the curriculum the narrow net learns (its validation still falling at 1000: mixture 52.7 / 46.4 / 38.4 / 34.9
-at 250-1000), but at half the wide net's pace: at this length width and easy data both matter. Review 7 scrutinises.
+Review 7 (independent agent): the C1 - W2 comparison is clean (same pairs, batches, schedule); paired bank
+differences C1 - W2: single +20.3 [15.7, 25.0], shared +13.9 [11.3, 16.7], mixture +18.6 [14.3, 22.6] -- width
+matters with the curriculum. But C1@1000 is no better than narrow without a curriculum (= R4@2000 within the
+intervals): "learns, but slowly" is not supported; the gap opens at steps 325-450, when the late terms ramp in and the
+easy share falls, and does not close. Shared cells cannot show separation (the metric does not detect it). Width is
+now 32/64/128 by default; narrow runs dropped. (L01's bank row is its step-2000 checkpoint.) Fixed: the untrained
+floor per width in rescore (it used the first run's), paired differences in rescore, a code version in the cache key.
