@@ -86,6 +86,14 @@ def per_draw(net, item, lmax):
     Sp = gather_slots(Pc["slots"], perm)
     p_ax = _axes(Sp.movedim(2, -1), kt)
     out = {"slot_single": ang(p_ax, t_ax)[single], "slot_shared": ang(p_ax, t_ax)[shared]}
+    sv, _ = eig3(Sp.movedim(2, 0)); plin = (sv[2] - sv[1]) / sv[2].clamp_min(1e-9)                 # matched slot's linearity
+    out["slot_linearity_single"] = plin[single]
+    # false lines: cells with no line target (mass > 0.05) where a present predicted slot is a line of linearity > 0.5
+    pres = (torch.sigmoid(Pc["presence_logit"]) > 0.5) & (Pc["mass"] >= 0.01)
+    pv_, _ = eig3(Pc["slots"].movedim(2, 0)); plin_all = (pv_[2] - pv_[1]) / pv_[2].clamp_min(1e-9)
+    pline = (pres & (Pc["kind"].argmax(2) == 0) & (plin_all > 0.5)).any(1)                           # (1, c)
+    noline = ~((mt > 0.05) & (kt == 0)).any(1)
+    out["false_line_noline"] = pline[noline].float()
     # order-free slot: the predicted slot of largest anisotropic mass
     pv, pV = eig3(Pc["slots"].movedim(2, 0)); psal = Pc["mass"] * (pv[2] - pv[0])                     # (1, K, c)
     best = psal.argmax(1)                                                                             # (1, c)
@@ -118,7 +126,7 @@ def summarise(draws, rng):
         pooled = np.concatenate(arrs)
         if pooled.size == 0:
             continue
-        stat = np.mean if k == "sh_cross_detect" else np.median
+        stat = np.mean if k in ("sh_cross_detect", "false_line_noline") else np.median
         boots = []
         for _ in range(1000):
             idx = rng.integers(0, len(arrs), len(arrs))
@@ -140,8 +148,8 @@ def score(a):
         table[name] = summarise([per_draw(net, it, lmax) for it in items], np.random.default_rng(0))
         if not any(k.startswith("untrained") for k in table):
             table[f"untrained ({tuple(args.get('widths', (16, 32, 64)))})"] = summarise([per_draw(floor, it, lmax) for it in items], np.random.default_rng(0))
-    keys = ["slot_single", "slot_orderfree_single", "slot_shared", "mix_single", "sh_top1_single", "sh_near3_single", "sh_near3_shared",
-            "sh_cross_detect", "sh_cross_err", "st_single", "st_shared"]
+    keys = ["slot_single", "slot_orderfree_single", "slot_shared", "mix_single", "slot_linearity_single", "false_line_noline",
+            "sh_top1_single", "sh_near3_single", "sh_near3_shared", "sh_cross_detect", "sh_cross_err", "st_single", "st_shared"]
     print(f"bank: {len(items)} draws, gen {bank['gen']}, strength {bank['strength']}")
     for name, res in table.items():
         print(f"\n{name}")
