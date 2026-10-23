@@ -324,3 +324,29 @@ model of the night** -- bank slot single 14.5 [12.4, 18.0], shared 32.4 [28.7, 3
 -4.4]; better than the structure tensor (15.2 / 35.1) and P1@2000 (15.6 / 32.7 / 15.1). Its gate opened at step 574.
 Confounds (1200 vs 1000 steps, a different rate trajectory, presence 0.1, one seed) under review 11. G1's sampler used
 the slot-based weight (linear in mass), not the density-based one review 10 faulted.
+
+## Review 9 (06:00 Montreal)
+
+Review 9 (C3): the crossing-rich easy data taught **no second population** in either output -- slots: pair error 37.7
+vs copy-of-first-axis 39.9 and random-second 39.7, top-2 slots 10.8 deg apart against 61; SH head: calibrated second
+peaks on 6% of crossing cells against the target's 34% on this bank, the predicted energy by order (l = 0/2/4/6/8) is
+0.66 / 0.35 / 0.07 / 0.05 / 0.06 of the target's -- a shrunken order-2 tensor. The SH head is a 1x1 readout of the
+features the mixture and slot terms built (it improves only when the mixture breaks away). Bug: `sh_cross_err` is
+selection-biased (only detected cells). Recommended: weight towards multi-population cells by the target's l >= 4
+energy beyond a single lobe's; a residual density head conditioned on the first peak (any N, any kind); a nonlinear
+SH head; D3 = density only with a per-cell-normalised order-2 term.
+
+## Per-review strongest and weakest areas
+
+| review | run(s) | strongest | weakest |
+|---|---|---|---|
+| 1 | R4d (shape-aware matching) | exact, matching-free density targets | slot output hedges to round tensors (linearity 0.11) |
+| 2 | L01 (narrow, backgrounds) | targets and augmentation (exact, cube-commuting, no axis bias) | the protocol: step-scaled schedule, single seeds, pooled medians over few draws |
+| 3 | W2 (wide + curriculum) | generator coverage + paired evaluation (difficulty is physical) | slot output: Frobenius on trace-1 tensors pulls to round; kind head collapses to "line" |
+| 4 | W0, N1 (controls) | targets are learnable and consistent (W2 beats W0 on W0's own objective) | loss balance at the round plateau (presence noise steers; orientation 19% of the gradient) |
+| 5 | D1 (density only) | the exact density target (3.5 deg from the slot axis; linear, coarsens exactly) | orientation signal on hard data, amplified noise; uncalibrated peaks |
+| 6 | P1@2000 | learned single-population orientation at structure-tensor level | slot set regresses to the conditional mean: copied axes at crossings, N uninformative |
+| 7 | C1 (narrow + curriculum) | the controlled comparison setup (deterministic data stream, fixed bank, paired differences) | the late "where / how much" heads (presence, kind, Hellinger) |
+| 9 | C3 (crossings + SH head) | exact target and bank make the one-axis failure measurable | no output can hold a second orientation |
+| 10 | D2 (decoupled density) | the exact density read without matching; learnable once the trunk has features | the anti-hedging losses (both target-weighted forms fail from scratch) |
+| 8, 11, 12 | S1, G1, F1 | (pending) | (pending) |
