@@ -225,3 +225,25 @@ off: sharp 1.50, half-round 0.92, round 0.67); the new cost weights the angle by
 `--simple-window` (absolute), the buffer's simple share logged, rescore: matched-slot linearity and false linear
 lines on no-line cells (W2 0.20 / 0.01, P1 0.26 / 0.02, R2 0.71 / 0.59 -- R2 sees sharp lines everywhere, W2 and P1
 predict round "line" slots). Launched S1 = W2 + `--shape-loss devcos` (absolute window 500).
+
+## Review 5 (04:30 Montreal)
+
+Review 5 (independent agent, on D1 = density only, no curriculum): D1 learned nothing image-dependent -- its l >= 2
+per-order losses equal a round prediction's (0.866/0.800/0.662/0.463 vs 0.870/0.800/0.662/0.462), angular energy
+0.1% of the target's; the bank SH "gains" were peak-geometry artefacts (top-1 57.9 vs 59.7 against shuffled axes); the
+plateau persisted without any presence / Hellinger / fraction terms, which **refutes the term-competition story** of
+review 4 -- the signal is weak on hard data. The exact density target is sound (order 0 = sqrt(4 pi) slot mass,
+ratio 1.000; top peak 3.5 deg from the slot axis on single-line cells; label axes within 1.9-5.4 deg of the rendered
+geometry); it differs from the per-layer form only where orientation visibility varies inside the window (a
+definitional difference; the exact form is linear and coarsens exactly). Bugs: the per-batch normaliser of the SH
+loss down-weights line-rich batches (an anti-curriculum, correlation -0.46); val loss averages per-draw normalised
+losses (empty draws dominate); peaks at rel 0.3 without an absolute gate find 2-3 peaks in noise (detection = false
+second = 100% for the untrained net). Recommended: calibrated peaks; a decoupled density loss (order 0 apart,
+per-order magnitude + target-weighted angle over running energies, order 2 first); sampling by the density's
+angular energy.
+
+Built (aba4c34): `peaks_gated` (a cell counts if its mean density > 0, <= 20% of the sphere negative and the top
+peak stands 0.5x the mean above it; a second peak at (f2 - mean) / (f1 - mean) >= 0.42, the target's 10% false
+rate) -- with it D1 and the untrained net give no peaks at all; `--sh-loss decoupled` with order 2 first (all orders
+once the mass-weighted order-2 cosine passes 0.3); `--aniso` uses the density's angular energy when the target has
+one. Launched D2: wide, density only, decoupled loss, curriculum (window 350), angular-energy sampling, 700 steps.
