@@ -445,3 +445,15 @@ term pushes |p_l| to the expected |t_l| with an unknown direction -> energetic r
 works. Recommended: a clean control for the strength ramp on G1; an overfit test of whether the SH head can
 represent a crossing at all, then a residual head conditioned on the first axis; the axis head through 2000 steps,
 then best-of-2 axis hypotheses per slot. Do not train the decoupled density head further.
+
+## Final (06:30 Montreal)
+
+* AX1 (G1 + 400 steps with the axis head, warm start): slots slightly better than G1 on shared cells (-2.1 [-3.2,
+  -0.7]; confounded with the 400 extra steps), slot linearity 0.29 (G1 0.23); the axis head itself 22.2 on single
+  cells -- worse than the slots after 400 steps: not yet shown to help. Unreviewed.
+* G1s1 (G1 recipe, seed 1): gate opened at step 559 (seed 0: 574) -- the breakaway from the round plateau replicates
+  across seeds at about the same step. The run continues past 07:00 (bank scores not yet available).
+
+**Twelve independent reviews completed** (agents with fresh context, reading code, logs, QC figures and re-scoring
+read-only). The per-review strongest / weakest table is above. The best model of the night is
+`learn_night/G1_wide_gate_aniso/model.pt`; the strength-robust one `learn_night/F1_final_P1_density/model.pt`.
