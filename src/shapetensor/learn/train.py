@@ -78,19 +78,22 @@ def stack(pairs, g=None, aug: bool = True):
 
 
 class Buffer:
-    def __init__(self, n: int, size: int, device, seed0: int = 0, strength: float = 1.0, log=print, gen: dict | None = None):
-        self.size, self.device, self.next, self.gen = size, device, seed0, gen
+    def __init__(self, n: int, size: int, device, seed0: int = 0, strength: float = 1.0, log=print, gen: dict | None = None,
+                 simple: dict | None = None, p_simple: float = 0.0):
+        self.size, self.device, self.next, self.gen, self.simple = size, device, seed0, gen, simple
         t0 = time.time()
-        self.items = [self._make(strength) for _ in range(n)]
-        log(f"buffer: {n} pairs at {size}^3 (strength {strength:.2f}) in {time.time() - t0:.0f} s")
+        self.items = [self._make(strength, p_simple) for _ in range(n)]
+        log(f"buffer: {n} pairs at {size}^3 (strength {strength:.2f}, simple share {p_simple:.2f}) in {time.time() - t0:.0f} s")
 
-    def _make(self, strength):
-        item = make(self.next, self.size, self.device, strength, self.gen); self.next += 1
+    def _make(self, strength, p_simple: float = 0.0):
+        import random
+        gen = self.simple if (self.simple is not None and random.Random(self.next * 7 + 3).random() < p_simple) else self.gen
+        item = make(self.next, self.size, self.device, strength, gen); self.next += 1
         return item
 
-    def refresh(self, k: int, g: torch.Generator, strength: float):
+    def refresh(self, k: int, g: torch.Generator, strength: float, p_simple: float = 0.0):
         for _ in range(k):
-            self.items[int(torch.randint(0, len(self.items), (1,), generator=g))] = self._make(strength)
+            self.items[int(torch.randint(0, len(self.items), (1,), generator=g))] = self._make(strength, p_simple)
 
     def batch(self, B: int, g: torch.Generator):
         idx = torch.randint(0, len(self.items), (B,), generator=g).tolist()
@@ -214,7 +217,8 @@ def query_metrics(q_eval, lmax: int) -> dict:
 def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: int = 4, buffer: int = 128, refresh: int = 1, lr: float = 3e-4,
           warmup: int = 500, margin: int = 4, val_n: int = 32, val_every: int = 500, log_every: int = 25, seed: int = 0, device: str = "cuda",
           strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None,
-          widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None, query: int = 0):
+          widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None, query: int = 0,
+          simple: dict | None = None, p_simple=(0.0, 0.0)):
     from .engine import PopulationEngine
     from . import losses as _losses
     _losses.PRESENCE_BAND = tuple(presence_band) if presence_band else None
@@ -230,7 +234,8 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
         print(msg, flush=True)
     args = dict(steps=steps, size=size, batch=batch, accum=accum, buffer=buffer, refresh=refresh, lr=lr, warmup=warmup, margin=margin, val_n=val_n,
                 seed=seed, strength0=strength0, strength1=strength1, overfit=overfit, gen=gen, widths=list(widths), distinct=distinct, sh_lmax=sh_lmax, lcn=lcn,
-                presence_band=list(presence_band) if presence_band else None, weights=weights, query=query)
+                presence_band=list(presence_band) if presence_band else None, weights=weights, query=query,
+                simple=simple, p_simple=list(p_simple))
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
     model = PopulationNet.from_args(args).to(device)
     rf = receptive_field(model)
@@ -246,7 +251,9 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     oramp = lambda s: min(1.0, max(0.0, (s - o0) / 300))                                               # mass, presence, kind, Hellinger: after orientation (o0 steps)
     grid = hemisphere(160, device)
     log(f"model: {sum(p.numel() for p in model.parameters())} parameters, receptive field {rf} voxels; args {args}")
-    buf = Buffer(overfit or buffer, size, device, seed0=seed * 1_000_000 + start * refresh, strength=strength(start), log=log, gen=gen)
+    psimple = lambda s_: p_simple[0] + (p_simple[1] - p_simple[0]) * min(1.0, s_ / (0.5 * steps))     # the simple share: p0 -> p1 by half-way
+    buf = Buffer(overfit or buffer, size, device, seed0=seed * 1_000_000 + start * refresh, strength=strength(start), log=log, gen=gen,
+                 simple=simple, p_simple=psimple(start))
     val = buf.items[:min(val_n, overfit)] if overfit else [make(10_000_000 + i, size, device, strength1, gen) for i in range(val_n)]   # overfit: score the training pairs
     engine = PopulationEngine(model, device=device)
     v0 = evaluate(model, val, grid, margin, device, engine)
@@ -270,7 +277,7 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
         gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0))
         opt.step()
         if not overfit:
-            buf.refresh(refresh, g, strength(step))
+            buf.refresh(refresh, g, strength(step), psimple(step))
         for k, v in {**parts_acc, "total": tot_v, "grad_norm": gn}.items():
             run[k] = run.get(k, 0.0) + v
         if (step + 1) % log_every == 0:
@@ -295,6 +302,8 @@ def main():
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
+    ap.add_argument("--simple", type=json.loads, default=None, help="a curriculum: draw() arguments of the simple regime (JSON), mixed in with --p-simple")
+    ap.add_argument("--p-simple", type=float, nargs=2, default=[0.0, 0.0], help="share of simple samples at the start and from half-way (e.g. 0.8 0.2)")
     ap.add_argument("--query", type=int, default=0, help="query points per sample: train the decoder of the density at any point and scale (needs --sh-lmax)")
     ap.add_argument("--presence-band", type=float, nargs=2, default=None, help="target masses between these two do not train presence (e.g. 0.002 0.02)")
     ap.add_argument("--weights", type=json.loads, default=None, help='loss weight overrides as JSON, e.g. {"presence": 0.2}')
@@ -305,7 +314,7 @@ def main():
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
-          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query)
+          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple))
 
 
 if __name__ == "__main__":
