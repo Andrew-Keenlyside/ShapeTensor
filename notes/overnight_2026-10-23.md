@@ -203,3 +203,25 @@ curriculum).
   lobes follow the vessel loop's local direction around its whole length, but faint populations (above the engine's
   min_mass 0.01, presence on) fill the empty dark space -- a presence / mass calibration problem (presence is the
   term reviews 1 and 4 flagged; G1 weights it 0.1).
+
+## Review 3 (04:15 Montreal)
+
+Review 3 (independent agent, on W2): W2 vs W0 is a clean single-factor comparison (same seed stream, same
+validation draws; W2 saw *less* hard data: 717 vs 1064 full-generator draws); the effect is real for this seed and
+spread over modalities and backgrounds (single cells: W2 trails the structure tensor by 3-8 deg in every stratum;
+shared cells: at or better than it in histology, mixed, tissue, HiP-CT, regions; worse in MRI 44.5 vs 34.5, CT 40.4
+vs 37.7). Over-claims corrected: "not width" is untested (only a wide curriculum run), "not the schedule" rests on a
+narrow run stopped early, curriculum vs a constant share of easy draws is untested -- what is supported is that easy,
+line-rich examples in the mix let learning start; one seed. Hidden by the axis metric: W2's matched slots are nearly
+round (linearity 0.20 vs target 0.86; P1 0.26, R2 0.71), the kind head collapses to "line", no model predicts a
+sheet. Bugs: the curriculum window scaled with --steps; the buffer lags the draw share by ~64 steps; the metrics see
+only line cells. Recommended: (1) separate orientation from shape magnitude in the slot loss; (2) an all-kinds simple
+regime at a constant floor share, 2x2 x 2 seeds; (3) density-only + curriculum (D2).
+
+Built: `--shape-loss devcos` -- the squared Frobenius distance of deviators is (|Dp| - |Dt|)^2 + 2 |Dp| |Dt| (1 -
+cos), its angular part weighted by the *predicted* anisotropy, so a rounder guess pays less for a wrong axis (60 deg
+off: sharp 1.50, half-round 0.92, round 0.67); the new cost weights the angle by the *target's* anisotropy, (|Dp| -
+|Dt|)^2 + 2 |Dt|^2 (1 - cos) (60 deg off: sharp 1.50, round 2.00; right: 0) -- for slots and mixture, any kind.
+`--simple-window` (absolute), the buffer's simple share logged, rescore: matched-slot linearity and false linear
+lines on no-line cells (W2 0.20 / 0.01, P1 0.26 / 0.02, R2 0.71 / 0.59 -- R2 sees sharp lines everywhere, W2 and P1
+predict round "line" slots). Launched S1 = W2 + `--shape-loss devcos` (absolute window 500).
