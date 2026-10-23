@@ -110,3 +110,38 @@ tensor (gradient sigma 1, window 5) on the same cells (`ref_*` keys).
 * Context B as a query input (design, not built): train the decoder with the input outside a random cube of
   half-width B around the queries replaced by the mean, B as an input; B beyond the receptive field needs a larger
   trunk (dilations or a coarser level) -- the context evaluation above is the test.
+
+## Review 2 and the fixed bank (02:30-03:00 Montreal)
+
+Review 2 (independent agent) reproduced the re-scored numbers and found: (1) the capacity claim is **not supported**
+-- P1's loss schedule scaled with its 12000 steps (scalar terms off for its first 1000 steps, the late terms from 600
+not 300, learning rate near 1e-3), its data were easier (strength 0.16-0.23, 2-3 line layers always) and buffer
+larger; on the same draws the narrow flat-trained R2 matches P1 on single cells -- the narrow net can represent line
+orientation; what fails is learning it from hard data under R4's schedule; (2) the metric is correct but its sampling
+noise is large (90% intervals of ~10-20 deg over 16-48 draws; anything above ~45 deg is chance); (3) a salience-order
+bug (isotropic ties with empty slots); (4) the context mask's hard step; (5) the half-resolution test too small for
+the receptive field; (6) the new tools are ahead of the evidence (none trained yet). Recommended: density-first
+training; an absolute schedule and a narrow/wide x schedule test; a fixed validation bank with intervals.
+
+Done: absolute schedule flags (`--late-start`, `--scalar-window`); salience key + 1e-3 m (0 present-after-empty
+cells); a tapered context mask, queries scored only where the context covers 1.5 sigma; 96³ half-resolution test;
+the fixed bank `learn_night/bank/full_s03_64.pt` (64 line-bearing rotated draws, full generator 0.3, exact density
+stored) and `scripts/learn/rescore.py` (pooled medians, 90% bootstrap intervals over draws, order-free slot score,
+untrained floor). Stopped W1 (SH on top of all slot terms: does not test the density alone) and W3 (too many changes
+at once); launched N1 (narrow, R4's data and settings, only the schedule changed: late terms from 600, scalars off) and
+D1 (wide, the exact density only: every slot and scalar weight 0).
+
+**The bank (90% intervals over 64 draws; ~16k single and ~36k shared line cells):**
+
+| model | slot single | order-free single | slot shared | mixture single |
+|---|---|---|---|---|
+| untrained (narrow) | 59.4 [55.0, 64.1] | 58.9 | 56.5 [51.2, 61.0] | 61.7 |
+| R2 (narrow, flat) | 16.0 [12.9, 20.5] | 13.5 [11.3, 16.5] | 43.4 [39.2, 47.6] | 13.2 [11.1, 16.2] |
+| R4 (narrow, full) | 44.1 [41.1, 47.0] | 42.9 | 46.9 [43.6, 50.4] | 42.9 |
+| R4d (+ --distinct) | 42.9 [39.7, 47.0] | 42.5 | 49.0 [46.8, 51.2] | 41.9 |
+| L01 (narrow, backgrounds) | 38.8 [34.8, 43.1] | 38.2 | 46.8 [43.8, 49.9] | 35.6 |
+| P1@1000 (wide, full + crossings, long schedule) | 19.3 [16.9, 22.6] | 18.7 | 37.7 [34.0, 42.3] | 18.1 |
+| structure tensor | 15.2 [12.4, 19.0] | | 35.1 [32.5, 37.6] | |
+
+R4 and R4d are indistinguishable; R2 is best on single cells, P1 best on shared cells (overlapping the structure
+tensor); everything trained on hard data with R4's schedule is far worse than either.
