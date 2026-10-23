@@ -33,6 +33,11 @@ Diagnosis before the loops:
   over six slots). Presence there asks whether each slot holds a population above 0.005 mass -- faint, near-threshold
   populations make it a guess -- and it ramps in at step 300, when orientation should form. Presence is also redundant
   with the mass (min_mass is an inference predicate). Fix tried: a don't-care band (0.002-0.02) and weight 0.2.
+* Backgrounds look right but are genuinely harder (`learn_night/backgrounds_targets.png`): tissue texture makes
+  elongated blobs at the fibres' scale (orientation visibility 0.55 in the example), cells add bright and dark blobs
+  like fibre sections, regions add strong steps whose interface mass is large. On the backgrounds run (L01, step 800)
+  every term's gradient at the stem is ~10x smaller than on R2 -- the input features barely train (an input-scale /
+  contrast problem: tested by the local-contrast input, --lcn).
 * Literature (independent survey agent): FOD networks regress SH coefficients (FOD-Net); 4th-order moments separate
   crossings from sheets (Advani & Tucker); unstable matching gives conflicting targets (DN-DETR) -- add a
   matching-free path; contrast invariance inside normalisation-free nets (divisive normalisation, GDN); gradient
