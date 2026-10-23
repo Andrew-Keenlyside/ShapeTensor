@@ -365,3 +365,34 @@ Frobenius (a devcos run's gate would never open); `sh_loss_decoupled` has the sa
 keep Frobenius and add an **axis output** per slot and for the mixture, L += lambda w_t (1 - (a_hat . u_t)^2) with
 w_t = |Dt|^2 |mode_t| (its minimiser under uncertainty is a committed axis, bounded gradients, no categories); a
 best-of-2 axis hypothesis per slot (winner-takes-all) for crossings; bounded, trace-free fixes to the decoupled loss.
+
+## Morning summary (draft, 06:05 Montreal)
+
+**What was learned overnight (11 independent reviews over ~20 runs):**
+
+1. **The real failure was the round plateau**, not slot ordering, presence alone or width alone: trained from scratch
+   on the full generator, every configuration collapses to round tensors whose losses sit exactly at the round
+   floor (R4, R4d, W0, N1, D1, D2). The old metric hid it (unrotated validation draws flattered a constant axis, and
+   training options changed the metric).
+2. **What breaks the plateau:** easy, line-rich examples in the mix (W2: hand-made curriculum; P1: line-rich easy
+   data) for a wide network -- and, category-free, **the gated schedule + anisotropy-weighted sampling (G1): the best
+   model** (bank single 14.5, shared 32.4, mixture 14.1; the structure tensor 15.2 / 35.1). Width matters with it
+   (the narrow net with the curriculum stayed at narrow-without-curriculum levels).
+3. **What did not work:** shape-aware matching (no effect), the deviator loss (much worse: the hedge moves from
+   roundness into shape), density-only training (stays on the plateau, with either loss), the decoupled density loss.
+4. **Still unsolved:** second populations at crossings -- slots copy the first axis, the density head is a shrunken
+   order-2 tensor (orders >= 4 at 5-7% of the target's energy); slots still hedge round (linearity ~0.2 vs 0.86); the
+   kind head says "line" everywhere and the population count is uninformative; strength 0.6 (P1 never trained there).
+5. **Built and tested** (all committed on `population-model`): the exact per-voxel orientation density (the
+   window-averaged density of the orientations present: any shape, any sigma, coarsens exactly), descriptor densities
+   (thickness / hollowness / angularity per direction without slots), the query decoder (any point, any sigma, context
+   B as an input, cube-exact augmentation), the SH head and calibrated peaks, the reference metric (one matching rule,
+   rotated draws, single / shared cells, structure tensor), the fixed bank with paired bootstrap re-scoring, the gated
+   schedule and anisotropy sampling, the curriculum, absolute schedule flags, a disk cache, evaluations of scale,
+   resolution, context and real HiP-CT glyphs.
+
+**Recommended next (from the reviews):** make the G1 recipe the default and replicate it (2 seeds; a second seed was
+started at 06:00); add an axis output per slot (committed axis under uncertainty) and a best-of-2 / residual density
+head for second populations; weight training towards multi-population cells by the target's order >= 4 energy beyond
+a single lobe; per-order MSE density loss over running energies alongside the slot terms; presence by mass; train at
+the strengths evaluated.
