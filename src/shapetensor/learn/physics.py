@@ -89,12 +89,16 @@ def draw_sequence(rng: np.random.Generator, mode: str) -> dict:
 
 
 def form_image(mode: str, occ: torch.Tensor, tens: torch.Tensor, bg: torch.Tensor, mats: list, bgmat: dict, seq: dict,
-               contrasts=None, raw: bool = False) -> torch.Tensor:
+               contrasts=None, raw: bool = False, tex: torch.Tensor | None = None) -> torch.Tensor:
     """The image of populations with fractions ``occ (L, Z, Y, X)`` (summing to at most 1), tensors ``tens (L, 6, ...)``
     and materials ``mats`` over a background whose texture ``bg (Z, Y, X)`` (about zero mean, unit spread) modulates
-    its material ``bgmat``; ``seq`` from :func:`draw_sequence`. Grey levels, about 0-255 (``raw``: the physical map)."""
+    its material ``bgmat``; ``seq`` from :func:`draw_sequence`. Grey levels, about 0-255 (``raw``: the physical map).
+    ``tex (L, ...)``: a multiplicative texture of each population's material (its density varies inside it)."""
     _to_grey_ = (lambda x: x) if raw else _to_grey
     rest = (1 - occ.sum(0)).clamp(0, 1)
+    if tex is not None:                                                                            # texture inside each population: its
+        occ = occ * tex                                                                            # material's density varies (SynthSeg's per-label
+                                                                                                   # noise, anatomix's per-label textures)
     tex = (1 + 0.25 * bg).clamp_min(0.05)                                                       # the background's material varies with its texture
     if mode == "additive":
         img = 128 + 30 * bg

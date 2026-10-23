@@ -1,0 +1,40 @@
+#!/bin/bash
+# A ~10-minute benchmark of the lobe training on one pryor GPU: time per step (data / forward-backward / extras /
+# optimiser), samples per second, producer and CPU-worker rates, peak memory -- for several settings in turn, so a
+# long run uses the fastest. NOT submitted automatically.
+#
+#   qsub scripts/cluster/pryor_benchmark.qsub                                   # H100
+#   qsub -l gpu=true,gpu_type=a40 scripts/cluster/pryor_benchmark.qsub          # or another type
+#$ -N st_bench
+#$ -l h_rt=0:45:00
+#$ -l gpu=true,gpu_type=h100
+#$ -pe gpu 1
+#$ -l tmem=48G
+#$ -o /home/akeenlys/storage_main/bridge_project_data/logs/$JOB_NAME.$JOB_ID.log
+#$ -S /bin/bash
+#$ -cwd
+#$ -j y
+set -uo pipefail
+P=/home/akeenlys/storage_main/bridge_project_data
+ST=${ST:-$P/shapetensor}; SRC=${SRC:-$ST/ShapeTensors}; SIF=${SIF:-$P/containers/chunkreg.sif}
+OUT=$ST/bench/$JOB_ID; export TMPDIR="${TMPDIR:-/tmp/st.$$}"; mkdir -p "$TMPDIR" "$OUT"
+echo "host $(hostname) gpus=${CUDA_VISIBLE_DEVICES:-?} start $(date)"; nvidia-smi --query-gpu=name,memory.total --format=csv
+tar -xf "$ST/bundle/shape_library.tar" -C "$TMPDIR"
+RUNTIME=$(command -v apptainer || command -v singularity) || { echo "FATAL: no apptainer/singularity" >&2; exit 1; }
+run() {  # name, then extra arguments
+    local name=$1; shift
+    echo "=== $name: $*"
+    "$RUNTIME" exec --nv -B "$TMPDIR:$TMPDIR" -B "$P:$P" --env PYTHONPATH="$SRC/src",SHAPETENSOR_SHAPES="$TMPDIR/shape_library",OMP_NUM_THREADS=4 \
+        "$SIF" /opt/venv/bin/python -m shapetensor.learn.train --head lobes --out "$OUT/$name" --steps 40 --benchmark 30 --size 96 --buffer 24 \
+        --gate 0.85 --gate-max 5 --lobes-J 6 --query 128 --pairs 8 --pair-every 8 --ssl-every 8 --log-every 10 \
+        --gen '{"scene": {"canvas": 192, "crops_per_scene": 8}}' "$@" 2>&1 | grep -E "BENCHMARK|Error|Traceback|error" || true
+}
+"$RUNTIME" exec --nv "$SIF" /opt/venv/bin/python -c "import torch, numpy, zarr; print('torch', torch.__version__, 'cuda', torch.version.cuda, torch.cuda.get_device_name(0)); import importlib; [print(m, bool(importlib.util.find_spec(m))) for m in ('scipy','monai','torchio','nibabel')]"
+run inline_b2x8        --batch 2 --accum 8 --no-producer
+run producer_b2x8      --batch 2 --accum 8
+run producer_b4x4      --batch 4 --accum 4
+run producer_b8x2      --batch 8 --accum 2
+run producer_b4x4_cl   --batch 4 --accum 4 --channels-last
+run producer_b4x4_cpu4 --batch 4 --accum 4 --cpu-workers 4 --cpu-threads 4
+run producer_b4x4_comp --batch 4 --accum 4 --compile
+echo "end $(date)"

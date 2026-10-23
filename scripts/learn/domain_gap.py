@@ -21,7 +21,9 @@ import torch.nn.functional as Fn
 
 from shapetensor.filters import gaussian
 
-DEV = "cuda"
+import os
+DEV = os.environ.get("ST_DEV", "cuda")
+FIRST_ROUND = ("lut", "nonmono", "spatial", "gamma", "unsharp", "log", "relief", "field", "noise", "lines", "blocks")
 NAMES = ([f"q{q}" for q in (5, 25, 50, 75, 95)] + [f"psd{b}" for b in range(8)] + [f"grad{q}" for q in (25, 50, 75, 95)]
          + [f"coh3_{q}" for q in (25, 50, 75)] + [f"coh8_{q}" for q in (25, 50, 75)] + ["lap_kurt"])
 
@@ -70,18 +72,26 @@ def coverage(R: np.ndarray, S: np.ndarray, ref: np.ndarray, k: int = 3) -> float
     return float((Drs.min(1) <= rad).mean())
 
 
-def full_mix(n: int, size: int, seed0: int, routes: bool):
+def full_mix(n: int, size: int, seed0: int, routes, canvas: int | None = None):
     """Crops from the training mixture at full difficulty (every family, physics and draw-time route), with or without
     the batch-time contrast routes."""
-    from shapetensor.learn.augment import contrast_route
+    from shapetensor.learn import augment as AU
     from shapetensor.learn.lobe_train import difficulty_gen
     from shapetensor.learn.scene import draw_scene
-    gen = difficulty_gen(1.0, {"canvas": 2 * size, "crops_per_scene": 4}); out = []
-    for i in range(n):
-        rng = np.random.default_rng(seed0 + i)
-        _, d = draw_scene((size,) * 3, seed=seed0 + i, device=DEV, strength=float(rng.uniform(0.3, 1.0)), **gen)
-        x = d["image"].float() / 255
-        out.append(contrast_route(x, rng, 1.0) if routes else x)
+    gen = difficulty_gen(1.0, {"canvas": canvas or 2 * size, "crops_per_scene": 4}); out = []
+    saved = dict(AU.P)
+    if routes == "first":                                                                          # only the first round's batch-time routes
+        for k in AU.P:
+            if k not in FIRST_ROUND:
+                AU.P[k] = 0.0
+    try:
+        for i in range(n):
+            rng = np.random.default_rng(seed0 + i)
+            _, d = draw_scene((size,) * 3, seed=seed0 + i, device=DEV, strength=float(rng.uniform(0.3, 1.0)), **gen)
+            x = d["image"].float() / 255
+            out.append(AU.contrast_route(x, rng, 1.0) if routes else x)
+    finally:
+        AU.P.update(saved)
     return out
 
 
@@ -114,7 +124,9 @@ def main():
     print("real vs real coverage (the ceiling):", round(res["real_vs_real_coverage"], 2), flush=True)
     settings = [(f"{ph}_s{st}", lambda ph=ph, st=st: synth_crops(a.n, a.size, ph, st, 60_000_000 + 1000 * int(10 * st)))
                 for ph in ("additive", "xray", "darkfield", "histology", "pli", "mri") for st in (0.3, 0.6, 1.0)] if not a.mix_only else []
-    settings += [("mix", lambda: full_mix(3 * a.n, a.size, 61_000_000, False)), ("mix+routes", lambda: full_mix(3 * a.n, a.size, 61_000_000, True))]
+    settings += [("mix (draw-time routes)", lambda: full_mix(3 * a.n, a.size, 61_000_000, False)),
+                 ("mix + first-round routes", lambda: full_mix(3 * a.n, a.size, 61_000_000, "first")),
+                 ("mix + all routes", lambda: full_mix(3 * a.n, a.size, 61_000_000, True))]
     for name, fn in settings:
         S = np.stack([stats(x) for x in fn()])
         fd = frechet(R, S, R); cv = coverage(R, S, R); smd = (S.mean(0) - R.mean(0)) / (R.std(0) + 1e-6)

@@ -25,6 +25,7 @@ import torch.nn.functional as Fn
 
 from shapetensor.filters import gaussian
 from shapetensor.learn.lobe_train import predict_sh, sh_peaks
+from shapetensor.learn.realdata import normalise
 from shapetensor.learn.sh import n_coef
 
 DEV = "cuda"
@@ -107,7 +108,7 @@ def hipct_synthseg(models: dict, size: int = 224, per_specimen: int = 3) -> dict
                     if np.isin(lab, WM).mean() >= 0.05 and np.isin(lab, GM).mean() >= 0.05:
                         break
             img = read_stack(img_dir, sl).astype(np.float32)
-            lo, hi = np.quantile(img, [0.005, 0.995]); x = torch.tensor(np.clip((img - lo) / max(hi - lo, 1e-6), 0, 1), device=DEV)
+            x, _ = normalise(torch.tensor(img, device=DEV))                                         # the tissue's range (background either polarity)
             edge = 12
             labc = torch.tensor(lab[1::4, 1::4, 1::4].astype(np.int64), device=DEV)[edge:-edge, edge:-edge, edge:-edge]
             wm = torch.isin(labc, torch.tensor(WM, device=DEV)); gm = torch.isin(labc, torch.tensor(GM, device=DEV))
@@ -141,7 +142,7 @@ def bigbrain_layers(models: dict, size: int = 224, n: int = 4) -> dict:
         if not ((L >= 1) & (L <= 6)).mean() > 0.25:
             continue
         I = np.asarray(img[sl]).astype(np.float32)
-        lo, hi = np.quantile(I, [0.005, 0.995]); x = torch.tensor(np.clip((I - lo) / max(hi - lo, 1e-6), 0, 1), device=DEV)
+        x, _ = normalise(torch.tensor(I, device=DEV))                                               # a white slide is background, not tissue
         Lt = torch.tensor(L.astype(np.float32), device=DEV)
         depth = torch.where(Lt == 0, torch.zeros_like(Lt), Lt)                                             # outside 0, layers 1-6, white matter 7
         dsm = gaussian(depth, 6.0); g = torch.stack(torch.gradient(dsm))

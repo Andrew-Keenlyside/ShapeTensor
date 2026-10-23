@@ -204,6 +204,12 @@ class Buffer:
             i = int(torch.randint(0, len(self.items), (1,), generator=g))
             self.items[i] = self._make(strength, p_simple); self.w[i] = anisotropy(self.items[i][1]); self.simple_flag[i] = self.last_simple
 
+    def put(self, items: list, g: torch.Generator):
+        """Replace random buffer slots with ``items`` (from a producer)."""
+        for it in items:
+            i = int(torch.randint(0, len(self.items), (1,), generator=g))
+            self.items[i] = it; self.w[i] = anisotropy(it[1]); self.simple_flag[i] = False
+
     def batch(self, B: int, g: torch.Generator, alpha: float = 0.0):
         """``B`` pairs, uniformly or, with ``alpha > 0``, in proportion to their non-round target energy ** alpha."""
         if alpha > 0:
@@ -574,13 +580,29 @@ def train_lobes(out: str, steps: int = 6000, size: int = 96, batch: int = 4, acc
                 lobes_J: int = 4, context_level: bool = True, voxel_cond: bool = True, identity_dim: int = 8, points: bool = True, query: int = 0,
                 gate: float | None = 0.85, gate_max: int | None = 1500, difficulty: str = "auto", level0: float = 0.3, pairs: int = 0, pair_every: int = 4,
                 real: list | None = None, ssl_every: int = 4, voxel_dropout: float = 0.3, weights: dict | None = None, cache: str | None = None,
-                init: str | None = None, resume: str | None = None, aniso=None, free_sh: bool = False, routes: float = 1.0, contrast_views: bool = True):
+                init: str | None = None, resume: str | None = None, aniso=None, free_sh: bool = False, routes: float = 1.0, contrast_views: bool = True,
+                producer: bool = True, cpu_workers: int = 0, cpu_threads: int = 4, channels_last: bool = False, compile_model: bool = False,
+                contrast_every: int = 2, ckpt_minutes: float = 20.0, benchmark: int = 0):
     """The lobe-mixture model's training (see :mod:`~shapetensor.learn.lobe_train`): scene generator, exact density
     and descriptor targets, the gate (orientation first), difficulty widening (``auto``: a level that rises when the
-    order-2 error is low), paired-render consistency (``pairs`` > 0), self-supervised consistency on ``real`` crops."""
+    order-2 error is low), paired-render consistency (``pairs`` > 0), self-supervised consistency on ``real`` crops.
+
+    Built to run on a cluster (:mod:`~shapetensor.learn.dataflow`): pairs made by a background thread on the training
+    GPU (``producer``) and by ``cpu_workers`` CPU-only processes while the GPU trains; data parallel over the GPUs of a
+    node under ``torchrun`` (rank 0 validates, logs, saves); cuDNN autotuning and TF32, optionally channels-last and
+    ``torch.compile``; the second contrast view every ``contrast_every`` steps; a checkpoint every ``ckpt_minutes``
+    and on the scheduler's warning signal (exit 99: resubmit), ``resume='auto'`` to continue; ``benchmark`` > 0 times
+    that many steps (data, forward / backward, extra terms, optimiser) and exits."""
+    from . import dataflow as DF
     from . import lobe_train as LT
     from . import losses as _losses
     global HEAD, DESC_KEY, SH_EXACT, DESC_LMAX, QUERY, CACHE, ROUTES, VIEWS
+    rank, world, local = DF.init_distributed(device)
+    if str(device).startswith("cuda"):
+        device = f"cuda:{local}"
+        torch.cuda.set_device(device)
+        torch.backends.cudnn.benchmark = True                                                       # fixed shapes: pick the fastest convolution algorithms
+        torch.backends.cuda.matmul.allow_tf32 = True; torch.backends.cudnn.allow_tf32 = True
     HEAD, DESC_KEY, SH_EXACT, DESC_LMAX = "lobes", "descriptors5", sh_lmax, desc_lmax
     VIEWS = 2 if (routes and contrast_views) else 1
     _losses.DESC_K = 5; _losses.DESC_NC = n_coef_(desc_lmax) if desc_lmax else 0
@@ -595,47 +617,90 @@ def train_lobes(out: str, steps: int = 6000, size: int = 96, batch: int = 4, acc
     def set_routes():                                                                              # batch-time routes widen with the level
         global ROUTES
         ROUTES = routes * (0.4 + 0.6 * level["v"]) if routes else 0.0
+    main = rank == 0
     outd = Path(out); outd.mkdir(parents=True, exist_ok=True)
-    logf = open(outd / "log.jsonl", "a")
-    log = lambda m: print(m, flush=True)
+    logf = open(outd / "log.jsonl", "a") if main else None
+    def log(m):
+        if main:
+            print(m, flush=True)
+    def logj(d):
+        if main:
+            logf.write(json.dumps(d) + "\n"); logf.flush()
     args = dict(head="lobes", steps=steps, size=size, batch=batch, accum=accum, buffer=buffer, refresh=refresh, lr=lr, warmup=warmup, margin=margin, val_n=val_n,
                 seed=seed, strength0=strength0, strength1=strength1, gen={"scene": base}, widths=list(widths), sh_lmax=sh_lmax, desc_lmax=desc_lmax, lobes_J=lobes_J,
                 context_level=context_level, voxel_cond=voxel_cond, identity_dim=identity_dim, points=points, query=query, gate=gate, gate_max=gate_max,
                 difficulty=difficulty, level0=level0, pairs=pairs, pair_every=pair_every, real=real, ssl_every=ssl_every, voxel_dropout=voxel_dropout,
-                weights=weights, aniso=list(aniso) if aniso else None, free_sh=free_sh, routes=routes, contrast_views=contrast_views)
-    torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
+                weights=weights, aniso=list(aniso) if aniso else None, free_sh=free_sh, routes=routes, contrast_views=contrast_views, world=world,
+                contrast_every=contrast_every, channels_last=channels_last, compile_model=compile_model)
+    torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     model = PopulationNet.from_args(args).to(device)
     rf = receptive_field(model)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     start = 0
-    if init:
-        sd = torch.load(init, map_location=device)["model"]; own = model.state_dict()
-        sd = {k: v for k, v in sd.items() if k in own and own[k].shape == v.shape}
-        model.load_state_dict(sd, strict=False); log(f"init: {len(sd)}/{len(own)} tensors from {init}")
+    gst = {"open": gate is None, "at": None, "ema": None}
+    if resume == "auto":
+        resume = str(outd / "model.pt") if (outd / "model.pt").exists() else None
+    if init and not resume:                                                                        # warm start (weights only; grown input channels filled)
+        DF.load_partial(model, torch.load(init, map_location=device)["model"], log)
     if resume:
         ck = torch.load(resume, map_location=device)
         model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); start = ck["step"]; level["v"] = ck.get("level", level["v"])
+        gst.update(ck.get("gate", {})); level["since"] = start
+        for k_, v_ in ck.get("ema", {}).items():
+            from . import lobes as _LB
+            _LB._EMA[tuple(k_.split("|")[:1]) + (int(k_.split("|")[1]),)] = v_.to(device)
+        log(f"resumed at step {start} (level {level['v']:.1f}, gate open {gst['open']})")
+    if channels_last:
+        model = model.to(memory_format=torch.channels_last_3d)
+    fwd = torch.compile(model) if compile_model else model
     strength = lambda s_: strength0 + (strength1 - strength0) * min(1.0, s_ / (0.5 * steps))
-    log(f"model: {sum(p.numel() for p in model.parameters())} parameters, receptive field {rf} voxels; args {args}")
-    buf = Buffer(buffer, size, device, seed0=seed * 1_000_000 + start * refresh, strength=strength(start), log=log, gen=cur_gen())
-    def rotated(i):
-        img, t = make(10_000_000 + i, size, device, strength1, {"scene": {**base, "crops_per_scene": 1}})
-        return augment(img, t, torch.Generator().manual_seed(i))
-    val = [rotated(i) for i in range(val_n)]
+    log(f"model: {sum(p.numel() for p in model.parameters())} parameters, receptive field {rf} voxels, {world} GPU(s); args {args}")
+    seed0 = seed * 1_000_000_000 + rank * 100_000_000 + start * refresh * 4                         # each rank its own stream of pairs
+    buf = Buffer(buffer, size, device, seed0=seed0, strength=strength(start), log=log, gen=cur_gen())
+    cfg = {"strength": strength(start), "gen": cur_gen()}
+    prod = DF.Producer(make, size, device, buf.next + 50_000_000, cfg) if producer else None
+    cpu = None
+    if cpu_workers > 0:
+        from . import lobes as _LB
+        state = {"HEAD": HEAD, "DESC_KEY": DESC_KEY, "SH_EXACT": SH_EXACT, "DESC_LMAX": DESC_LMAX, "QUERY": QUERY, "CACHE": None,
+                 "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC}
+        cpu = DF.CpuWorkers(cpu_workers, size, buf.next + 90_000_000, cfg, state, threads=cpu_threads)
+        log(f"cpu workers: {cpu_workers} x {cpu_threads} threads")
+    val = []
+    if main and not benchmark:
+        def rotated(i):
+            img, t = make(10_000_000 + i, size, device, strength1, {"scene": {**base, "crops_per_scene": 1}})
+            return augment(img, t, torch.Generator().manual_seed(i))
+        val = [rotated(i) for i in range(val_n)]
     pbuf = LT.PairBuffer(pairs, 64, device, base) if pairs else None
-    rbuf = None
+    rbuf = None; rv = float("nan")
     if real:
         srcs = [r_.split("=")[0] for r_ in real]; rvox = [float(r_.split("=")[1]) if "=" in r_ else float("nan") for r_ in real]
-        rbuf = LT.RealBuffer(srcs, size, device, n=64, seed=seed); rv = math.log2(rvox[0]) if math.isfinite(rvox[0]) else float("nan")
+        rbuf = LT.RealBuffer(srcs, size, device, n=64, seed=seed + rank); rv = math.log2(rvox[0]) if math.isfinite(rvox[0]) else float("nan")
         log(f"real buffer: {len(rbuf.items)} crops from {srcs}")
-    v0 = LT.evaluate_lobes(model, val, margin, device, sh_lmax, desc_lmax)
-    logf.write(json.dumps({"step": start, "baseline": True, **v0}) + "\n"); logf.flush()
-    log(f"  val {start} (baseline): " + " ".join(f"{k} {x:.4f}" for k, x in v0.items()))
-    gst = {"open": gate is None, "at": None, "ema": None}
+    if main and not benchmark:
+        v0 = LT.evaluate_lobes(model, val, margin, device, sh_lmax, desc_lmax)
+        logj({"step": start, "baseline": True, **v0})
+        log(f"  val {start} (baseline): " + " ".join(f"{k} {x:.4f}" for k, x in v0.items()))
     alpha = lambda s_: aniso[0] * max(0.0, 1 - s_ / aniso[1]) if aniso else 0.0
-    t0 = time.time(); run = {}
+    ckp = DF.Checkpointer(ckpt_minutes)
+    def save(step_):
+        if not main:
+            return
+        from . import lobes as _LB
+        ema = {f"{k[0]}|{k[1]}": v.detach().cpu() for k, v in _LB._EMA.items() if torch.is_tensor(v)}
+        tmp = outd / "model.pt.tmp"
+        torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step_, "args": args, "receptive_field": rf, "level": level["v"],
+                    "gate": dict(gst), "ema": ema}, tmp)
+        os.replace(tmp, outd / "model.pt")
+    tick = (lambda: torch.cuda.synchronize(device)) if str(device).startswith("cuda") else (lambda: None)
+    bench = {k: [] for k in ("data", "main", "extra", "opt", "step")} if benchmark else None
+    t0 = time.time(); run = {}; got_pairs = 0
     set_routes()
-    for step in range(start, steps):
+    end = min(steps, start + benchmark) if benchmark else steps
+    for step in range(start, end):
+        if bench is not None:
+            tick(); ts = time.perf_counter()
         if gate is not None and not gst["open"]:
             lr_now = lr * min(1.0, (step + 1) / warmup); ro = r2 = 0.0
         else:
@@ -645,63 +710,127 @@ def train_lobes(out: str, steps: int = 6000, size: int = 96, batch: int = 4, acc
         for pg in opt.param_groups:
             pg["lr"] = lr_now
         W = {k: (LT.LOBE_WEIGHTS[k] if k in LT.ORIENT else LT.LOBE_WEIGHTS[k] * (r2 if k in ("consistency", "ssl", "contrast") else ro)) for k in LT.LOBE_WEIGHTS}
-        opt.zero_grad(set_to_none=True); tot_v = 0.0; pa = {}
-        for _ in range(accum):
+        opt.zero_grad(set_to_none=True); pa = {}; tot_v = 0.0; t_data = 0.0
+        for mb in range(accum):
+            if bench is not None:
+                tick(); td = time.perf_counter()
             x, T = buf.batch(batch, g, alpha(step))
+            if channels_last:
+                x = x.contiguous(memory_format=torch.channels_last_3d)
             v = T["voxel"].clone()
             v[torch.rand(v.shape[0], generator=g).to(v.device) < voxel_dropout] = float("nan")       # the model must also work without it
+            if bench is not None:
+                tick(); t_data += time.perf_counter() - td
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device != "cpu"):
-                P = model(x, T.get("q_points"), T.get("q_sigma"), voxel=v)
+                P = fwd(x, T.get("q_points"), T.get("q_sigma"), voxel=v)
             total, parts, rend = LT.lobe_loss(model, P, T, margin, W, sh_lmax, desc_lmax)
-            if "_view2" in T and W.get("contrast", 0) > 0 and _ == 0:                              # the same geometry by another route
+            if "_view2" in T and W.get("contrast", 0) > 0 and mb == 0 and step % max(1, contrast_every) == 0:   # the same geometry by another route
+                x2 = T["_view2"].contiguous(memory_format=torch.channels_last_3d) if channels_last else T["_view2"]
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device != "cpu"):
-                    P2 = model(T["_view2"], voxel=v)
+                    P2 = fwd(x2, voxel=v)
                 lcon = LT.contrast_consistency(model, rend["f"], P2, sh_lmax, margin)
-                total = total + W["contrast"] * lcon; parts["contrast"] = float(lcon)
-            (total / accum).backward(); tot_v += float(total) / accum
+                total = total + W["contrast"] * lcon; parts["contrast"] = lcon.detach()
+            (total / accum).backward(); tot_v = tot_v + total.detach() / accum
             for k, v_ in parts.items():
                 pa[k] = pa.get(k, 0.0) + v_ / accum
+        if bench is not None:
+            tick(); tm = time.perf_counter()
         if pbuf is not None and W["consistency"] > 0 and step % pair_every == 0:                    # paired renders
             kind = ("zoom", "modality")[(step // pair_every) % 2]
             pb = pbuf.batch(2, g, kind)
             if pb is not None:
                 xa, xb, va, vb, info = pb
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device != "cpu"):
-                    Pa = model(xa, voxel=va); Pb = model(xb, voxel=vb)
+                    Pa = fwd(xa, voxel=va); Pb = fwd(xb, voxel=vb)
                 lc = LT.zoom_consistency(model, Pa, Pb, info, sh_lmax) if kind == "zoom" else LT.modality_consistency(model, Pa, Pb, sh_lmax)
-                (W["consistency"] * lc).backward(); pa[f"cons_{kind}"] = float(lc)
+                (W["consistency"] * lc).backward(); pa[f"cons_{kind}"] = lc.detach()
             pbuf.refresh(1)
         if rbuf is not None and W["ssl"] > 0 and step % ssl_every == 0:                             # unlabelled real crops
             xr = rbuf.batch(2, g)
             ls = LT.ssl_consistency(model, xr, g, sh_lmax, margin, voxel=torch.full((xr.shape[0],), rv, device=device))
-            (W["ssl"] * ls).backward(); pa["ssl"] = float(ls)
-        ratio = pa["gate_num"] / max(pa["gate_den"], 1e-9)
-        gst["ema"] = ratio if gst["ema"] is None else 0.95 * gst["ema"] + 0.05 * ratio
+            (W["ssl"] * ls).backward(); pa["ssl"] = ls.detach()
+        if bench is not None:
+            tick(); te = time.perf_counter()
+        DF.allreduce_grads(model, world)
+        gsum = DF.allreduce_mean(torch.stack([pa["gate_num"], pa["gate_den"]]), world)              # every rank reads the same gate signal
+        gn_, gd_ = float(gsum[0]), float(gsum[1])
+        # running sums of the error and of the energy, their ratio the signal: a step whose crops hold almost no
+        # orientation energy cannot blow it up (a running mean of per-step ratios could)
+        gst["num"] = gn_ if gst.get("num") is None else 0.95 * gst["num"] + 0.05 * gn_
+        gst["den"] = gd_ if gst.get("den") is None else 0.95 * gst["den"] + 0.05 * gd_
+        gst["ema"] = gst["num"] / max(gst["den"], 1e-9); ratio = gn_ / max(gd_, 1e-9)
         if gate is not None and not gst["open"] and ((step - start >= 50 and gst["ema"] < gate) or (gate_max is not None and step + 1 >= gate_max)):
             gst["open"], gst["at"] = True, step + 1
             log(f"gate open at step {step + 1}: order-2 error / energy {gst['ema']:.3f}")
-            logf.write(json.dumps({"step": step + 1, "gate_open": True, "ratio": gst["ema"]}) + "\n"); logf.flush()
+            logj({"step": step + 1, "gate_open": True, "ratio": gst["ema"]})
         if difficulty == "auto" and gst["open"]:                                                    # widen when the current level is learned
-            level["ema"] = ratio if level["ema"] is None else 0.98 * level["ema"] + 0.02 * ratio
+            level["num"] = gn_ if level.get("num") is None else 0.98 * level["num"] + 0.02 * gn_
+            level["den"] = gd_ if level.get("den") is None else 0.98 * level["den"] + 0.02 * gd_
+            level["ema"] = level["num"] / max(level["den"], 1e-9)
             if level["v"] < 1.0 and step - level["since"] >= 300 and level["ema"] < 0.6:
-                level["v"] = min(1.0, level["v"] + 0.1); level["since"] = step; buf.gen = cur_gen(); level["ema"] = None; set_routes()
+                level["v"] = min(1.0, level["v"] + 0.1); level["since"] = step; buf.gen = cur_gen(); level["ema"] = level["num"] = level["den"] = None; set_routes()
+                cfg["gen"] = cur_gen()
+                if cpu is not None:
+                    cpu.update(gen=cfg["gen"])
                 log(f"difficulty -> {level['v']:.1f} at step {step + 1}")
-                logf.write(json.dumps({"step": step + 1, "difficulty": level["v"]}) + "\n"); logf.flush()
-        gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0))
+                logj({"step": step + 1, "difficulty": level["v"]})
+        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
         opt.step()
-        buf.refresh(refresh, g, strength(step))
-        for k, v_ in {**pa, "total": tot_v, "grad_norm": gn, "gate_ratio": gst["ema"], "level": level["v"]}.items():
+        cfg["strength"] = strength(step)
+        if cpu is not None and step % 25 == 0:
+            cpu.update(strength=cfg["strength"])
+        new = (prod.take(refresh) if prod is not None else []) + (cpu.take(refresh, device) if cpu is not None else [])
+        if prod is None and cpu is None:
+            buf.refresh(refresh, g, strength(step))
+        else:
+            buf.put(new, g); got_pairs += len(new)
+        if bench is not None:
+            tick(); tend = time.perf_counter()
+            bench["data"].append(t_data); bench["main"].append(tm - ts - t_data); bench["extra"].append(te - tm); bench["opt"].append(tend - te); bench["step"].append(tend - ts)
+        for k, v_ in {**pa, "total": tot_v, "grad_norm": gn.detach(), "gate_ratio": gst["ema"], "level": level["v"], "_n": 1}.items():
             run[k] = run.get(k, 0.0) + v_
         if (step + 1) % log_every == 0:
-            rec = {"step": step + 1, "time_s": round(time.time() - t0, 1), "lr": lr_now, "strength": strength(step), **{k: v_ / log_every for k, v_ in run.items()}}
-            logf.write(json.dumps(rec) + "\n"); logf.flush(); run = {}
+            nw = max(int(run.pop("_n", 1)), 1)                                                      # the steps in this window (a resume starts mid-window)
+            rec = {"step": step + 1, "time_s": round(time.time() - t0, 1), "lr": lr_now, "strength": strength(step),
+                   **{k: float(v_) / nw for k, v_ in run.items() if k not in ("lobe_l2_num",)}, "new_pairs_per_step": got_pairs / nw,
+                   "producer_pairs_s": prod.rate() if prod is not None else 0.0, "cpu_pairs_s": cpu.rate() if cpu is not None else 0.0}
+            if "lobe_l2_num" in run and "gate_den" in run:
+                rec["lobe_l2_ratio"] = float(run["lobe_l2_num"]) / max(float(run["gate_den"]), 1e-9)
+            logj(rec); run = {}; got_pairs = 0
             log(f"step {step + 1} {rec['time_s']}s s={rec['strength']:.2f} lv={rec['level']:.1f} total {rec['total']:.4f} sh {rec['sh']:.4f} ce {rec['ce']:.4f} "
-                f"desc {rec.get('desc', 0):.4f} id {rec.get('identity', 0):.4f} pts {rec.get('points', 0):.4f} gate {rec['gate_ratio']:.3f} lobe_l2 {rec.get('lobe_l2_ratio', float('nan')):.3f}")
-        if (step + 1) % val_every == 0 or step + 1 == steps:
-            v_ = LT.evaluate_lobes(model, val, margin, device, sh_lmax, desc_lmax)
-            logf.write(json.dumps({"step": step + 1, **v_}) + "\n"); logf.flush()
-            log(f"  val {step + 1}: " + " ".join(f"{k} {x:.4f}" for k, x in v_.items()))
-            torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step + 1, "args": args, "receptive_field": rf, "level": level["v"]}, outd / "model.pt")
+                f"aux {rec.get('aux', 0):.4f} desc {rec.get('desc', 0):.4f} id {rec.get('identity', 0):.4f} gate {rec['gate_ratio']:.3f} "
+                f"lobe_l2 {rec.get('lobe_l2_ratio', float('nan')):.3f} new/step {rec['new_pairs_per_step']:.2f}")
+        if not benchmark and ((step + 1) % val_every == 0 or step + 1 == steps):
+            if main:
+                v_ = LT.evaluate_lobes(model, val, margin, device, sh_lmax, desc_lmax)
+                logj({"step": step + 1, **v_})
+                log(f"  val {step + 1}: " + " ".join(f"{k} {x:.4f}" for k, x in v_.items()))
+            save(step + 1); ckp.last = time.time()
+        elif not benchmark and ckp.due():
+            save(step + 1); log(f"checkpoint at step {step + 1}")
+        stop = torch.tensor([1.0 if ckp.stop else 0.0], device=device)
+        if float(DF.allreduce_mean(stop, world)) > 0:                                               # the scheduler warned: save and leave for a resubmit
+            save(step + 1); log(f"stopping at step {step + 1} on the scheduler's signal (exit 99: resubmit)")
+            if prod is not None:
+                prod.close()
+            if cpu is not None:
+                cpu.close()
+            raise SystemExit(99)
+    if bench is not None and main:
+        import numpy as _np
+        k0 = max(1, len(bench["step"]) // 5)                                                        # warm-up steps (autotuning, compile) left out
+        rep = {k: round(float(_np.median(v[k0:])), 4) for k, v in bench.items() if len(v) > k0}
+        rep.update({"samples_per_s_per_gpu": round(batch * accum / max(rep.get("step", 1e9), 1e-9), 2), "gpus": world,
+                    "producer_pairs_s": round(prod.rate(), 3) if prod is not None else 0.0, "cpu_pairs_s": round(cpu.rate(), 3) if cpu is not None else 0.0,
+                    "peak_mem_gb": round(torch.cuda.max_memory_allocated(device) / 2 ** 30, 2) if str(device).startswith("cuda") else 0.0,
+                    "gpu": torch.cuda.get_device_name(device) if str(device).startswith("cuda") else "cpu", "batch": batch, "accum": accum, "size": size,
+                    "channels_last": channels_last, "compile": compile_model})
+        log("BENCHMARK " + json.dumps(rep)); logj({"benchmark": rep})
+    if prod is not None:
+        prod.close()
+    if cpu is not None:
+        cpu.close()
+    DF.finish_distributed(world)
     return model
 
 
@@ -759,6 +888,16 @@ def main():
     ap.add_argument("--free-sh", action="store_true", help="lobes ablation: free harmonics instead of lobes (same trunk, targets, losses)")
     ap.add_argument("--routes", type=float, default=1.0, help="lobes: batch-time contrast routes (transfer functions, filters, fields, noise, missing lines / blocks) at this strength (scaled by the difficulty level); 0: off")
     ap.add_argument("--no-contrast-views", action="store_true", help="lobes: no second route per pair (no contrast-consistency loss)")
+    ap.add_argument("--contrast-every", type=int, default=2, help="lobes: the second contrast view every this many steps")
+    ap.add_argument("--no-producer", action="store_true", help="lobes: make pairs in the training loop (no background producer thread)")
+    ap.add_argument("--cpu-workers", type=int, default=0, help="lobes: CPU-only pair-making processes (cluster: spare cores / --cpu-threads)")
+    ap.add_argument("--cpu-threads", type=int, default=4)
+    ap.add_argument("--channels-last", action="store_true", help="lobes: channels-last 3-D memory layout (tensor cores; benchmark first)")
+    ap.add_argument("--compile", action="store_true", help="lobes: torch.compile the network (benchmark first)")
+    ap.add_argument("--ckpt-minutes", type=float, default=20.0, help="lobes: save every this many minutes (and on SIGUSR1/2, SIGTERM)")
+    ap.add_argument("--benchmark", type=int, default=0, help="lobes: time this many steps (data / forward-backward / extras / optimiser) and exit")
+    ap.add_argument("--log-every", type=int, default=25)
+    ap.add_argument("--device", default="cuda", help="lobes: cuda (each torchrun rank its local GPU) or cpu (tests)")
     a = ap.parse_args()
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,
@@ -767,7 +906,9 @@ def main():
                     identity_dim=a.identity_dim, points=not a.no_points, query=a.query, gate=a.gate, gate_max=a.gate_max, difficulty=a.difficulty,
                     level0=a.level0, pairs=a.pairs, pair_every=a.pair_every, real=a.real, ssl_every=a.ssl_every, voxel_dropout=a.voxel_dropout,
                     weights=a.weights, cache=a.cache, init=a.init, resume=a.resume, aniso=a.aniso, free_sh=a.free_sh, routes=a.routes,
-                    contrast_views=not a.no_contrast_views)
+                    contrast_views=not a.no_contrast_views, producer=not a.no_producer, cpu_workers=a.cpu_workers, cpu_threads=a.cpu_threads,
+                    channels_last=a.channels_last, compile_model=a.compile, contrast_every=a.contrast_every, ckpt_minutes=a.ckpt_minutes,
+                    benchmark=a.benchmark, log_every=a.log_every, device=a.device)
         return
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
           seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact, desc_lmax=a.desc_lmax, context=a.context, late_start=a.late_start, scalar_window=a.scalar_window, cache=a.cache, gate=a.gate, aniso=a.aniso, shape_loss=a.shape_loss, simple_window=a.simple_window, sh_loss=a.sh_loss, axis_head=a.axis_head, gate_max=a.gate_max)

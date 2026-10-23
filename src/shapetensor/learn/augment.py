@@ -11,6 +11,11 @@ geometry, so the target (from the geometry) is unchanged:
   sign), a **relief** term (a directional derivative along a random 3-D direction: DIC-like shadow casting);
 * **fields** -- a smooth multiplicative gain and additive offset;
 * **noise** -- Gaussian at a random level, after the curve (so its spectrum and level vary independently of it);
+* **acquisition** -- each axis its own resolution and slice thickness; MRI motion (k-space segments of a translated
+  object) and spikes; a noise level varying in space; resampling artefacts (aliased downsampling, sub-voxel shifts,
+  ideal low-pass ringing); a low bit depth; lossy compression (JPEG-like block DCT, JPEG2000-like wavelet); and one
+  of MONAI's maintained transforms (histogram shift, smooth-field contrast, Gibbs, k-space spikes, low resolution,
+  Rician noise);
 * **missing data** -- **missing lines** (scan-line or detector dropouts: thin lines through the block along one axis,
   all or part of it, filled with a constant, the local mean or the neighbouring line) and **small missing blocks**
   (cuboids of 2-12 voxels: bubbles, missing tiles, dropouts; filled with a constant, noise or a blur). Small gaps
@@ -29,21 +34,26 @@ import torch.nn.functional as Fn
 
 from ..filters import gaussian
 
-P = {"lut": 0.7, "nonmono": 0.5, "spatial": 0.25, "gamma": 0.3, "unsharp": 0.3, "log": 0.15, "relief": 0.15, "field": 0.4,
-     "noise": 0.4, "lines": 0.25, "blocks": 0.25}
+P = {"lut": 0.7, "nonmono": 0.35, "spatial": 0.25, "gamma": 0.3, "unsharp": 0.3, "log": 0.15, "relief": 0.15, "field": 0.4,
+     "noise": 0.4, "lines": 0.25, "blocks": 0.25, "resolution": 0.25, "motion": 0.1, "spikes": 0.08, "varnoise": 0.2,
+     "resample": 0.15, "quantise": 0.1, "compress": 0.12, "library": 0.15, "ghosting": 0.1}
 
 
-def random_lut(rng: np.random.Generator, monotone: bool, min_tv: float = 0.6):
-    """Knots ``(xk, yk)`` of a random curve on [0, 1]: 2-8 inner knots; monotone (rising or falling) or not, its total
-    variation at least ``min_tv`` (a curve that flattens the range would erase the structure)."""
-    for _ in range(50):
+def random_lut(rng: np.random.Generator, monotone: bool, min_tv: float = 0.6, max_slope: float = 5.0, max_folds: int = 2):
+    """Knots ``(xk, yk)`` of a random curve on [0, 1]: 2-8 inner knots; monotone (rising or falling) or not (at most
+    ``max_folds`` changes of direction), its total variation at least ``min_tv`` (a curve that flattens the range would
+    erase the structure) and its slope at most ``max_slope`` (a steep segment turns the image's noise into speckle --
+    seen on real HiP-CT with unbounded curves)."""
+    for _ in range(200):
         k = int(rng.integers(2, 9))
         xk = np.concatenate([[0.0], np.sort(rng.uniform(0, 1, k)), [1.0]])
         yk = rng.uniform(0, 1, k + 2)
         if monotone:
             yk = np.sort(yk) if rng.random() < 0.5 else np.sort(yk)[::-1]
             yk = (yk - yk.min()) / max(yk.max() - yk.min(), 1e-6)                                 # full range
-        if np.abs(np.diff(yk)).sum() >= min_tv:
+        dy = np.diff(yk); slope = np.abs(dy) / np.maximum(np.diff(xk), 1e-6)
+        folds = int((np.sign(dy[1:]) * np.sign(dy[:-1]) < 0).sum())
+        if np.abs(dy).sum() >= min_tv and slope.max() <= max_slope and folds <= max_folds:
             return xk, yk
     return np.array([0.0, 1.0]), np.array([0.0, 1.0])
 
@@ -114,6 +124,196 @@ def missing_blocks(x: torch.Tensor, rng: np.random.Generator, rec: dict, max_sid
     return x
 
 
+def per_axis_resolution(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
+    """Each axis its own resolution (SynthSeg's random resolution): spacing f_a in 1-4 voxels, a slice thickness (the
+    blur's FWHM) of 0.6-1.6 x the spacing -- thickness and spacing apart -- sampled at a random phase, interpolated
+    back (nearest, linear or by Fourier zero-padding)."""
+    f = [float(math.exp(rng.uniform(0, math.log(4)))) if rng.random() < 0.6 else 1.0 for _ in range(3)]
+    if max(f) < 1.2:
+        f[int(rng.integers(0, 3))] = float(rng.uniform(1.5, 4))
+    th = [fa * float(rng.uniform(0.6, 1.6)) for fa in f]
+    y = gaussian(x, tuple(t / 2.355 if fa > 1.01 else 0.0 for t, fa in zip(th, f)), truncate=3.0)
+    small = [max(4, int(round(n / fa))) for n, fa in zip(x.shape, f)]
+    lo = Fn.interpolate(y[None, None], size=small, mode="trilinear", align_corners=False)
+    mode = ["nearest", "trilinear", "fourier"][int(rng.integers(0, 3))]
+    if mode == "fourier":
+        out = fourier_resize(lo[0, 0], x.shape)
+    else:
+        out = Fn.interpolate(lo, size=x.shape, mode=mode, **({} if mode == "nearest" else {"align_corners": False}))[0, 0]
+    rec["resolution"] = ([round(v, 2) for v in f], [round(v, 2) for v in th], mode)
+    return out
+
+
+def fourier_resize(x: torch.Tensor, shape) -> torch.Tensor:
+    """Sinc interpolation by zero-padding (or cropping) the centred spectrum: ringing at edges, as a scanner's own."""
+    K = torch.fft.fftshift(torch.fft.fftn(x.float()))
+    out = torch.zeros(tuple(shape), dtype=K.dtype, device=x.device)
+    # the zero frequency sits at n // 2 after fftshift: align it (n_in // 2 -> n_out // 2), for odd and even sizes alike
+    src = [slice(max(0, a // 2 - b // 2), max(0, a // 2 - b // 2) + min(a, b)) for a, b in zip(x.shape, shape)]
+    dst = [slice(max(0, b // 2 - a // 2), max(0, b // 2 - a // 2) + min(a, b)) for a, b in zip(x.shape, shape)]
+    out[tuple(dst)] = K[tuple(src)]
+    y = torch.fft.ifftn(torch.fft.ifftshift(out)).real * (float(np.prod(shape)) / float(np.prod(x.shape)))
+    return y
+
+
+def kspace_motion(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
+    """MRI motion: k-space lines along a phase-encode axis acquired in 2-6 segments, each with the object translated
+    (an exact Fourier phase ramp) -- ghosts and blur along that axis (TorchIO's RandomMotion, by translation)."""
+    pe = int(rng.integers(0, 3)); n = x.shape[pe]; nseg = int(rng.integers(2, 7))
+    K = torch.fft.fftn(x.float()); out = torch.zeros_like(K)
+    freqs = [torch.fft.fftfreq(m, device=x.device) for m in x.shape]
+    cuts = np.sort(rng.choice(np.arange(1, n), size=nseg - 1, replace=False)) if rng.random() < 0.6 else None
+    if cuts is not None:                                                                           # contiguous blocks of lines
+        bounds = np.concatenate([[0], cuts, [n]]); seg_of = np.zeros(n, dtype=np.int64)
+        for j in range(nseg):
+            seg_of[bounds[j]:bounds[j + 1]] = j
+    else:                                                                                          # interleaved lines
+        seg_of = rng.integers(0, nseg, n)
+    perm = np.argsort(np.argsort(np.fft.fftfreq(n)))                                              # line index in acquisition (centre-out) order
+    seg_of = seg_of[perm]
+    seg_t = torch.tensor(seg_of, device=x.device)
+    for j in range(nseg):
+        t = rng.normal(0, rng.uniform(0.5, 3.0), 3) if j else np.zeros(3)
+        ph = sum(freqs[a].view([-1 if b == a else 1 for b in range(3)]) * float(t[a]) for a in range(3))
+        sel = (seg_t == j).view([-1 if b == pe else 1 for b in range(3)])
+        out = out + K * torch.exp(-2j * math.pi * ph) * sel
+    rec["motion"] = (pe, nseg)
+    return torch.fft.ifftn(out).abs()
+
+
+def kspace_ghosting(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
+    """MRI ghosting: every n-th k-space line along a phase-encode axis scaled (TorchIO's RandomGhosting) -- n - 1
+    faint copies of the object shifted by multiples of N / n along that axis (the centre line kept)."""
+    pe = int(rng.integers(0, 3)); n = int(rng.integers(2, 7)); a = float(rng.uniform(0.3, 1.0))
+    K = torch.fft.fftn(x.float()); m = x.shape[pe]
+    w = torch.ones(m, device=x.device); w[::n] = 1 - a; w[0] = 1.0
+    K = K * w.view([-1 if b == pe else 1 for b in range(3)])
+    rec["ghosting"] = (pe, n, round(a, 2))
+    return torch.fft.ifftn(K).abs()
+
+
+def kspace_spikes(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
+    """k-space spikes (herringbone stripes; TorchIO's RandomSpike, MONAI's RandKSpaceSpikeNoise)."""
+    K = torch.fft.fftn(x.float()); m = float(K.abs().max()); n = int(rng.integers(1, 4))
+    for _ in range(n):
+        idx = tuple(int(rng.integers(0, s)) for s in x.shape)
+        K[idx] = K[idx] + float(rng.uniform(0.05, 0.4)) * m * complex(math.cos(rng.uniform(0, 6.28)), math.sin(rng.uniform(0, 6.28)))
+    rec["spikes"] = n
+    return torch.fft.ifftn(K).abs()
+
+
+def resample_artefacts(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
+    """What resampling does to data: an aliased (unfiltered) downsampling, a sub-voxel Fourier shift, an ideal low-pass
+    (ringing) -- each then brought back to the grid."""
+    kind = ["alias", "shift", "lowpass"][int(rng.integers(0, 3))]
+    if kind == "alias":
+        f = int(rng.integers(2, 4)); o = [int(rng.integers(0, f)) for _ in range(3)]
+        small = x[o[0]::f, o[1]::f, o[2]::f]
+        y = Fn.interpolate(small[None, None], size=x.shape, mode="nearest" if rng.random() < 0.5 else "trilinear")[0, 0]
+    elif kind == "shift":
+        t = rng.uniform(-0.5, 0.5, 3); K = torch.fft.fftn(x.float())
+        ph = sum(torch.fft.fftfreq(m, device=x.device).view([-1 if b == a else 1 for b in range(3)]) * float(t[a]) for a, m in enumerate(x.shape))
+        y = torch.fft.ifftn(K * torch.exp(-2j * math.pi * ph)).real
+    else:
+        keep = float(rng.uniform(0.35, 0.8))
+        small = [max(4, int(n * keep)) for n in x.shape]
+        y = fourier_resize(fourier_resize(x, small), x.shape)
+    rec["resample"] = kind
+    return y
+
+
+def quantise(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
+    """A low bit depth (3-6 bits): posterised intensities."""
+    b = int(rng.integers(3, 7)); q = 2 ** b - 1
+    rec["quantise"] = b
+    return torch.round(x.clamp(0, 1) * q) / q
+
+
+_DCT: dict = {}
+
+
+def compress(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
+    """Lossy compression: JPEG-like (8x8 block DCT per slice along a random axis, coefficients quantised by a table
+    growing with frequency) or JPEG2000-like (a three-level Haar wavelet with its detail coefficients quantised)."""
+    if rng.random() < 0.6:
+        key = str(x.device)
+        if key not in _DCT:
+            n = torch.arange(8, dtype=torch.float32, device=x.device)
+            C = torch.cos(math.pi * (2 * n[None] + 1) * n[:, None] / 16) * math.sqrt(2 / 8); C[0] /= math.sqrt(2)
+            _DCT[key] = C
+        C = _DCT[key]; ax = int(rng.integers(0, 3)); y = x.movedim(ax, 0)
+        A, B, D = y.shape; pb, pd = (-B) % 8, (-D) % 8
+        yp = Fn.pad(y[None], (0, pd, 0, pb), mode="replicate")[0]
+        blocks = yp.reshape(A, (B + pb) // 8, 8, (D + pd) // 8, 8).permute(0, 1, 3, 2, 4)
+        coef = C @ blocks @ C.T
+        qual = float(rng.uniform(0.01, 0.07)); fq = torch.arange(8, device=x.device, dtype=torch.float32)
+        Q = qual * (1 + fq[:, None] + fq[None, :])
+        coef = torch.round(coef / Q) * Q
+        rebuilt = (C.T @ coef @ C).permute(0, 1, 3, 2, 4).reshape(A, B + pb, D + pd)[:, :B, :D]
+        rec["compress"] = ("jpeg", ax, round(qual, 3))
+        return rebuilt.movedim(0, ax)
+    # Haar wavelet, three levels (dims padded to a multiple of 8)
+    pads = [(-n) % 8 for n in x.shape]
+    y = Fn.pad(x[None, None], (0, pads[2], 0, pads[1], 0, pads[0]), mode="replicate")[0, 0]
+    q = float(rng.uniform(0.01, 0.06)); levels = []; cur = y
+    for _ in range(3):
+        a = cur
+        for d in range(3):                                                                         # along each axis: averages and differences
+            e, o = a.narrow(d, 0, a.shape[d]).unfold(d, 2, 2).unbind(-1)
+            a = torch.cat([(e + o) / 2, (e - o) / 2], d)
+        lo = a[: a.shape[0] // 2, : a.shape[1] // 2, : a.shape[2] // 2].clone()
+        det = a.clone(); det[: a.shape[0] // 2, : a.shape[1] // 2, : a.shape[2] // 2] = 0
+        det = torch.round(det / q) * q
+        levels.append((det, a.shape)); cur = lo
+    rec_ = cur
+    for det, shp in reversed(levels):
+        a = det.clone(); a[: shp[0] // 2, : shp[1] // 2, : shp[2] // 2] = rec_
+        for d in reversed(range(3)):
+            h = a.shape[d] // 2
+            s_, df = a.narrow(d, 0, h), a.narrow(d, h, h)
+            a = torch.stack([s_ + df, s_ - df], -1).movedim(-1, d + 1).reshape(a.shape)
+        rec_ = a
+    rec["compress"] = ("wavelet", round(q, 3))
+    return rec_[: x.shape[0], : x.shape[1], : x.shape[2]]
+
+
+def library_route(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
+    """One transform from the maintained libraries: MONAI (on the tensor's device) -- histogram shift, smooth-field
+    contrast, Gibbs ringing, k-space spikes, simulated low resolution, Rician noise -- or TorchIO (CPU) -- motion,
+    ghosting, spikes, bias field, anisotropy. Each costs 1-120 ms per 96^3 volume (tools_check.py)."""
+    try:
+        import monai.transforms as mt
+    except Exception:
+        return x
+    choices = [lambda: mt.RandHistogramShift(num_control_points=(4, 12), prob=1.0),
+               lambda: mt.RandSmoothFieldAdjustContrast(spatial_size=tuple(x.shape), rand_size=(4, 4, 4), gamma=(0.4, 2.5), prob=1.0),
+               lambda: mt.RandGibbsNoise(prob=1.0, alpha=(0.3, 0.8)),
+               lambda: mt.RandKSpaceSpikeNoise(prob=1.0, intensity_range=(10, 13)),
+               lambda: mt.RandSimulateLowResolution(prob=1.0, zoom_range=(0.3, 0.8)),
+               lambda: mt.RandRicianNoise(prob=1.0, std=0.05, relative=True)]
+    try:                                                                                           # TorchIO's (CPU) k-space and field transforms
+        import torchio as tio
+        tchoices = [lambda: tio.RandomMotion(degrees=5, translation=4, num_transforms=int(rng.integers(1, 4))),
+                    lambda: tio.RandomGhosting(num_ghosts=(2, 8), intensity=(0.3, 1.0)), lambda: tio.RandomSpike(num_spikes=(1, 3), intensity=(0.3, 1.0)),
+                    lambda: tio.RandomBiasField(coefficients=0.5), lambda: tio.RandomAnisotropy(downsampling=(1.5, 5))]
+    except Exception:
+        tchoices = []
+    k = int(rng.integers(0, len(choices) + len(tchoices)))
+    if k >= len(choices):                                                                           # TorchIO draws from torch's global generator:
+        t = tchoices[k - len(choices)]()                                                            # seed it from ours for reproducibility
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(int(rng.integers(0, 2 ** 31 - 1)))
+            y = t(tio.ScalarImage(tensor=x[None].float().cpu())).data[0].float()
+        rec["library"] = "torchio." + type(t).__name__
+        return y.to(x.device)
+    t = choices[k]()
+    t.set_random_state(seed=int(rng.integers(0, 2 ** 31 - 1)))
+    y = t(x[None].float())
+    y = y.as_tensor() if hasattr(y, "as_tensor") else y
+    rec["library"] = "monai." + type(t).__name__
+    return torch.as_tensor(y, device=x.device)[0].float()
+
+
 def contrast_route(x: torch.Tensor, rng: np.random.Generator, strength: float = 1.0, g: torch.Generator | None = None,
                    rec: dict | None = None) -> torch.Tensor:
     """One random contrast route for an image ``x (Z, Y, X)`` in 0-1 (see the module docstring); returns 0-1."""
@@ -148,9 +348,31 @@ def contrast_route(x: torch.Tensor, rng: np.random.Generator, strength: float = 
             + float(rng.uniform(0, 0.15)) * smooth_field(y.shape, float(rng.uniform(15, 60)), y.device, g); rec["field"] = True
     lo, hi = torch.quantile(y.flatten()[:: max(1, y.numel() // 50000)], torch.tensor([0.002, 0.998], device=y.device))
     y = ((y - lo) / (hi - lo).clamp_min(1e-6)).clamp(0, 1)                                          # back to the full range
+    if on("resolution"):
+        y = per_axis_resolution(y, rng, rec)
+    if on("resample"):
+        y = resample_artefacts(y, rng, rec)
+    if on("motion"):
+        y = kspace_motion(y, rng, rec)
+    if on("spikes"):
+        y = kspace_spikes(y, rng, rec)
+    if on("ghosting"):
+        y = kspace_ghosting(y, rng, rec)
+    if on("library"):
+        y = library_route(y, rng, rec)
+    lo, hi = torch.quantile(y.flatten()[:: max(1, y.numel() // 50000)], torch.tensor([0.002, 0.998], device=y.device))
+    y = ((y - lo) / (hi - lo).clamp_min(1e-6)).clamp(0, 1)
     if on("noise"):
         sd = float(math.exp(rng.uniform(math.log(0.004), math.log(0.06))))
         y = (y + sd * torch.randn(y.shape, device=y.device, generator=g)).clamp(0, 1); rec["noise"] = round(sd, 3)
+    if on("varnoise"):                                                                             # a noise level that varies across the block
+        sd = float(math.exp(rng.uniform(math.log(0.005), math.log(0.05))))
+        fld = torch.exp(float(rng.uniform(0.3, 1.0)) * smooth_field(y.shape, float(rng.uniform(15, 50)), y.device, g))
+        y = (y + sd * fld * torch.randn(y.shape, device=y.device, generator=g)).clamp(0, 1); rec["varnoise"] = round(sd, 3)
+    if on("compress"):
+        y = compress(y, rng, rec).clamp(0, 1)
+    if on("quantise"):
+        y = quantise(y, rng, rec)
     if on("lines"):
         y = missing_lines(y, rng, rec)
     if on("blocks"):

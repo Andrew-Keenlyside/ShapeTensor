@@ -66,8 +66,46 @@ def layer_density(s, drawn: dict, points: torch.Tensor, sigmas: torch.Tensor, lm
     return out
 
 
+_LAMBDA: dict = {}
+
+
+def _watson_table(lmax: int, device, kmax: float = 25.0, step: float = 0.025):
+    """Funk--Hecke coefficients of the Watson density on a grid of concentrations (interpolated)."""
+    key = (lmax, str(device))
+    if key not in _LAMBDA:
+        from .lobes import watson_lambda
+        ks = torch.arange(-kmax, kmax + step / 2, step, device=device)
+        _LAMBDA[key] = (ks, watson_lambda(ks, lmax).T.contiguous(), step, kmax)                    # (n_k, L)
+    return _LAMBDA[key]
+
+
+def axial_density_sh(S: torch.Tensor, kappa: float, lmax: int, tk: float = 0.05):
+    """Closed-form SH of ``exp(kappa u^T S u)`` (each normalised to integral 4 pi) for trace-1 tensors ``S (6, m)`` that
+    are axially symmetric: prolate (two smallest eigenvalues equal, kappa x their gap below ``tk``: a Watson lobe of concentration
+    kappa (l3 - l1) about the long axis), oblate (two largest equal: a girdle, -kappa (l3 - l1) about the normal) or
+    isotropic. Returns the coefficients ``(nc, m)`` and the mask of tensors handled (the rest need quadrature)."""
+    from .generator import eig3
+    from .lobes import sh_poly
+    ev, V = eig3(S)                                                                                 # ascending; V[i] the i-th eigenvector (3, m)
+    spread = ev[2] - ev[0]
+    pro = (ev[1] - ev[0]) * kappa < tk                                                             # the neglected factor exp(kappa gap) < e^tk
+    obl = (ev[2] - ev[1]) * kappa < tk
+    iso = spread * kappa < tk
+    ok = pro | obl | iso
+    k_eff = torch.where(iso, torch.zeros_like(spread), torch.where(pro, kappa * spread, -kappa * spread))
+    axis = torch.where(pro[None], V[2], V[0]).T                                                    # (m, 3)
+    ks, tab, step, kmax = _watson_table(lmax, S.device)
+    pos = ((k_eff.clamp(-kmax, kmax) + kmax) / step).clamp(0, ks.numel() - 1.001)
+    i0 = pos.floor().long(); w = (pos - i0)[:, None]
+    lam = tab[i0] * (1 - w) + tab[i0 + 1] * w                                                      # (m, L)
+    reps = torch.tensor([2 * l + 1 for l in range(0, lmax + 1, 2)], device=S.device)
+    lam_c = torch.repeat_interleave(lam, reps, dim=1)                                              # (m, nc)
+    c = (4 * math.pi) * lam_c * sh_poly(axis, lmax)
+    return c.T, ok
+
+
 def voxel_density(s, drawn: dict, lmax: int, kappa: float = 20.0, n: int = 600, chunk: int = 32768, floor: float = 1e-4,
-                  desc_lmax: int = 0, desc_key: str = "descriptors") -> torch.Tensor:
+                  desc_lmax: int = 0, desc_key: str = "descriptors", analytic: bool = False) -> torch.Tensor:
     """The exact per-voxel orientation density in SH, ``(n_coef, Z, Y, X)``: at every voxel, the sum over the shape
     layers of its visible occupancy times the angular density of its own label tensor (each lobe normalised over the
     sphere). A Gaussian window of any sigma applied to it is the window-averaged density of the orientations present
@@ -107,9 +145,16 @@ def voxel_density(s, drawn: dict, lmax: int, kappa: float = 20.0, n: int = 600, 
                 o_ = ovk[ii] if ovk.numel() > 1 else ovk
                 Sv = Sv * o_ + (1 - o_) * iso[:, None]
             Sv = Sv / (Sv[0] + Sv[1] + Sv[2]).clamp_min(1e-9)                                          # trace 1
-            e = torch.exp(kappa * (quad @ Sv - 1))                                                     # (n, m)
-            e = e / e.mean(0, keepdim=True).clamp_min(1e-30)
-            c = b.proj @ e                                                                             # (nc, m)
+            if analytic:                                                                               # axially symmetric tensors in closed form
+                c, okk = axial_density_sh(Sv, kappa, lmax)
+                rest = (~okk).nonzero()[:, 0]
+                if rest.numel():                                                                       # the others by quadrature on the sphere grid
+                    e = torch.exp(kappa * (quad @ Sv[:, rest] - 1)); e = e / e.mean(0, keepdim=True).clamp_min(1e-30)
+                    c[:, rest] = b.proj @ e
+            else:
+                e = torch.exp(kappa * (quad @ Sv - 1))                                                 # (n, m)
+                e = e / e.mean(0, keepdim=True).clamp_min(1e-30)
+                c = b.proj @ e                                                                         # (nc, m)
             Ff[:nc, ii] += c * w[ii]
             if nd and D is not None:
                 q = D[k].reshape(nq, -1)[:, ii].float()                                                # (nq, m)
@@ -118,12 +163,22 @@ def voxel_density(s, drawn: dict, lmax: int, kappa: float = 20.0, n: int = 600, 
     return F
 
 
-def sample_density(F: torch.Tensor, points: torch.Tensor, sigmas: torch.Tensor) -> torch.Tensor:
-    """The per-voxel density ``F (c, Z, Y, X)`` windowed at each query's sigma and sampled at its point: ``(Q, c)``."""
+def sample_density(F: torch.Tensor, points: torch.Tensor, sigmas: torch.Tensor, fast: bool = True) -> torch.Tensor:
+    """The per-voxel density ``F (c, Z, Y, X)`` windowed at each query's sigma and sampled at its point: ``(Q, c)``.
+    With ``fast``, a wide window is computed on a block-averaged grid (blocks of f = 2 from sigma 3, 4 from sigma 6;
+    the block's own variance (f^2 - 1) / 12 taken off the Gaussian's): the windowed field is smooth at that scale, the
+    cost drops by f^3 (the queries were the training data's largest cost)."""
     out = torch.zeros(points.shape[0], F.shape[0], device=F.device)
     for lev in torch.unique(sigmas).tolist():
         q = sigmas == lev
-        out[q] = _sample(gaussian(F, lev, truncate=3.0), points[q]).T
+        f = 1 if (not fast or lev < 3.0) else (2 if lev < 6.0 else 4)
+        if f == 1:
+            out[q] = _sample(gaussian(F, lev, truncate=3.0), points[q]).T
+            continue
+        n = [d // f * f for d in F.shape[1:]]
+        Fc = Fn.avg_pool3d(F[:, :n[0], :n[1], :n[2]][None].float(), f)[0]
+        sc = math.sqrt(max(lev * lev - (f * f - 1) / 12.0, 0.25)) / f
+        out[q] = _sample(gaussian(Fc, sc, truncate=3.0), (points[q] - (f - 1) / 2.0) / f).T
     return out
 
 

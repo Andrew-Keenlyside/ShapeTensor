@@ -44,8 +44,32 @@ WF = (1.0, 1.0, 1.0, 2.0, 2.0, 2.0)                    # Frobenius weights of th
 
 
 def _pool(x: torch.Tensor, sigma_w: float, step: int) -> torch.Tensor:
-    """``(C, Z, Y, X)`` -> Gaussian window then the lattice average, ``(C, z, y, x)``."""
-    return Fn.avg_pool3d(gaussian(x, sigma_w, truncate=3.0)[None], step)[0]
+    """``(C, Z, Y, X)`` -> Gaussian window then the lattice average, ``(C, z, y, x)``. Computed one axis at a time --
+    blur along an axis, then average its ``step``-blocks, then the next axis on the smaller array -- which equals the
+    full blur followed by the block average exactly (filtering along one axis commutes with averaging along another)
+    at ~40 % of the work."""
+    from ..filters import kernel1d, filter_axis
+    k = kernel1d(float(sigma_w), 0, 3.0)
+    y = x
+    for ax in (-3, -2, -1):
+        y = filter_axis(y, k, ax)
+        n = y.shape[ax] // step * step
+        y = y.narrow(ax, 0, n)
+        shp = list(y.shape); a = ax % y.dim()
+        y = y.reshape(shp[:a] + [n // step, step] + shp[a + 1:]).mean(a + 1)
+    return y
+
+
+def fraction_target(s: Sample, drawn: dict, sigma_w: float = 5.0, step: int = 4) -> torch.Tensor:
+    """Only the cell's visible shape volume (what :func:`target` calls ``fraction``) -- the lobe model needs nothing
+    else from the slot targets: one pooling of the summed visible occupancy of the shape layers (linear)."""
+    occ, vis = drawn["occupancy"], drawn["visibility"]
+    vis = vis.view(-1, 1, 1, 1) if vis.dim() == 1 else vis
+    ks = [k for k, L in enumerate(s.layers) if L.role == "shape"]
+    if not ks:
+        return torch.zeros([n // step for n in occ.shape[1:]], device=occ.device)
+    w = (occ[ks] * vis[ks]).sum(0, keepdim=True)
+    return _pool(w, sigma_w, step)[0].clamp(0, 1)
 
 
 def _axis(T: torch.Tensor, kind: torch.Tensor) -> torch.Tensor:

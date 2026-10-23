@@ -1,6 +1,8 @@
 """The object-scene generator: exact geometry, identities, topology, packing, units, compatibility with the targets."""
 import math
 
+import numpy as np
+
 import pytest
 import torch.nn.functional as Fn
 import torch
@@ -255,3 +257,64 @@ def test_every_family_renders():
         sc = Scene((48, 48, 48), 4, DEV, 5.0).build(fam, (1, 1), 1.0 if name == "radial" else 0.0); ren = sc.render()
         for g in ren["groups"]:
             assert torch.isfinite(g["tensor"]).all() and float(g["occupancy"].max()) <= 1.0
+
+
+# ---- draw-time routes: texture, shared intensities, specimen edges, global affine
+
+def test_specimen_edge_removes_everything_beyond_it():
+    s, d = draw_scene((48, 48, 48), seed=21, device=DEV, strength=0.0, canvas=64, p_boundary=1.0, p_warp=0.0, p_affine=0.0)
+    out = s.record["boundary"][0]; assert 0.05 < out < 0.7
+    occ = sum(d["occupancy"][k] for k, L in enumerate(s.layers) if hasattr(L, "desc5"))
+    inside = (s.labels != int(s.labels.max())).float()                                          # the medium has its own label
+    lab_out = Fn.max_pool3d(inside[None, None], 5, stride=1, padding=2)[0, 0] == 0              # the medium beyond the soft edge's reach
+    assert bool(lab_out.any()) and float(occ[lab_out].max()) < 0.02
+    assert not bool((d["identity"][lab_out] >= 0).any())
+
+
+def test_texture_and_shared_intensities_run_and_are_recorded():
+    s, d = draw_scene((32, 32, 32), seed=4, device=DEV, strength=0.2, canvas=64, p_texture=1.0, p_merge=1.0, physics="xray", p_blend=0, p_aniso=0, p_scramble=0)
+    r = d["record"]["routes"]; assert "texture" in r and torch.isfinite(d["image"].float()).all()
+    s, d = draw_scene((32, 32, 32), seed=4, device=DEV, strength=0.2, canvas=64, p_texture=1.0, p_merge=1.0, physics="additive", p_blend=0, p_aniso=0, p_scramble=0)
+    assert torch.isfinite(d["image"].float()).all()
+
+
+def test_affine_shears_the_tensors_with_the_image():
+    from shapetensor.learn.generator import eig3
+    s, d = draw_scene((48, 48, 48), seed=6, device=DEV, strength=0.0, canvas=64, p_affine=1.0, p_warp=0.0)
+    assert "affine" in d["record"] and d["warp_grid"] is not None
+    A = np.array(d["record"]["affine"]).reshape(3, 3)
+    assert np.abs(A - np.eye(3)).max() > 1e-3
+    T = d["tensors"]; assert torch.isfinite(T).all()
+
+
+# ---- real shapes: NeuroMorpho neurons, BigBrain cortical layouts (skipped without the shape library)
+
+def test_neuron_family_renders_real_morphologies():
+    from shapetensor.learn.scene import neuron_files
+    if not neuron_files():
+        pytest.skip("no shape library")
+    fam = {k: (1.0 if k == "neuron" else 0.0) for k in Scene.FAMILIES}
+    got = 0
+    for sd in range(6):
+        sc = Scene((64, 64, 64), sd, DEV, 2.0).build(fam, (1, 1), 0.0); ren = sc.render()
+        occ = sum(float(g["occupancy"].sum()) for g in ren["groups"] if g["group"].name == "neuron")
+        got += occ > 1.0
+        for g in ren["groups"]:
+            assert torch.isfinite(g["tensor"]).all()
+    assert got >= 3
+
+
+def test_real_cortical_layout_orders_the_layers():
+    from shapetensor.learn.scene import cortical_surfaces
+    if cortical_surfaces("left") is None:
+        pytest.skip("no shape library")
+    ok = 0
+    for sd in range(8):
+        sc = Scene((64, 64, 64), 200 + sd, DEV, 20.0)
+        if not sc.layout_real():
+            continue
+        D = sc.depth; assert torch.isfinite(D).all()
+        n = sc.normal_field                                                                        # depth increases along its own gradient
+        assert float(n.norm(dim=0).mean()) > 0.9
+        ok += 1
+    assert ok >= 6

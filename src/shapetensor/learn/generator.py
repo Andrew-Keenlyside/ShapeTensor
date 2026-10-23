@@ -806,9 +806,9 @@ def _warp_grid(disp: torch.Tensor):
     return (p * scale - 1.0).flip(0).movedim(0, -1)[None]
 
 
-def _resample(vol: torch.Tensor, grid: torch.Tensor, mode="bilinear") -> torch.Tensor:
+def _resample(vol: torch.Tensor, grid: torch.Tensor, mode="bilinear", padding: str = "border") -> torch.Tensor:
     v = vol[None, None] if vol.dim() == 3 else vol[None]
-    out = Fn.grid_sample(v, grid, mode=mode, padding_mode="border", align_corners=True)
+    out = Fn.grid_sample(v, grid, mode=mode, padding_mode=padding, align_corners=True)
     return out[0, 0] if vol.dim() == 3 else out[0]
 
 
@@ -979,7 +979,7 @@ CROSS_MIX = 0.08                   # every nuisance outside the chosen modality'
 
 
 def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, modality: str | None = None, warp: bool | None = None,
-             fast: bool = False, hp_max: float | None = None, vis_opts: dict | None = None) -> dict:
+             fast: bool = False, hp_max: float | None = None, vis_opts: dict | None = None, affine: bool = False) -> dict:
     # ``strength`` (0-1) scales the probability and the magnitude of every nuisance that destroys information (PSF,
     # resolution, thick slices, k-space truncation, noise, artefacts); geometric and monotone remaps are not scaled
     """One draw of a modality's acquisition on a clean sample (``hipct`` / ``ct`` / ``mri`` / ``histology`` /
@@ -1008,25 +1008,40 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     R = s.regions if s.regions is not None else torch.zeros_like(img)
     K = occ.shape[0]; stretch = torch.ones_like(img); grid = None
     # ---- geometry: an elastic warp; labels follow; shape tensors by the Jacobian (S -> J⁻¹ S J⁻ᵀ), never folding
-    if (warp if warp is not None else on("warp")):
-        sig = lu(8, 30); amp = u(0, 6)
-        n3 = torch.stack([smooth_noise((Z, Y, X), sig, g, device) for _ in range(3)])
+    do_warp = bool(warp if warp is not None else on("warp"))
+    if do_warp or affine:
+        # a global affine (shear, anisotropic scale: shrinkage, section compression, voxel calibration) about the centre,
+        # plus the elastic field; the tensors follow the Jacobian of the whole displacement
+        aff = torch.zeros((3, Z, Y, X), device=device)
+        if affine:
+            A = np.eye(3) + np.diag([u(-0.2, 0.2) for _ in range(3)])
+            for (i, j) in ((0, 1), (0, 2), (1, 2)):
+                if u(0, 1) < 0.5:
+                    A[i, j] = u(-0.15, 0.15) if u(0, 1) < 0.5 else 0.0
+            At = torch.tensor(A - np.eye(3), dtype=torch.float32, device=device)
+            c = torch.tensor([(Z - 1) / 2, (Y - 1) / 2, (X - 1) / 2], device=device).view(3, 1, 1, 1)
+            aff = torch.einsum("ij,j...->i...", At, _coords((Z, Y, X), device) - c)
+            rec["affine"] = [round(float(v), 3) for v in A.flatten()]
+        sig = lu(8, 30); amp = u(0, 6) if do_warp else 0.0
+        n3 = torch.stack([smooth_noise((Z, Y, X), sig, g, device) for _ in range(3)]) if do_warp else torch.zeros_like(aff)
         for _ in range(10):
-            J = _jacobian(n3 * amp); det = float(torch.linalg.det(J).min())
+            J = _jacobian(n3 * amp + aff); det = float(torch.linalg.det(J).min())
             if det > 0.2:
                 break
             amp *= 0.7
         else:
-            amp = 0.0; J = _jacobian(n3 * amp); det = 1.0
-        disp = n3 * amp; grid = _warp_grid(disp)
-        img = _resample(img, grid); occ = _resample(occ, grid); R = _resample(R, grid)
-        Tw = _resample(T.reshape(K * 6, Z, Y, X), grid).reshape(K, 6, Z, Y, X)
+            amp = 0.0; J = _jacobian(aff); det = float(torch.linalg.det(J).min())
+        disp = n3 * amp + aff; grid = _warp_grid(disp)
+        pad = "reflection" if affine else "border"                                             # an affine reaches past the faces: tissue continues
+        img = _resample(img, grid, padding=pad); occ = _resample(occ, grid, padding=pad); R = _resample(R, grid, padding=pad)
+        Tw = _resample(T.reshape(K * 6, Z, Y, X), grid, padding=pad).reshape(K, 6, Z, Y, X)
+        rec["warp_padding"] = pad
         Ji = torch.linalg.inv(J)
         S = Ji[None] @ full3(Tw.permute(0, 2, 3, 4, 1)) @ Ji.transpose(-1, -2)[None]
         S = S / S.diagonal(dim1=-2, dim2=-1).sum(-1)[..., None, None].clamp_min(1e-9)
         T = sym6(S).permute(0, 4, 1, 2, 3).contiguous(); rec["warp"] = (round(amp, 2), round(sig, 1), round(det, 2))
         stretch = torch.linalg.det(J).clamp_min(1e-3) ** (-1.0 / 3.0)                            # shapes appear this much larger in the warped image
-        Dsc = _resample(Dsc.reshape(K * 3, Z, Y, X), grid).reshape(K, 3, Z, Y, X)
+        Dsc = _resample(Dsc.reshape(K * 3, Z, Y, X), grid, padding=pad).reshape(K, 3, Z, Y, X)
         Dsc[:, 0] = Dsc[:, 0] * stretch[None]
     # ---- the acquisition frame: the acquisition axis becomes dim 0 for every photometric nuisance
     ax = _int(0, 3); rec["axis"] = ax

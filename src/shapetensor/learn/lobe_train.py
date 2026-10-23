@@ -70,11 +70,11 @@ def lobe_loss(model, P: dict, T: dict, margin: int = 4, weights: dict | None = N
     if "aux_sh" in P:                                                                              # the auxiliary free-harmonics head
         out["aux"] = LB.sh_mse_running(c(P["aux_sh"].float()), c(ct), "aux", update=update)
     total = sum(W[k] * v for k, v in out.items())
-    parts = {k: float(v) for k, v in out.items()}
-    t2 = c(ct)[:, 1:6]; den = float((t2 ** 2).sum())
+    parts = {k: v.detach() for k, v in out.items()}                                               # tensors: converted once per log, not per term
+    t2 = c(ct)[:, 1:6]
     p2 = c(P["aux_sh"].float())[:, 1:6] if "aux_sh" in P else c(f)[:, 1:6]                         # the gate's signal: order 2 vs its energy
-    parts["gate_num"] = float(((p2 - t2) ** 2).sum()); parts["gate_den"] = den
-    parts["lobe_l2_ratio"] = float(((c(f)[:, 1:6] - t2) ** 2).sum()) / max(den, 1e-9)
+    parts["gate_num"] = ((p2 - t2) ** 2).sum().detach(); parts["gate_den"] = (t2 ** 2).sum().detach()
+    parts["lobe_l2_num"] = ((c(f).detach()[:, 1:6] - t2) ** 2).sum()                               # the lobes' own order-2 error (pooled, not a mean of ratios)
     return total, parts, {"f": f, "lob": lob}
 
 
@@ -168,32 +168,44 @@ class PairBuffer:
 
 
 class RealBuffer:
-    """Random crops of unlabelled real volumes (OME-Zarr levels or 3-D arrays), normalised to 0-1 by robust
-    quantiles, for the self-supervised consistency terms."""
+    """Random crops of unlabelled real volumes (OME-Zarr levels or 3-D arrays) holding at least ``min_tissue`` tissue
+    (background of either polarity found by :func:`~shapetensor.learn.realdata.background_mask`), normalised by the
+    tissue's robust range (the medium clipped or kept, at random), for the self-supervised consistency terms."""
 
-    def __init__(self, sources: list, size: int, device, n: int = 64, seed: int = 0):
+    def __init__(self, sources: list, size: int, device, n: int = 64, seed: int = 0, min_tissue: float = 0.5):
         import zarr
         self.size, self.device = size, device
         rng = np.random.default_rng(seed); self.items = []
         arrs = []
         for src in sources:
             path, _, level = src.partition("@")
+            if path.endswith(".npz"):                                                              # pre-extracted crops (a cluster job's local copy)
+                z = np.load(path)
+                crops = z["crops"]
+                for i in rng.permutation(crops.shape[0])[:n]:
+                    c = crops[i]
+                    if c.shape[0] < size:
+                        continue
+                    o = [int(rng.integers(0, c.shape[k] - size + 1)) for k in range(3)]
+                    self.items.append(torch.tensor(c[o[0]:o[0] + size, o[1]:o[1] + size, o[2]:o[2] + size], dtype=torch.uint8, device=device))
+                continue
             a = zarr.open(path, mode="r")
             if hasattr(a, "keys") and not hasattr(a, "shape"):
                 a = a[level or "0"]
             arrs.append(a)
         tries = 0
-        while len(self.items) < n and tries < 20 * n:
+        while arrs and len(self.items) < n and tries < 20 * n:
             tries += 1
             a = arrs[rng.integers(0, len(arrs))]
             o = [int(rng.integers(0, max(1, s - size))) for s in a.shape[-3:]]
             x = np.asarray(a[tuple(slice(p, p + size) for p in o)], dtype=np.float32)
-            if x.shape != (size,) * 3:
+            if x.shape != (size,) * 3 or float(x.std()) < 1e-6:
                 continue
-            lo, hi = np.quantile(x, [0.005, 0.995])
-            if hi - lo < 1e-6 or (x > lo + 0.02 * (hi - lo)).mean() < 0.5:                       # mostly empty (outside the sample)
+            from .realdata import normalise
+            y, share = normalise(torch.tensor(x, device=device), clip_medium=bool(rng.random() < 0.5))
+            if share < min_tissue:                                                                 # mostly background, dark or bright
                 continue
-            self.items.append(torch.tensor(np.clip((x - lo) / (hi - lo), 0, 1) * 255, dtype=torch.uint8, device=device))
+            self.items.append((y * 255).round().to(torch.uint8))
 
     def batch(self, B: int, g: torch.Generator):
         idx = torch.randint(0, len(self.items), (B,), generator=g).tolist()
@@ -334,7 +346,9 @@ def evaluate_lobes(model, val: list, margin: int, device, lmax: int = 8, desc_lm
                 pts_c.append(float(torch.corrcoef(torch.stack([a_, b_]))[0, 1]))
         fr.append((torch.sigmoid(crop(P["fraction_logit"]).float()).flatten(), crop(T["fraction"]).float().flatten()))
     model.train()
-    out = {f"val_{k}": v for k, v in acc.items()}
+    out = {f"val_{k}": float(v) for k, v in acc.items()}
+    if "val_lobe_l2_num" in out:
+        out["val_lobe_l2_ratio"] = out.pop("val_lobe_l2_num") / max(out["val_gate_den"], 1e-9)
     out["val_unexplained_l2"] = num2 / max(den2, 1e-9); out["val_unexplained_l4p"] = num4 / max(den4, 1e-9)
     Pc, Tc, Mc = torch.cat(P_sh, 1), torch.cat(T_sh, 1), torch.cat(M_t)
     Dp, Vp = sh_peaks(Pc, lmax); Dt, Vt = sh_peaks(Tc, lmax)

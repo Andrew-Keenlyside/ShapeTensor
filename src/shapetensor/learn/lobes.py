@@ -171,7 +171,7 @@ def sh_mse_running(pred: torch.Tensor, tgt: torch.Tensor, key: str = "sh", floor
     fl = (floor_mass * math.sqrt(4 * math.pi)) ** 2
     for i, b in enumerate(bl):
         k = (key, i)
-        e = float((tgt[:, b].float() ** 2).sum(1).mean()) if (update or k not in _EMA) else _EMA[k]
+        e = (tgt[:, b].float() ** 2).sum(1).mean().detach() if (update or k not in _EMA) else _EMA[k]   # on the device: no host sync
         if update:
             _EMA[k] = e if k not in _EMA else decay * _EMA[k] + (1 - decay) * e
         norm = _EMA.get(k, e) + 0.1 * fl

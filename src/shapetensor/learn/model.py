@@ -58,10 +58,13 @@ class Down(nn.Module):
         self.max_first = max_first
 
     def forward(self, x):
-        c = x.shape[1]
         if self.max_first:
             x = Fn.max_pool3d(Fn.pad(x, (1, 1, 1, 1, 1, 1), mode="replicate"), 3, stride=1)
-        x = Fn.conv3d(Fn.pad(x, (1, 1, 1, 1, 1, 1), mode="replicate"), self.k.expand(c, 1, 4, 4, 4), stride=2, groups=c)
+        # the binomial [1 3 3 1] / 8 at stride 2 as three box-2 averages (two at stride 1, the last at stride 2): the same
+        # numbers as the depthwise 4^3 convolution (k, kept for old checkpoints), without cuDNN's slow depthwise 3-D path
+        x = Fn.pad(x, (1, 1, 1, 1, 1, 1), mode="replicate")
+        x = Fn.avg_pool3d(Fn.avg_pool3d(x, 2, stride=1), 2, stride=1)
+        x = Fn.avg_pool3d(x, 2, stride=2)
         return self.proj(x)
 
 

@@ -126,6 +126,60 @@ def training_inputs(out: Path, n: int = 24):
     plt.tight_layout(rect=(0, 0, 1, 0.97)); fig.savefig(out / "training_inputs.png", dpi=55); plt.close(fig)
 
 
+def new_items(out: Path, seed: int = 8 * 4331):
+    """``new_items.png``: the second round -- draw-time texture, shared intensities, a specimen edge, a global shear;
+    batch-time per-axis resolution, MRI motion, ghosting, spikes, varying noise, resampling, bit depth, JPEG / wavelet
+    compression, a MONAI / TorchIO transform; and the real shapes -- a NeuroMorpho neuron, a BigBrain cortical window."""
+    size, canvas = 96, CANVAS
+    fam = {k: (2.0 if k == "bundle" else 1.0 if k in ("cells", "tree") else 0.0) for k in Scene.FAMILIES}
+    common = dict(canvas=canvas, crops_per_scene=1, families=fam, n_groups=[3, 4], voxel_um=4.0, crop=((canvas - size) // 2,) * 3, modality="mixed",
+                  physics="xray", p_blend=0, p_aniso=0, p_scramble=0, p_texture=0, p_merge=0, p_boundary=0, p_affine=0, p_warp=0)
+    panels = []
+    s0, d0 = draw_scene((size,) * 3, seed=seed, device=DEV, strength=0.0, **common)
+    panels.append(("x-ray, no routes (no acquisition)", d0["image"][size // 2].float().cpu().numpy()))
+    for name, kw in (("texture inside populations", dict(p_texture=1.0)), ("shared intensities", dict(p_merge=1.0)),
+                     ("specimen edge", dict(p_boundary=1.0)), ("global shear + scale", dict(p_affine=1.0))):
+        s, d = draw_scene((size,) * 3, seed=seed, device=DEV, strength=0.0, **{**common, **kw})
+        panels.append((name, d["image"][size // 2].float().cpu().numpy()))
+    base = d0["image"].float() / 255
+    for op, title in (("resolution", "per-axis resolution"), ("motion", "MRI motion"), ("ghosting", "k-space ghosting"), ("spikes", "k-space spikes"),
+                      ("varnoise", "noise varying in space"), ("resample", "resampling artefact"), ("quantise", "low bit depth"), ("compress", "compression"),
+                      ("library", "MONAI / TorchIO")):
+        rec = {}
+        saved = dict(AU.P)
+        try:
+            for k in AU.P:
+                AU.P[k] = 0.0
+            AU.P[op] = 1.0
+            y = AU.contrast_route(base, np.random.default_rng(21), 1.0, rec=rec)
+        finally:
+            AU.P.update(saved)
+        panels.append((f"{title}: {rec.get(op, '')}"[:48], y[size // 2].cpu().numpy()))
+    fam_n = {k: (1.0 if k == "neuron" else 0.0) for k in Scene.FAMILIES}
+    best = None
+    for k in range(12):                                                                            # a neuron with plenty of neurites in view
+        sc = Scene((canvas,) * 3, 900 + k, DEV, 2.0).build(fam_n, (1, 1), 0.0); ren = sc.render()
+        occ = sum(g["occupancy"] for g in ren["groups"])
+        v = float((occ.amax(0) > 0.05).float().mean()) if torch.is_tensor(occ) else 0.0
+        if best is None or v > best[0]:
+            best = (v, occ, sc.record["families"][-1]["neuron"])
+    panels.append((f"NeuroMorpho {best[2]['cell_type'][:22]} (label MIP)", best[1].amax(0).clamp(0, 0.3).cpu().numpy()))
+    fam_c = {k: (1.0 if k in ("cells", "radial") else 0.0) for k in Scene.FAMILIES}
+    for k in range(20):
+        sc = Scene((canvas,) * 3, 300 + k, DEV, 15.0)
+        if sc.layout_real() and 0.1 < sc.record["layout"]["outside"] < 0.5:
+            break
+    panels.append((f"BigBrain window: layers I-VI, white matter ({sc.record['layout']['bigbrain']})", torch.floor(sc.depth[canvas // 2].clamp(-1, 7)).cpu().numpy()))
+    n = len(panels); c = 6; r = (n + c - 1) // c
+    fig, ax = plt.subplots(r, c, figsize=(3.2 * c, 3.4 * r))
+    for a_, (t, im) in zip(ax.flat, panels):
+        a_.imshow(im, cmap="viridis" if "layer coordinate" in t else "gray"); a_.set_title(t, fontsize=8); a_.axis("off")
+    for a_ in ax.flat[n:]:
+        a_.axis("off")
+    fig.suptitle("second round: draw-time and batch-time routes, and real shapes")
+    plt.tight_layout(rect=(0, 0, 1, 0.97)); fig.savefig(out / "new_items.png", dpi=60); plt.close(fig)
+
+
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--out", default="/home/andrew/bridge_wmcov/shapetensor/results/dev_pipeline/scene_generator")
     ap.add_argument("--only", nargs="*")
@@ -134,6 +188,8 @@ def main():
         main_routes(out); print("wrote routes_one_scene", flush=True)
     if not a.only or "inputs" in a.only:
         training_inputs(out); print("wrote training_inputs", flush=True)
+    if not a.only or "new" in a.only:
+        new_items(out); print("wrote new_items", flush=True)
 
 
 if __name__ == "__main__":

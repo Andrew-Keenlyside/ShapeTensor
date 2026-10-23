@@ -47,6 +47,36 @@ def _grey(x: torch.Tensor) -> torch.Tensor:
     return _to_grey(x)
 
 H = 0.5                                    # sampling step of the renderer (voxels): 8 points per voxel volume
+SHAPE_LIB = None                           # the real-shape library (scripts/learn/fetch_shapes.py); None: $SHAPETENSOR_SHAPES or the default
+_LIB: dict = {}
+
+
+def _library():
+    import os
+    from pathlib import Path
+    return Path(SHAPE_LIB or os.environ.get("SHAPETENSOR_SHAPES", "/home/andrew/bridge_wmcov/shapetensor/shape_library"))
+
+
+def neuron_files() -> list:
+    if "neurons" not in _LIB:
+        d = _library() / "neurons"
+        _LIB["neurons"] = sorted(d.glob("*.npz")) if d.exists() else []
+    return _LIB["neurons"]
+
+
+def cortical_surfaces(hemi: str):
+    """The BigBrain layer surfaces of a hemisphere, pial (0) to white (6): vertices (um), outward normals, KD-trees."""
+    key = ("surf", hemi)
+    if key not in _LIB:
+        from scipy.spatial import cKDTree
+        d = _library() / "surfaces"; out = []
+        for k in range(7):
+            f = d / f"layer{k}_{hemi}.npz"
+            if not f.exists():
+                _LIB[key] = None; return None
+            z = np.load(f); out.append({"V": z["vertices"].astype(np.float64), "N": z["normals"].astype(np.float64), "tree": cKDTree(z["vertices"])})
+        _LIB[key] = out
+    return _LIB[key]
 
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -417,7 +447,7 @@ class Scene:
 
     FAMILIES = {"bundle": 0.24, "tree": 0.11, "network": 0.05, "helix": 0.04, "sheet": 0.09, "foam": 0.04, "porous": 0.03,
                 "cells": 0.09, "crystals": 0.04, "radial": 0.04, "plywood": 0.04, "fascicles": 0.05, "trabecular": 0.03,
-                "tubules": 0.04, "epithelium": 0.03, "dendrite": 0.02, "gland": 0.02}
+                "tubules": 0.04, "epithelium": 0.03, "dendrite": 0.02, "gland": 0.02, "neuron": 0.03}
 
     def __init__(self, shape, seed: int, device="cuda", voxel_um: float | None = None, content: str = "general"):
         self.shape = tuple(shape); self.device = device; self.r = Rng(seed, device); self.seed = seed
@@ -429,6 +459,7 @@ class Scene:
         self.parents = {}                                  # object id -> parent id (nuclei in cells, fibres in bundles)
         self.obj_r = {}                                    # object id -> its smallest radius (voxels): which level of the hierarchy resolves
         self.depth = None                                  # the laminar depth coordinate (voxels), if a layout was drawn
+        self.outside = None                                # (Z, Y, X) bool: beyond the specimen (a real cortical layout's pial side)
         self.record = {"voxel_um": round(self.voxel_um, 2), "families": []}
 
     # ---- helpers
@@ -465,7 +496,53 @@ class Scene:
         return self.r.u(lo, hi) * (1 if self.r.p(0.5) else -1)
 
     # ---- layout: laminae along a folded depth coordinate
+    def layout_real(self) -> bool:
+        """A real cortical layout from the BigBrain layer surfaces (Wagstyl et al. 2020): a window of the canvas's extent at
+        the scene's voxel size, centred near a random pial point (pial side to white matter), in a random orientation.
+        The depth coordinate is the continuous layer index (0 pial ... 6 white; < 0 outside the brain, > 6 white matter)
+        from signed distances to the seven surfaces (their nearest vertices' tangent planes, on a coarse grid,
+        interpolated); bands are the layers, cell densities follow a laminar profile, the outside is beyond the specimen."""
+        r = self.r; hemi = "left" if r.p(0.5) else "right"
+        S = cortical_surfaces(hemi)
+        if S is None:
+            return False
+        for _ in range(20):                                                                   # not the medial wall (pial = white there)
+            i0 = r.i(0, S[0]["V"].shape[0] - 1); v0, n0 = S[0]["V"][i0], S[0]["N"][i0]
+            thick = float(S[6]["tree"].query(v0[None])[0][0])
+            if thick > 800:
+                break
+        else:
+            return False
+        centre = v0 - n0 * r.u(-0.2, 1.1) * thick
+        Rm = _rot(r, 1)[0].cpu().numpy().astype(np.float64)
+        G = 33; ax = np.linspace(-0.5, 0.5, G)
+        g = np.stack(np.meshgrid(ax, ax, ax, indexing="ij"), -1).reshape(-1, 3) * (np.array(self.shape) * self.voxel_um)
+        Xw = centre + g @ Rm.T                                                              # physical um of the coarse grid
+        sdist = []
+        for k in range(7):
+            d, j = S[k]["tree"].query(Xw, k=6)
+            w = 1.0 / np.maximum(d, 1e-3)
+            sk = (((S[k]["V"][j] - Xw[:, None]) * S[k]["N"][j]).sum(-1) * w).sum(1) / w.sum(1)   # > 0: deeper than surface k
+            sdist.append(sk)
+        sd = np.stack(sdist, 1); tau = thick / 6
+        depth = np.where(sd[:, 0] < 0, sd[:, 0] / tau, 6 + np.maximum(sd[:, 6], 0) / tau)
+        for k in range(6):                                                                  # between surfaces k and k+1
+            inside = (sd[:, k] >= 0) & (sd[:, k + 1] < 0)
+            depth = np.where(inside, k + sd[:, k] / np.maximum(sd[:, k] - sd[:, k + 1], 1e-6), depth)
+        D = torch.tensor(depth.reshape(G, G, G), dtype=torch.float32, device=self.device)
+        self.depth = Fn.interpolate(D[None, None], size=self.shape, mode="trilinear", align_corners=True)[0, 0]
+        self.bands = [float(k) for k in range(7)]
+        prof = [0.0, 0.15, 0.9, 0.6, 0.9, 0.6, 0.7, 0.2]                                     # outside, I-VI, white matter
+        self.band_density = [max(0.0, p_ * r.u(0.7, 1.3)) for p_ in prof]
+        gz, gy, gx = torch.gradient(self.depth)
+        self.normal_field = Fn.normalize(torch.stack([gz, gy, gx]), dim=0)
+        self.outside = self.depth < -0.05
+        self.record["layout"] = {"bigbrain": hemi, "vertex": i0, "thickness_um": round(thick), "outside": round(float(self.outside.float().mean()), 2)}
+        return True
+
     def layout(self):
+        if self.r.p(0.5) and self.layout_real():
+            return
         r = self.r; Z, Y, X = self.shape
         n0 = r.unit(); a = torch.tensor([1.0, 0, 0], device=self.device) if abs(float(n0[0])) < 0.9 else torch.tensor([0, 1.0, 0], device=self.device)
         e1 = Fn.normalize(torch.linalg.cross(n0, a), dim=0); e2 = torch.linalg.cross(n0, e1)
@@ -985,6 +1062,71 @@ class Scene:
         self.obstacles.append((C, R))
         return g
 
+    def neuron(self):
+        """A real neuron (or glial cell) from NeuroMorpho.org (standardised SWC), at the scene's voxel size, rotated and
+        placed at random: its neurites as curves (radius along them from the reconstruction), its soma a solid; two
+        populations by branch side (the thinner child changes side at every branching), one object."""
+        files = neuron_files()
+        if not files:
+            return None
+        r = self.r; fsel = files[r.i(0, len(files) - 1)]; z = np.load(fsel)
+        P_um, R_um, par, typ = z["nodes"].astype(np.float64), z["radii"].astype(np.float64), z["parents"], z["types"]
+        soma = np.nonzero(typ == 1)[0]
+        root = soma[0] if soma.size else int(np.nonzero(par < 0)[0][0])
+        Rm = _rot(r, 1)[0].cpu().numpy().astype(np.float64)
+        c = self.centre_point(0.3).cpu().numpy()
+        P = (P_um - P_um[root]) @ Rm.T / self.voxel_um + c; R = np.maximum(R_um / self.voxel_um, 0.05)
+        n = P.shape[0]; nch = np.bincount(par[par >= 0], minlength=n)
+        kids = [[] for _ in range(n)]
+        for i in range(n):
+            if par[i] >= 0:
+                kids[par[i]].append(i)
+        chain = -np.ones(n, dtype=np.int64); chains, start_par, side = [], [], []
+        for i in range(n):                                                                    # SWC lists a parent before its children
+            p_ = par[i]
+            if typ[i] == 1:
+                continue
+            if p_ >= 0 and chain[p_] >= 0 and nch[p_] == 1 and typ[p_] == typ[i]:
+                chain[i] = chain[p_]; chains[chain[i]].append(i)
+            else:
+                chain[i] = len(chains); chains.append([i]); start_par.append(p_)
+                ps = side[chain[p_]] if (p_ >= 0 and chain[p_] >= 0) else 0
+                sib = [j for j in kids[p_] if j != i] if p_ >= 0 else []                           # the thicker child keeps its parent's side
+                side.append(ps if not sib or R[i] >= max(R[j] for j in sib) else 1 - ps)
+        lo, hi = -8.0, np.array(self.shape) + 8.0
+        curves = []
+        for ci, ids in enumerate(chains):
+            idx = ([start_par[ci]] if start_par[ci] >= 0 else []) + ids
+            Q = P[idx]; rr = R[idx]
+            if not ((Q > lo) & (Q < hi)).all(1).any() or Q.shape[0] < 2:
+                continue
+            seg = np.linalg.norm(np.diff(Q, axis=0), axis=1); cum = np.concatenate([[0], np.cumsum(seg)])
+            if cum[-1] < 1.0:
+                continue
+            t = np.arange(0, cum[-1] + 1e-9, H)
+            curves.append((np.stack([np.interp(t, cum, Q[:, a]) for a in range(3)], 1), np.interp(t, cum, rr), side[ci]))
+        if not curves:
+            return None
+        curves = sorted(curves, key=lambda c_: -c_[0].shape[0])[:800]
+        oid = int(self.ids(1, float(np.median(R)))[0]); contrast = self.contrast(); out = []
+        for sd in (0, 1):
+            cs = [c_ for c_ in curves if c_[2] == sd]
+            if not cs:
+                continue
+            S = max(c_[0].shape[0] for c_ in cs)
+            Pt = np.zeros((len(cs), S, 3)); Rt = np.zeros((len(cs), S))
+            for j, (q, rr, _) in enumerate(cs):
+                Pt[j, :q.shape[0]] = q; Pt[j, q.shape[0]:] = q[-1]; Rt[j, :q.shape[0]] = rr
+            Pt = torch.tensor(Pt, dtype=torch.float32, device=self.device); Rt = torch.tensor(Rt, dtype=torch.float32, device=self.device)
+            cv = curves_like(Pt, Rt, r, obj=torch.full((len(cs),), oid, device=self.device), seg=torch.arange(len(cs), device=self.device), contrast=contrast)
+            out.append(Group("neuron", "line", float(np.median(R)), contrast, curves=[cv]))
+        if soma.size:                                                                         # the soma: a solid of its reconstructed radius
+            rs = float(R[soma].max())
+            out.append(self._solids(C=torch.tensor(P[root][None], dtype=torch.float32, device=self.device),
+                                    A=torch.eye(3, device=self.device)[None] * rs * r.u(0.9, 1.3), name="soma", oid=torch.tensor([oid], device=self.device)))
+        self.record["families"].append({"neuron": {"file": fsel.stem, "cell_type": str(z["cell_type"]) if "cell_type" in z else "", "chains": len(curves)}})
+        return out
+
     def crystals(self):
         """Compact solids (polyhedra, shards, superquadrics), placed without overlap, each its own object: a blob
         population whose tensors are the solids' second moments (rendered as points: no device synchronisation)."""
@@ -1279,14 +1421,32 @@ class Scene:
 # a training pair: a crop of a rendered scene, composited, acquired
 # ------------------------------------------------------------------------------------------------------------------
 
-_CACHE: dict = {}
+import threading
+
+_TLS = threading.local()                   # one scene cache per thread: the background producer and the main thread render apart
 CACHE_SCENES = 3
+
+
+def _scene_cache() -> dict:
+    if not hasattr(_TLS, "cache"):
+        _TLS.cache = {}
+    return _TLS.cache
+
+
+class _CacheProxy:
+    """``_CACHE.clear()`` clears the calling thread's scene cache (kept for scripts that call it)."""
+    def clear(self):
+        _scene_cache().clear()
+
+
+_CACHE = _CacheProxy()
 
 
 def render_scene(canvas, scene_seed: int, device, voxel_um=None, families=None, n_groups=(1, 5), layout_p=0.3, content="general", style=None):
     """The scene (cached: crops of one scene are drawn in sequence) and its background on the whole canvas -- a
     texture, regions and possibly a cell stain, so crops at any zoom of one scene share them."""
     key = (tuple(canvas), scene_seed, str(device), voxel_um, str(families), tuple(n_groups), layout_p, content, style)
+    _CACHE = _scene_cache()
     if key in _CACHE:
         _CACHE[key] = _CACHE.pop(key)                                       # most recently used last
     else:
@@ -1333,6 +1493,23 @@ def _point_map(pts: torch.Tensor, origin, zoom: int, shape, device) -> torch.Ten
     return m
 
 
+def sample_mask(shape, rng: Rng, device) -> torch.Tensor:
+    """A specimen's edge across a crop: a gently curved surface (a plane with smooth relief, or a sphere's cap) with
+    10-60 % of the crop beyond it; 1 inside the tissue, 0 outside, a one-voxel soft edge."""
+    g = torch.stack(torch.meshgrid(*[torch.arange(n, device=device, dtype=torch.float32) for n in shape], indexing="ij"), -1)
+    c = torch.tensor([n / 2 for n in shape], device=device)
+    n = rng.unit(); out_frac = rng.u(0.1, 0.6)
+    if rng.p(0.6):
+        h = (g - c) @ n
+        relief = rng.u(0, 8) * smooth_noise(shape, rng.lu(10, 40), rng.g, device)
+        d = h + relief
+    else:                                                                    # the cap of a large sphere
+        R0 = rng.lu(1.0, 6.0) * max(shape); ctr = c - n * R0
+        d = R0 - (g - ctr).norm(dim=-1)
+    thr = float(torch.quantile(d.flatten()[:: max(1, d.numel() // 100000)], 1 - out_frac))
+    return torch.sigmoid((thr - d) / 0.5)
+
+
 def _slice_profile(img, rng: Rng, rec: dict):
     """Native anisotropic acquisition: slices of thickness ``t`` (a Gaussian or box profile) every ``sp`` voxels along a
     random axis (a gap when ``sp > t``), at a random phase, interpolated back to the grid."""
@@ -1361,14 +1538,14 @@ def _slice_profile(img, rng: Rng, rec: dict):
     return y.movedim(-1, ax).contiguous()
 
 
-def _extra_acquisition(img, layers, rng: Rng, modality: str, rec: dict):
+def _extra_acquisition(img, layers, rng: Rng, modality: str, rec: dict, strength: float = 1.0):
     """Artefacts the acquisition model lacks: native slice profiles (MRI, histology), histology tears (tissue missing
     along a crack, labels removed with it) and folds (a band of a section doubled), local-tomography truncation (low
-    frequencies lost) for HiP-CT / CT."""
-    shp = img.shape
-    if modality in ("mri", "histology", "mixed") and rng.p(0.35):
+    frequencies lost) for HiP-CT / CT. Each scaled by the acquisition ``strength`` (0: none -- the curriculum's clean start)."""
+    shp = img.shape; sg = float(min(max(strength, 0.0), 1.0))
+    if modality in ("mri", "histology", "mixed") and rng.p(0.35 * sg):
         img = _slice_profile(img, rng, rec)
-    if modality in ("histology", "mixed") and rng.p(0.3):
+    if modality in ("histology", "mixed") and rng.p(0.3 * sg):
         k = rng.i(1, 3); a = rng.i(0, shp[0] - 1); n = noise2d(shp[1], shp[2], rng.lu(6, 20), rng)
         crack = (n.abs() < rng.u(0.02, 0.08)).float()
         sl = slice(max(0, a - k), min(shp[0], a + k))
@@ -1376,12 +1553,12 @@ def _extra_acquisition(img, layers, rng: Rng, modality: str, rec: dict):
         for L in layers:
             L.occupancy[sl] = L.occupancy[sl] * (1 - crack)
         rec["tear"] = (a, k)
-    if modality in ("histology", "mixed") and rng.p(0.2):
+    if modality in ("histology", "mixed") and rng.p(0.2 * sg):
         a = rng.i(1, shp[0] - 2); b0 = rng.i(0, shp[1] - 8); w = rng.i(3, 8)
         if b0 + 2 * w <= shp[1]:                                            # the neighbouring band folded over it
             img[a, b0:b0 + w] = img[a, b0:b0 + w] + 0.6 * img[a, b0 + w:b0 + 2 * w]
         rec["fold"] = (a, b0, w)
-    if modality in ("hipct", "ct", "mixed") and rng.p(0.3):
+    if modality in ("hipct", "ct", "mixed") and rng.p(0.3 * sg):
         s = rng.lu(10, 40); alpha = rng.u(0.2, 0.8)
         img = img - alpha * (gaussian(img, s) - img.mean())
         rec["local_tomography"] = (round(s, 1), round(alpha, 2))
@@ -1398,7 +1575,8 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
                canvas: int = 128, crops_per_scene: int = 8, voxel_um: float | None = None, families: dict | None = None,
                n_groups=(1, 5), layout_p: float = 0.3, content: str = "general", style: str | None = None, second_contrast: bool = False,
                zoom: int = 1, physics: str | None = None, p_physics: float = 0.75, p_warp: float = 0.5, acq_seed: int | None = None,
-               crop: tuple | None = None, identity_min_r: float = 1.5, p_blend: float = 0.35, p_aniso: float = 0.25, p_scramble: float = 0.3):
+               crop: tuple | None = None, identity_min_r: float = 1.5, p_blend: float = 0.35, p_aniso: float = 0.25, p_scramble: float = 0.3,
+               p_texture: float = 0.5, p_merge: float = 0.25, p_boundary: float = 0.2, p_affine: float = 0.3):
     """A training pair from an object scene, in the format of :func:`~shapetensor.learn.generator.draw`: ``(Sample,
     drawn)``. Scenes are rendered on a ``canvas``³ grid and ``crops_per_scene`` consecutive seeds share one (cut at
     different places), so a scene's cost is spread over its crops.
@@ -1412,7 +1590,11 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     * contrast routes at image formation: ``p_blend`` -- a blend with a second physics (either polarity), ``p_aniso`` -- an
       orientation-dependent term (``sin^2`` or ``cos^2`` of each population's angle to a random direction, its own
       amplitude and sign) under any physics, ``p_scramble`` -- each population and background region its own offset.
-      With :mod:`~shapetensor.learn.augment` at batch time, one geometry reaches the network through many contrasts.
+      With :mod:`~shapetensor.learn.augment` at batch time, one geometry reaches the network through many contrasts;
+    * before visibility is measured (so the targets ask only for what shows): ``p_texture`` -- each population's material
+      varies inside it (its own grain and depth); ``p_merge`` -- populations as intense as the background or as another
+      (SynthSeg's shared classes); ``p_boundary`` -- the specimen's edge (medium beyond it, nothing to find there);
+      ``p_affine`` -- a global shear and anisotropic scale with the warp (tensors, identities and descriptors follow).
 
     ``drawn`` also carries ``ids``/``id_frac`` (the two heaviest objects per voxel), ``identity`` (the object at the level
     the resolution separates: smaller than ``identity_min_r`` voxels -> its parent), ``descriptors5`` (per layer:
@@ -1452,25 +1634,65 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
         L.desc5 = d5.clone(); L.cmap = cm[0]; L.name = g_.name
         layers.append(L)
     shapes_ = layers + extra
-    img = _composite(bg, R, shapes_, device)                                 # normalises the occupancies, adds the interface and isotropic states
     lum = _crop(ren["lumen"], sl, zoom); lum_c = _crop(ren["lumen"] * ren["lumen_c"], sl, zoom) / lum.clamp_min(1e-9)
     rec = {"scene": sid, "crop": o, "zoom": zoom, "style": st, **sc.record}
+    M = None
+    if ra.p(p_boundary):                                                     # the specimen's edge: tissue on one side, medium on the other
+        M = sample_mask(shape, ra, device)
+    if sc.outside is not None:                                               # a real cortical layout: nothing beyond the pial surface
+        Mo = 1.0 - _crop(sc.outside.float(), sl, zoom)
+        M = Mo if M is None else M * Mo
+    medium = None
+    if M is not None and float(M.min()) < 0.5:
+        for L in shapes_:
+            L.occupancy = L.occupancy * M
+        lum = lum * M
+        kind = ["dark", "bright", "mid"][int(ra.np.choice(3, p=[0.4, 0.4, 0.2]))]             # air / a dark mount, glass / a white slide, agar / paraffin
+        med = {"dark": ra.u(0, 35), "bright": ra.u(220, 255), "mid": ra.u(35, 220)}[kind]
+        medium = (med, ra.u(0, 6), ra.u(0, 8), kind)                                           # level, noise, faint texture
+        R = M * R + (1 - M) * med                                                              # the specimen's surface is a step (an interface)
+        lab = torch.where(M > 0.5, lab, torch.full_like(lab, int(lab.max()) + 1))
+        rec["boundary"] = (round(float(1 - M.mean()), 2), kind)
+    img = _composite(bg, R, shapes_, device)                                 # normalises the occupancies, adds the interface and isotropic states
     mode = physics or (ra.np.choice(PHYS_BY_MODALITY[modality]) if ra.p(p_physics) else "additive")
     n_sh = len(layers) + len(extra)
     filled = sum((L.occupancy for L in shapes_[:n_sh]), torch.zeros(shape, device=device))
     occs = torch.stack([L.occupancy for L in shapes_[:n_sh]] + [torch.minimum(lum, (1 - filled).clamp_min(0))])
     tens = torch.stack([L.tensor for L in shapes_[:n_sh]] + [eye6(device).view(6, 1, 1, 1).expand(6, *shape) / 3])
     texture = (bg - bg.mean()) / bg.std().clamp_min(1e-6)
+    tex = None
+    if ra.p(p_texture):                                                      # texture inside each population (its own grain and depth)
+        tex = torch.stack([(1 + ra.u(0.05, 0.5) * smooth_noise(shape, ra.lu(0.6, 6.0), ra.g, device)).clamp_min(0.05) if ra.p(0.7)
+                           else torch.ones(shape, device=device) for _ in range(occs.shape[0])])
+        routes_pre = ["texture"]
+    else:
+        routes_pre = []
+    merge = {}
+    if n_sh and ra.p(p_merge):                                               # shared intensities: populations as dark as the background or as another
+        for k in range(n_sh):
+            if ra.p(0.4):
+                merge[k] = -1 if (n_sh == 1 or ra.p(0.5)) else ra.i(0, n_sh - 1)
+        if merge:
+            routes_pre.append("merge")
     def physics_image(m):
         if m == "additive":
             out = img.clone()
-            for L in layers:                                                 # contrast varying along objects (striation, profiles)
+            for k, L in enumerate(layers):                                   # contrast varying along objects (striation, profiles)
                 out = out + (L.cmap - L.contrast) * L.occupancy
+            for k, L in enumerate(shapes_[:n_sh]):
+                c_eff = 0.0 if merge.get(k, None) == -1 else (shapes_[merge[k]].contrast if k in merge else L.contrast)
+                out = out + (c_eff - L.contrast) * L.occupancy
+                if tex is not None:
+                    out = out + c_eff * (tex[k] - 1) * L.occupancy
             return out + lum * lum_c
-        return form_image(m, occs, tens, texture, [draw_material(ra.np, m) for _ in range(occs.shape[0])],
-                          draw_material(ra.np, m, background=True), draw_sequence(ra.np, m))
+        mats = [draw_material(ra.np, m) for _ in range(occs.shape[0])]; bgm = draw_material(ra.np, m, background=True)
+        for k, t in merge.items():
+            mats[k] = dict(bgm) if t == -1 else dict(mats[t])
+            if t == -1:                                                      # the background material carries no orientation terms
+                mats[k].update({kk: vv for kk, vv in draw_material(ra.np, m).items() if kk not in bgm})
+        return form_image(m, occs, tens, texture, mats, bgm, draw_sequence(ra.np, m), tex=tex)
     img_main = physics_image(mode)
-    routes = [mode]
+    routes = [mode] + routes_pre
     if ra.p(p_blend):                                                        # physics as a continuum: a blend with another (either polarity)
         m2 = str(ra.np.choice([m_ for m_ in PHYS_MODES if m_ != mode])); w = ra.u(0.3, 0.9)
         a = _grey(img_main); b = _grey(physics_image(m2)); b = 255 - b if ra.p(0.5) else b
@@ -1488,13 +1710,26 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
         nl = int(lab.max()) + 1; reg = torch.tensor([ra.u(-40, 40) for _ in range(nl)], device=device)[lab]
         img_main = g0 + off + reg; routes.append("scramble")
     img = img_main
+    if medium is not None:                                                                     # the medium set in grey levels after the physics:
+        med, sd, tx, _ = medium                                                                # dark or bright whatever the image formation
+        g0 = _grey(img) if mode != "additive" else img
+        fill = med + sd * ra.randn(*shape) + tx * smooth_noise(shape, ra.lu(8, 30), ra.g, device)
+        img = M * g0 + (1 - M) * fill
     rec["physics"] = mode; rec["routes"] = routes
-    img = _extra_acquisition(img, layers, ra, modality, rec)
+    img = _extra_acquisition(img, layers, ra, modality, rec, strength)
     s = Sample(img, shapes_, bg, lab, st, 1.0, content, rec, R)
     d = nuisance(s, seed=acq_seed if acq_seed is not None else seed, device=device, strength=strength, modality=modality, warp=ra.p(p_warp), fast=True, hp_max=12.0,
-                 vis_opts={"per_layer_hp": True, "local_corr": True})
+                 vis_opts={"per_layer_hp": True, "local_corr": True}, affine=ra.p(p_affine))
+    if medium is not None and ra.p(0.5):                                                       # the tissue's range stretched to the display, the medium
+        tis = d["image"].float()[M > 0.5]                                                      # clipped -- as a real crop normalised by its tissue
+        if tis.numel() > 100:
+            lo_, hi_ = torch.quantile(tis[:: max(1, tis.numel() // 100000)], torch.tensor([0.005, 0.995], device=device))
+            d["image"] = ((d["image"].float() - lo_) / (hi_ - lo_).clamp_min(1e-6) * 255).clamp(0, 255).round()
+            rec["tissue_window"] = True
     ids = _crop(ren["ids"], sl, zoom, "pick"); frac = _crop(ren["id_frac"], sl, zoom, "pick")
     pts = torch.stack([_point_map(pl, o, zoom, shape, device) for pl in ren["point_lists"]])
+    if M is not None:                                                        # nothing beyond the specimen's edge
+        ids = torch.where((M > 0.5)[None], ids, torch.full_like(ids, -1)); frac = frac * (M > 0.5)[None]; pts = pts * M[None]
     D5 = torch.zeros(len(s.layers), 5, *shape, device=device)
     for k, L in enumerate(s.layers):
         if hasattr(L, "desc5"):
@@ -1502,9 +1737,10 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     grid = d.get("warp_grid")
     if grid is not None:                                                     # the warp moves the identities, points and descriptors too
         from .generator import _resample
-        ids = _resample(ids.float(), grid, mode="nearest").round().long(); frac = _resample(frac, grid)
-        pts = _resample(pts, grid)
-        D5 = _resample(D5.reshape(-1, *shape), grid).reshape(D5.shape)
+        pad = d["record"].get("warp_padding", "border")                                       # the same padding as the image's
+        ids = _resample(ids.float(), grid, mode="nearest", padding=pad).round().long(); frac = _resample(frac, grid, padding=pad)
+        pts = _resample(pts, grid, padding=pad)
+        D5 = _resample(D5.reshape(-1, *shape), grid, padding=pad).reshape(D5.shape)
         D5[:, 0] = torch.log2(1 + (2 ** D5[:, 0] - 1) * d["stretch"][None])     # sizes scale with the local stretch
     lut = sc.identity_lut(identity_min_r)
     d["identity"] = torch.where(ids[0] >= 0, lut[ids[0].clamp(0, lut.numel() - 1)], ids[0])
@@ -1527,6 +1763,7 @@ def draw_pair(shape=(64, 64, 64), seed: int = 0, device="cuda", kind: str = "zoo
     crop's first cell pair); ``modality`` -- the same crop under another acquisition (modality, physics, materials,
     noise). Returns ``(s1, d1), (s2, d2), info``."""
     canvas = kw.get("canvas", 128); r = Rng(seed + 99991, device)
+    kw = {**kw, "p_boundary": 0.0, "p_affine": 0.0, "p_warp": 0.0}                     # one geometry: the renders differ in acquisition only
     if kind == "zoom":
         ext = [2 * n for n in shape]; assert all(e <= canvas for e in ext)
         oc = [8 * r.i(0, (canvas - e) // 8) for e in ext]                    # the coarse crop's origin (multiple of 8: lattice-aligned)
