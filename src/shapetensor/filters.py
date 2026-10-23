@@ -40,13 +40,29 @@ def _kernel1d_scipy(sigma: float, order: int = 0, truncate: float = 3.0) -> np.n
     return q * phi
 
 
+_KCACHE: dict = {}
+
+
+def _device_kernel(kernel, dtype, device) -> torch.Tensor:
+    """The reversed kernel as a tensor on ``device``, cached (building it each call is a host-to-device copy and a
+    synchronisation: a third of the synthetic generator's time)."""
+    a = np.ascontiguousarray(np.asarray(kernel, dtype=np.float64)[::-1])
+    key = (a.tobytes(), dtype, str(device))
+    k = _KCACHE.get(key)
+    if k is None:
+        if len(_KCACHE) > 512:
+            _KCACHE.clear()
+        k = _KCACHE[key] = torch.as_tensor(a, dtype=dtype, device=device)
+    return k
+
+
 def filter_axis(x: torch.Tensor, kernel, axis: int, chunk_rows: int = 1 << 22) -> torch.Tensor:
     """Convolve ``x`` with a 1-D kernel along ``axis``, replicate padding (scipy ``mode='nearest'``).
 
     The axis is moved last and the rest flattened into rows, filtered in chunks of ``chunk_rows`` rows so the padded
     copy stays bounded. Any dtype torch's conv1d takes; the kernel is cast to ``x.dtype``.
     """
-    k = torch.as_tensor(np.ascontiguousarray(np.asarray(kernel, dtype=np.float64)[::-1]), dtype=x.dtype, device=x.device)
+    k = _device_kernel(kernel, x.dtype, x.device)
     r = (k.numel() - 1) // 2
     xm = x.movedim(axis, -1)
     shape = xm.shape
