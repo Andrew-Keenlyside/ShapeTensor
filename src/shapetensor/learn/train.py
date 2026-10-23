@@ -329,7 +329,7 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
           strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None,
           widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None, query: int = 0,
           simple: dict | None = None, p_simple=(0.0, 0.0), init: str | None = None, order: str = "mass", exact: bool = False, desc_lmax: int = 0,
-          context=None):
+          context=None, late_start: int | None = None, scalar_window=None):
     from .engine import PopulationEngine
     from . import losses as _losses
     _losses.PRESENCE_BAND = tuple(presence_band) if presence_band else None
@@ -357,7 +357,7 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
                 seed=seed, strength0=strength0, strength1=strength1, overfit=overfit, gen=gen, widths=list(widths), distinct=distinct, sh_lmax=sh_lmax, lcn=lcn,
                 presence_band=list(presence_band) if presence_band else None, weights=weights, query=query,
                 simple=simple, p_simple=list(p_simple), init=init, order=order, exact=exact, desc_lmax=desc_lmax,
-                context=list(context) if context else None)
+                context=list(context) if context else None, late_start=late_start, scalar_window=list(scalar_window) if scalar_window else None)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
     model = PopulationNet.from_args(args).to(device)
     rf = receptive_field(model)
@@ -372,8 +372,9 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
         model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); start = ck["step"]
     sched = lambda s: min(1.0, (s + 1) / warmup) * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * min(s, steps) / steps)))
     strength = lambda s: strength1 if overfit else strength0 + (strength1 - strength0) * min(1.0, s / (0.5 * steps))
-    ramp = lambda s: min(1.0, max(0.0, (s / steps - 0.2) / 0.2))                                     # the cell scalars: 0 until 20%, full by 40%
-    o0 = max(300, int(0.05 * steps))
+    sw = scalar_window or (0.2 * steps, 0.4 * steps)                                                  # the cell scalars: 0 until 20%, full by 40% (default)
+    ramp = lambda s: min(1.0, max(0.0, (s - sw[0]) / max(sw[1] - sw[0], 1)))
+    o0 = late_start if late_start is not None else max(300, int(0.05 * steps))
     oramp = lambda s: min(1.0, max(0.0, (s - o0) / 300))                                               # mass, presence, kind, Hellinger: after orientation (o0 steps)
     grid = hemisphere(160, device)
     log(f"model: {sum(p.numel() for p in model.parameters())} parameters, receptive field {rf} voxels; args {args}")
@@ -443,6 +444,8 @@ def main():
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
+    ap.add_argument("--late-start", type=int, default=None, help="step at which mass, presence, kind and Hellinger start ramping in (300 over 300 steps); default max(300, 5%% of steps)")
+    ap.add_argument("--scalar-window", type=int, nargs=2, default=None, help="steps over which the cell scalars (classes, fraction, size, identity) ramp from 0 to full; default 20%%-40%% of steps")
     ap.add_argument("--context", type=float, nargs=2, default=None, help="train the query decoder also with the input visible only within a random half-width in [lo, hi] voxels (e.g. 6 32)")
     ap.add_argument("--desc-lmax", type=int, default=0, help="also predict the descriptor densities (thickness, hollowness, angularity) to this SH order (needs --exact; e.g. 4)")
     ap.add_argument("--exact", action="store_true", help="SH head and query targets from the exact per-voxel density (orientations present in the window) instead of the slots / per-layer mean tensors")
@@ -460,7 +463,7 @@ def main():
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
-          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact, desc_lmax=a.desc_lmax, context=a.context)
+          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact, desc_lmax=a.desc_lmax, context=a.context, late_start=a.late_start, scalar_window=a.scalar_window)
 
 
 if __name__ == "__main__":
