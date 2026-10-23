@@ -149,16 +149,17 @@ def evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
 
 def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: int = 4, buffer: int = 128, refresh: int = 1, lr: float = 3e-4,
           warmup: int = 500, margin: int = 4, val_n: int = 32, val_every: int = 500, log_every: int = 25, seed: int = 0, device: str = "cuda",
-          strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None):
+          strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None,
+          widths: tuple = (16, 32, 64)):
     from .engine import PopulationEngine
     outd = Path(out); outd.mkdir(parents=True, exist_ok=True)
     logf = open(outd / "log.jsonl", "a")
     def log(msg):
         print(msg, flush=True)
     args = dict(steps=steps, size=size, batch=batch, accum=accum, buffer=buffer, refresh=refresh, lr=lr, warmup=warmup, margin=margin, val_n=val_n,
-                seed=seed, strength0=strength0, strength1=strength1, overfit=overfit, gen=gen)
+                seed=seed, strength0=strength0, strength1=strength1, overfit=overfit, gen=gen, widths=list(widths))
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
-    model = PopulationNet().to(device)
+    model = PopulationNet(widths=tuple(widths)).to(device)
     rf = receptive_field(model)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     start = 0
@@ -221,10 +222,11 @@ def main():
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
+    ap.add_argument("--widths", type=int, nargs=3, default=[16, 32, 64], help="channels at strides 1, 2, 4")
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
-          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume)
+          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths))
 
 
 if __name__ == "__main__":

@@ -194,9 +194,12 @@ class PopulationEngine:
         if isinstance(checkpoint, PopulationNet):
             self.net = checkpoint.to(device).eval(); rf = None
         else:
-            self.net = PopulationNet().to(device).eval(); rf = None
+            rf = None; ck = None
             if checkpoint is not None:
                 ck = torch.load(checkpoint, map_location=device) if isinstance(checkpoint, (str, Path)) else checkpoint
+            widths = tuple(ck["args"].get("widths", (16, 32, 64))) if ck is not None else (16, 32, 64)
+            self.net = PopulationNet(widths=widths).to(device).eval()
+            if ck is not None:
                 self.net.load_state_dict(ck["model"]); rf = ck.get("receptive_field")
         self.rf = rf if rf is not None else receptive_field(self.net)
         self.exact = exact                                                                          # fp32 without TF32 (chunks equal one pass bit for bit) vs bf16 (~10x faster)
