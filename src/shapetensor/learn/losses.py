@@ -35,7 +35,7 @@ from .targets import render_odf
 WF = torch.tensor([1.0, 1.0, 1.0, 2.0, 2.0, 2.0])
 KIND_WEIGHT = torch.tensor([1.0, 4.0, 1.0, 4.0])          # line, sheet, blob, interface
 WEIGHTS = {"shape": 1.0, "mass": 1.0, "presence": 0.5, "kind": 0.1, "classes": 0.5, "fraction": 0.5, "size": 0.1, "hellinger": 1.0, "identity": 0.1, "mixture": 2.0,
-           "sh": 2.0}
+           "sh": 2.0, "query": 2.0}
 PRESENT = 0.005                    # a target slot with at least this mass is a population (presence 1); below, empty (presence 0)
 TIE = 0.7                          # target slots whose masses are within this ratio may exchange their predicted slots
 PRESENCE_BAND = None               # None: presence trained on every slot; (lo, hi): slots whose target mass lies between
@@ -43,6 +43,16 @@ PRESENCE_BAND = None               # None: presence trained on every slot; (lo, 
 DISTINCT = None                    # None: rank order among all present slots; a float: kept only among slots whose
                                    # trace-1 eigenvalue spectra lie within this distance (ideal tensors: line-blob 0.82,
                                    # line-sheet 0.71, sheet-blob 0.41, two lines 0; window pooling shortens them)
+
+
+def sh_loss(pred: torch.Tensor, tgt: torch.Tensor) -> torch.Tensor:
+    """SH coefficients ``(B, n_coef, ...)``: each even order's squared error over the batch's energy in that order
+    (floored: a tenth of the order-0 energy plus that of mass 0.05 everywhere), averaged over the orders."""
+    from .sh import bands
+    lmax = 2 * (len(bands_for(pred.shape[1])) - 1)
+    floor = 0.1 * (tgt[:, 0] ** 2).sum() + tgt[:, 0].numel() * (0.05 * math.sqrt(4 * math.pi)) ** 2
+    d2 = (pred - tgt) ** 2
+    return sum(d2[:, b].sum() / ((tgt[:, b] ** 2).sum() + floor) for b in bands(lmax)) / len(bands(lmax))
 
 
 def bands_for(n: int) -> list:
@@ -161,7 +171,7 @@ def loss(pred: dict, tgt: dict, grid: torch.Tensor, margin: int = 4, kappa: floa
          g: torch.Generator | None = None) -> tuple[torch.Tensor, dict]:
     """The total loss and its parts (floats), over the cells ``margin`` from the crop's edge; ``weights`` overrides
     :data:`WEIGHTS` for the per-cell terms (a curriculum)."""
-    P = {k: _cells(v, margin) for k, v in pred.items()}
+    P = {k: (v if k.startswith("q_") else _cells(v, margin)) for k, v in pred.items()}
     T = {k: _cells(v, margin) if torch.is_tensor(v) and v.dim() >= 4 else v for k, v in tgt.items()}
     cost, parts, perm = match(P, T)
     n_pop = (T["mass"].float() > PRESENT).sum().clamp_min(1)                                       # each term over its own support: orientation and kind
@@ -181,6 +191,8 @@ def loss(pred: dict, tgt: dict, grid: torch.Tensor, margin: int = 4, kappa: floa
     mix = (St * mt[:, :, None]).sum(1) / tot.clamp_min(1e-9)[:, None]
     wmix = (tot / 0.05).clamp(max=1)
     out["mixture"] = ((((P["mixture"].float() - mix) ** 2) * WF.to(mix.device).view(1, 6, 1, 1, 1)).sum(1) * wmix).sum() / wmix.sum().clamp_min(1)
+    if "q_sh" in P and "q_sh" in T:                                                                # the density at query points and scales
+        out["query"] = sh_loss(P["q_sh"].float().transpose(1, 2), T["q_sh"].float().transpose(1, 2))
     if "sh" in P:                                                                                    # the populations' density in SH, no matching:
         from .sh import bands, density_sh                                                           # each order's squared error over the batch's
         lmax = 2 * (len(bands_for(P["sh"].shape[1])) - 1)                                           # energy in that order, averaged over the orders
@@ -232,7 +244,17 @@ def augment(image: torch.Tensor, tgt: dict, g: torch.Generator | None = None):
     perm, flips = cube_transform(g)                                                             # drawn on the CPU
     out = {}
     for k, v in tgt.items():
-        if torch.is_tensor(v) and v.dim() >= 3:
+        if k == "q_points":
+            from .query import cube_points
+            out[k] = cube_points(v, perm, flips, image.shape[-3:])
+        elif k == "q_sh":
+            from .query import sh_rotation
+            from .losses import bands_for as _bf
+            R = sh_rotation(perm, flips, 2 * (len(_bf(v.shape[-1])) - 1), v.device)
+            out[k] = (v.float() @ R.T).to(v.dtype)
+        elif k == "q_sigma":
+            out[k] = v
+        elif torch.is_tensor(v) and v.dim() >= 3:
             out[k] = apply_cube(v, perm, flips, tensor6=(k == "slots"))
         else:
             out[k] = v

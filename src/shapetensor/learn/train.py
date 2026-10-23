@@ -39,6 +39,8 @@ from .targets import target
 
 TKEYS = ("slots", "mass", "kind", "layer", "fraction", "classes", "size", "size_mask")
 HALF = ("slots", "mass", "fraction", "classes", "size")
+QKEYS = ("q_points", "q_sigma", "q_sh")
+QUERY = None                       # {"n_points", "n_levels", "lmax"}: draw query targets per sample (set by train())
 SCALARS = ("classes", "fraction", "size", "identity")
 LATE = ("mass", "presence", "kind", "hellinger")                                                   # after orientation: they swamp it if present from the start
 
@@ -49,6 +51,12 @@ def make(seed: int, size: int, device, strength: float = 1.0, gen: dict | None =
     s, d = draw((size,) * 3, seed=seed, device=device, strength=strength, **(gen or {}))
     t = target(s, d)
     out = {k: (t[k].half() if k in HALF else t[k]) for k in TKEYS}
+    if QUERY:                                                                                          # the density at random points and scales
+        from .query import draw_queries, layer_density
+        gq = torch.Generator(device=device).manual_seed(seed + 7919)
+        pts, sig = draw_queries((size,) * 3, QUERY["n_points"], QUERY["n_levels"], gq, device)
+        out["q_points"], out["q_sigma"] = pts, sig
+        out["q_sh"] = layer_density(s, d, pts, sig, QUERY["lmax"]).half()
     out["kind"] = out["kind"].to(torch.int8); out["layer"] = out["layer"].to(torch.int16)
     return d["image"].to(torch.uint8), out
 
@@ -58,14 +66,15 @@ def stack(pairs, g=None, aug: bool = True):
     each pair cube-transformed and its intensities jittered (a different window: ``a x + b``, clipped)."""
     imgs, tgts = [], []
     for img, t in pairs:
-        t = {k: (v.float() if k in HALF else v.long() if k in ("kind", "layer") else v) for k, v in t.items()}
+        t = {k: (v.float() if k in HALF or k == "q_sh" else v.long() if k in ("kind", "layer") else v) for k, v in t.items()}
         x = img.float() / 255.0
         if aug:
             x, t = augment(x, t, g)
             a = 0.6 + 0.8 * float(torch.rand(1, generator=g)); b = 0.4 * (float(torch.rand(1, generator=g)) - 0.5)
             x = (a * (x - 0.5) + 0.5 + b).clamp(0, 1)
         imgs.append(x); tgts.append(t)
-    return torch.stack(imgs)[:, None], {k: torch.stack([t[k] for t in tgts]) for k in TKEYS}
+    keys = TKEYS + tuple(k for k in QKEYS if k in tgts[0])
+    return torch.stack(imgs)[:, None], {k: torch.stack([t[k] for t in tgts]) for k in keys}
 
 
 class Buffer:
@@ -103,15 +112,18 @@ def evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
     populations, N) against the target's own (the same engine reading the target slots)."""
     model.eval(); parts, errs, mix_errs, fp, ft, nagree, ntot = {}, [], [], [], [], 0.0, 0.0
     sh_one, sh_false, sh_det, sh_err2 = [], [], [], []
+    q_eval = []
     crop = lambda v: v[..., margin:-margin, margin:-margin, margin:-margin]
     for img, t in val:
         x, T = stack([(img, t)], aug=False)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device != "cpu"):
-            P = model(x)
+            P = model(x, T.get("q_points"), T.get("q_sigma"))
         _, p = loss(P, T, grid, margin)
         for k, v in p.items():
             parts[k] = parts.get(k, 0.0) + v / len(val)
-        Pc = {k: crop(v) for k, v in P.items()}; Tc = {k: crop(v) for k, v in T.items()}
+        Pc = {k: crop(v) for k, v in P.items() if not k.startswith("q_")}; Tc = {k: crop(v) for k, v in T.items() if not k.startswith("q_")}
+        if "q_sh" in P:
+            q_eval.append((P["q_sh"][0].float(), T["q_sh"][0].float(), T["q_sigma"][0].float()))
         _, _, perm = match(Pc, Tc)
         Sp = gather_slots(Pc["slots"].float(), perm)
         kt = Tc["kind"]; mt = Tc["mass"].float()
@@ -164,6 +176,8 @@ def evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
     if engine is not None:
         out["val_N_agree"] = nagree / max(ntot, 1)
     cat = lambda L: torch.cat(L) if L else torch.zeros(0)
+    if q_eval:
+        out.update(query_metrics(q_eval, model.sh_lmax))
     if sh_one or sh_det:
         out["val_sh_axis_deg_median"] = float(cat(sh_one).median()) if sh_one else float("nan")                # top peak, one-line cells
         out["val_sh_false_second"] = float(cat(sh_false).mean()) if sh_false else float("nan")                 # a second peak where one line
@@ -172,13 +186,41 @@ def evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
     return out
 
 
+def query_metrics(q_eval, lmax: int) -> dict:
+    """Queries by scale band (sigma < 3, 3-7, > 7 voxels): the top density peak's axis error where the target density
+    has one clear peak; where it has two (> 25 deg apart, the second >= 0.3 of the first), how often the prediction has
+    two, and their mean axis error."""
+    from .sh import peaks
+    P = torch.cat([p for p, _, _ in q_eval]); T = torch.cat([t for _, t, _ in q_eval]); S = torch.cat([s for _, _, s in q_eval])
+    pd, pv = peaks(P.T, lmax, rel=0.3); td, tv = peaks(T.T, lmax, rel=0.3)
+    nt, npred = (tv > 0).sum(0), (pv > 0).sum(0)
+    ang = lambda a, b: torch.rad2deg(torch.acos((a * b).sum(0).abs().clamp(max=1)))
+    out = {}
+    for name, sel in (("fine", S < 3), ("mid", (S >= 3) & (S <= 7)), ("coarse", S > 7)):
+        one = sel & (nt == 1) & (T[:, 0] > 0.05 * math.sqrt(4 * math.pi))
+        two = sel & (nt == 2)
+        if bool(one.any()):
+            out[f"val_q_axis_{name}"] = float(ang(pd[0][:, one], td[0][:, one]).median())
+        if bool(two.any()):
+            det = (npred >= 2) & two
+            out[f"val_q_second_{name}"] = float(det.sum() / two.sum())
+            if bool(det.any()):
+                e = torch.minimum((ang(pd[0][:, det], td[0][:, det]) + ang(pd[1][:, det], td[1][:, det])) / 2,
+                                  (ang(pd[0][:, det], td[1][:, det]) + ang(pd[1][:, det], td[0][:, det])) / 2)
+                out[f"val_q_crossing_{name}"] = float(e.median())
+    return out
+
+
 def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: int = 4, buffer: int = 128, refresh: int = 1, lr: float = 3e-4,
           warmup: int = 500, margin: int = 4, val_n: int = 32, val_every: int = 500, log_every: int = 25, seed: int = 0, device: str = "cuda",
           strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None,
-          widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None):
+          widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None, query: int = 0):
     from .engine import PopulationEngine
     from . import losses as _losses
     _losses.PRESENCE_BAND = tuple(presence_band) if presence_band else None
+    global QUERY
+    QUERY = {"n_points": query, "n_levels": 4, "lmax": sh_lmax} if query else None
+    assert not query or sh_lmax, "--query needs --sh-lmax"
     if weights:
         _losses.WEIGHTS.update(weights)                                                                   # loss weights for this run
     _losses.DISTINCT = distinct                                                                          # slot order kept only among similar shapes
@@ -188,7 +230,7 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
         print(msg, flush=True)
     args = dict(steps=steps, size=size, batch=batch, accum=accum, buffer=buffer, refresh=refresh, lr=lr, warmup=warmup, margin=margin, val_n=val_n,
                 seed=seed, strength0=strength0, strength1=strength1, overfit=overfit, gen=gen, widths=list(widths), distinct=distinct, sh_lmax=sh_lmax, lcn=lcn,
-                presence_band=list(presence_band) if presence_band else None, weights=weights)
+                presence_band=list(presence_band) if presence_band else None, weights=weights, query=query)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
     model = PopulationNet.from_args(args).to(device)
     rf = receptive_field(model)
@@ -220,7 +262,7 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
         for _ in range(accum):
             x, T = buf.batch(batch, g)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device != "cpu"):
-                P = model(x)
+                P = model(x, T.get("q_points"), T.get("q_sigma"))
             total, parts = loss(P, T, grid, margin, axis=int(torch.randint(0, 3, (1,), generator=g)), weights=W, g=g)
             (total / accum).backward(); tot_v += float(total) / accum
             for k, v in parts.items():
@@ -253,6 +295,7 @@ def main():
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
+    ap.add_argument("--query", type=int, default=0, help="query points per sample: train the decoder of the density at any point and scale (needs --sh-lmax)")
     ap.add_argument("--presence-band", type=float, nargs=2, default=None, help="target masses between these two do not train presence (e.g. 0.002 0.02)")
     ap.add_argument("--weights", type=json.loads, default=None, help='loss weight overrides as JSON, e.g. {"presence": 0.2}')
     ap.add_argument("--lcn", type=float, default=0.0, help="add a local-contrast input channel ((x - mean) / sd in a Gaussian window of this sigma, voxels; e.g. 3)")
@@ -262,7 +305,7 @@ def main():
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
-          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights)
+          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query)
 
 
 if __name__ == "__main__":

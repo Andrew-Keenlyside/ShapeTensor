@@ -69,9 +69,9 @@ class PopulationNet(nn.Module):
     """Image ``(B, 1, Z, Y, X)`` (grey levels scaled to 0-1) -> a dict of lattice outputs at stride 4 (``Z/4``...)."""
 
     def __init__(self, K: int = 6, widths=(16, 32, 64), embed: int = 8, n_kinds: int = 4, n_classes: int = 5, sh_lmax: int = 0,
-                 lcn: float = 0.0):
+                 lcn: float = 0.0, query: bool = False):
         super().__init__()
-        self.sh_lmax, self.lcn = sh_lmax, lcn
+        self.sh_lmax, self.lcn, self.has_query = sh_lmax, lcn, bool(query)
         c0, c1, c2 = widths
         self.K, self.embed, self.n_kinds = K, embed, n_kinds
         self.stem = nn.Conv3d(2 if lcn else 1, c0, 3, padding=1)                                  # with ``lcn``: the image and its local contrast
@@ -86,12 +86,18 @@ class PopulationNet(nn.Module):
         if sh_lmax:                                                                                # the populations' density in even SH (permutation-free)
             from .sh import n_coef
             self.sh = nn.Conv3d(c2, n_coef(sh_lmax), 1)
+        if self.has_query:                                                                         # the density at any point and description scale
+            from .query import QueryDecoder
+            from .sh import n_coef
+            assert sh_lmax, "the query decoder outputs SH: set sh_lmax"
+            self.query_dec = QueryDecoder(c0, c1, c2, n_coef(sh_lmax))
 
     @classmethod
     def from_args(cls, args: dict | None) -> "PopulationNet":
         """The network a checkpoint's ``args`` describe (widths, SH order)."""
         args = args or {}
-        return cls(widths=tuple(args.get("widths", (16, 32, 64))), sh_lmax=int(args.get("sh_lmax", 0) or 0), lcn=float(args.get("lcn", 0) or 0))
+        return cls(widths=tuple(args.get("widths", (16, 32, 64))), sh_lmax=int(args.get("sh_lmax", 0) or 0), lcn=float(args.get("lcn", 0) or 0),
+                   query=bool(args.get("query", False)))
 
     def local_contrast(self, x: torch.Tensor) -> torch.Tensor:
         """``(x - mean) / sd`` in a Gaussian window of sigma ``lcn`` voxels (sd floored at 0.01 of the 0-1 range), /3:
@@ -100,13 +106,20 @@ class PopulationNet(nn.Module):
         xf = x.float(); mu = gaussian(xf, self.lcn); var = gaussian((xf - mu) ** 2, self.lcn)
         return ((xf - mu) / (var + 1e-4).sqrt() / 3).to(x.dtype)
 
-    def forward(self, x: torch.Tensor) -> dict:
+    def features(self, x: torch.Tensor):
+        """The three feature levels: stride 1, stride 2 and the stride-4 lattice."""
         if self.lcn:
             x = torch.cat([x, self.local_contrast(x)], 1)
         h0 = self.l0(Fn.silu(self.stem(x)))                                                      # nonlinear from the first layer: local energies
         h1 = self.l1(Fn.silu(self.d1(h0)))                                                       # (squared-gradient-like features) need no open branch
         h2 = self.l2(Fn.silu(self.d2(h1)))
         h = Fn.silu(self.mix(torch.cat([h2, Fn.silu(self.skip(h1))], 1)))
+        return h0, h1, h
+
+    def forward(self, x: torch.Tensor, points: torch.Tensor | None = None, sigma: torch.Tensor | None = None) -> dict:
+        """The lattice outputs; with ``points (B, Q, 3)`` (input voxel coordinates) and ``sigma (B, Q)`` (voxels) and a
+        query decoder, also ``q_sh (B, Q, n_coef)``: the populations' density at those points and scales."""
+        h0, h1, h = self.features(x)
         B = x.shape[0]; cs = h.shape[2:]
         s = self.slots(h).view(B, self.K, self.per_slot, *cs)
         L = torch.zeros(B, self.K, 3, 3, *cs, device=x.device, dtype=s.dtype)
@@ -125,6 +138,8 @@ class PopulationNet(nn.Module):
                "fraction_logit": sc[:, 0], "class_logits": sc[:, 1:1 + n_cls], "log_size": sc[:, 1 + n_cls], "mixture": sc[:, 2 + n_cls:]}
         if self.sh_lmax:
             out["sh"] = self.sh(h)
+        if points is not None and self.has_query:
+            out["q_sh"] = self.query_dec((h0, h1, h), points.float(), sigma.float())
         return out
 
 
