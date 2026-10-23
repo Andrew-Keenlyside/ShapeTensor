@@ -457,3 +457,6 @@ then best-of-2 axis hypotheses per slot. Do not train the decoupled density head
 **Twelve independent reviews completed** (agents with fresh context, reading code, logs, QC figures and re-scoring
 read-only). The per-review strongest / weakest table is above. The best model of the night is
 `learn_night/G1_wide_gate_aniso/model.pt`; the strength-robust one `learn_night/F1_final_P1_density/model.pt`.
+* **G1s1 (seed 1) replicates G1**: bank slot single 14.3, shared 31.3, mixture single 14.2; paired against seed 0:
+  single -0.1 [-1.2, +0.5], shared -1.1 [-2.8, +0.8], mixture +0.1 [-0.9, +0.9]; gate at 559 vs 574. The recipe's
+  result is not a seed accident.
