@@ -79,6 +79,10 @@ def main():
         cy, cx = np.unravel_index(np.argmax(score), score.shape)
     y0, x0 = (min(max(int(c_) - h2, 0), n_ - ZW) // 4 * 4 for c_, n_ in ((cy, g.shape[0]), (cx, g.shape[1])))
     iy, ix = np.mgrid[y0 // 4:(y0 + ZW) // 4, x0 // 4:(x0 + ZW) // 4]                               # cells in the zoom
+    cy0, cx0 = max(0, y0 - 64), max(0, x0 - 64)                                                      # a crop with 64 voxels of context
+    vc = v[:, cy0:min(g.shape[0], y0 + ZW + 64), cx0:min(g.shape[1], x0 + ZW + 64)]
+    vc = vc[:, :vc.shape[1] // 4 * 4, :vc.shape[2] // 4 * 4]
+    iyc, ixc = iy - cy0 // 4, ix - cx0 // 4
     py, px = 4 * iy + 1.5 - y0, 4 * ix + 1.5 - x0                                                  # their centres in zoom pixels
     tis_c = ndimage.zoom(tis.astype(np.float32), 0.25, order=1)[iy, ix] > 0.5
     extent = (-0.5, ZW - 0.5, ZW - 0.5, -0.5)
@@ -104,9 +108,9 @@ def main():
     for r, run in enumerate(a.runs, start=1):
         eng = PopulationEngine(str(Path(run) / "model.pt"), device=DEV); step = torch.load(Path(run) / "model.pt", map_location="cpu")["step"]
         with torch.no_grad():
-            net = eng.network(v, win); pop = eng.populations(net, labels=False)
-        D = pop["dirs_cells"][:, :, kc].cpu().numpy()[:, :, iy, ix]                                 # (P, 3, h, w)
-        M = pop["mass"][:, kc].cpu().numpy()[:, iy, ix]                                             # (P, h, w)
+            net = eng.network(vc, win); pop = eng.populations(net, labels=False)                    # on the crop around the zoom
+        D = pop["dirs_cells"][:, :, kc].cpu().numpy()[:, :, iyc, ixc]                                 # (P, 3, h, w)
+        M = pop["mass"][:, kc].cpu().numpy()[:, iyc, ixc]                                             # (P, h, w)
         mref = float(np.quantile(M[M > 0], 0.95)) if (M > 0).any() else 1.0
         name = Path(run).name
         # population sticks
@@ -117,7 +121,7 @@ def main():
         ax.set_title(f"{name} (step {step}): line populations as sticks (length ∝ mass)\n"
                      f"cells in tissue with 0/1/2/3+ populations: {', '.join(f'{(npop[tis_c] == n).mean():.0%}' for n in (0, 1, 2))}, {(npop[tis_c] >= 3).mean():.0%}", fontsize=10)
         # density cut
-        T = pop["line_tensors"][:, :, kc][:, :, iy, ix].reshape(M.shape[0], 6, -1)
+        T = pop["line_tensors"][:, :, kc][:, :, iyc, ixc].reshape(M.shape[0], 6, -1)
         cut = watson_cut(T.to(DEV).float(), torch.as_tensor(M.reshape(M.shape[0], -1), device=DEV), phi, sphere).cpu().numpy()   # (A, n)
         mline = M.sum(0).reshape(-1)
         size = np.sqrt(np.clip(mline / mref, 0, 1))                                                  # glyph size ∝ √(line mass)
@@ -130,7 +134,7 @@ def main():
         ax.add_collection(PolyCollection(polys[keep], facecolors=np.concatenate([cols[keep], np.full((int(keep.sum()), 1), 0.35)], 1), edgecolors=cols[keep], linewidths=1.2))
         ax.set_title("orientation density of the populations, cut in the slice plane\n(per-cell shape, size ∝ √ line mass)", fontsize=10)
         # mixture tensor ellipses
-        mix = net["mixture"][:, kc].cpu().numpy()[:, iy, ix]                                         # (6, h, w): zz yy xx zy zx yx
+        mix = net["mixture"][:, kc].cpu().numpy()[:, iyc, ixc]                                         # (6, h, w): zz yy xx zy zx yx
         B = np.stack([np.stack([mix[1], mix[5]], -1), np.stack([mix[5], mix[2]], -1)], -2)            # in-plane (y, x) block
         lam, vec = np.linalg.eigh(B.reshape(-1, 2, 2))                                               # ascending
         lam = np.clip(lam, 0, None)
@@ -140,7 +144,7 @@ def main():
         e1 = vec[:, :, 1][:, None]; e2 = vec[:, :, 0][:, None]                                       # (n, 1, 2) in (y, x)
         pts = (R * lam[:, 1][:, None, None] * np.cos(th) * e1 + R * lam[:, 0][:, None, None] * np.sin(th) * e2)   # (n, 40, 2) (y, x)
         polys = np.stack([px.reshape(-1, 1) + pts[..., 1] * 2, py.reshape(-1, 1) + pts[..., 0] * 2], -1)   # ×2: semi-axis = 2R λ (λ ≤ 1)
-        mtot = pop["slot_mass"][:, kc].sum(0).cpu().numpy()[iy, ix].reshape(-1)
+        mtot = pop["slot_mass"][:, kc].sum(0).cpu().numpy()[iyc, ixc].reshape(-1)
         alpha = 0.25 + 0.75 * np.clip(mtot / max(float(np.quantile(mtot[mtot > 0], 0.95)) if (mtot > 0).any() else 1.0, 1e-9), 0, 1)
         cols = np.concatenate([dec_rgb(ax3), alpha[:, None]], 1)
         keep = tis_c.reshape(-1)
