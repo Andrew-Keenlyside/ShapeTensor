@@ -401,7 +401,7 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
           simple: dict | None = None, p_simple=(0.0, 0.0), init: str | None = None, order: str = "mass", exact: bool = False, desc_lmax: int = 0,
           context=None, late_start: int | None = None, scalar_window=None, cache: str | None = None,
           gate: float | None = None, aniso=None, shape_loss: str = "frobenius", simple_window: int | None = None,
-          sh_loss: str = "batchnorm"):
+          sh_loss: str = "batchnorm", axis_head: bool = False):
     from .engine import PopulationEngine
     from . import losses as _losses
     _losses.PRESENCE_BAND = tuple(presence_band) if presence_band else None
@@ -436,7 +436,7 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
                 simple=simple, p_simple=list(p_simple), init=init, order=order, exact=exact, desc_lmax=desc_lmax,
                 context=list(context) if context else None, late_start=late_start, scalar_window=list(scalar_window) if scalar_window else None,
                 gate=gate, aniso=list(aniso) if aniso else None, shape_loss=shape_loss, simple_window=simple_window,
-                sh_loss=sh_loss)
+                sh_loss=sh_loss, axis_head=axis_head)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
     model = PopulationNet.from_args(args).to(device)
     rf = receptive_field(model)
@@ -546,6 +546,7 @@ def main():
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
+    ap.add_argument("--axis-head", action="store_true", help="a committed axis output per slot and for the mixture (axis cost: target anisotropy x (1 - cos^2); review 8)")
     ap.add_argument("--sh-loss", default="batchnorm", choices=("batchnorm", "decoupled"), help="density loss: per-order error over the batch's energy, or magnitude + target-weighted angle per order over running energies (order 2 first)")
     ap.add_argument("--shape-loss", default="frobenius", choices=("frobenius", "devcos"), help="tensor cost of slots and mixture: Frobenius, or deviator magnitude + target-weighted angle (does not reward round predictions)")
     ap.add_argument("--simple-window", type=int, default=None, help="steps over which the simple share falls from p0 to p1 (default half the run)")
@@ -571,7 +572,7 @@ def main():
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
-          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact, desc_lmax=a.desc_lmax, context=a.context, late_start=a.late_start, scalar_window=a.scalar_window, cache=a.cache, gate=a.gate, aniso=a.aniso, shape_loss=a.shape_loss, simple_window=a.simple_window, sh_loss=a.sh_loss)
+          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact, desc_lmax=a.desc_lmax, context=a.context, late_start=a.late_start, scalar_window=a.scalar_window, cache=a.cache, gate=a.gate, aniso=a.aniso, shape_loss=a.shape_loss, simple_window=a.simple_window, sh_loss=a.sh_loss, axis_head=a.axis_head)
 
 
 if __name__ == "__main__":

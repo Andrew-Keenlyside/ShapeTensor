@@ -175,3 +175,31 @@ def test_shape_aware_matching():
         assert float(c2) > 0.05
     finally:
         L.DISTINCT = old
+
+
+def test_axis_head_dominant_axis_and_cost():
+    from shapetensor.learn.losses import axis_cost, dominant_axis
+    from shapetensor.learn.generator import sheet_tensor
+    d = torch.tensor([0.0, 0.6, 0.8])
+    for T, expect_sign in ((line_tensor(d), 1), (sheet_tensor(d), -1)):
+        u, w = dominant_axis(T.view(6, 1), 0)
+        assert abs(abs(float((u[:, 0] * d).sum())) - 1) < 1e-4 and float(w[0]) > 0
+    u, w = dominant_axis(line_tensor(d).view(6, 1), 0)
+    assert float(axis_cost(d.view(3, 1), u, w, 0)[0]) < 1e-6
+    perp = torch.tensor([1.0, 0.0, 0.0]).view(3, 1)
+    assert abs(float(axis_cost(perp, u, w, 0)[0]) - float(w[0])) < 1e-5
+
+
+def test_axis_head_outputs_and_trains():
+    from shapetensor.learn.losses import loss
+    net = PopulationNet(axis_head=True).to(DEV)
+    s, d = draw((32,) * 3, seed=1, device=DEV, strength=0.3)
+    t = target(s, d)
+    x = (d["image"].float() / 255)[None, None]
+    P = net(x)
+    assert P["axis"].shape == (1, 6, 3, 8, 8, 8) and P["mix_axis"].shape == (1, 3, 8, 8, 8)
+    T = {k: (v[None] if torch.is_tensor(v) else v) for k, v in t.items()}
+    total, parts = loss(P, T, hemisphere(160, DEV), margin=1)
+    assert "axis" in parts and torch.isfinite(total)
+    total.backward()
+    assert net.axes.weight.grad is not None

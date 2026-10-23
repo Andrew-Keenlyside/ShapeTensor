@@ -69,9 +69,9 @@ class PopulationNet(nn.Module):
     """Image ``(B, 1, Z, Y, X)`` (grey levels scaled to 0-1) -> a dict of lattice outputs at stride 4 (``Z/4``...)."""
 
     def __init__(self, K: int = 6, widths=(16, 32, 64), embed: int = 8, n_kinds: int = 4, n_classes: int = 5, sh_lmax: int = 0,
-                 lcn: float = 0.0, query: bool = False, desc_lmax: int = 0):
+                 lcn: float = 0.0, query: bool = False, desc_lmax: int = 0, axis_head: bool = False):
         super().__init__()
-        self.sh_lmax, self.lcn, self.has_query, self.desc_lmax = sh_lmax, lcn, bool(query), desc_lmax
+        self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
         c0, c1, c2 = widths
         self.K, self.embed, self.n_kinds = K, embed, n_kinds
         self.stem = nn.Conv3d(2 if lcn else 1, c0, 3, padding=1)                                  # with ``lcn``: the image and its local contrast
@@ -83,6 +83,8 @@ class PopulationNet(nn.Module):
         self.per_slot = 6 + 1 + 1 + n_kinds + embed                                             # tensor, root mass, presence logit, kind logits, embedding
         self.slots = nn.Conv3d(c2, K * self.per_slot, 1)
         self.scalars = nn.Conv3d(c2, 1 + n_classes + 1 + 6, 1)                                     # fraction, classes, log size, the mixture tensor
+        if self.axis_head:                                                                         # a committed axis per slot and for the mixture
+            self.axes = nn.Conv3d(c2, 3 * (K + 1), 1)
         if sh_lmax:                                                                                # the populations' density in even SH (permutation-free)
             from .sh import n_coef
             self.sh = nn.Conv3d(c2, n_coef(sh_lmax) + (3 * n_coef(desc_lmax) if desc_lmax else 0), 1)   # + descriptor densities
@@ -97,7 +99,8 @@ class PopulationNet(nn.Module):
         """The network a checkpoint's ``args`` describe (widths, SH order)."""
         args = args or {}
         return cls(widths=tuple(args.get("widths", (16, 32, 64))), sh_lmax=int(args.get("sh_lmax", 0) or 0), lcn=float(args.get("lcn", 0) or 0),
-                   query=bool(args.get("query", False)), desc_lmax=int(args.get("desc_lmax", 0) or 0))
+                   query=bool(args.get("query", False)), desc_lmax=int(args.get("desc_lmax", 0) or 0),
+                   axis_head=bool(args.get("axis_head", False)))
 
     def local_contrast(self, x: torch.Tensor) -> torch.Tensor:
         """``(x - mean) / sd`` in a Gaussian window of sigma ``lcn`` voxels (sd floored at 0.01 of the 0-1 range), /3:
@@ -137,6 +140,9 @@ class PopulationNet(nn.Module):
         n_cls = sc.shape[1] - 8
         out = {"slots": T, "mass": root_mass ** 2, "root_mass": root_mass, "presence_logit": presence, "kind": kind, "embed": e,
                "fraction_logit": sc[:, 0], "class_logits": sc[:, 1:1 + n_cls], "log_size": sc[:, 1 + n_cls], "mixture": sc[:, 2 + n_cls:]}
+        if self.axis_head:
+            a = self.axes(h).view(B, self.K + 1, 3, *cs)
+            out["axis"], out["mix_axis"] = a[:, :self.K], a[:, self.K]
         if self.sh_lmax:
             out["sh"] = self.sh(h)
         if points is not None and self.has_query:

@@ -35,7 +35,7 @@ from .targets import render_odf
 WF = torch.tensor([1.0, 1.0, 1.0, 2.0, 2.0, 2.0])
 KIND_WEIGHT = torch.tensor([1.0, 4.0, 1.0, 4.0])          # line, sheet, blob, interface
 WEIGHTS = {"shape": 1.0, "mass": 1.0, "presence": 0.5, "kind": 0.1, "classes": 0.5, "fraction": 0.5, "size": 0.1, "hellinger": 1.0, "identity": 0.1, "mixture": 2.0,
-           "sh": 2.0, "query": 2.0, "descriptors": 0.5}
+           "sh": 2.0, "query": 2.0, "descriptors": 0.5, "axis": 2.0}
 PRESENT = 0.005                    # a target slot with at least this mass is a population (presence 1); below, empty (presence 0)
 TIE = 0.7                          # target slots whose masses are within this ratio may exchange their predicted slots
 PRESENCE_BAND = None               # None: presence trained on every slot; (lo, hi): slots whose target mass lies between
@@ -47,6 +47,33 @@ DISTINCT = None                    # None: rank order among all present slots; a
 
 DESC_NC = 0                        # coefficients per descriptor density (0: none), set by train()
 SHAPE_LOSS = "frobenius"           # "frobenius" | "devcos": the tensor cost of slots and mixture (see dev_cost)
+AXIS_W = 1.0                       # weight of the axis-head cost (when the model has an axis head)
+
+
+def dominant_axis(T: torch.Tensor, axis: int):
+    """A trace-1 tensor's dominant direction and weight, no categories: with D = T - I/3, mode = 3 sqrt6 det(D/|D|)
+    in [-1, 1] (prolate > 0, oblate < 0); u = the long axis if prolate, the normal if oblate; w = |D|^2 |mode|.
+    ``T`` with 6 components on ``axis``; returns u (3 on ``axis``) and w."""
+    from .generator import eig3
+    Tm = T.movedim(axis, 0)
+    iso = torch.tensor([1, 1, 1, 0, 0, 0.0], device=T.device).view(6, *([1] * (Tm.dim() - 1))) / 3
+    D = Tm - iso
+    n2 = (D[:3] ** 2).sum(0) + 2 * (D[3:] ** 2).sum(0)
+    zz, yy, xx, zy, zx, yx = D.unbind(0)
+    det = zz * (yy * xx - yx * yx) - zy * (zy * xx - yx * zx) + zx * (zy * yx - yy * zx)
+    mode = (3 * math.sqrt(6) * det / n2.clamp_min(1e-12) ** 1.5).clamp(-1, 1)
+    _, V = eig3(Tm)                                                                                  # ascending
+    u = torch.where((mode > 0)[None], V[2], V[0])
+    return u.movedim(0, axis), n2 * mode.abs()
+
+
+def axis_cost(a: torch.Tensor, u: torch.Tensor, w: torch.Tensor, axis: int) -> torch.Tensor:
+    """w (1 - (a_hat . u)^2): bounded; its minimiser under uncertainty is the top eigenvector of E[w u u^T] -- a
+    committed axis, not a round tensor or a disc."""
+    ah = Fn.normalize(a, dim=axis)
+    return w * (1 - (ah * u).sum(axis) ** 2)
+
+
 SH_LOSS = "batchnorm"              # "batchnorm" (per-order error over the batch's energy) | "decoupled" (see sh_loss_decoupled)
 _SH_EMA: dict = {}                 # running per-cell energy per order (decoupled loss)
 SH_LMAX_ON = None                  # decoupled loss: highest order trained (None: all); raised by train() once l = 2 aligns
@@ -151,6 +178,10 @@ def match(pred: dict, tgt: dict, m_full: float = 0.02):
         lo, hi = PRESENCE_BAND
         pres = pres * ((mt <= lo) | (mt >= hi))[:, None].float()
     C = WEIGHTS["shape"] * shape + WEIGHTS["mass"] * mass + WEIGHTS["presence"] * pres + WEIGHTS["kind"] * kind   # (B, Kp, Kt, c)
+    if "axis" in pred:                                                                              # the axis head's cost, matched with the rest
+        ut, wt = dominant_axis(St, 2)                                                               # (B, Kt, 3, c), (B, Kt, c)
+        axc = axis_cost(pred["axis"].float()[:, :, None], ut[:, None], (wt * present)[:, None], 3)  # (B, Kp, Kt, c)
+        C = C + AXIS_W * axc
     perms = torch.tensor(list(itertools.permutations(range(K))), device=dev)                               # (P, K): target slot k <- predicted perms[p, k]
     kt_idx = torch.arange(K, device=dev)
     costs = C[:, perms, kt_idx[None].expand_as(perms)].sum(2)                                             # (B, P, c)
@@ -183,6 +214,8 @@ def match(pred: dict, tgt: dict, m_full: float = 0.02):
     perm = perms[best].movedim(-1, 1)                                                                     # (B, K, c)
     sel = lambda X: torch.gather(X, 1, perm.unsqueeze(1)).squeeze(1)                                      # X (B, Kp, Kt, c) -> (B, Kt, c): X[b, perm[b, t], t]
     parts = {"shape": sel(shape).sum(1), "mass": sel(mass).sum(1), "presence": sel(pres).sum(1), "kind": sel(kind).sum(1)}
+    if "axis" in pred:
+        parts["axis"] = sel(axc).sum(1)
     return costs.min(1).values, parts, perm
 
 
@@ -241,6 +274,12 @@ def loss(pred: dict, tgt: dict, grid: torch.Tensor, margin: int = 4, kappa: floa
     n_pop = (T["mass"].float() > PRESENT).sum().clamp_min(1)                                       # each term over its own support: orientation and kind
     n_slot = T["mass"].numel() / T["mass"].shape[1] * 1.0                                           # per present population; mass and presence per cell
     out = {"shape": parts["shape"].sum() / n_pop, "mass": parts["mass"].sum() / n_slot, "presence": parts["presence"].sum() / n_slot, "kind": parts["kind"].sum() / n_pop}
+    if "axis" in parts:                                                                             # slots' axes; the mixture's axis; unit length
+        out["axis"] = parts["axis"].sum() / n_pop
+        mt_ = T["mass"].float(); mix_ = (T["slots"].float() * mt_[:, :, None]).sum(1) / mt_.sum(1).clamp_min(1e-9)[:, None]
+        um, wm = dominant_axis(mix_, 1)
+        out["axis"] = out["axis"] + (axis_cost(P["mix_axis"].float(), um, wm, 1) * (mt_.sum(1) > 0.05)).mean()
+        out["axis"] = out["axis"] + 0.01 * ((P["axis"].float().norm(dim=2) - 1) ** 2).mean()
     logq = Fn.log_softmax(P["class_logits"].float(), 1)
     out["classes"] = -(T["classes"].float() * logq).sum(1).mean()
     out["fraction"] = Fn.binary_cross_entropy_with_logits(P["fraction_logit"].float(), T["fraction"].float())
