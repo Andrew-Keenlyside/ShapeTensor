@@ -269,3 +269,14 @@ for a warm start, then decays -- P1 never decayed), buffer 128, strength 0.3 -> 
 {"crossing": true} --p-simple 0.5 0.5`), exact density head with the decoupled loss, presence 0.1, checkpoints
 every 300 steps. C2 (the five-change general model) stopped at 250 to make room (three reviews called it
 confounded; its parts are covered by tests and by D2 / F1).
+
+## C1: narrow + curriculum (05:25 Montreal)
+
+| run (1000 steps, same curriculum) | bank slot single | shared | mixture single | slot linearity |
+|---|---|---|---|---|
+| C1 narrow 16/32/64 | 42.0 [36.7, 47.7] | 49.0 [45.4, 52.3] | 39.1 [34.1, 44.2] | 0.10 |
+| W2 wide 32/64/128 | 21.7 [19.3, 24.4] | 35.0 [31.8, 38.2] | 20.5 [18.0, 23.1] | 0.20 |
+| untrained narrow | 59.4 | 56.5 | 61.7 | 0.68 |
+
+With the curriculum the narrow net learns (its validation still falling at 1000: mixture 52.7 / 46.4 / 38.4 / 34.9
+at 250-1000), but at half the wide net's pace: at this length width and easy data both matter. Review 7 scrutinises.
