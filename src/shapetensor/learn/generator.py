@@ -33,6 +33,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+import numpy as np
 import torch
 import torch.nn.functional as Fn
 
@@ -854,7 +855,7 @@ def _corr_volume(r: torch.Tensor) -> float:
 
 
 def visibility(img: torch.Tensor, regressors: torch.Tensor, units, radii=None, sigma_v: float = 5.0, step: int = 4,
-               t_lo: float = 3.0, t_hi: float = 8.0, return_t: bool = False) -> torch.Tensor:
+               t_lo: float = 3.0, t_hi: float = 8.0, return_t: bool = False, s_hp_max: float | None = None) -> torch.Tensor:
     """Each layer's **local** visibility ``(K, Z, Y, X)``: how clearly its shapes show in the final image around each
     point. The image and the layers' image signatures (``regressors``: a shape layer's occupancy, an interface's
     region-means image) are high-passed at a scale matched to the shapes (σ = max(4, 2.5 × the largest radius in
@@ -877,6 +878,8 @@ def visibility(img: torch.Tensor, regressors: torch.Tensor, units, radii=None, s
         return v
     rmax = max([float(radii[k]) for k in idx] if radii is not None else [1.0])
     s_hp = max(4.0, 2.5 * rmax)
+    if s_hp_max is not None:                                                                      # one large object must not blur every layer's evidence
+        s_hp = min(s_hp, s_hp_max)
     hp = lambda x: x - gaussian(x, s_hp, truncate=3.0)
     y = hp(img); A = hp(regressors[idx]); n = len(idx)
     pool = lambda x: Fn.avg_pool3d(gaussian(x, sigma_v, truncate=3.0)[None], step)[0]
@@ -931,7 +934,8 @@ MODALITIES["mixed"] = {k: 0.35 for k in MODALITIES["hipct"]}
 CROSS_MIX = 0.08                   # every nuisance outside the chosen modality's profile is still drawn with this probability
 
 
-def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, modality: str | None = None, warp: bool | None = None) -> dict:
+def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, modality: str | None = None, warp: bool | None = None,
+             fast: bool = False, hp_max: float | None = None) -> dict:
     # ``strength`` (0-1) scales the probability and the magnitude of every nuisance that destroys information (PSF,
     # resolution, thick slices, k-space truncation, noise, artefacts); geometric and monotone remaps are not scaled
     """One draw of a modality's acquisition on a clean sample (``hipct`` / ``ct`` / ``mri`` / ``histology`` /
@@ -941,9 +945,15 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     where a display window maps it to 0-255. Returns the image, the warped occupancies ``(K, Z, Y, X)``, the warped
     shape tensors ``(K, 6, Z, Y, X)``, the layers' ``visibility (K,)`` and the draw's record."""
     g = torch.Generator(device=device).manual_seed(seed + 7919)
-    u = lambda a, b: float(a + (b - a) * torch.rand(1, generator=g, device=device))
+    if fast:                                                                                     # scalars from numpy: no device synchronisation per draw
+        _np = np.random.default_rng(seed + 7919)
+        u = lambda a, b: float(_np.uniform(a, b))
+        _int = lambda lo, hi: int(_np.integers(lo, hi))
+    else:
+        u = lambda a, b: float(a + (b - a) * torch.rand(1, generator=g, device=device))
+        _int = lambda lo, hi: int(torch.randint(lo, hi, (1,), generator=g, device=device))
     lu = lambda a, b: float(math.exp(u(math.log(a), math.log(b))))
-    names = list(MODALITIES); modality = modality or names[int(torch.randint(0, len(names), (1,), generator=g, device=device))]
+    names = list(MODALITIES); modality = modality or names[_int(0, len(names))]
     P = MODALITIES[modality]
     sg = float(min(max(strength, 0.0), 1.0))                                                     # 0: clean; 1: the full ranges (a training curriculum ramps it)
     KEEP = ("warp", "invert", "bend", "bias")                                                   # remaps that keep the information: not scaled by strength
@@ -975,7 +985,7 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
         Dsc = _resample(Dsc.reshape(K * 3, Z, Y, X), grid).reshape(K, 3, Z, Y, X)
         Dsc[:, 0] = Dsc[:, 0] * stretch[None]
     # ---- the acquisition frame: the acquisition axis becomes dim 0 for every photometric nuisance
-    ax = int(torch.randint(0, 3, (1,), generator=g, device=device)); rec["axis"] = ax
+    ax = _int(0, 3); rec["axis"] = ax
     img = img.movedim(ax, 0).contiguous(); A, B, C = img.shape
     cy, cx = None, None
     if True:                                                                                    # the rotation axis's in-plane position (rings, cupping)
@@ -1058,7 +1068,7 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     if on("streaks"):
         amp = u(5, 40) * unit; ang = u(0, 180); spread = u(5, 60); half = 0.5 * math.hypot(B, C)
         yc, xc = yy - (B - 1) / 2, xx - (C - 1) / 2; zs = torch.arange(A, device=device, dtype=torch.float32)
-        n = int(torch.poisson(torch.tensor(0.5 * A, device=device), generator=g))
+        n = int(_np.poisson(0.5 * A)) if fast else int(torch.poisson(torch.tensor(0.5 * A, device=device), generator=g))
         for _ in range(n):
             z0 = u(0, A - 1); p = math.radians(ang + u(-spread, spread)); off = u(-half, half)
             d = (yc * math.cos(p) - xc * math.sin(p) - off).abs()
@@ -1093,7 +1103,8 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     img = ((img - lo) / max(hi - lo, 1e-6) * 255).clamp(0, 255).round(); rec["window"] = round(clip, 3)
     occ = occ.clamp(0, 1)
     regs = torch.stack([R if L.role == "interface" else occ[k] for k, L in enumerate(s.layers)])
-    t = visibility(img, regs, [None if L.role == "isotropic" else 1.0 for L in s.layers], radii=[L.radius if L.role == "shape" else 1.0 for L in s.layers], return_t=True)
+    t = visibility(img, regs, [None if L.role == "isotropic" else 1.0 for L in s.layers], radii=[L.radius if L.role == "shape" else 1.0 for L in s.layers], return_t=True,
+                   s_hp_max=hp_max)
     iso = torch.tensor([L.role == "isotropic" for L in s.layers], device=device).view(-1, 1, 1, 1)
     vis = torch.where(iso, torch.ones_like(t), ((t - PRESENCE_T[0]) / (PRESENCE_T[1] - PRESENCE_T[0])).clamp(0, 1))
     ovis = torch.where(iso, torch.ones_like(t), ((t - ORIENTATION_T[0]) / (ORIENTATION_T[1] - ORIENTATION_T[0])).clamp(0, 1))

@@ -220,3 +220,37 @@ Slots remain as a readout (peaks of f, with descriptor ratios at the peaks), tra
   intervals): width matters with the curriculum, the narrow net's limit under the joint objective is unresolved (one
   seed). Slots still hedge to round tensors and copy the first axis at crossings; the density head has not yet been
   trained past the plateau. Default width is now 32/64/128.
+
+## 13. The object-scene generator (23 Oct, afternoon)
+
+`learn/scene.py` (tests `tests/test_scene.py`, examples `scripts/learn/scene_examples.py`, benchmarks
+`scripts/learn/bench_scene.py`; figures and `bench.json` in `results/dev_pipeline/scene_generator/`). A scene is a set
+of objects -- a skeleton, attribute profiles along it, an identity, a parent -- rendered in one GPU pass (cross-section
+templates swept along rotation-minimising frames, trilinear splats of volume, tensor, descriptors, contrast, and the
+(voxel, object) weights for the identities). Scalars come from numpy (no device sync per random number).
+
+* along objects: radius, flattening (perimeter kept: a tube collapses to a ribbon and a band), wall, lumen (open,
+  narrowing, closed), superellipse section, contrast, beading, striation; stenosis and collapse events. A collapsing
+  vessel stays one object with one axis while its lumen fraction falls to 0 (test).
+* topology: Murray trees (r^3 = r1^3 + r2^3, optimal angles; test), tapered tips, k-NN capillary networks, branch-point
+  and endpoint maps.
+* identity: per object, segment and parent (fibre -> bundle, nucleus -> cell); the two heaviest objects per voxel.
+* arrangement: bundles of packed fibres (jittered hexagonal sections; overlaps < 2%, test) with twist, fanning,
+  dispersion; angled / kissing / fanning crossings; fibres deflected around cells and vessels.
+* families: helices, lamellar tubes, hollow / ribbon / angular fibres, folded / fenestrated / bilayer / stacked
+  sheets, Voronoi foams, porous level sets, cells with nuclei (no overlaps, test), crystals (the old solids).
+* scale: a voxel size per scene (1-60 µm) with physical size priors; unresolved fibres drawn as their bundle's partial
+  volume; 128³ canvases cropped (8 crops per scene); descriptors in µm.
+* layout: laminae on a folded depth coordinate (cell density and radial / tangential fibres by depth).
+* acquisition: the existing model with CPU scalars and a capped visibility high-pass, plus histology tears and folds,
+  local-tomography truncation, an optional second contrast.
+* training: `--gen '{"scene": {...}}'` (smoke-tested with the gated schedule and the exact density).
+
+Benchmarks (A6000; `bench.json`): idle GPU -- old pair 0.212 s, new 0.072 s per pair amortised over 8 crops (first crop
+0.281 s, cached 0.042 s); scene render 0.09 / 0.13 / 0.28 / 0.52 s at 96 / 128 / 192 / 256³. Under two concurrent GPU
+loads -- old 2.55 s, new 0.85 s per pair; the acquisition with CPU-drawn scalars 0.25 s vs 0.49 s.
+
+Not yet: object-level identity targets in the loss (the ids are produced, the identity term still uses layers);
+voxel size as a model input; paired renders at two resolutions; trees as several populations at a branch point in
+the slot targets (the exact density already resolves them); warps in scene draws (off: the scenes carry their own
+geometry, and the warp would have to move the identity maps too).

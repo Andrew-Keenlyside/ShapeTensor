@@ -115,7 +115,11 @@ def make(seed: int, size: int, device, strength: float = 1.0, gen: dict | None =
 def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | None = None) -> tuple[torch.Tensor, dict]:
     """One training pair: the 8-bit image and its lattice target (floats in half precision). ``gen``: arguments for
     :func:`~shapetensor.learn.generator.draw` (a modality, a background style, crossing groups, layer kinds, ...)."""
-    s, d = draw((size,) * 3, seed=seed, device=device, strength=strength, **(gen or {}))
+    if gen and "scene" in gen:                                                                         # the object-scene generator
+        from .scene import draw_scene
+        s, d = draw_scene((size,) * 3, seed=seed, device=device, strength=strength, **(gen["scene"] or {}))
+    else:
+        s, d = draw((size,) * 3, seed=seed, device=device, strength=strength, **(gen or {}))
     t = target(s, d)
     out = {k: (t[k].half() if k in HALF else t[k]) for k in TKEYS}
     F = None
