@@ -1210,10 +1210,13 @@ class Scene:
         if g is None or isinstance(g, list) or g.offsets is None:
             return None
         cv = g.curves[0]; N, S = cv.P.shape[:2]; Lc = 2.0 * max(self.shape); ds = Lc / max(S - 1, 1)
-        zs = torch.arange(r.u(0, per), Lc, per, device=self.device); ix = (zs / ds).round().long().clamp(0, S - 1)
+        z0 = r.u(0, per); out = [g]
+        if z0 >= Lc:                                                                            # a sarcomere longer than the fibres in view: no disc
+            g.name = "myofibrils"; self.record["families"].append({"myofibrils": {"fibril_um": round(rf_um, 2), "sarcomere_vox": round(per, 1)}})
+            return out
+        zs = torch.arange(z0, Lc, per, device=self.device); ix = (zs / ds).round().long().clamp(0, S - 1)
         Cz = cv.P[:, ix].reshape(-1, 3); Tz = tangents(cv.P)[:, ix].reshape(-1, 3); Rz = cv.rad[:, ix].reshape(-1)
         inside = ((Cz > -Rz[:, None]) & (Cz < torch.tensor(self.shape, device=self.device) + Rz[:, None])).all(1)
-        out = [g]
         if bool(inside.any()):
             zd = self._discs(Cz[inside], Tz[inside], Rz[inside] * 1.05, max(0.3, 0.06 / self.voxel_um), "z_discs",
                              cv.obj[:, None].expand(N, ix.numel()).reshape(-1)[inside])
