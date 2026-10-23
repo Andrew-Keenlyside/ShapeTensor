@@ -145,3 +145,19 @@ D1 (wide, the exact density only: every slot and scalar weight 0).
 
 R4 and R4d are indistinguishable; R2 is best on single cells, P1 best on shared cells (overlapping the structure
 tensor); everything trained on hard data with R4's schedule is far worse than either.
+
+## The curriculum result (03:40 Montreal)
+
+| run (1000 steps unless stated) | change | val single / shared / mixture (48 rotated draws) | bank single / shared / mixture |
+|---|---|---|---|
+| W0 wide | -- (control) | 58.7 / 57.0 / 60.1 at 750: chance | (pending) |
+| **W2 wide** | **curriculum: 0.8 -> 0.1 share of flat single-line draws by step 500** | **18.5 / 32.3 / 16.2** | **21.7 [19.3, 24.4] / 35.0 [31.8, 38.2] / 20.5** |
+| N1 narrow, 2000 planned | late schedule only (late terms from 600, scalars off) | 58.5 / 55.9 / 55.6 at 750: chance -- stopped | |
+| D1 wide, 1500 | exact density only (all slot / scalar weights 0) | SH nearest-peak 29.5 / 34.1 at 500 (floor 39.1 / 38.7) | (running) |
+| structure tensor | | 13.7 / 32.9 | 15.2 / 35.1 |
+
+With the same width and schedule, the curriculum turns chance into structure-tensor-level shared-cell orientation
+in 1000 steps (W2 vs W0); neither width alone (W0) nor the late schedule alone (N1, narrow, at 750) did. P1's early
+success fits: its data were line-rich and easy (crossings forced, strength 0.16-0.23). Review 3 scrutinises this.
+Launched: C1 (narrow + curriculum: is width still needed?) and C2 (wide + curriculum + exact density + queries +
+descriptors + context: the general model).
