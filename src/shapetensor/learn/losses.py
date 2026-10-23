@@ -46,6 +46,24 @@ DISTINCT = None                    # None: rank order among all present slots; a
 
 
 DESC_NC = 0                        # coefficients per descriptor density (0: none), set by train()
+SHAPE_LOSS = "frobenius"           # "frobenius" | "devcos": the tensor cost of slots and mixture (see dev_cost)
+
+
+def dev_cost(P: torch.Tensor, T: torch.Tensor, axis: int) -> torch.Tensor:
+    """A tensor cost that does not reward hedging: with D = S - I/3 (the deviator; trace-1 tensors), the squared
+    Frobenius distance is (|Dp| - |Dt|)^2 + 2 |Dp| |Dt| (1 - cos): its angular part is weighted by the PREDICTED
+    anisotropy, so a rounder prediction pays less for a wrong axis -- under uncertainty the minimum is round. Here
+    the angular part is weighted by the TARGET's anisotropy instead: (|Dp| - |Dt|)^2 + 2 |Dt|^2 (1 - cos) -- the
+    magnitude and the orientation of the shape learned separately; any kind (lines, sheets, solids), no categories.
+    ``P``, ``T``: tensors with 6 components on ``axis`` (broadcastable)."""
+    iso = torch.tensor([1, 1, 1, 0, 0, 0.0], device=P.device) / 3
+    wf = WF.to(P.device)
+    shp = [1] * P.dim(); shp[axis] = 6
+    Dp, Dt = P - iso.view(shp), T - iso.view(shp)
+    w = wf.view(shp)
+    npn = (Dp * Dp * w).sum(axis).clamp_min(1e-12).sqrt(); ntn = (Dt * Dt * w).sum(axis).clamp_min(1e-12).sqrt()
+    cos = (Dp * Dt * w).sum(axis) / (npn * ntn)
+    return (npn - ntn) ** 2 + 2 * ntn ** 2 * (1 - cos)
 
 
 def desc_loss(pred: torch.Tensor, tgt: torch.Tensor) -> torch.Tensor:
@@ -88,8 +106,11 @@ def match(pred: dict, tgt: dict, m_full: float = 0.02):
     St, mt, kt = tgt["slots"].float(), tgt["mass"].float(), tgt["kind"]
     B, K = rm.shape[:2]; dev = rm.device
     present = mt > PRESENT
-    d = S[:, :, None] - St[:, None]                                                                       # (B, Kp, Kt, 6, c)
-    dS = (d ** 2 * WF.to(dev).view(1, 1, 1, 6, 1, 1, 1)).sum(3)                                           # (B, Kp, Kt, c)
+    if SHAPE_LOSS == "devcos":
+        dS = dev_cost(S[:, :, None], St[:, None], 3)                                                      # (B, Kp, Kt, c)
+    else:
+        d = S[:, :, None] - St[:, None]                                                                   # (B, Kp, Kt, 6, c)
+        dS = (d ** 2 * WF.to(dev).view(1, 1, 1, 6, 1, 1, 1)).sum(3)                                       # (B, Kp, Kt, c)
     kw = KIND_WEIGHT.to(dev)[kt.clamp_min(0)] * (mt / m_full).clamp(max=1).sqrt() * present               # (B, Kt, c)
     shape = dS * kw[:, None]
     mass = (rm[:, :, None] - mt.clamp_min(0).sqrt()[:, None]) ** 2
@@ -203,7 +224,10 @@ def loss(pred: dict, tgt: dict, grid: torch.Tensor, margin: int = 4, kappa: floa
     mt = T["mass"].float(); St = T["slots"].float(); tot = mt.sum(1)
     mix = (St * mt[:, :, None]).sum(1) / tot.clamp_min(1e-9)[:, None]
     wmix = (tot / 0.05).clamp(max=1)
-    out["mixture"] = ((((P["mixture"].float() - mix) ** 2) * WF.to(mix.device).view(1, 6, 1, 1, 1)).sum(1) * wmix).sum() / wmix.sum().clamp_min(1)
+    if SHAPE_LOSS == "devcos":
+        out["mixture"] = (dev_cost(P["mixture"].float(), mix, 1) * wmix).sum() / wmix.sum().clamp_min(1)
+    else:
+        out["mixture"] = ((((P["mixture"].float() - mix) ** 2) * WF.to(mix.device).view(1, 6, 1, 1, 1)).sum(1) * wmix).sum() / wmix.sum().clamp_min(1)
     if "q_sh" in P and "q_sh" in T:                                                                # the density at query points and scales
         qp, qt = P["q_sh"].float().transpose(1, 2), T["q_sh"].float().transpose(1, 2)
         nc = qt.shape[1] - 3 * DESC_NC
