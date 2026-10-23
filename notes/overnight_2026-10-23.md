@@ -161,3 +161,41 @@ in 1000 steps (W2 vs W0); neither width alone (W0) nor the late schedule alone (
 success fits: its data were line-rich and easy (crossings forced, strength 0.16-0.23). Review 3 scrutinises this.
 Launched: C1 (narrow + curriculum: is width still needed?) and C2 (wide + curriculum + exact density + queries +
 descriptors + context: the general model).
+
+## Review 4 and the round plateau (04:00-04:20 Montreal)
+
+Review 4 (independent agent, on the controls W0 and N1): both collapsed to **round tensors** -- W0's mixture loss is
+0.997 of a round (I/3) prediction's, its predicted mixture anisotropy 0.028 against a target 0.45, matched slots'
+linearity 0.04 against 0.88; it learned no orientation of anything, interfaces included (a deviatoric cosine by the
+cell's heaviest kind: W0 +0.10 / +0.22 / +0.11 / +0.03 for line / interface / sheet / blob, untrained similar, **W2
++0.77 / +0.80 / +0.79 / +0.67**). W0's shape and mixture losses fall to exactly the full generator's round floors by
+step ~120 and stay; from step 300 the late terms learn mass, presence, fraction ("where", not "which way"). W2 sat on
+its own round plateau for ~250 steps and broke away between 250 and 500. W2 vs W0 is unconfounded (identical
+baselines, the same validation draws, W2's full-generator draws a subset of W0's).
+
+Why: the full generator carries 5.3x less non-round target energy than the simple regime (the mixture target is
+the mass-weighted mean of 2.3 populations per cell -- blobs, oblate interfaces, crossing partners -- against 0.8);
+only 39% of the slot shape term's round-floor energy is from learnable lines; 25% of draws have no line; after step
+300 presence, Hellinger and fraction set the update direction (cosine with the total 0.92 / 0.88 / 0.92), the
+orientation terms' mean gradient is 19% of the total and near orthogonal to it. Optimisation is more likely than "no
+usable gradient", not proven. The targets are learnable and consistent: W2 scores better than W0 on W0's own
+objective (2.44 vs 2.54). Missing cell: wide + late schedule without a curriculum.
+
+Recommended: (1) a schedule gated on breaking away from the round floor; (2) sampling by anisotropy instead of a
+hand-made regime; (3) drop presence or weight it <= 0.1. Built: `--gate R` (orientation terms only at constant rate
+until the mixture loss / its round floor (EMA) < R, then the late terms over 300 steps, the scalars over the next
+300, cosine decay) and `--aniso A0 N` (buffer pairs drawn in proportion to their non-round target energy ** alpha,
+alpha annealed A0 -> 0 over N steps). Launched G1: wide, full generator, `--gate 0.85 --aniso 1 600`, presence 0.1,
+1200 steps -- the category-free replacement for the hand-made curriculum.
+
+Stopped P1 at ~2550 (checkpoint 2000 kept) and D1 at ~900 (checkpoint 750) to free the GPU for the curriculum runs
+(C1 narrow, C2 general, C3 crossings) and G1. Bank:
+
+| model | slot single | slot shared | mixture single | SH top-1 single | SH nearest-3 single / shared |
+|---|---|---|---|---|---|
+| **P1@2000** (wide, line-rich easy data, long schedule) | **15.6 [13.6, 18.1]** | **32.7 [28.7, 35.9]** | **15.1** | | |
+| D1@750 (wide, exact density only, no curriculum) | 57.9 | 52.3 | 58.5 | 57.9 (untrained 58.9) | 34.2 / 33.7 (untrained 40.4 / 37.2) |
+| structure tensor | 15.2 | 35.1 | | | |
+
+P1 is the best model so far; D1 sat on the round plateau too (density-only training does not escape it without a
+curriculum).
