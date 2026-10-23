@@ -38,6 +38,13 @@ Diagnosis before the loops:
   like fibre sections, regions add strong steps whose interface mass is large. On the backgrounds run (L01, step 800)
   every term's gradient at the stem is ~10x smaller than on R2 -- the input features barely train (an input-scale /
   contrast problem: tested by the local-contrast input, --lcn).
+* R4d (shape-aware matching) = R4 within noise: matched 41.0 deg, best-of-six 20.4 (R4 41.7 / 21.1). The ordering
+  across shapes is not what holds R4 back; "best of six slots" is biased low (a minimum over six axes), so the
+  "half the error is ordering" reading was too strong.
+* Generator throughput: under four-way GPU sharing one 64³ draw takes ~2.4 s against ~1.1 s for a training step;
+  a host-to-device kernel copy in every Gaussian call was 3.0 of 10.5 s (cached now, output identical); the rest is
+  per-scalar GPU synchronisations from drawing random scalars on the CUDA generator (changing that changes every
+  sample -- deferred).
 * Literature (independent survey agent): FOD networks regress SH coefficients (FOD-Net); 4th-order moments separate
   crossings from sheets (Advani & Tucker); unstable matching gives conflicting targets (DN-DETR) -- add a
   matching-free path; contrast invariance inside normalisation-free nets (divisive normalisation, GDN); gradient
@@ -48,3 +55,4 @@ Diagnosis before the loops:
 
 | loop | change | run | slot axis | mixture axis | N agree | reviewer: strongest | reviewer: weakest | next |
 |---|---|---|---|---|---|---|---|---|
+| 1 | shape-aware matching (--distinct 0.2) | R4d: full generator 0.3 | 41.6 (R4 42.4) | 18.5 (18.4) | 0.29 (0.27) | (review 1) | (review 1) | |
