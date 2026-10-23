@@ -35,7 +35,8 @@ PHI = torch.linspace(0, 2 * math.pi, 49)[:-1]
 def glyphs(ax, coef, px, py, lmax, R, mref):
     """``coef (c, n)`` at plot positions ``px, py (n,)``."""
     u = torch.stack([torch.zeros_like(PHI), torch.sin(PHI), torch.cos(PHI)], 1).to(coef.device)
-    f = (real_sh(u, lmax) @ coef).clamp_min(0).cpu().numpy()                                          # (A, n)
+    Y = real_sh(u, lmax); coef = coef[:Y.shape[1]]                                                     # the density (not descriptor channels)
+    f = (Y @ coef).clamp_min(0).cpu().numpy()                                                         # (A, n)
     size = np.sqrt(np.clip(coef[0].cpu().numpy() / mref, 0, 1))
     r = f / np.maximum(f.max(0, keepdims=True), 1e-9) * R * size[None]
     ph = PHI.numpy()[:, None]
@@ -76,7 +77,12 @@ def main():
         kc = k // 4
         cy, cx = np.mgrid[z0 // 4:(z0 + Z) // 4, z0 // 4:(z0 + Z) // 4]
         px, py = (4 * cx + 1.5 - z0).ravel(), (4 * cy + 1.5 - z0).ravel()
-        ct = density_sh(t["slots"][None].float(), t["mass"][None].float(), lmax)[0][:, kc, cy, cx].reshape(-1, cx.size)
+        if args.get("exact"):
+            from shapetensor.learn.query import voxel_density
+            from shapetensor.learn.targets import _pool
+            ct = _pool(voxel_density(s, d, lmax), 5.0, 4)[:, kc, cy, cx].reshape(-1, cx.size)
+        else:
+            ct = density_sh(t["slots"][None].float(), t["mass"][None].float(), lmax)[0][:, kc, cy, cx].reshape(-1, cx.size)
         cp = P["sh"][0].float()[:, kc, cy, cx].reshape(-1, cx.size)
         mref = float(torch.quantile(ct[0][ct[0] > 0], 0.9)) if bool((ct[0] > 0).any()) else 1.0
         for j, (c, name) in enumerate(((ct, "target"), (cp, "predicted"))):
@@ -87,7 +93,11 @@ def main():
             pts = torch.tensor(np.stack([np.full(gy.size, k + 0.0), gy.ravel(), gx.ravel()], 1), device=DEV, dtype=torch.float32)
             for sj, sig in enumerate((2.0, 5.0, 10.0)):
                 sv = torch.full((pts.shape[0],), sig, device=DEV)
-                qt = layer_density(s, d, pts, sv, lmax).T
+                if args.get("exact"):
+                    from shapetensor.learn.query import sample_density, voxel_density
+                    qt = sample_density(voxel_density(s, d, lmax), pts, sv).T
+                else:
+                    qt = layer_density(s, d, pts, sv, lmax).T
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
                     qp = net(x, pts[None], sv[None])["q_sh"][0].float().T
                 mq = float(torch.quantile(qt[0][qt[0] > 0], 0.9)) if bool((qt[0] > 0).any()) else 1.0
