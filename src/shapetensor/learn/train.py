@@ -102,6 +102,7 @@ def evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
     fraction's spread over the set and its correlation with the target's; the engine's population count (line
     populations, N) against the target's own (the same engine reading the target slots)."""
     model.eval(); parts, errs, mix_errs, fp, ft, nagree, ntot = {}, [], [], [], [], 0.0, 0.0
+    sh_one, sh_false, sh_det, sh_err2 = [], [], [], []
     crop = lambda v: v[..., margin:-margin, margin:-margin, margin:-margin]
     for img, t in val:
         x, T = stack([(img, t)], aug=False)
@@ -125,6 +126,24 @@ def evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
         if bool(one.any()):
             _, Vm = eig3(Pc["mixture"][0].float()); _, Vt = eig3(Tc["slots"][0, 0].float())
             mix_errs.append(torch.rad2deg(torch.acos((Vm[2] * Vt[2]).sum(0).abs().clamp(max=1.0)))[one[0]])
+        if "sh" in Pc:                                                                                    # the SH density's peaks, no matching
+            from .sh import peaks
+            pd, pv = peaks(Pc["sh"][0].float().flatten(1), model.sh_lmax, nmax=3, rel=0.3)                # (3, 3, N), (3, N)
+            tvv, tVv = eig3(Tc["slots"][0].float().movedim(1, 0)); ta = tVv[2].flatten(2)                # (3, K, N)
+            aniso = ((tvv[2] - tvv[0]) / tvv.sum(0).clamp_min(1e-9)).flatten(1)                          # (K, N)
+            mk = Tc["mass"][0].float().flatten(1)
+            tl = sel[0].flatten(1)                                                                       # (K, N) line targets with an axis
+            angd = lambda a_, b_: torch.rad2deg(torch.acos((a_ * b_).sum(0).abs().clamp(max=1)))
+            others = (mk > 0.05) & (aniso > 0.25); others[0] = False                                    # anisotropic populations besides the line
+            o1 = tl[0] & (tl.sum(0) == 1) & ~others.any(0)                                               # one line, the rest near-isotropic
+            if bool(o1.any()):
+                sh_one.append(angd(pd[0], ta[:, 0])[o1]); sh_false.append((pv[1] > 0)[o1].float())
+            two = tl[0] & tl[1] & (angd(ta[:, 0], ta[:, 1]) > 30)
+            if bool(two.any()):
+                a1, a2, p1, p2 = ta[:, 0][:, two], ta[:, 1][:, two], pd[0][:, two], pd[1][:, two]
+                e_ = torch.minimum((angd(p1, a1) + angd(p2, a2)) / 2, (angd(p1, a2) + angd(p2, a1)) / 2)
+                det = pv[1][two] > 0
+                sh_det.append(det.float()); sh_err2.append(e_[det])
         fp.append(torch.sigmoid(Pc["fraction_logit"].float()).flatten()); ft.append(Tc["fraction"].float().flatten())
         if engine is not None:
             pe = engine.populations({k: v[0].float() for k, v in P.items()}, labels=False)
@@ -144,13 +163,19 @@ def evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
            "val_fraction_std": float(fp.std()), "val_fraction_corr": corr, "val_fraction_mae": float((fp - ft).abs().mean())}
     if engine is not None:
         out["val_N_agree"] = nagree / max(ntot, 1)
+    cat = lambda L: torch.cat(L) if L else torch.zeros(0)
+    if sh_one or sh_det:
+        out["val_sh_axis_deg_median"] = float(cat(sh_one).median()) if sh_one else float("nan")                # top peak, one-line cells
+        out["val_sh_false_second"] = float(cat(sh_false).mean()) if sh_false else float("nan")                 # a second peak where one line
+        out["val_sh_second_detected"] = float(cat(sh_det).mean()) if sh_det else float("nan")                  # crossings (> 30 deg): 2 peaks
+        e2 = cat(sh_err2); out["val_sh_crossing_deg_median"] = float(e2.median()) if e2.numel() else float("nan")   # their mean axis error
     return out
 
 
 def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: int = 4, buffer: int = 128, refresh: int = 1, lr: float = 3e-4,
           warmup: int = 500, margin: int = 4, val_n: int = 32, val_every: int = 500, log_every: int = 25, seed: int = 0, device: str = "cuda",
           strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None,
-          widths: tuple = (16, 32, 64), distinct: float | None = None):
+          widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0):
     from .engine import PopulationEngine
     from . import losses as _losses
     _losses.DISTINCT = distinct                                                                          # slot order kept only among similar shapes
@@ -159,9 +184,9 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     def log(msg):
         print(msg, flush=True)
     args = dict(steps=steps, size=size, batch=batch, accum=accum, buffer=buffer, refresh=refresh, lr=lr, warmup=warmup, margin=margin, val_n=val_n,
-                seed=seed, strength0=strength0, strength1=strength1, overfit=overfit, gen=gen, widths=list(widths), distinct=distinct)
+                seed=seed, strength0=strength0, strength1=strength1, overfit=overfit, gen=gen, widths=list(widths), distinct=distinct, sh_lmax=sh_lmax, lcn=lcn)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
-    model = PopulationNet(widths=tuple(widths)).to(device)
+    model = PopulationNet.from_args(args).to(device)
     rf = receptive_field(model)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     start = 0
@@ -224,12 +249,14 @@ def main():
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
+    ap.add_argument("--lcn", type=float, default=0.0, help="add a local-contrast input channel ((x - mean) / sd in a Gaussian window of this sigma, voxels; e.g. 3)")
+    ap.add_argument("--sh-lmax", type=int, default=0, help="also predict the populations' density in even SH to this order (permutation-free; e.g. 8)")
     ap.add_argument("--distinct", type=float, default=None, help="slot order kept only among populations whose eigenvalue spectra lie within this distance (e.g. 0.2); default: among all")
     ap.add_argument("--widths", type=int, nargs=3, default=[16, 32, 64], help="channels at strides 1, 2, 4")
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
-          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct)
+          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn)
 
 
 if __name__ == "__main__":

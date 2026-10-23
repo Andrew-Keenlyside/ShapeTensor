@@ -46,7 +46,7 @@ def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--run", required=True); ap.add_argument("--n", type=int, default=4); ap.add_argument("--out")
     a = ap.parse_args(); run = Path(a.run)
     ck = torch.load(run / "model.pt", map_location=DEV); args = ck["args"]
-    net = PopulationNet(widths=tuple(args.get("widths", (16, 32, 64)))).to(DEV); net.load_state_dict(ck["model"]); net.eval()
+    net = PopulationNet.from_args(args).to(DEV); net.load_state_dict(ck["model"]); net.eval()
     eng = PopulationEngine(net, device=DEV)
     size, gen, sg = args["size"], args.get("gen"), args.get("strength1", 1.0)
     rows = [json.loads(l) for l in open(run / "log.jsonl")]

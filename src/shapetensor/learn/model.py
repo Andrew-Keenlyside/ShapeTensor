@@ -68,11 +68,13 @@ class Down(nn.Module):
 class PopulationNet(nn.Module):
     """Image ``(B, 1, Z, Y, X)`` (grey levels scaled to 0-1) -> a dict of lattice outputs at stride 4 (``Z/4``...)."""
 
-    def __init__(self, K: int = 6, widths=(16, 32, 64), embed: int = 8, n_kinds: int = 4, n_classes: int = 5):
+    def __init__(self, K: int = 6, widths=(16, 32, 64), embed: int = 8, n_kinds: int = 4, n_classes: int = 5, sh_lmax: int = 0,
+                 lcn: float = 0.0):
         super().__init__()
+        self.sh_lmax, self.lcn = sh_lmax, lcn
         c0, c1, c2 = widths
         self.K, self.embed, self.n_kinds = K, embed, n_kinds
-        self.stem = nn.Conv3d(1, c0, 3, padding=1)
+        self.stem = nn.Conv3d(2 if lcn else 1, c0, 3, padding=1)                                  # with ``lcn``: the image and its local contrast
         self.l0 = Block(c0)
         self.d1 = Down(c0, c1); self.l1 = nn.Sequential(Block(c1), Block(c1))
         self.d2 = Down(c1, c2); self.l2 = Block(c2)
@@ -81,8 +83,26 @@ class PopulationNet(nn.Module):
         self.per_slot = 6 + 1 + 1 + n_kinds + embed                                             # tensor, root mass, presence logit, kind logits, embedding
         self.slots = nn.Conv3d(c2, K * self.per_slot, 1)
         self.scalars = nn.Conv3d(c2, 1 + n_classes + 1 + 6, 1)                                     # fraction, classes, log size, the mixture tensor
+        if sh_lmax:                                                                                # the populations' density in even SH (permutation-free)
+            from .sh import n_coef
+            self.sh = nn.Conv3d(c2, n_coef(sh_lmax), 1)
+
+    @classmethod
+    def from_args(cls, args: dict | None) -> "PopulationNet":
+        """The network a checkpoint's ``args`` describe (widths, SH order)."""
+        args = args or {}
+        return cls(widths=tuple(args.get("widths", (16, 32, 64))), sh_lmax=int(args.get("sh_lmax", 0) or 0), lcn=float(args.get("lcn", 0) or 0))
+
+    def local_contrast(self, x: torch.Tensor) -> torch.Tensor:
+        """``(x - mean) / sd`` in a Gaussian window of sigma ``lcn`` voxels (sd floored at 0.01 of the 0-1 range), /3:
+        the same structure at any texture amplitude, background level or modality's contrast scale."""
+        from ..filters import gaussian
+        xf = x.float(); mu = gaussian(xf, self.lcn); var = gaussian((xf - mu) ** 2, self.lcn)
+        return ((xf - mu) / (var + 1e-4).sqrt() / 3).to(x.dtype)
 
     def forward(self, x: torch.Tensor) -> dict:
+        if self.lcn:
+            x = torch.cat([x, self.local_contrast(x)], 1)
         h0 = self.l0(Fn.silu(self.stem(x)))                                                      # nonlinear from the first layer: local energies
         h1 = self.l1(Fn.silu(self.d1(h0)))                                                       # (squared-gradient-like features) need no open branch
         h2 = self.l2(Fn.silu(self.d2(h1)))
@@ -101,8 +121,11 @@ class PopulationNet(nn.Module):
         e = Fn.normalize(s[:, :, 8 + self.n_kinds:], dim=2)
         sc = self.scalars(h)
         n_cls = sc.shape[1] - 8
-        return {"slots": T, "mass": root_mass ** 2, "root_mass": root_mass, "presence_logit": presence, "kind": kind, "embed": e,
-                "fraction_logit": sc[:, 0], "class_logits": sc[:, 1:1 + n_cls], "log_size": sc[:, 1 + n_cls], "mixture": sc[:, 2 + n_cls:]}
+        out = {"slots": T, "mass": root_mass ** 2, "root_mass": root_mass, "presence_logit": presence, "kind": kind, "embed": e,
+               "fraction_logit": sc[:, 0], "class_logits": sc[:, 1:1 + n_cls], "log_size": sc[:, 1 + n_cls], "mixture": sc[:, 2 + n_cls:]}
+        if self.sh_lmax:
+            out["sh"] = self.sh(h)
+        return out
 
 
 def receptive_field(model: PopulationNet, size: int = 96) -> int:

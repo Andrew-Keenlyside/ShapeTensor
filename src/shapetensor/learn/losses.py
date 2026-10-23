@@ -34,12 +34,21 @@ from .targets import render_odf
 
 WF = torch.tensor([1.0, 1.0, 1.0, 2.0, 2.0, 2.0])
 KIND_WEIGHT = torch.tensor([1.0, 4.0, 1.0, 4.0])          # line, sheet, blob, interface
-WEIGHTS = {"shape": 1.0, "mass": 1.0, "presence": 0.5, "kind": 0.1, "classes": 0.5, "fraction": 0.5, "size": 0.1, "hellinger": 1.0, "identity": 0.1, "mixture": 2.0}
+WEIGHTS = {"shape": 1.0, "mass": 1.0, "presence": 0.5, "kind": 0.1, "classes": 0.5, "fraction": 0.5, "size": 0.1, "hellinger": 1.0, "identity": 0.1, "mixture": 2.0,
+           "sh": 2.0}
 PRESENT = 0.005                    # a target slot with at least this mass is a population (presence 1); below, empty (presence 0)
 TIE = 0.7                          # target slots whose masses are within this ratio may exchange their predicted slots
 DISTINCT = None                    # None: rank order among all present slots; a float: kept only among slots whose
                                    # trace-1 eigenvalue spectra lie within this distance (ideal tensors: line-blob 0.82,
                                    # line-sheet 0.71, sheet-blob 0.41, two lines 0; window pooling shortens them)
+
+
+def bands_for(n: int) -> list:
+    """The even SH orders held by ``n`` coefficients."""
+    out, l, c = [], 0, 0
+    while c < n:
+        out.append(l); c += 2 * l + 1; l += 2
+    return out
 
 
 def _cells(x: torch.Tensor, margin: int) -> torch.Tensor:
@@ -167,6 +176,15 @@ def loss(pred: dict, tgt: dict, grid: torch.Tensor, margin: int = 4, kappa: floa
     mix = (St * mt[:, :, None]).sum(1) / tot.clamp_min(1e-9)[:, None]
     wmix = (tot / 0.05).clamp(max=1)
     out["mixture"] = ((((P["mixture"].float() - mix) ** 2) * WF.to(mix.device).view(1, 6, 1, 1, 1)).sum(1) * wmix).sum() / wmix.sum().clamp_min(1)
+    if "sh" in P:                                                                                    # the populations' density in SH, no matching:
+        from .sh import bands, density_sh                                                           # each order's squared error over the batch's
+        lmax = 2 * (len(bands_for(P["sh"].shape[1])) - 1)                                           # energy in that order, averaged over the orders
+        ct = density_sh(T["slots"].float(), T["mass"].float(), lmax, kappa)
+        d2 = (P["sh"].float() - ct) ** 2
+        # floor: a tenth of the batch's order-0 energy plus that of mass 0.05 in every cell (order 0 = sqrt(4 pi) m) --
+        # a batch without anisotropy, or without populations, does not divide by ~0
+        floor = 0.1 * (ct[:, 0] ** 2).sum() + ct[:, 0].numel() * (0.05 * math.sqrt(4 * math.pi)) ** 2
+        out["sh"] = sum(d2[:, b].sum() / ((ct[:, b] ** 2).sum() + floor) for b in bands(lmax)) / len(bands(lmax))
     W = {**WEIGHTS, **(weights or {})}
     total = sum(W[k] * v for k, v in out.items())
     return total, {k: float(v) for k, v in out.items()}

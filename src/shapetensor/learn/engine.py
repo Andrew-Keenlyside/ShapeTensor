@@ -197,8 +197,7 @@ class PopulationEngine:
             rf = None; ck = None
             if checkpoint is not None:
                 ck = torch.load(checkpoint, map_location=device) if isinstance(checkpoint, (str, Path)) else checkpoint
-            widths = tuple(ck["args"].get("widths", (16, 32, 64))) if ck is not None else (16, 32, 64)
-            self.net = PopulationNet(widths=widths).to(device).eval()
+            self.net = PopulationNet.from_args(ck["args"] if ck is not None else None).to(device).eval()
             if ck is not None:
                 self.net.load_state_dict(ck["model"]); rf = ck.get("receptive_field")
         self.rf = rf if rf is not None else receptive_field(self.net)
