@@ -46,6 +46,7 @@ DISTINCT = None                    # None: rank order among all present slots; a
 
 
 DESC_NC = 0                        # coefficients per descriptor density (0: none), set by train()
+DESC_K = 3                         # descriptor densities after the density (3: thickness, hollowness, angularity; 5: the scenes')
 SHAPE_LOSS = "frobenius"           # "frobenius" | "devcos": the tensor cost of slots and mixture (see dev_cost)
 AXIS_W = 1.0                       # weight of the axis-head cost (when the model has an axis head)
 
@@ -365,12 +366,12 @@ def _sh_block_rotation(perm, flips, n: int, device) -> torch.Tensor:
     """The rotation of ``n`` SH channels: the density (its order from ``n - 3 DESC_NC``) and, after it, three descriptor
     densities of ``DESC_NC`` coefficients each (rotations are block-diagonal by order, so theirs is the leading block)."""
     from .query import sh_rotation
-    nsh = n - 3 * DESC_NC
+    nsh = n - DESC_K * DESC_NC
     R = sh_rotation(perm, flips, 2 * (len(bands_for(nsh)) - 1), device)
     if not DESC_NC:
         return R
     Rd = R[:DESC_NC, :DESC_NC]
-    return torch.block_diag(R, Rd, Rd, Rd)
+    return torch.block_diag(R, *([Rd] * DESC_K))
 
 
 def augment(image: torch.Tensor, tgt: dict, g: torch.Generator | None = None):

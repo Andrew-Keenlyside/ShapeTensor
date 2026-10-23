@@ -152,6 +152,23 @@ python -m shapetensor.learn.train --out run --steps 20000 --size 96      # train
 python scripts/learn/examples.py                                         # the synthesis, labels and targets, by modality
 ```
 
+**The lobe-mixture model on object scenes** (in development; `learn/scene.py`, `learn/physics.py`, `learn/lobes.py`,
+`learn/lobe_train.py`). Scenes of objects in physical units (bundles that interleave where they cross, trees,
+networks, dendrites, glands, tubules, sheets, foams, lamellae, fascicles, trabeculae, cells, epithelia, crystals),
+imaged through material physics (X-ray, dark-field, histology, polarised light, MRI); each cell's output is a set of
+Watson lobes -- axis, mass, signed concentration, five descriptors -- compared in harmonics with the exact density of
+the orientations present, plus an identity embedding, branch / endpoint maps and the shape fraction:
+
+```bash
+python -m shapetensor.learn.train --head lobes --out run --steps 3000 --size 96 --batch 2 --accum 8 \
+    --gate 0.85 --gate-max 500 --difficulty auto --pairs 16 --query 128 \
+    --real HIPCT.ome.zarr@0=20 --gen '{"scene": {"canvas": 192, "crops_per_scene": 8}}'
+python scripts/learn/capability_bank.py build --out banks          # fixed test sets per capability
+python scripts/learn/capability_bank.py score --bank banks --models run/model.pt
+python scripts/learn/real_validation.py --models run/model.pt      # HiP-CT vs SynthSeg, BigBrain vs its layers
+python scripts/learn/domain_gap.py --real HIPCT.ome.zarr@0         # real vs synthetic image statistics
+```
+
 ## Layout
 
 ```

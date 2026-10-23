@@ -67,20 +67,22 @@ def layer_density(s, drawn: dict, points: torch.Tensor, sigmas: torch.Tensor, lm
 
 
 def voxel_density(s, drawn: dict, lmax: int, kappa: float = 20.0, n: int = 600, chunk: int = 32768, floor: float = 1e-4,
-                  desc_lmax: int = 0) -> torch.Tensor:
+                  desc_lmax: int = 0, desc_key: str = "descriptors") -> torch.Tensor:
     """The exact per-voxel orientation density in SH, ``(n_coef, Z, Y, X)``: at every voxel, the sum over the shape
     layers of its visible occupancy times the angular density of its own label tensor (each lobe normalised over the
     sphere). A Gaussian window of any sigma applied to it is the window-averaged density of the orientations present
     -- exact for bends, branches and crossings alike (the per-layer form, :func:`layer_density`, describes a layer by
     its window-mean tensor instead). With ``desc_lmax``, also each descriptor's density (thickness, hollowness,
     angularity: ``sum_L o_L v_L q_L w``) to that order, appended: ``(n_coef(lmax) + 3 n_coef(desc_lmax), ...)``; at a
-    density peak ``u``, ``q(u) = f_q(u) / f(u)`` is the descriptor of the population pointing there -- no slots."""
+    density peak ``u``, ``q(u) = f_q(u) / f(u)`` is the descriptor of the population pointing there -- no slots.
+    ``desc_key``: the drawn descriptors to use (``descriptors``: 3 per layer; ``descriptors5``: the scenes' 5)."""
     occ, T, vis = drawn["occupancy"], drawn["tensors"], drawn["visibility"]
     dev = occ.device
     shapes = [k for k, L in enumerate(s.layers) if L.role != "isotropic"]
     vis = vis.view(-1, 1, 1, 1) if vis.dim() == 1 else vis
-    D = drawn.get("descriptors") if desc_lmax else None
+    D = drawn.get(desc_key) if desc_lmax else None
     nd = n_coef(desc_lmax) if desc_lmax else 0
+    nq = D.shape[1] if D is not None else 3
     ov = drawn.get("orientation_visibility")
     if ov is not None:
         ov = ov.view(-1, 1, 1, 1) if ov.dim() == 1 else ov
@@ -88,7 +90,7 @@ def voxel_density(s, drawn: dict, lmax: int, kappa: float = 20.0, n: int = 600, 
     gz, gy, gx = b.grid.unbind(1)
     quad = torch.stack([gz * gz, gy * gy, gx * gx, 2 * gz * gy, 2 * gz * gx, 2 * gy * gx], 1)              # (n, 6): u^T S u = quad @ S6
     nc = b.proj.shape[0]
-    F = torch.zeros(nc + 3 * nd, *occ.shape[1:], device=dev)
+    F = torch.zeros(nc + nq * nd, *occ.shape[1:], device=dev)
     Ff = F.view(F.shape[0], -1)
     iso = torch.tensor([1, 1, 1, 0, 0, 0.0], device=dev) / 3
     for k in shapes:
@@ -110,8 +112,8 @@ def voxel_density(s, drawn: dict, lmax: int, kappa: float = 20.0, n: int = 600, 
             c = b.proj @ e                                                                             # (nc, m)
             Ff[:nc, ii] += c * w[ii]
             if nd and D is not None:
-                q = D[k].reshape(3, -1)[:, ii].float()                                                 # (3, m)
-                for j in range(3):
+                q = D[k].reshape(nq, -1)[:, ii].float()                                                # (nq, m)
+                for j in range(nq):
                     Ff[nc + j * nd: nc + (j + 1) * nd, ii] += c[:nd] * (w[ii] * q[j])
     return F
 

@@ -9,6 +9,12 @@
 3. ``scene_modalities.png``: one crop of one scene under the HiP-CT, CT, MRI and histology acquisition models.
 4. ``scene_pairs.png``: training pairs (64³ crops) with their targets: the heaviest population's axis x mass, the
    population count and the identities.
+5. ``scene_crossings.png``: two bundles crossing, fibres passing through each other vs interleaved fascicles (a plane
+   containing the crossing's normal and one bundle's axis), a tract splitting in two, a kissing pair.
+6. ``scene_physics.png``: one crop under each image formation (additive, X-ray, dark-field, histology, PLI, MRI), and a
+   zoom pair (the crop and the region twice its size at half the resolution).
+7. ``scene_new_families.png``: the added families -- plywood lamellae, fascicle hierarchies, trabeculae, tubules,
+   epithelia, glands, dendrites, crystals (populations coloured).
 """
 from __future__ import annotations
 
@@ -152,11 +158,96 @@ def pairs(out: Path):
     plt.tight_layout(rect=(0, 0, 1, 0.97)); fig.savefig(out / "scene_pairs.png", dpi=50); plt.close(fig)
 
 
+def _plane(vol: torch.Tensor, c: torch.Tensor, u: torch.Tensor, v: torch.Tensor, half: int = 40) -> np.ndarray:
+    """A planar slice of ``vol (C, Z, Y, X)`` through ``c`` spanned by unit ``u`` (rows) and ``v`` (columns)."""
+    t = torch.arange(-half, half + 1, device=vol.device, dtype=torch.float32)
+    P = c + t[:, None, None] * u + t[None, :, None] * v                                                 # (n, n, 3)
+    sz = torch.tensor(vol.shape[-3:], device=vol.device, dtype=torch.float32)
+    g = (2 * P / (sz - 1) - 1).flip(-1)[None, None]
+    return torch.nn.functional.grid_sample(vol[None].float(), g, align_corners=True)[0, :, 0].permute(1, 2, 0).cpu().numpy()
+
+
+def crossings(out: Path):
+    import shapetensor.learn.scene as S
+    fig, ax = plt.subplots(1, 4, figsize=(16, 4.4))
+    for j, inter in enumerate((False, True)):
+        sc = Scene((96, 96, 96), 1, DEV, 2.0); c = torch.tensor([48.0, 48.0, 48.0], device=DEV)
+        for _ in range(50):
+            a = sc.bundle(None, "single", axis=torch.tensor([0.0, 0.0, 1.0], device=DEV), centre=c, radius=14.0, curv=1e-4)
+            if a is not None and a.offsets is not None:
+                break
+        for _ in range(50):
+            b = sc.bundle(a.centreline, "angled", curv=1e-4)
+            if b is not None and not isinstance(b, list) and b.offsets is not None:
+                break
+        if inter:
+            sc.interleave(a, b)
+        sc.groups = [a, b]; ren = sc.render()
+        o = torch.stack([ren["groups"][0]["occupancy"], ren["groups"][1]["occupancy"], torch.zeros_like(ren["groups"][0]["occupancy"])])
+        P0, tA, dB = b.cross; n = torch.nn.functional.normalize(torch.linalg.cross(tA, dB), dim=0)
+        both = int(((o[0] > 0.05) & (o[1] > 0.05)).sum())
+        ax[j].imshow(np.clip(_plane(o, P0, n, tA), 0, 1)); ax[j].set_title(f"{'interleaved' if inter else 'passing through'}: {both} shared voxels\n(rows: crossing normal, cols: red bundle axis)")
+    fam = {k: (1.0 if k == "bundle" else 0.0) for k in Scene.FAMILIES}
+    for sd in range(400):
+        sc = Scene((96, 96, 96), sd, DEV, 3.0).build(fam, (1, 1), 0.0)
+        if "split" in sc.record and len(sc.groups) == 2:
+            break
+    ren = sc.render(); o = torch.stack([g["occupancy"] for g in ren["groups"]]); mip = o.amax(1)
+    ax[2].imshow(np.clip(torch.stack([mip[0], mip[1], torch.zeros_like(mip[0])], -1).cpu().numpy(), 0, 1)); ax[2].set_title(f"a tract splitting ({sc.record['split'][0]} deg): two populations, MIP")
+    sc = Scene((96, 96, 96), 7, DEV, 4.0); c = torch.tensor([48.0, 48.0, 48.0], device=DEV)
+    a = sc.bundle(None, "single", axis=torch.tensor([0.0, 0.0, 1.0], device=DEV), centre=c, radius=10.0, curv=1e-4)
+    b = sc.bundle(a.centreline, "kissing", curv=1e-4)
+    if isinstance(b, list):
+        b = b[0]
+    cl = a.centreline; b.curves = [sc.deflect(cv, extra=[(cl.P[0, ::4], cl.rad[0, ::4])]) for cv in b.curves]
+    sc.groups = [a, b]; ren = sc.render(); o = torch.stack([g["occupancy"] for g in ren["groups"]]); mip = o.amax(2)
+    ax[3].imshow(np.clip(torch.stack([mip[0], mip[1], torch.zeros_like(mip[0])], -1).cpu().numpy(), 0, 1)); ax[3].set_title("kissing: the newer bundle yields (MIP)")
+    for a_ in ax:
+        a_.axis("off")
+    plt.tight_layout(); fig.savefig(out / "scene_crossings.png", dpi=60); plt.close(fig)
+
+
+def physics(out: Path):
+    from shapetensor.learn.scene import draw_pair
+    modes = ("additive", "xray", "darkfield", "histology", "pli", "mri")
+    fig, ax = plt.subplots(2, 4, figsize=(16, 8.4))
+    for j, ph in enumerate(modes):
+        s, d = draw_scene((96, 96, 96), seed=8 * 1234, device=DEV, strength=0.3, physics=ph, p_warp=0.0, canvas=192, modality="mixed")
+        a_ = ax.flat[j]; a_.imshow(d["image"][48].float().cpu().numpy(), cmap="gray"); a_.set_title(f"{ph}"); a_.axis("off")
+    (s1, d1), (s2, d2), info = draw_pair((96, 96, 96), seed=8 * 77, device=DEV, kind="zoom", strength=0.3, canvas=192, p_warp=0.0)
+    ax.flat[6].imshow(d1["image"][48].float().cpu().numpy(), cmap="gray"); ax.flat[6].set_title(f"zoom pair: fine ({d1['voxel_um']:.1f} um)")
+    ax.flat[7].imshow(d2["image"][48 // 2 + 4 * info["offset_cells"][0]].float().cpu().numpy(), cmap="gray"); ax.flat[7].set_title(f"coarse ({d2['voxel_um']:.1f} um), 2x the extent")
+    for a_ in ax.flat:
+        a_.axis("off")
+    plt.tight_layout(); fig.savefig(out / "scene_physics.png", dpi=55); plt.close(fig)
+
+
+def new_families(out: Path):
+    names = ["plywood", "fascicles", "trabecular", "tubules", "epithelium", "gland", "dendrite", "crystals"]
+    vox = {"dendrite": 1.0, "fascicles": 3.0, "gland": 4.0}
+    fig, ax = plt.subplots(2, 4, figsize=(16, 8.4))
+    cols = torch.tensor([[1, 0.2, 0.2], [0.2, 1, 0.2], [0.2, 0.6, 1], [1, 1, 0.2]], device=DEV)
+    for a_, name in zip(ax.flat, names):
+        fam = {k: (1.0 if k == name else 0.0) for k in Scene.FAMILIES}
+        for sd in range(5, 30):
+            sc = Scene((128, 128, 128), sd, DEV, vox.get(name, 4.0)).build(fam, (1, 1), 0.0)
+            if sc.groups:
+                ren = sc.render()
+                o = torch.stack([g["occupancy"] for g in ren["groups"]])
+                if float(o.sum()) > 200:
+                    break
+        k = int(o.sum((0, 2, 3)).argmax())
+        rgb = (o[:, k, :, :, None] * cols[:o.shape[0], None, None, :]).sum(0).clamp(0, 1)
+        a_.imshow(rgb.cpu().numpy()); a_.set_title(f"{name}: " + ", ".join(sorted({g['group'].name for g in ren['groups']}))); a_.axis("off")
+    plt.tight_layout(); fig.savefig(out / "scene_new_families.png", dpi=55); plt.close(fig)
+
+
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--out", default="/home/andrew/bridge_wmcov/shapetensor/results/dev_pipeline/scene_generator")
     ap.add_argument("--only", nargs="*")
     a = ap.parse_args(); out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
-    for name, fn in (("families", families), ("collapse", collapse), ("modalities", modalities), ("pairs", pairs)):
+    for name, fn in (("families", families), ("collapse", collapse), ("modalities", modalities), ("pairs", pairs), ("crossings", crossings),
+                     ("physics", physics), ("new_families", new_families)):
         if a.only and name not in a.only:
             continue
         fn(out); print("wrote", name, flush=True)

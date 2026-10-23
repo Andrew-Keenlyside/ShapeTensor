@@ -647,22 +647,28 @@ def interface(R: torch.Tensor, sigma: float = 1.5):
     return torch.where(mag[None] > 1e-6, gr / mag.clamp_min(1e-9)[None], ez), w
 
 
-def background(shape, style: str, g: torch.Generator, device, scale: float = 1.0, content: str = "general"):
+def background(shape, style: str, g: torch.Generator, device, scale: float = 1.0, content: str = "general", nprng=None):
     """The background before the layers: ``regions`` (anatomix: a random label map, an intensity per label),
     ``tissue`` (two or three broad regions -- grey/white matter -- with texture), ``cells`` (a cell stain: small blobs,
     dark or bright, their density optionally laminar along a random direction). Returns the image, the label map, the
-    region means, and the extra layers the style brings (the cells as a blob population)."""
-    u = lambda a, b: float(a + (b - a) * torch.rand(1, generator=g, device=device))
+    region means, and the extra layers the style brings (the cells as a blob population). With ``nprng`` (a numpy
+    generator) every scalar is drawn on the CPU: no device synchronisation."""
+    if nprng is not None:
+        u = lambda a, b: float(nprng.uniform(a, b))
+        ri = lambda a, b: int(nprng.integers(a, b))
+    else:
+        u = lambda a, b: float(a + (b - a) * torch.rand(1, generator=g, device=device))
+        ri = lambda a, b: int(torch.randint(a, b, (1,), generator=g, device=device))
     lu = lambda a, b: float(math.exp(u(math.log(a), math.log(b))))
     extra = []
     if style == "flat":                                                                        # a uniform background (feasibility tests)
         lab = torch.zeros(shape, dtype=torch.long, device=device); R = torch.full(shape, u(70, 190), device=device)
         img = R + 2 * smooth_noise(shape, 1.0, g, device)
     elif style == "regions":
-        nl = int(torch.randint(3, 9, (1,), generator=g, device=device)); lab = label_map(shape, nl, u(6, 25) * scale, g, device)
+        nl = ri(3, 9); lab = label_map(shape, nl, u(6, 25) * scale, g, device)
         R = (40 + 170 * torch.rand(nl, device=device, generator=g))[lab]; img = R + 6 * smooth_noise(shape, 2.0 * scale, g, device)
     elif style == "tissue":
-        nl = int(torch.randint(2, 4, (1,), generator=g, device=device)); lab = label_map(shape, nl, u(25, 60) * scale, g, device)
+        nl = ri(2, 4); lab = label_map(shape, nl, u(25, 60) * scale, g, device)
         R = (60 + 150 * torch.rand(nl, device=device, generator=g))[lab]; img = R + u(8, 25) * smooth_noise(shape, u(1.0, 3.0) * scale, g, device)
     else:                                                                                      # cells: a blob population on a flat background
         lab = torch.zeros(shape, dtype=torch.long, device=device); R = torch.full(shape, u(70, 190), device=device)
@@ -854,32 +860,24 @@ def _corr_volume(r: torch.Tensor) -> float:
     return v
 
 
-def visibility(img: torch.Tensor, regressors: torch.Tensor, units, radii=None, sigma_v: float = 5.0, step: int = 4,
-               t_lo: float = 3.0, t_hi: float = 8.0, return_t: bool = False, s_hp_max: float | None = None) -> torch.Tensor:
-    """Each layer's **local** visibility ``(K, Z, Y, X)``: how clearly its shapes show in the final image around each
-    point. The image and the layers' image signatures (``regressors``: a shape layer's occupancy, an interface's
-    region-means image) are high-passed at a scale matched to the shapes (σ = max(4, 2.5 × the largest radius in
-    ``radii``)); in a Gaussian window at each lattice cell (``sigma_v``: the target's own window, so the evidence is the
-    window's -- a featureless interior is not credited with its distant edges) the image is regressed on them jointly.
-    Layer k's evidence is the t-statistic ``|c_k| / se_k`` of its fit: its contrast against the noise, times the root
-    of its structure energy in the window, the standard error counting the window's voxels over the noise's correlation
-    volume -- scale-free (a thick shape or an extended step gathers more evidence than a thin fibre at the same contrast
-    to noise). Visibility = (t - ``t_lo``) / (``t_hi`` - ``t_lo``), clipped to [0, 1], interpolated to the voxels:
-    0 where the layer's shapes do not show (a featureless slab, a noisy or dark part of the block), 1 where they do.
-    Two uses, two ranges (:data:`PRESENCE_T`, :data:`ORIENTATION_T`): whether the shapes are there at all -- a
-    detection, t 3 to 8 -- and whether their orientation is recoverable -- measured on drawn samples against a local
-    structure tensor's orientation error on single-population fibre voxels (about 40° (chance ~60°) up to t ≈ 10,
-    24-32° at t 15-25, 17° beyond 25) and set somewhat below it, t 6 to 18.
-    ``units[k] = None`` marks a layer not measured (visibility 1)."""
-    K = regressors.shape[0]; dev = img.device; shp = img.shape
-    v = torch.ones((K,) + tuple(shp), device=dev)
-    idx = [k for k in range(K) if units[k] is not None]
-    if not idx:
-        return v
-    rmax = max([float(radii[k]) for k in idx] if radii is not None else [1.0])
-    s_hp = max(4.0, 2.5 * rmax)
-    if s_hp_max is not None:                                                                      # one large object must not blur every layer's evidence
-        s_hp = min(s_hp, s_hp_max)
+def _corr_volume_local(r: torch.Tensor, pool) -> torch.Tensor:
+    """:func:`_corr_volume` per window: the lag-1 autocorrelation of the residual along each axis pooled with the
+    target's window (``pool``), so a thick-sliced or blurred part of a block is not credited with white-noise evidence
+    and a clean part is not penalised for another part's correlation. ``(c...)``."""
+    v = None; rr = pool((r * r)[None])[0].clamp_min(1e-12)
+    for a in range(3):
+        x1 = torch.roll(r, -1, dims=a)
+        rho = (pool((r * x1)[None])[0] / rr).clamp(1e-6, 0.99)
+        sig = torch.sqrt(-1.0 / (4.0 * torch.log(rho)))
+        f = (2.0 * math.sqrt(math.pi) * sig).clamp_min(1.0)
+        v = f if v is None else v * f
+    return v
+
+
+def _vis_t(img, regressors, idx, s_hp, sigma_v, step, local_corr):
+    """The t-statistics ``(c..., len(idx))`` of a joint regression of the high-passed image on the high-passed
+    regressors ``idx`` in a Gaussian window at each lattice cell (see :func:`visibility`)."""
+    dev = img.device; shp = img.shape
     hp = lambda x: x - gaussian(x, s_hp, truncate=3.0)
     y = hp(img); A = hp(regressors[idx]); n = len(idx)
     pool = lambda x: Fn.avg_pool3d(gaussian(x, sigma_v, truncate=3.0)[None], step)[0]
@@ -895,9 +893,55 @@ def visibility(img: torch.Tensor, regressors: torch.Tensor, units, radii=None, s
     res = (yy - (c * bm.movedim(0, -1)).sum(-1)).clamp_min(1e-9)                                  # the window's residual mean square
     c_vox = Fn.interpolate(c.movedim(-1, 0)[None], scale_factor=step, mode="trilinear", align_corners=False)[0][(slice(None),) + tuple(slice(0, s_) for s_ in shp)]
     resid = y - (c_vox * A).sum(0)                                                                  # the image less the layers' fitted signal: noise and clutter
-    neff = (2 * math.sqrt(math.pi) * sigma_v) ** 3 / _corr_volume(resid)                          # independent voxels in the window
+    if local_corr:
+        neff = ((2 * math.sqrt(math.pi) * sigma_v) ** 3 / _corr_volume_local(resid, pool))[..., None]
+    else:
+        neff = (2 * math.sqrt(math.pi) * sigma_v) ** 3 / _corr_volume(resid)                      # independent voxels in the window
     se = (res[..., None] * Gi.diagonal(dim1=-2, dim2=-1).clamp_min(0) / neff).sqrt()
-    t = c.abs() / se.clamp_min(1e-12)
+    return c.abs() / se.clamp_min(1e-12)
+
+
+def visibility(img: torch.Tensor, regressors: torch.Tensor, units, radii=None, sigma_v: float = 5.0, step: int = 4,
+               t_lo: float = 3.0, t_hi: float = 8.0, return_t: bool = False, s_hp_max: float | None = None,
+               per_layer_hp: bool = False, local_corr: bool = False) -> torch.Tensor:
+    """Each layer's **local** visibility ``(K, Z, Y, X)``: how clearly its shapes show in the final image around each
+    point. The image and the layers' image signatures (``regressors``: a shape layer's occupancy, an interface's
+    region-means image) are high-passed at a scale matched to the shapes (σ = max(4, 2.5 × the largest radius in
+    ``radii``; with ``per_layer_hp``, each layer at its own radius's scale -- layers grouped by scale, each group's
+    t from a regression at its scale with every layer as a covariate -- so a large object does not blur a fine one's
+    evidence)); in a Gaussian window at each lattice cell (``sigma_v``: the target's own window, so the evidence is the
+    window's -- a featureless interior is not credited with its distant edges) the image is regressed on them jointly.
+    Layer k's evidence is the t-statistic ``|c_k| / se_k`` of its fit: its contrast against the noise, times the root
+    of its structure energy in the window, the standard error counting the window's voxels over the noise's correlation
+    volume (``local_corr``: per window, else over the block) -- scale-free (a thick shape or an extended step gathers
+    more evidence than a thin fibre at the same contrast to noise). Visibility = (t - ``t_lo``) / (``t_hi`` - ``t_lo``),
+    clipped to [0, 1], interpolated to the voxels: 0 where the layer's shapes do not show (a featureless slab, a noisy
+    or dark part of the block), 1 where they do.
+    Two uses, two ranges (:data:`PRESENCE_T`, :data:`ORIENTATION_T`): whether the shapes are there at all -- a
+    detection, t 3 to 8 -- and whether their orientation is recoverable -- measured on drawn samples against a local
+    structure tensor's orientation error on single-population fibre voxels (about 40° (chance ~60°) up to t ≈ 10,
+    24-32° at t 15-25, 17° beyond 25) and set somewhat below it, t 6 to 18.
+    ``units[k] = None`` marks a layer not measured (visibility 1)."""
+    K = regressors.shape[0]; dev = img.device; shp = img.shape
+    v = torch.ones((K,) + tuple(shp), device=dev)
+    idx = [k for k in range(K) if units[k] is not None]
+    if not idx:
+        return v
+    cap = (lambda x: min(x, s_hp_max)) if s_hp_max is not None else (lambda x: x)
+    if per_layer_hp and radii is not None:
+        scale_of = {k: cap(max(4.0, 2.5 * float(radii[k]))) for k in idx}
+        bins = {}
+        for k in idx:                                                                             # scales within a factor of ~1.4 share a regression
+            bins.setdefault(round(math.log2(scale_of[k]) * 2), []).append(k)
+        t = torch.zeros(tuple(s // step for s in shp) + (len(idx),), device=dev)
+        for key, ks in bins.items():
+            s_hp = max(scale_of[k] for k in ks)
+            tg = _vis_t(img, regressors, idx, s_hp, sigma_v, step, local_corr)
+            for k in ks:
+                j = idx.index(k); t[..., j] = tg[..., j]
+    else:
+        rmax = max([float(radii[k]) for k in idx] if radii is not None else [1.0])
+        t = _vis_t(img, regressors, idx, cap(max(4.0, 2.5 * rmax)), sigma_v, step, local_corr)
     if return_t:                                                                                  # the evidence itself, upsampled (for calibration)
         tv = Fn.interpolate(t.movedim(-1, 0)[None], scale_factor=step, mode="trilinear", align_corners=False)[0]
         out = torch.zeros((K,) + tuple(shp), device=dev); out[idx] = tv[(slice(None),) + tuple(slice(0, s_) for s_ in shp)]
@@ -935,7 +979,7 @@ CROSS_MIX = 0.08                   # every nuisance outside the chosen modality'
 
 
 def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, modality: str | None = None, warp: bool | None = None,
-             fast: bool = False, hp_max: float | None = None) -> dict:
+             fast: bool = False, hp_max: float | None = None, vis_opts: dict | None = None) -> dict:
     # ``strength`` (0-1) scales the probability and the magnitude of every nuisance that destroys information (PSF,
     # resolution, thick slices, k-space truncation, noise, artefacts); geometric and monotone remaps are not scaled
     """One draw of a modality's acquisition on a clean sample (``hipct`` / ``ct`` / ``mri`` / ``histology`` /
@@ -962,7 +1006,7 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     occ = torch.stack([L.occupancy for L in s.layers]); T = torch.stack([L.tensor for L in s.layers])
     Dsc = torch.stack([L.desc if L.desc is not None else torch.zeros((3,) + tuple(img.shape), device=device) for L in s.layers])   # (K, 3, Z, Y, X)
     R = s.regions if s.regions is not None else torch.zeros_like(img)
-    K = occ.shape[0]; stretch = torch.ones_like(img)
+    K = occ.shape[0]; stretch = torch.ones_like(img); grid = None
     # ---- geometry: an elastic warp; labels follow; shape tensors by the Jacobian (S -> J⁻¹ S J⁻ᵀ), never folding
     if (warp if warp is not None else on("warp")):
         sig = lu(8, 30); amp = u(0, 6)
@@ -1104,13 +1148,14 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     occ = occ.clamp(0, 1)
     regs = torch.stack([R if L.role == "interface" else occ[k] for k, L in enumerate(s.layers)])
     t = visibility(img, regs, [None if L.role == "isotropic" else 1.0 for L in s.layers], radii=[L.radius if L.role == "shape" else 1.0 for L in s.layers], return_t=True,
-                   s_hp_max=hp_max)
+                   s_hp_max=hp_max, **(vis_opts or {}))
     iso = torch.tensor([L.role == "isotropic" for L in s.layers], device=device).view(-1, 1, 1, 1)
     vis = torch.where(iso, torch.ones_like(t), ((t - PRESENCE_T[0]) / (PRESENCE_T[1] - PRESENCE_T[0])).clamp(0, 1))
     ovis = torch.where(iso, torch.ones_like(t), ((t - ORIENTATION_T[0]) / (ORIENTATION_T[1] - ORIENTATION_T[0])).clamp(0, 1))
     wmean = lambda v: [round(float((x * o).sum() / o.sum().clamp_min(1e-6)), 2) for x, o in zip(v, occ)]   # occupancy-weighted means, for the record
     rec["visibility"] = wmean(vis); rec["orientation_visibility"] = wmean(ovis)
-    return {"image": img, "occupancy": occ, "tensors": T, "descriptors": Dsc, "visibility": vis, "orientation_visibility": ovis, "stretch": stretch, "record": rec}
+    return {"image": img, "occupancy": occ, "tensors": T, "descriptors": Dsc, "visibility": vis, "orientation_visibility": ovis, "stretch": stretch, "record": rec,
+            "warp_grid": grid}
 
 
 def draw(shape=(128, 128, 128), seed: int = 0, device="cuda", modality: str | None = None, strength: float = 1.0, **kw):

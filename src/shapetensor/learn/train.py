@@ -42,6 +42,9 @@ from .targets import target
 TKEYS = ("slots", "mass", "kind", "layer", "fraction", "classes", "size", "size_mask")
 HALF = ("slots", "mass", "fraction", "classes", "size")
 QKEYS = ("q_points", "q_sigma", "q_sh", "sh_t")
+LKEYS = ("identity_t", "points_t", "voxel", "fraction")    # the lobe model's extra targets
+HEAD = "slots"                     # "slots" | "lobes" (set by train())
+DESC_KEY = "descriptors"           # the drawn descriptors the descriptor densities use ("descriptors5": the scenes' five)
 SH_EXACT = 0                       # > 0: the SH head's lattice target from the exact per-voxel density to this order
 DESC_LMAX = 0                      # > 0: also the descriptor densities (thickness, hollowness, angularity) to this order
 CONTEXT = None                     # (lo, hi): also train the query decoder on copies whose input outside a random cube of
@@ -84,7 +87,7 @@ def _code_version() -> str:
         from pathlib import Path as _P
         here = _P(__file__).parent
         h = hashlib.sha1()
-        for f in (here / "generator.py", here / "targets.py", here / "query.py", here / "sh.py", here.parent / "filters.py"):
+        for f in (here / "generator.py", here / "targets.py", here / "query.py", here / "sh.py", here / "scene.py", here / "physics.py", here.parent / "filters.py"):
             h.update(f.read_bytes())
         _CODE_VERSION = h.hexdigest()[:12]
     return _CODE_VERSION
@@ -98,7 +101,7 @@ def make(seed: int, size: int, device, strength: float = 1.0, gen: dict | None =
     import hashlib
     from pathlib import Path as _P
     from . import targets as _tg
-    key = json.dumps([seed, size, round(float(strength), 4), gen or {}, QUERY, SH_EXACT, DESC_LMAX, _tg.ORDER, _code_version()], sort_keys=True, default=str)
+    key = json.dumps([seed, size, round(float(strength), 4), gen or {}, QUERY, SH_EXACT, DESC_LMAX, _tg.ORDER, HEAD, DESC_KEY, _code_version()], sort_keys=True, default=str)
     f = _P(CACHE) / (hashlib.sha1(key.encode()).hexdigest() + ".pt")
     if f.exists():
         try:
@@ -125,7 +128,13 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
     F = None
     if SH_EXACT or (QUERY and QUERY.get("exact")):                                                     # the exact per-voxel density
         from .query import voxel_density
-        F = voxel_density(s, d, SH_EXACT or QUERY["lmax"], desc_lmax=DESC_LMAX)
+        F = voxel_density(s, d, SH_EXACT or QUERY["lmax"], desc_lmax=DESC_LMAX, desc_key=DESC_KEY if DESC_KEY in d else "descriptors")
+    if HEAD == "lobes":                                                                                # identities (stride 2), points (lattice), voxel size
+        if "identity" in d:
+            out["identity_t"] = d["identity"][::2, ::2, ::2].to(torch.int32)
+        if "points" in d:
+            out["points_t"] = Fn.avg_pool3d(d["points"][None].float(), 4)[0].half()
+        out["voxel"] = torch.tensor(math.log2(d["voxel_um"]) if d.get("voxel_um") else float("nan"), device=device)
     if SH_EXACT:                                                                                       # lattice target: window sigma 5, 4³ average
         from .targets import _pool
         out["sh_t"] = _pool(F, 5.0, 4).half()
@@ -139,20 +148,37 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
     return d["image"].to(torch.uint8), out
 
 
+ROUTES = 0.0                       # > 0: batch-time contrast routes (learn/augment.py) at this strength, a fresh draw each use
+VIEWS = 1                          # 2: also a second route of the same pairs (``_view2``) for the contrast-consistency loss
+
+
 def stack(pairs, g=None, aug: bool = True):
     """A batch from (image, target) pairs: the image ``(B, 1, Z, Y, X)`` in 0-1, the targets stacked; with ``aug``
-    each pair cube-transformed and its intensities jittered (a different window: ``a x + b``, clipped)."""
-    imgs, tgts = [], []
+    each pair cube-transformed and its intensities jittered (a different window: ``a x + b``, clipped), and with
+    :data:`ROUTES` sent through a random contrast route (:func:`~shapetensor.learn.augment.contrast_route`); with
+    :data:`VIEWS` = 2 a second, independent route of the same geometry rides along as ``_view2``."""
+    import numpy as _np
+    from .augment import contrast_route
+    imgs, imgs2, tgts = [], [], []
     for img, t in pairs:
-        t = {k: (v.float() if k in HALF or k in ("q_sh", "sh_t") else v.long() if k in ("kind", "layer") else v) for k, v in t.items()}
+        t = {k: (v.float() if k in HALF or k in ("q_sh", "sh_t", "points_t") else v.long() if k in ("kind", "layer", "identity_t") else v) for k, v in t.items()}
         x = img.float() / 255.0
         if aug:
             x, t = augment(x, t, g)
             a = 0.6 + 0.8 * float(torch.rand(1, generator=g)); b = 0.4 * (float(torch.rand(1, generator=g)) - 0.5)
             x = (a * (x - 0.5) + 0.5 + b).clamp(0, 1)
+            if ROUTES > 0:
+                base = x
+                rng = _np.random.default_rng(int(torch.randint(0, 2 ** 31 - 1, (1,), generator=g)))
+                x = contrast_route(base, rng, ROUTES)
+                if VIEWS == 2:
+                    imgs2.append(contrast_route(base, _np.random.default_rng(int(torch.randint(0, 2 ** 31 - 1, (1,), generator=g))), ROUTES))
         imgs.append(x); tgts.append(t)
-    keys = TKEYS + tuple(k for k in QKEYS if k in tgts[0])
-    return torch.stack(imgs)[:, None], {k: torch.stack([t[k] for t in tgts]) for k in keys}
+    keys = TKEYS + tuple(k for k in QKEYS + LKEYS if k in tgts[0] and k not in TKEYS)
+    T = {k: torch.stack([t[k] for t in tgts]) for k in keys}
+    if imgs2:
+        T["_view2"] = torch.stack(imgs2)[:, None]
+    return torch.stack(imgs)[:, None], T
 
 
 class Buffer:
@@ -542,6 +568,148 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     return model
 
 
+def train_lobes(out: str, steps: int = 6000, size: int = 96, batch: int = 4, accum: int = 4, buffer: int = 128, refresh: int = 1, lr: float = 3e-4,
+                warmup: int = 300, margin: int = 4, val_n: int = 24, val_every: int = 500, log_every: int = 25, seed: int = 0, device: str = "cuda",
+                strength0: float = 0.15, strength1: float = 0.8, gen: dict | None = None, widths: tuple = (32, 64, 128), sh_lmax: int = 8, desc_lmax: int = 4,
+                lobes_J: int = 4, context_level: bool = True, voxel_cond: bool = True, identity_dim: int = 8, points: bool = True, query: int = 0,
+                gate: float | None = 0.85, gate_max: int | None = 1500, difficulty: str = "auto", level0: float = 0.3, pairs: int = 0, pair_every: int = 4,
+                real: list | None = None, ssl_every: int = 4, voxel_dropout: float = 0.3, weights: dict | None = None, cache: str | None = None,
+                init: str | None = None, resume: str | None = None, aniso=None, free_sh: bool = False, routes: float = 1.0, contrast_views: bool = True):
+    """The lobe-mixture model's training (see :mod:`~shapetensor.learn.lobe_train`): scene generator, exact density
+    and descriptor targets, the gate (orientation first), difficulty widening (``auto``: a level that rises when the
+    order-2 error is low), paired-render consistency (``pairs`` > 0), self-supervised consistency on ``real`` crops."""
+    from . import lobe_train as LT
+    from . import losses as _losses
+    global HEAD, DESC_KEY, SH_EXACT, DESC_LMAX, QUERY, CACHE, ROUTES, VIEWS
+    HEAD, DESC_KEY, SH_EXACT, DESC_LMAX = "lobes", "descriptors5", sh_lmax, desc_lmax
+    VIEWS = 2 if (routes and contrast_views) else 1
+    _losses.DESC_K = 5; _losses.DESC_NC = n_coef_(desc_lmax) if desc_lmax else 0
+    QUERY = {"n_points": query, "n_levels": 4, "lmax": sh_lmax, "exact": True} if query else None
+    if cache:
+        Path(cache).mkdir(parents=True, exist_ok=True); CACHE = cache
+    if weights:
+        LT.LOBE_WEIGHTS.update(weights)
+    base = dict((gen or {}).get("scene") or {"canvas": 2 * size, "crops_per_scene": 8})
+    level = {"v": level0 if difficulty == "auto" else 1.0, "since": 0, "ema": None}
+    cur_gen = lambda: {"scene": LT.difficulty_gen(level["v"], base) if difficulty == "auto" else base}
+    def set_routes():                                                                              # batch-time routes widen with the level
+        global ROUTES
+        ROUTES = routes * (0.4 + 0.6 * level["v"]) if routes else 0.0
+    outd = Path(out); outd.mkdir(parents=True, exist_ok=True)
+    logf = open(outd / "log.jsonl", "a")
+    log = lambda m: print(m, flush=True)
+    args = dict(head="lobes", steps=steps, size=size, batch=batch, accum=accum, buffer=buffer, refresh=refresh, lr=lr, warmup=warmup, margin=margin, val_n=val_n,
+                seed=seed, strength0=strength0, strength1=strength1, gen={"scene": base}, widths=list(widths), sh_lmax=sh_lmax, desc_lmax=desc_lmax, lobes_J=lobes_J,
+                context_level=context_level, voxel_cond=voxel_cond, identity_dim=identity_dim, points=points, query=query, gate=gate, gate_max=gate_max,
+                difficulty=difficulty, level0=level0, pairs=pairs, pair_every=pair_every, real=real, ssl_every=ssl_every, voxel_dropout=voxel_dropout,
+                weights=weights, aniso=list(aniso) if aniso else None, free_sh=free_sh, routes=routes, contrast_views=contrast_views)
+    torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
+    model = PopulationNet.from_args(args).to(device)
+    rf = receptive_field(model)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    start = 0
+    if init:
+        sd = torch.load(init, map_location=device)["model"]; own = model.state_dict()
+        sd = {k: v for k, v in sd.items() if k in own and own[k].shape == v.shape}
+        model.load_state_dict(sd, strict=False); log(f"init: {len(sd)}/{len(own)} tensors from {init}")
+    if resume:
+        ck = torch.load(resume, map_location=device)
+        model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); start = ck["step"]; level["v"] = ck.get("level", level["v"])
+    strength = lambda s_: strength0 + (strength1 - strength0) * min(1.0, s_ / (0.5 * steps))
+    log(f"model: {sum(p.numel() for p in model.parameters())} parameters, receptive field {rf} voxels; args {args}")
+    buf = Buffer(buffer, size, device, seed0=seed * 1_000_000 + start * refresh, strength=strength(start), log=log, gen=cur_gen())
+    def rotated(i):
+        img, t = make(10_000_000 + i, size, device, strength1, {"scene": {**base, "crops_per_scene": 1}})
+        return augment(img, t, torch.Generator().manual_seed(i))
+    val = [rotated(i) for i in range(val_n)]
+    pbuf = LT.PairBuffer(pairs, 64, device, base) if pairs else None
+    rbuf = None
+    if real:
+        srcs = [r_.split("=")[0] for r_ in real]; rvox = [float(r_.split("=")[1]) if "=" in r_ else float("nan") for r_ in real]
+        rbuf = LT.RealBuffer(srcs, size, device, n=64, seed=seed); rv = math.log2(rvox[0]) if math.isfinite(rvox[0]) else float("nan")
+        log(f"real buffer: {len(rbuf.items)} crops from {srcs}")
+    v0 = LT.evaluate_lobes(model, val, margin, device, sh_lmax, desc_lmax)
+    logf.write(json.dumps({"step": start, "baseline": True, **v0}) + "\n"); logf.flush()
+    log(f"  val {start} (baseline): " + " ".join(f"{k} {x:.4f}" for k, x in v0.items()))
+    gst = {"open": gate is None, "at": None, "ema": None}
+    alpha = lambda s_: aniso[0] * max(0.0, 1 - s_ / aniso[1]) if aniso else 0.0
+    t0 = time.time(); run = {}
+    set_routes()
+    for step in range(start, steps):
+        if gate is not None and not gst["open"]:
+            lr_now = lr * min(1.0, (step + 1) / warmup); ro = r2 = 0.0
+        else:
+            s0 = gst["at"] if gst["at"] is not None else 0; prog = (step - s0) / max(steps - s0, 1)
+            lr_now = lr * min(1.0, (step + 1) / warmup) * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * prog)))
+            ro = min(1.0, (step - s0) / 300); r2 = min(1.0, max(0.0, (step - s0 - 300) / 300))
+        for pg in opt.param_groups:
+            pg["lr"] = lr_now
+        W = {k: (LT.LOBE_WEIGHTS[k] if k in LT.ORIENT else LT.LOBE_WEIGHTS[k] * (r2 if k in ("consistency", "ssl", "contrast") else ro)) for k in LT.LOBE_WEIGHTS}
+        opt.zero_grad(set_to_none=True); tot_v = 0.0; pa = {}
+        for _ in range(accum):
+            x, T = buf.batch(batch, g, alpha(step))
+            v = T["voxel"].clone()
+            v[torch.rand(v.shape[0], generator=g).to(v.device) < voxel_dropout] = float("nan")       # the model must also work without it
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device != "cpu"):
+                P = model(x, T.get("q_points"), T.get("q_sigma"), voxel=v)
+            total, parts, rend = LT.lobe_loss(model, P, T, margin, W, sh_lmax, desc_lmax)
+            if "_view2" in T and W.get("contrast", 0) > 0 and _ == 0:                              # the same geometry by another route
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device != "cpu"):
+                    P2 = model(T["_view2"], voxel=v)
+                lcon = LT.contrast_consistency(model, rend["f"], P2, sh_lmax, margin)
+                total = total + W["contrast"] * lcon; parts["contrast"] = float(lcon)
+            (total / accum).backward(); tot_v += float(total) / accum
+            for k, v_ in parts.items():
+                pa[k] = pa.get(k, 0.0) + v_ / accum
+        if pbuf is not None and W["consistency"] > 0 and step % pair_every == 0:                    # paired renders
+            kind = ("zoom", "modality")[(step // pair_every) % 2]
+            pb = pbuf.batch(2, g, kind)
+            if pb is not None:
+                xa, xb, va, vb, info = pb
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device != "cpu"):
+                    Pa = model(xa, voxel=va); Pb = model(xb, voxel=vb)
+                lc = LT.zoom_consistency(model, Pa, Pb, info, sh_lmax) if kind == "zoom" else LT.modality_consistency(model, Pa, Pb, sh_lmax)
+                (W["consistency"] * lc).backward(); pa[f"cons_{kind}"] = float(lc)
+            pbuf.refresh(1)
+        if rbuf is not None and W["ssl"] > 0 and step % ssl_every == 0:                             # unlabelled real crops
+            xr = rbuf.batch(2, g)
+            ls = LT.ssl_consistency(model, xr, g, sh_lmax, margin, voxel=torch.full((xr.shape[0],), rv, device=device))
+            (W["ssl"] * ls).backward(); pa["ssl"] = float(ls)
+        ratio = pa["gate_num"] / max(pa["gate_den"], 1e-9)
+        gst["ema"] = ratio if gst["ema"] is None else 0.95 * gst["ema"] + 0.05 * ratio
+        if gate is not None and not gst["open"] and ((step - start >= 50 and gst["ema"] < gate) or (gate_max is not None and step + 1 >= gate_max)):
+            gst["open"], gst["at"] = True, step + 1
+            log(f"gate open at step {step + 1}: order-2 error / energy {gst['ema']:.3f}")
+            logf.write(json.dumps({"step": step + 1, "gate_open": True, "ratio": gst["ema"]}) + "\n"); logf.flush()
+        if difficulty == "auto" and gst["open"]:                                                    # widen when the current level is learned
+            level["ema"] = ratio if level["ema"] is None else 0.98 * level["ema"] + 0.02 * ratio
+            if level["v"] < 1.0 and step - level["since"] >= 300 and level["ema"] < 0.6:
+                level["v"] = min(1.0, level["v"] + 0.1); level["since"] = step; buf.gen = cur_gen(); level["ema"] = None; set_routes()
+                log(f"difficulty -> {level['v']:.1f} at step {step + 1}")
+                logf.write(json.dumps({"step": step + 1, "difficulty": level["v"]}) + "\n"); logf.flush()
+        gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0))
+        opt.step()
+        buf.refresh(refresh, g, strength(step))
+        for k, v_ in {**pa, "total": tot_v, "grad_norm": gn, "gate_ratio": gst["ema"], "level": level["v"]}.items():
+            run[k] = run.get(k, 0.0) + v_
+        if (step + 1) % log_every == 0:
+            rec = {"step": step + 1, "time_s": round(time.time() - t0, 1), "lr": lr_now, "strength": strength(step), **{k: v_ / log_every for k, v_ in run.items()}}
+            logf.write(json.dumps(rec) + "\n"); logf.flush(); run = {}
+            log(f"step {step + 1} {rec['time_s']}s s={rec['strength']:.2f} lv={rec['level']:.1f} total {rec['total']:.4f} sh {rec['sh']:.4f} ce {rec['ce']:.4f} "
+                f"desc {rec.get('desc', 0):.4f} id {rec.get('identity', 0):.4f} pts {rec.get('points', 0):.4f} gate {rec['gate_ratio']:.3f} lobe_l2 {rec.get('lobe_l2_ratio', float('nan')):.3f}")
+        if (step + 1) % val_every == 0 or step + 1 == steps:
+            v_ = LT.evaluate_lobes(model, val, margin, device, sh_lmax, desc_lmax)
+            logf.write(json.dumps({"step": step + 1, **v_}) + "\n"); logf.flush()
+            log(f"  val {step + 1}: " + " ".join(f"{k} {x:.4f}" for k, x in v_.items()))
+            torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step + 1, "args": args, "receptive_field": rf, "level": level["v"]}, outd / "model.pt")
+    return model
+
+
+def n_coef_(lmax: int) -> int:
+    from .sh import n_coef
+    return n_coef(lmax)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--out", required=True); ap.add_argument("--steps", type=int, default=20000); ap.add_argument("--size", type=int, default=96)
@@ -575,7 +743,32 @@ def main():
     ap.add_argument("--distinct", type=float, default=None, help="slot order kept only among populations whose eigenvalue spectra lie within this distance (e.g. 0.2); default: among all")
     ap.add_argument("--widths", type=int, nargs=3, default=[32, 64, 128], help="channels at strides 1, 2, 4")
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
+    ap.add_argument("--head", default="slots", choices=("slots", "lobes"), help="output: slots (+ SH head) or the lobe mixture (scene generator, exact density, descriptors, identities)")
+    ap.add_argument("--lobes-J", type=int, default=6, help="lobes per cell (6: direct fits recover two crossing axes ~90 % of the time from random starts, 4: ~75 %)")
+    ap.add_argument("--no-context-level", action="store_true", help="lobes: no stride-8 trunk level")
+    ap.add_argument("--no-voxel-cond", action="store_true", help="lobes: no voxel-size conditioning")
+    ap.add_argument("--identity-dim", type=int, default=8, help="lobes: identity embedding size (0: none)")
+    ap.add_argument("--no-points", action="store_true", help="lobes: no branch / endpoint maps")
+    ap.add_argument("--difficulty", default="auto", choices=("auto", "fixed"), help="lobes: widen the generator's difficulty as the model learns, or the full mix from the start")
+    ap.add_argument("--level0", type=float, default=0.3, help="lobes: the starting difficulty level")
+    ap.add_argument("--pairs", type=int, default=0, help="lobes: paired renders kept for consistency (0: none)")
+    ap.add_argument("--pair-every", type=int, default=4)
+    ap.add_argument("--real", nargs="*", default=None, help="lobes: unlabelled real volumes for self-supervised consistency, PATH[@LEVEL][=VOXEL_UM]")
+    ap.add_argument("--ssl-every", type=int, default=4)
+    ap.add_argument("--voxel-dropout", type=float, default=0.3)
+    ap.add_argument("--free-sh", action="store_true", help="lobes ablation: free harmonics instead of lobes (same trunk, targets, losses)")
+    ap.add_argument("--routes", type=float, default=1.0, help="lobes: batch-time contrast routes (transfer functions, filters, fields, noise, missing lines / blocks) at this strength (scaled by the difficulty level); 0: off")
+    ap.add_argument("--no-contrast-views", action="store_true", help="lobes: no second route per pair (no contrast-consistency loss)")
     a = ap.parse_args()
+    if a.head == "lobes":
+        train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,
+                    val_every=a.val_every, seed=a.seed, strength0=a.strength0, strength1=a.strength1, gen=a.gen, widths=tuple(a.widths),
+                    sh_lmax=a.sh_lmax or 8, desc_lmax=a.desc_lmax or 4, lobes_J=a.lobes_J, context_level=not a.no_context_level, voxel_cond=not a.no_voxel_cond,
+                    identity_dim=a.identity_dim, points=not a.no_points, query=a.query, gate=a.gate, gate_max=a.gate_max, difficulty=a.difficulty,
+                    level0=a.level0, pairs=a.pairs, pair_every=a.pair_every, real=a.real, ssl_every=a.ssl_every, voxel_dropout=a.voxel_dropout,
+                    weights=a.weights, cache=a.cache, init=a.init, resume=a.resume, aniso=a.aniso, free_sh=a.free_sh, routes=a.routes,
+                    contrast_views=not a.no_contrast_views)
+        return
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
           seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact, desc_lmax=a.desc_lmax, context=a.context, late_start=a.late_start, scalar_window=a.scalar_window, cache=a.cache, gate=a.gate, aniso=a.aniso, shape_loss=a.shape_loss, simple_window=a.simple_window, sh_loss=a.sh_loss, axis_head=a.axis_head, gate_max=a.gate_max)
 
