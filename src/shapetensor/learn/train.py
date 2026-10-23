@@ -260,7 +260,8 @@ def _evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
         ref["mix_single"].append(e_mx[single])
         if "sh" in Pc:
             from .sh import peaks as _peaks
-            pdd, pvv = _peaks(Pc["sh"][0].float().flatten(1), model.sh_lmax, nmax=3, rel=0.3)            # (3, 3, N), (3, N)
+            from .sh import peaks_gated as _pkg
+            pdd, pvv, _ = _pkg(Pc["sh"][0].float().flatten(1), model.sh_lmax, nmax=3)                    # calibrated (review 5)
             cs_ = Pc["sh"].shape[2:]
             pk = pdd.movedim(1, -1).reshape(3, *cs_, 3)                                                  # (3 peaks, c..., 3)
             pkv = pvv.reshape(3, *cs_)
@@ -286,7 +287,8 @@ def _evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
             mix_errs.append(torch.rad2deg(torch.acos((Vm[2] * Vt[2]).sum(0).abs().clamp(max=1.0)))[one[0]])
         if "sh" in Pc:                                                                                    # the SH density's peaks, no matching
             from .sh import peaks
-            pd, pv = peaks(Pc["sh"][0].float().flatten(1), model.sh_lmax, nmax=3, rel=0.3)                # (3, 3, N), (3, N)
+            from .sh import peaks_gated
+            pd, pv, _ = peaks_gated(Pc["sh"][0].float().flatten(1), model.sh_lmax, nmax=3)                # calibrated (review 5)
             tvv, tVv = eig3(Tc["slots"][0].float().movedim(1, 0)); ta = tVv[2].flatten(2)                # (3, K, N)
             aniso = ((tvv[2] - tvv[0]) / tvv.sum(0).clamp_min(1e-9)).flatten(1)                          # (K, N)
             mk = Tc["mass"][0].float().flatten(1)
@@ -353,7 +355,8 @@ def query_metrics(q_eval, lmax: int) -> dict:
     two, and their mean axis error."""
     from .sh import peaks
     P = torch.cat([p for p, _, _ in q_eval]); T = torch.cat([t for _, t, _ in q_eval]); S = torch.cat([s for _, _, s in q_eval])
-    pd, pv = peaks(P.T, lmax, rel=0.3); td, tv = peaks(T.T, lmax, rel=0.3)
+    from .sh import peaks_gated
+    pd, pv, _ = peaks_gated(P.T, lmax); td, tv, _ = peaks_gated(T.T, lmax)                              # calibrated (review 5)
     nt, npred = (tv > 0).sum(0), (pv > 0).sum(0)
     ang = lambda a, b: torch.rad2deg(torch.acos((a * b).sum(0).abs().clamp(max=1)))
     out = {}
