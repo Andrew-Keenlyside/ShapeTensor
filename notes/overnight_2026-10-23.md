@@ -290,3 +290,18 @@ floor per width in rescore (it used the first run's), paired differences in resc
 * F1 (P1@2000 continued with the density head): gate open at 51 (warm start), all SH orders on at 51 -- the density
   head on P1's trunk reached a mass-weighted order-2 cosine of 0.36 within 50 steps (P1's features carry it).
 * D2 (density only, decoupled loss, curriculum): no order-2 alignment above 0.3 by step 575.
+
+## S1, C3, D2 on the bank (05:50 Montreal; paired against W2)
+
+| run (wide) | change vs W2 | slot single | shared | mixture single | paired single vs W2 | SH head (calibrated peaks) |
+|---|---|---|---|---|---|---|
+| S1 | `--shape-loss devcos` | 46.9 | 46.1 | 51.5 | **+25.2 [+21.0, +28.4]** | -- |
+| C3 | crossing-rich curriculum + exact SH head | 21.5 | 37.2 | 20.9 | -0.2 [-2.1, +2.1] | top-1 single 25.7, false second 0.07, crossings found 0.06 (target 0.52) |
+| D2 | density only, decoupled loss, curriculum, 700 steps | (untrained slots) | | | | top-1 87.1 (gated out), false second 0.53, crossings 0.46 (noise) |
+
+* The deviator loss **hurt badly** (orientation +25 deg worse, slots no sharper: linearity 0.18): a negative result
+  (review 8 investigates why).
+* Crossing-rich easy data did not change the slots (C3 = W2) and its density head learned single-line orientation
+  (25.7) but almost no second populations (6% against the target's 52%).
+* Density-only training failed again even with the decoupled loss and the curriculum (D2); trained alongside the slot
+  terms (C3) the density head learns -- the slot terms seem to bootstrap the trunk.
