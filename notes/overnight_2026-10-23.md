@@ -349,4 +349,19 @@ SH head; D3 = density only with a per-cell-normalised order-2 term.
 | 7 | C1 (narrow + curriculum) | the controlled comparison setup (deterministic data stream, fixed bank, paired differences) | the late "where / how much" heads (presence, kind, Hellinger) |
 | 9 | C3 (crossings + SH head) | exact target and bank make the one-axis failure measurable | no output can hold a second orientation |
 | 10 | D2 (decoupled density) | the exact density read without matching; learnable once the trunk has features | the anti-hedging losses (both target-weighted forms fail from scratch) |
-| 8, 11, 12 | S1, G1, F1 | (pending) | (pending) |
+| 8 | S1 (deviator loss) | the evaluation setup (rotated bank, paired bootstrap, a matching rule independent of the training loss) | one tensor per mass-ranked slot under uncertainty: any single-tensor loss yields a mean hedge |
+| 11, 12 | G1, F1 | (pending) | (pending) |
+
+## Review 8 (06:05 Montreal)
+
+Review 8 (S1): the regression is real and clean (args equal to W2's but the loss; the bank's matching is
+Frobenius whatever the training loss); no sign / axis / broadcasting bug -- the design fails: (1) devcos's optimal
+direction E[|Dt| Dt] has the same eigenvectors as Frobenius's E[Dt], so it cannot improve the axis; it removes only
+hedging on magnitude, and the hedge moves into the shape -- S1's line slots are **oblate** (mode -0.41) at a constant
+|Dp| ~0.20; (2) its gradient is ill-conditioned near round (1.9x Frobenius at |Dp| 0.15, 17x at 0.03, ~1e6 at round);
+(3) 1 - cos has zero gradient at a prolate-vs-oblate flip, and the magnitude term alone takes a third of the round
+floor with no image information. Bugs: the mixture head's free trace leaks into devcos; `mixture_floor` uses
+Frobenius (a devcos run's gate would never open); `sh_loss_decoupled` has the same 1/|p| conditioning. Recommended:
+keep Frobenius and add an **axis output** per slot and for the mixture, L += lambda w_t (1 - (a_hat . u_t)^2) with
+w_t = |Dt|^2 |mode_t| (its minimiser under uncertainty is a committed axis, bounded gradients, no categories); a
+best-of-2 axis hypothesis per slot (winner-takes-all) for crossings; bounded, trace-free fixes to the decoupled loss.
