@@ -195,3 +195,24 @@ second moment's quadratic form, a blob flat). Properties:
   draws physical scale (`scale`); resample-to-train-grid augmentation (SynthSeg's recipe) covers acquisitions.
 
 Slots remain as a readout (peaks of f, with descriptor ratios at the peaks), trained after the density, not before it.
+
+### 12.1 Built (overnight 23 Oct) and the evidence so far
+
+* `learn/sh.py`: real even SH (orthonormal), the slots' density in SH, peaks (padded neighbour lists, chunked).
+* `learn/query.py`:
+  * `voxel_density` -- the exact per-voxel density: each voxel's own label tensor's lobe, weighted by its visible
+    occupancy, summed over layers (0.28 s per 64³ sample, order 8); a Gaussian window of any sigma on it is the
+    window-averaged density of the orientations present. Against the per-layer mean-tensor form (`layer_density`):
+    the same mass to 4e-4, top peaks within 6.7 deg, and two peaks at 45% of points vs 29% (bends and branches are no
+    longer averaged into one broadened lobe).
+  * descriptor densities (`desc_lmax`): f_q = sum o v q w for thickness, hollowness, angularity; at the top peak
+    f_q(u) / f(u) recovers a single layer's thickness (test).
+  * `QueryDecoder` (LIIF): the density (and descriptor densities) at continuous points and scales, from the three
+    feature levels; cube-exact augmentation of query points and SH coefficients (block-diagonal rotations).
+* Training options: `--sh-lmax`, `--exact`, `--desc-lmax`, `--query N`, `--order salience`, `--simple/--p-simple`
+  (curriculum), `--lcn`, `--presence-band`, `--weights`, `--init`.
+* Evaluation under one reference matching rule on rotated held-out draws, single vs shared line cells, against a
+  structure tensor; the density's nearest-peak error; descriptors at the target's top peak.
+* Evidence: under the corrected metric the narrow network (0.37 M) learned nothing on the full generator, the wide one
+  (1.45 M) reached the structure tensor's level in 1000 steps (single 15.0 / shared 38.5 vs 13.8 / 37.5) -- capacity
+  was the blocker the old metric hid. Single-factor wide runs (baseline, SH head, curriculum) under way.
