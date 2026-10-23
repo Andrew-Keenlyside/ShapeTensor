@@ -116,7 +116,8 @@ class PopulationNet(nn.Module):
         h = Fn.silu(self.mix(torch.cat([h2, Fn.silu(self.skip(h1))], 1)))
         return h0, h1, h
 
-    def forward(self, x: torch.Tensor, points: torch.Tensor | None = None, sigma: torch.Tensor | None = None) -> dict:
+    def forward(self, x: torch.Tensor, points: torch.Tensor | None = None, sigma: torch.Tensor | None = None,
+                context: torch.Tensor | None = None) -> dict:
         """The lattice outputs; with ``points (B, Q, 3)`` (input voxel coordinates) and ``sigma (B, Q)`` (voxels) and a
         query decoder, also ``q_sh (B, Q, n_coef)``: the populations' density at those points and scales."""
         h0, h1, h = self.features(x)
@@ -139,7 +140,7 @@ class PopulationNet(nn.Module):
         if self.sh_lmax:
             out["sh"] = self.sh(h)
         if points is not None and self.has_query:
-            out["q_sh"] = self.query_dec((h0, h1, h), points.float(), sigma.float())
+            out["q_sh"] = self.query_dec((h0, h1, h), points.float(), sigma.float(), None if context is None else context.float())
         return out
 
 

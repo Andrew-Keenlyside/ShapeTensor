@@ -43,6 +43,27 @@ HALF = ("slots", "mass", "fraction", "classes", "size")
 QKEYS = ("q_points", "q_sigma", "q_sh", "sh_t")
 SH_EXACT = 0                       # > 0: the SH head's lattice target from the exact per-voxel density to this order
 DESC_LMAX = 0                      # > 0: also the descriptor densities (thickness, hollowness, angularity) to this order
+CONTEXT = None                     # (lo, hi): also train the query decoder on copies whose input outside a random cube of
+                                   # half-width lo..hi voxels around a query is replaced by the mean, with the visible
+                                   # context per query as an input
+
+
+def context_mask(x: torch.Tensor, points: torch.Tensor, half: torch.Tensor):
+    """Copies of images ``x (B, 1, Z, Y, X)`` visible only inside a cube of half-width ``half (B,)`` around each
+    sample's first query point, the rest the image's mean; and each query's visible context (its distance to the
+    cube's faces, clipped by the volume's), ``(B, Q)``."""
+    B = x.shape[0]; size = torch.tensor(x.shape[-3:], device=x.device, dtype=points.dtype)
+    c = points[:, 0]                                                                                  # (B, 3)
+    lo = (c - half[:, None]).clamp(min=0); hi = torch.minimum(c + half[:, None], size - 1)
+    ar = [torch.arange(n, device=x.device, dtype=points.dtype) for n in x.shape[-3:]]
+    inside = torch.ones(B, *x.shape[-3:], dtype=torch.bool, device=x.device)
+    for j in range(3):
+        a = ar[j].view(*([1] * (j + 1)), -1, *([1] * (2 - j)))
+        inside &= (a >= lo[:, j].view(B, 1, 1, 1)) & (a <= hi[:, j].view(B, 1, 1, 1))
+    mean = x.mean(dim=(2, 3, 4), keepdim=True)
+    xm = torch.where(inside[:, None], x, mean)
+    ctx = torch.minimum(points - lo[:, None], hi[:, None] - points).amin(-1)                        # (B, Q); < 0: outside
+    return xm, ctx
 QUERY = None                       # {"n_points", "n_levels", "lmax"}: draw query targets per sample (set by train())
 SCALARS = ("classes", "fraction", "size", "identity")
 LATE = ("mass", "presence", "kind", "hellinger")                                                   # after orientation: they swamp it if present from the start
@@ -145,7 +166,7 @@ def st_axis_cells(x: torch.Tensor) -> torch.Tensor:
 def _evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
     model.eval(); parts, errs, mix_errs, fp, ft, nagree, ntot = {}, [], [], [], [], 0.0, 0.0
     sh_one, sh_false, sh_det, sh_err2 = [], [], [], []
-    q_eval = []
+    q_eval = []; ctx_eval = {}
     ref = {k: [] for k in ("slot_single", "slot_shared", "mix_single", "st_single", "st_shared", "sh_single", "sh_shared")}
     desc_err = []
     crop = lambda v: v[..., margin:-margin, margin:-margin, margin:-margin]
@@ -159,6 +180,14 @@ def _evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
         Pc = {k: crop(v) for k, v in P.items() if not k.startswith("q_")}; Tc = {k: crop(v) for k, v in T.items() if not k.startswith("q_")}
         if "q_sh" in P:
             q_eval.append((P["q_sh"][0].float(), T["q_sh"][0].float(), T["q_sigma"][0].float()))
+            if CONTEXT is not None:
+                for hb in (8.0, 16.0):
+                    xm, ctx = context_mask(x, T["q_points"], torch.tensor([hb], device=x.device))
+                    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device != "cpu"):
+                        Pm = model(xm, T["q_points"], T["q_sigma"], ctx)
+                    kq = ctx[0] >= 2.0
+                    if bool(kq.any()):
+                        ctx_eval.setdefault(hb, []).append((Pm["q_sh"][0].float()[kq], T["q_sh"][0].float()[kq]))
         _, _, perm = match(Pc, Tc)
         Sp = gather_slots(Pc["slots"].float(), perm)
         kt = Tc["kind"]; mt = Tc["mass"].float()
@@ -255,6 +284,13 @@ def _evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
             out[f"ref_{k_}"] = float(v_.median())
     if q_eval:
         out.update(query_metrics(q_eval, model.sh_lmax))
+    for hb, L_ in ctx_eval.items():                                                                   # the top peak with limited context
+        from .sh import peaks as _pk
+        Pq = torch.cat([p_ for p_, _ in L_]); Tq = torch.cat([t_ for _, t_ in L_])
+        pd_, _ = _pk(Pq.T, model.sh_lmax, rel=0.3); td_, tv_ = _pk(Tq.T, model.sh_lmax, rel=0.3)
+        one_ = (tv_[0] > 0) & (tv_[1] == 0) & (Tq[:, 0] > 0.05 * math.sqrt(4 * math.pi))
+        if bool(one_.any()):
+            out[f"val_q_axis_ctx{int(hb)}"] = float(torch.rad2deg(torch.acos((pd_[0][:, one_] * td_[0][:, one_]).sum(0).abs().clamp(max=1))).median())
     if sh_one or sh_det:
         out["val_sh_axis_deg_median"] = float(cat(sh_one).median()) if sh_one else float("nan")                # top peak, one-line cells
         out["val_sh_false_second"] = float(cat(sh_false).mean()) if sh_false else float("nan")                 # a second peak where one line
@@ -292,7 +328,8 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
           warmup: int = 500, margin: int = 4, val_n: int = 32, val_every: int = 500, log_every: int = 25, seed: int = 0, device: str = "cuda",
           strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None,
           widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None, query: int = 0,
-          simple: dict | None = None, p_simple=(0.0, 0.0), init: str | None = None, order: str = "mass", exact: bool = False, desc_lmax: int = 0):
+          simple: dict | None = None, p_simple=(0.0, 0.0), init: str | None = None, order: str = "mass", exact: bool = False, desc_lmax: int = 0,
+          context=None):
     from .engine import PopulationEngine
     from . import losses as _losses
     _losses.PRESENCE_BAND = tuple(presence_band) if presence_band else None
@@ -300,7 +337,9 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     _targets.ORDER = order                                                                               # slot order of the targets (and of ties)
     global QUERY
     QUERY = {"n_points": query, "n_levels": 4, "lmax": sh_lmax, "exact": exact} if query else None
-    global SH_EXACT, DESC_LMAX
+    global SH_EXACT, DESC_LMAX, CONTEXT
+    CONTEXT = tuple(context) if context else None
+    assert not context or query, "--context needs --query"
     SH_EXACT = sh_lmax if (exact and sh_lmax) else 0
     assert not desc_lmax or exact, "--desc-lmax needs --exact"
     DESC_LMAX = desc_lmax
@@ -317,7 +356,8 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     args = dict(steps=steps, size=size, batch=batch, accum=accum, buffer=buffer, refresh=refresh, lr=lr, warmup=warmup, margin=margin, val_n=val_n,
                 seed=seed, strength0=strength0, strength1=strength1, overfit=overfit, gen=gen, widths=list(widths), distinct=distinct, sh_lmax=sh_lmax, lcn=lcn,
                 presence_band=list(presence_band) if presence_band else None, weights=weights, query=query,
-                simple=simple, p_simple=list(p_simple), init=init, order=order, exact=exact, desc_lmax=desc_lmax)
+                simple=simple, p_simple=list(p_simple), init=init, order=order, exact=exact, desc_lmax=desc_lmax,
+                context=list(context) if context else None)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
     model = PopulationNet.from_args(args).to(device)
     rf = receptive_field(model)
@@ -360,6 +400,18 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device != "cpu"):
                 P = model(x, T.get("q_points"), T.get("q_sigma"))
             total, parts = loss(P, T, grid, margin, axis=int(torch.randint(0, 3, (1,), generator=g)), weights=W, g=g)
+            if CONTEXT is not None:                                                                   # the decoder with limited context
+                from .losses import DESC_NC, desc_loss, sh_loss
+                half = CONTEXT[0] + (CONTEXT[1] - CONTEXT[0]) * torch.rand(x.shape[0], generator=g).to(x.device)
+                xm, ctx = context_mask(x, T["q_points"], half)
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device != "cpu"):
+                    Pm = model(xm, T["q_points"], T["q_sigma"], ctx)
+                keep = ctx >= 2.0                                                                     # queries with at least 2 voxels of context
+                if bool(keep.any()):
+                    qp_, qt_ = Pm["q_sh"].float()[keep].T[None], T["q_sh"].float()[keep].T[None]       # (1, c, n)
+                    nc_ = qt_.shape[1] - 3 * DESC_NC
+                    lc_ = sh_loss(qp_[:, :nc_], qt_[:, :nc_])
+                    total = total + WEIGHTS["query"] * lc_; parts["query_ctx"] = float(lc_)
             (total / accum).backward(); tot_v += float(total) / accum
             for k, v in parts.items():
                 parts_acc[k] = parts_acc.get(k, 0.0) + v / accum
@@ -391,6 +443,7 @@ def main():
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
+    ap.add_argument("--context", type=float, nargs=2, default=None, help="train the query decoder also with the input visible only within a random half-width in [lo, hi] voxels (e.g. 6 32)")
     ap.add_argument("--desc-lmax", type=int, default=0, help="also predict the descriptor densities (thickness, hollowness, angularity) to this SH order (needs --exact; e.g. 4)")
     ap.add_argument("--exact", action="store_true", help="SH head and query targets from the exact per-voxel density (orientations present in the window) instead of the slots / per-layer mean tensors")
     ap.add_argument("--order", default="mass", choices=("mass", "salience"), help="target slot order: heaviest or most anisotropic mass first")
@@ -407,7 +460,7 @@ def main():
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
-          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact, desc_lmax=a.desc_lmax)
+          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact, desc_lmax=a.desc_lmax, context=a.context)
 
 
 if __name__ == "__main__":

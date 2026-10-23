@@ -166,11 +166,12 @@ class QueryDecoder(nn.Module):
 
     def __init__(self, c0: int, c1: int, c2: int, n_out: int, hidden: int = 128):
         super().__init__()
-        self.mlp = nn.Sequential(nn.Linear(c2 + c1 + c0 + 3 + 1, hidden), nn.SiLU(), nn.Linear(hidden, hidden), nn.SiLU(), nn.Linear(hidden, n_out))
+        self.mlp = nn.Sequential(nn.Linear(c2 + c1 + c0 + 3 + 2, hidden), nn.SiLU(), nn.Linear(hidden, hidden), nn.SiLU(), nn.Linear(hidden, n_out))
 
-    def forward(self, feats, points: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
+    def forward(self, feats, points: torch.Tensor, sigma: torch.Tensor, context: torch.Tensor | None = None) -> torch.Tensor:
         """``feats`` (h0 stride 1, h1 stride 2, h stride 4), each ``(B, C, ...)``; ``points (B, Q, 3)`` voxel coordinates of
-        the input; ``sigma (B, Q)`` voxels. Returns ``(B, Q, n_out)``."""
+        the input; ``sigma (B, Q)`` voxels; ``context (B, Q)``: the visible half-width around each query in voxels (its
+        distance to the nearest face of the visible region; default: of the input volume). Returns ``(B, Q, n_out)``."""
         h0, h1, h = feats
         B, Q = points.shape[:2]
         f0 = torch.stack([_sample(h0[b], points[b]) for b in range(B)])                               # (B, c0, Q): voxel centres at integers
@@ -180,6 +181,10 @@ class QueryDecoder(nn.Module):
         base = u.floor()
         hf = h.flatten(2)                                                                               # (B, c2, n)
         ls = torch.log(sigma.clamp_min(1e-3) / 5.0)[..., None]
+        if context is None:                                                                             # the visible context around each query
+            size_v = torch.tensor(h0.shape[-3:], device=points.device, dtype=points.dtype)
+            context = torch.minimum(points, size_v - 1 - points).amin(-1)                               # (B, Q): distance to the volume's faces
+        lc = torch.log(context.clamp(1.0, 64.0) / 32.0)[..., None]
         out = 0
         for o in range(8):
             off = torch.tensor([(o >> 2) & 1, (o >> 1) & 1, o & 1], device=points.device, dtype=points.dtype)
@@ -189,6 +194,6 @@ class QueryDecoder(nn.Module):
             lin = ((idx[..., 0] * size[1] + idx[..., 1]) * size[2] + idx[..., 2]).long()                # (B, Q)
             fc = torch.gather(hf, 2, lin[:, None].expand(-1, hf.shape[1], -1))                          # (B, c2, Q)
             z = torch.cat([fc, f1, f0], 1).transpose(1, 2)                                              # (B, Q, c)
-            y = self.mlp(torch.cat([z.to(rel.dtype), rel, ls], -1))
+            y = self.mlp(torch.cat([z.to(rel.dtype), rel, ls, lc], -1))
             out = out + wgt[..., None] * y
         return out

@@ -84,3 +84,13 @@ def test_descriptor_density_reads_the_layer_descriptor_at_the_peak():
     Y = real_sh(D[0].T, 4); nd = n_coef(4); nsh = n_coef(6)
     q = (Y * F[nsh:nsh + nd, strong].T).sum(1) / (Y * F[:nd, strong].T).sum(1)
     assert abs(float(q.median()) - thick) < 0.15 * max(thick, 1.0), (float(q.median()), thick)
+
+
+def test_context_mask_keeps_the_cube_and_measures_context():
+    from shapetensor.learn.train import context_mask
+    x = torch.rand(1, 1, 32, 32, 32, device=DEV)
+    pts = torch.tensor([[[16.0, 16.0, 16.0], [16.0, 20.0, 16.0], [16.0, 30.0, 16.0]]], device=DEV)
+    xm, ctx = context_mask(x, pts, torch.tensor([6.0], device=DEV))
+    assert torch.equal(xm[..., 10:23, 10:23, 10:23], x[..., 10:23, 10:23, 10:23])
+    assert torch.allclose(xm[..., 0, 0, 0], x.mean().view(1, 1))
+    assert torch.allclose(ctx, torch.tensor([[6.0, 2.0, -8.0]], device=DEV))
