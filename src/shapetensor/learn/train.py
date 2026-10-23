@@ -265,10 +265,12 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
           warmup: int = 500, margin: int = 4, val_n: int = 32, val_every: int = 500, log_every: int = 25, seed: int = 0, device: str = "cuda",
           strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None,
           widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None, query: int = 0,
-          simple: dict | None = None, p_simple=(0.0, 0.0), init: str | None = None):
+          simple: dict | None = None, p_simple=(0.0, 0.0), init: str | None = None, order: str = "mass"):
     from .engine import PopulationEngine
     from . import losses as _losses
     _losses.PRESENCE_BAND = tuple(presence_band) if presence_band else None
+    from . import targets as _targets
+    _targets.ORDER = order                                                                               # slot order of the targets (and of ties)
     global QUERY
     QUERY = {"n_points": query, "n_levels": 4, "lmax": sh_lmax} if query else None
     assert not query or sh_lmax, "--query needs --sh-lmax"
@@ -282,7 +284,7 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     args = dict(steps=steps, size=size, batch=batch, accum=accum, buffer=buffer, refresh=refresh, lr=lr, warmup=warmup, margin=margin, val_n=val_n,
                 seed=seed, strength0=strength0, strength1=strength1, overfit=overfit, gen=gen, widths=list(widths), distinct=distinct, sh_lmax=sh_lmax, lcn=lcn,
                 presence_band=list(presence_band) if presence_band else None, weights=weights, query=query,
-                simple=simple, p_simple=list(p_simple), init=init)
+                simple=simple, p_simple=list(p_simple), init=init, order=order)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
     model = PopulationNet.from_args(args).to(device)
     rf = receptive_field(model)
@@ -356,6 +358,7 @@ def main():
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
+    ap.add_argument("--order", default="mass", choices=("mass", "salience"), help="target slot order: heaviest or most anisotropic mass first")
     ap.add_argument("--init", help="warm start: load the weights (not the optimiser or step) of this checkpoint")
     ap.add_argument("--simple", type=json.loads, default=None, help="a curriculum: draw() arguments of the simple regime (JSON), mixed in with --p-simple")
     ap.add_argument("--p-simple", type=float, nargs=2, default=[0.0, 0.0], help="share of simple samples at the start and from half-way (e.g. 0.8 0.2)")
@@ -369,7 +372,7 @@ def main():
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
-          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init)
+          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order)
 
 
 if __name__ == "__main__":

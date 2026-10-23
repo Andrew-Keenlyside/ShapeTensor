@@ -31,6 +31,15 @@ from .generator import Sample, eig3
 
 KINDS = ("line", "sheet", "blob", "interface")
 CLASSES = ("line", "sheet", "blob", "interface", "isotropic")
+ORDER = "mass"                     # slot order: "mass" (heaviest first) or "salience" (largest anisotropic mass first:
+                                   # m (lambda_max - lambda_min) of the trace-1 tensor -- rotation-invariant, no kinds)
+
+
+def salience(slots: torch.Tensor, mass: torch.Tensor, axis: int = 1) -> torch.Tensor:
+    """Anisotropic mass ``m (lambda_max - lambda_min) / trace`` of slots whose 6 tensor components lie on ``axis``
+    (``(K, 6, ...)``: 1; ``(B, K, 6, ...)``: 2), masses shaped as the slots without that axis."""
+    ev, _ = eig3(slots.float().movedim(axis, 0))
+    return mass * (ev[2] - ev[0]) / ev.sum(0).clamp_min(1e-9)
 WF = (1.0, 1.0, 1.0, 2.0, 2.0, 2.0)                    # Frobenius weights of the 6 components (off-diagonals twice)
 
 
@@ -94,7 +103,8 @@ def target(s: Sample, drawn: dict, *, step: int = 4, sigma_w: float = 5.0, K: in
         slayer = torch.where(oh & new[None], torch.tensor(shapes, device=dev)[li][None].expand(K, n), slayer)
         saxis = torch.where(oh[:, None], _axis(slots.permute(1, 0, 2).reshape(6, -1), skind.clamp_min(0).reshape(-1)).reshape(3, K, n).permute(1, 0, 2), saxis)
         dropped = dropped + torch.where(live & ~sel, mj, torch.zeros_like(mj))
-    o2 = smass.argsort(0, descending=True)                                                     # merging can reorder masses
+    key = smass if ORDER == "mass" else salience(slots, smass, 1)
+    o2 = key.argsort(0, descending=True)                                                       # merging can reorder masses
     g = lambda x: torch.gather(x, 0, o2) if x.dim() == 2 else torch.gather(x, 0, o2[:, None].expand_as(x))
     slots, smass, skind, slayer = g(slots), g(smass), g(skind), g(slayer)
     # scalars: the shape fraction (volume: shapes only), class shares (the volume's shares plus the boundary), size
