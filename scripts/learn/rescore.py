@@ -30,7 +30,7 @@ from shapetensor.learn.generator import draw, eig3
 from shapetensor.learn.losses import augment, gather_slots, match
 from shapetensor.learn.model import PopulationNet
 from shapetensor.learn.query import voxel_density
-from shapetensor.learn.sh import peaks
+from shapetensor.learn.sh import peaks, peaks_gated
 from shapetensor.learn.targets import _pool, target
 from shapetensor.learn.train import HALF, TKEYS, _axes, st_axis_cells, stack
 
@@ -104,10 +104,11 @@ def per_draw(net, item, lmax):
     out["st_shared"] = ang(st.movedim(0, -1)[None, None], t_ax)[shared]
     if lmax:
         cs = Pc["sh"].shape[2:]
-        D, V = peaks(Pc["sh"][0].flatten(1), lmax, nmax=3, rel=0.3)
+        D, V, _ = peaks_gated(Pc["sh"][0].flatten(1), lmax, nmax=3)                                     # calibrated (review 5)
         pk = D.movedim(1, -1).reshape(3, *cs, 3); pkv = V.reshape(3, *cs)
         e = torch.stack([torch.where(pkv[j][None, None] > 0, ang(pk[j][None, None], t_ax), torch.full(t_ax.shape[:-1], 90.0, device=DEV)) for j in range(3)])
         out["sh_top1_single"] = e[0][single]; out["sh_near3_single"] = e.amin(0)[single]; out["sh_near3_shared"] = e.amin(0)[shared]
+        out["sh_false_second_single"] = (pkv[1][None, None].expand_as(single) > 0)[single].float()
         two = sel[0, 0] & sel[0, 1] & (ang(t_ax[0, 0], t_ax[0, 1]) > 30)                              # crossing cells
         if bool(two.any()):
             det = (pkv[1] > 0) & two
@@ -126,7 +127,7 @@ def summarise(draws, rng):
         pooled = np.concatenate(arrs)
         if pooled.size == 0:
             continue
-        stat = np.mean if k in ("sh_cross_detect", "false_line_noline") else np.median
+        stat = np.mean if k in ("sh_cross_detect", "false_line_noline", "sh_false_second_single") else np.median
         boots = []
         for _ in range(1000):
             idx = rng.integers(0, len(arrs), len(arrs))
@@ -149,7 +150,7 @@ def score(a):
         if not any(k.startswith("untrained") for k in table):
             table[f"untrained ({tuple(args.get('widths', (16, 32, 64)))})"] = summarise([per_draw(floor, it, lmax) for it in items], np.random.default_rng(0))
     keys = ["slot_single", "slot_orderfree_single", "slot_shared", "mix_single", "slot_linearity_single", "false_line_noline",
-            "sh_top1_single", "sh_near3_single", "sh_near3_shared", "sh_cross_detect", "sh_cross_err", "st_single", "st_shared"]
+            "sh_top1_single", "sh_near3_single", "sh_near3_shared", "sh_false_second_single", "sh_cross_detect", "sh_cross_err", "st_single", "st_shared"]
     print(f"bank: {len(items)} draws, gen {bank['gen']}, strength {bank['strength']}")
     for name, res in table.items():
         print(f"\n{name}")

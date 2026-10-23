@@ -171,6 +171,8 @@ class Buffer:
 def anisotropy(t: dict) -> float:
     """A pair's non-round target energy: the cells' mean of sum_k m_k |S_k - I/3|^2 (the populations' deviatoric
     energy, mass-weighted) -- category-free; what an orientation-learning batch is made of."""
+    if "sh_t" in t:                                                                                   # the density's angular energy (orders >= 2)
+        return float((t["sh_t"].float()[1:] ** 2).sum(0).mean())
     S = t["slots"].float(); m = t["mass"].float()
     iso = torch.tensor([1, 1, 1, 0, 0, 0.0], device=S.device).view(1, 6, 1, 1, 1) / 3
     wf = torch.tensor([1, 1, 1, 2, 2, 2.0], device=S.device).view(1, 6, 1, 1, 1)
@@ -376,11 +378,14 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
           widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None, query: int = 0,
           simple: dict | None = None, p_simple=(0.0, 0.0), init: str | None = None, order: str = "mass", exact: bool = False, desc_lmax: int = 0,
           context=None, late_start: int | None = None, scalar_window=None, cache: str | None = None,
-          gate: float | None = None, aniso=None, shape_loss: str = "frobenius", simple_window: int | None = None):
+          gate: float | None = None, aniso=None, shape_loss: str = "frobenius", simple_window: int | None = None,
+          sh_loss: str = "batchnorm"):
     from .engine import PopulationEngine
     from . import losses as _losses
     _losses.PRESENCE_BAND = tuple(presence_band) if presence_band else None
     _losses.SHAPE_LOSS = shape_loss
+    _losses.SH_LOSS = sh_loss
+    _losses.SH_LMAX_ON = 2 if sh_loss == "decoupled" else None                                          # order 2 first, all orders once it aligns
     from . import targets as _targets
     _targets.ORDER = order                                                                               # slot order of the targets (and of ties)
     global QUERY
@@ -408,7 +413,8 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
                 presence_band=list(presence_band) if presence_band else None, weights=weights, query=query,
                 simple=simple, p_simple=list(p_simple), init=init, order=order, exact=exact, desc_lmax=desc_lmax,
                 context=list(context) if context else None, late_start=late_start, scalar_window=list(scalar_window) if scalar_window else None,
-                gate=gate, aniso=list(aniso) if aniso else None, shape_loss=shape_loss, simple_window=simple_window)
+                gate=gate, aniso=list(aniso) if aniso else None, shape_loss=shape_loss, simple_window=simple_window,
+                sh_loss=sh_loss)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
     model = PopulationNet.from_args(args).to(device)
     rf = receptive_field(model)
@@ -485,6 +491,11 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
                 log(f"gate open at step {step + 1}: mixture / round floor {gstate['ema']:.3f}")
                 logf.write(json.dumps({"step": step + 1, "gate_open": True, "ratio": gstate["ema"]}) + "\n"); logf.flush()
         parts_acc["gate_ratio"] = gstate["ema"] if gstate["ema"] is not None else float("nan")
+        if _losses.SH_LOSS == "decoupled" and _losses.SH_LMAX_ON is not None and "sh_l2cos" in parts_acc:
+            l2c = gstate.setdefault("l2c", 0.0); gstate["l2c"] = 0.95 * l2c + 0.05 * parts_acc["sh_l2cos"]
+            if step - start >= 50 and gstate["l2c"] > 0.3:
+                _losses.SH_LMAX_ON = None; log(f"all SH orders on at step {step + 1}: order-2 cosine {gstate['l2c']:.2f}")
+                logf.write(json.dumps({"step": step + 1, "sh_all_orders": True}) + "\n"); logf.flush()
         gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0))
         opt.step()
         if not overfit:
@@ -513,6 +524,7 @@ def main():
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
+    ap.add_argument("--sh-loss", default="batchnorm", choices=("batchnorm", "decoupled"), help="density loss: per-order error over the batch's energy, or magnitude + target-weighted angle per order over running energies (order 2 first)")
     ap.add_argument("--shape-loss", default="frobenius", choices=("frobenius", "devcos"), help="tensor cost of slots and mixture: Frobenius, or deviator magnitude + target-weighted angle (does not reward round predictions)")
     ap.add_argument("--simple-window", type=int, default=None, help="steps over which the simple share falls from p0 to p1 (default half the run)")
     ap.add_argument("--gate", type=float, default=None, help="orientation terms only, constant rate, until the mixture loss falls below this fraction of its round floor (EMA, e.g. 0.85); then the late terms and scalars ramp in and the rate decays")
@@ -537,7 +549,7 @@ def main():
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
-          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact, desc_lmax=a.desc_lmax, context=a.context, late_start=a.late_start, scalar_window=a.scalar_window, cache=a.cache, gate=a.gate, aniso=a.aniso, shape_loss=a.shape_loss, simple_window=a.simple_window)
+          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact, desc_lmax=a.desc_lmax, context=a.context, late_start=a.late_start, scalar_window=a.scalar_window, cache=a.cache, gate=a.gate, aniso=a.aniso, shape_loss=a.shape_loss, simple_window=a.simple_window, sh_loss=a.sh_loss)
 
 
 if __name__ == "__main__":

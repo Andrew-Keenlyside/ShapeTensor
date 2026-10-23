@@ -103,3 +103,20 @@ def peaks(coef: torch.Tensor, lmax: int, nmax: int = 3, rel: float = 0.5, min_se
         v, idx = torch.where(keep, f, torch.zeros_like(f)).topk(nmax, dim=0)                          # (nmax, M)
         dirs_out.append(g[idx].movedim(-1, 1) * (v > 0)[:, None]); vals_out.append(v)
     return torch.cat(dirs_out, -1), torch.cat(vals_out, -1)
+
+
+def peaks_gated(coef: torch.Tensor, lmax: int, sharp: float = 0.5, neg: float = 0.2, second: float = 0.42, **kw):
+    """Calibrated peaks of ``coef (c, N)``: a cell's density counts only if its mean is positive, at most ``neg`` of
+    the sphere is negative and its top peak stands ``sharp`` x the mean above the mean; a second peak counts if it
+    stands at least ``second`` of the first's height above the mean ((f2 - mean) / (f1 - mean); 0.42 gives the exact
+    target a 10% false-second rate on single-line cells). Returns ``dirs (nmax, 3, N)``, ``vals (nmax, N)`` (zeros
+    where absent) and the gate ``(N,)``."""
+    nmax = kw.pop("nmax", 3)
+    D, V = peaks(coef, lmax, nmax=nmax, rel=0.0, **kw)
+    mean = coef[0].float() / math.sqrt(4 * math.pi)                                                   # the density's mean over the sphere
+    g = fibonacci_sphere(800, coef.device); f = evaluate_sh(coef, lmax, g)                             # (800, N)
+    negshare = (f < 0).float().mean(0)
+    gate = (mean > 0) & (negshare <= neg) & (V[0] - mean >= sharp * mean)
+    rel2 = (V - mean[None]) / (V[0] - mean).clamp_min(1e-9)[None]                                      # (nmax, N)
+    keep = gate[None] & (V > 0) & ((torch.arange(nmax, device=V.device)[:, None] == 0) | (rel2 >= second))
+    return D * keep[:, None], V * keep, gate

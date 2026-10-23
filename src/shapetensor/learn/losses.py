@@ -47,6 +47,36 @@ DISTINCT = None                    # None: rank order among all present slots; a
 
 DESC_NC = 0                        # coefficients per descriptor density (0: none), set by train()
 SHAPE_LOSS = "frobenius"           # "frobenius" | "devcos": the tensor cost of slots and mixture (see dev_cost)
+SH_LOSS = "batchnorm"              # "batchnorm" (per-order error over the batch's energy) | "decoupled" (see sh_loss_decoupled)
+_SH_EMA: dict = {}                 # running per-cell energy per order (decoupled loss)
+SH_LMAX_ON = None                  # decoupled loss: highest order trained (None: all); raised by train() once l = 2 aligns
+
+
+def sh_loss_decoupled(pred: torch.Tensor, tgt: torch.Tensor, key: str = "sh", lmax_on: int | None = None) -> torch.Tensor:
+    """The density loss with magnitude and direction apart, per order: order 0 (mass) its own squared error; each order
+    l >= 2: (|p_l| - |t_l|)^2 + 2 |t_l|^2 (1 - cos_l) -- the angular part weighted by the target's energy, so a flat
+    (round) prediction gains nothing -- each over a running mean of the per-cell target energy of that order (fixed
+    across batches: no down-weighting of line-rich batches). Orders above ``lmax_on`` are left out (l = 2 first).
+    ``pred``, ``tgt``: ``(B, c, ...)`` with orders on dim 1."""
+    from .sh import bands
+    lmax = 2 * (len(bands_for(pred.shape[1])) - 1)
+    total, n = 0.0, 0
+    for i, b in enumerate(bands(lmax)):
+        l = 2 * i
+        if lmax_on is not None and l > lmax_on:
+            break
+        p_, t_ = pred[:, b], tgt[:, b]
+        e = float((t_ ** 2).sum(1).mean())
+        k = (key, l); _SH_EMA[k] = e if k not in _SH_EMA else 0.99 * _SH_EMA[k] + 0.01 * e
+        norm = max(_SH_EMA[k], 1e-6)
+        if l == 0:
+            term = ((p_ - t_) ** 2).sum(1)
+        else:
+            pn, tn = p_.norm(dim=1), t_.norm(dim=1)
+            cos = (p_ * t_).sum(1) / (pn * tn).clamp_min(1e-9)
+            term = (pn - tn) ** 2 + 2 * tn ** 2 * (1 - cos)
+        total = total + term.mean() / norm; n += 1
+    return total / n
 
 
 def dev_cost(P: torch.Tensor, T: torch.Tensor, axis: int) -> torch.Tensor:
@@ -231,7 +261,7 @@ def loss(pred: dict, tgt: dict, grid: torch.Tensor, margin: int = 4, kappa: floa
     if "q_sh" in P and "q_sh" in T:                                                                # the density at query points and scales
         qp, qt = P["q_sh"].float().transpose(1, 2), T["q_sh"].float().transpose(1, 2)
         nc = qt.shape[1] - 3 * DESC_NC
-        out["query"] = sh_loss(qp[:, :nc], qt[:, :nc])
+        out["query"] = sh_loss_decoupled(qp[:, :nc], qt[:, :nc], "query", SH_LMAX_ON) if SH_LOSS == "decoupled" else sh_loss(qp[:, :nc], qt[:, :nc])
         if DESC_NC:
             out["descriptors"] = desc_loss(qp[:, nc:], qt[:, nc:])
     if "sh" in P:                                                                                    # the populations' density in SH, no matching:
@@ -241,14 +271,20 @@ def loss(pred: dict, tgt: dict, grid: torch.Tensor, margin: int = 4, kappa: floa
         ct = T["sh_t"].float()[:, :nsh] if "sh_t" in T else density_sh(T["slots"].float(), T["mass"].float(), lmax, kappa)
         if DESC_NC and "sh_t" in T:
             out["descriptors"] = out.get("descriptors", 0.0) + desc_loss(P["sh"].float()[:, nsh:], T["sh_t"].float()[:, nsh:])
+        if SH_LOSS == "decoupled":
+            out["sh"] = sh_loss_decoupled(P["sh"].float()[:, :nsh], ct, "sh", SH_LMAX_ON)
         d2 = (P["sh"].float()[:, :nsh] - ct) ** 2
         # floor: a tenth of the batch's order-0 energy plus that of mass 0.05 in every cell (order 0 = sqrt(4 pi) m) --
         # a batch without anisotropy, or without populations, does not divide by ~0
         floor = 0.1 * (ct[:, 0] ** 2).sum() + ct[:, 0].numel() * (0.05 * math.sqrt(4 * math.pi)) ** 2
-        out["sh"] = sum(d2[:, b].sum() / ((ct[:, b] ** 2).sum() + floor) for b in bands(lmax)) / len(bands(lmax))
+        out["sh"] = out["sh"] if SH_LOSS == "decoupled" else sum(d2[:, b].sum() / ((ct[:, b] ** 2).sum() + floor) for b in bands(lmax)) / len(bands(lmax))
     W = {**WEIGHTS, **(weights or {})}
     total = sum(W[k] * v for k, v in out.items())
     parts = {k: float(v) for k, v in out.items()}
+    if "sh" in P:                                                                                    # the order-2 alignment (mass-weighted cosine)
+        p2, t2 = P["sh"].float()[:, 1:6], ct[:, 1:6]
+        tn2 = t2.norm(dim=1)
+        parts["sh_l2cos"] = float(((p2 * t2).sum(1) / (p2.norm(dim=1) * tn2).clamp_min(1e-9) * tn2).sum() / tn2.sum().clamp_min(1e-9))
     iso = torch.tensor([1, 1, 1, 0, 0, 0.0], device=mix.device).view(1, 6, 1, 1, 1) / 3              # the mixture term of a round prediction:
     parts["mixture_floor"] = float(((((iso - mix) ** 2) * WF.to(mix.device).view(1, 6, 1, 1, 1)).sum(1) * wmix).sum() / wmix.sum().clamp_min(1))
     return total, parts
