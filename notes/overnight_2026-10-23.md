@@ -305,3 +305,22 @@ floor per width in rescore (it used the first run's), paired differences in resc
   (25.7) but almost no second populations (6% against the target's 52%).
 * Density-only training failed again even with the decoupled loss and the curriculum (D2); trained alongside the slot
   terms (C3) the density head learns -- the slot terms seem to bootstrap the trunk.
+
+## Reviews 10 and the gated recipe (06:00 Montreal)
+
+Review 10 (D2): D2 learned order 0 and the order-2 *magnitude* (size 0.65 of the target) but never its direction
+(target-weighted cosine +0.09; C3's MSE density head +0.63); S1 vs W2 shows the same target-weighted-angle form
+failing on slots and mixture -- both decoupled forms fail from scratch where Frobenius / MSE work (hypothesis: MSE
+shrinks to the conditional mean and accumulates weak directional evidence from a round start; the decoupled form fits
+size independently of confidence and its direction gradient goes as 1/|p|). The energy sampler worked against the
+curriculum: the density-energy weight goes as mass^2 and easy draws carry *less* angular energy (fixed: scale-free
+angular share per occupied cell). Untrained high orders (D2 trained l = 2 only) were scored; the order-2-only state
+is not saved in checkpoints. Recommended: per-order MSE over a running per-order energy, all orders, alongside the
+slot terms; repair or drop the sampler; a late magnitude term for orders >= 4 to recover second peaks.
+
+**G1 (gated schedule + anisotropy-weighted sampling + presence 0.1, no hand-made curriculum, 1200 steps): the best
+model of the night** -- bank slot single 14.5 [12.4, 18.0], shared 32.4 [28.7, 35.9], mixture single 14.1 [12.0,
+16.8], linearity 0.23; paired against W2: single -7.3 [-9.0, -4.9], shared -2.7 [-4.9, -0.5], mixture -6.4 [-8.1,
+-4.4]; better than the structure tensor (15.2 / 35.1) and P1@2000 (15.6 / 32.7 / 15.1). Its gate opened at step 574.
+Confounds (1200 vs 1000 steps, a different rate trajectory, presence 0.1, one seed) under review 11. G1's sampler used
+the slot-based weight (linear in mass), not the density-based one review 10 faulted.
