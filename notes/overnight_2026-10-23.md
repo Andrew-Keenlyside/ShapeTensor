@@ -413,3 +413,22 @@ opens (fixed: `--gate-max`); devcos with the Frobenius floor; sampling not coupl
 wide, gate 0.85 with a fallback, presence 0.1, no hand-made curriculum; ablation: G1 without `--aniso`; then the
 exact density head on the G1 recipe for second populations, continuous descriptors instead of the kind head, mixed
 strength 0.3 -> 0.6.
+
+## F1, the final model (06:15 Montreal)
+
+| bank | model | slot single | shared | mixture single | SH: false second / crossings found |
+|---|---|---|---|---|---|
+| standard (0.3) | P1@2000 | 15.6 | 32.7 | 15.1 | -- |
+| | **F1@900** | 16.0 | 32.7 | 15.1 | 0.28 / 0.26 |
+| | G1@1200 | **14.5** | **32.4** | **14.1** | -- |
+| crossings (0.3) | P1@2000 | 12.7 | 28.6 | 12.7 | -- |
+| | F1@900 | 12.6 | 29.2 | 11.4 | 0.22 / 0.20 |
+| | G1@1200 | **11.4** | **28.0** | **10.6** | -- |
+| strength 0.6 | P1@2000 | 24.3 | 29.2 | 25.0 | -- |
+| | **F1@900** | **19.6** | 28.4 | **19.0** | 0.27 / 0.19 |
+| | G1@1200 | 20.5 | **26.2** | 19.3 | -- |
+| | structure tensor | 20.0 | 30.0 | | |
+
+F1 fixed P1's strength-0.6 weakness (training to 0.7) and kept its standard-bank level; its density head finds second
+peaks on crossing cells at about its false-alarm rate on single cells (no discrimination). G1 remains the best model
+overall. Review 12 scrutinises.
