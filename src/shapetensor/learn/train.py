@@ -187,8 +187,11 @@ class Buffer:
 def anisotropy(t: dict) -> float:
     """A pair's non-round target energy: the cells' mean of sum_k m_k |S_k - I/3|^2 (the populations' deviatoric
     energy, mass-weighted) -- category-free; what an orientation-learning batch is made of."""
-    if "sh_t" in t:                                                                                   # the density's angular energy (orders >= 2)
-        return float((t["sh_t"].float()[1:] ** 2).sum(0).mean())
+    if "sh_t" in t:                                                                                   # the density's angular share (orders >= 2 over order 0),
+        c = t["sh_t"].float(); occ = c[0] > 0.05 * math.sqrt(4 * math.pi)                          # per occupied cell -- scale-free (review 10: the
+        if not bool(occ.any()):                                                                       # raw energy went as mass^2 and favoured hard draws)
+            return 0.0
+        return float(((c[1:] ** 2).sum(0)[occ] / (c[0][occ] ** 2)).mean())
     S = t["slots"].float(); m = t["mass"].float()
     iso = torch.tensor([1, 1, 1, 0, 0, 0.0], device=S.device).view(1, 6, 1, 1, 1) / 3
     wf = torch.tensor([1, 1, 1, 2, 2, 2.0], device=S.device).view(1, 6, 1, 1, 1)
