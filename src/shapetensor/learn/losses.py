@@ -198,7 +198,7 @@ def loss(pred: dict, tgt: dict, grid: torch.Tensor, margin: int = 4, kappa: floa
     if "sh" in P:                                                                                    # the populations' density in SH, no matching:
         from .sh import bands, density_sh                                                           # each order's squared error over the batch's
         lmax = 2 * (len(bands_for(P["sh"].shape[1])) - 1)                                           # energy in that order, averaged over the orders
-        ct = density_sh(T["slots"].float(), T["mass"].float(), lmax, kappa)
+        ct = T["sh_t"].float() if "sh_t" in T else density_sh(T["slots"].float(), T["mass"].float(), lmax, kappa)
         d2 = (P["sh"].float() - ct) ** 2
         # floor: a tenth of the batch's order-0 energy plus that of mass 0.05 in every cell (order 0 = sqrt(4 pi) m) --
         # a batch without anisotropy, or without populations, does not divide by ~0
@@ -256,6 +256,10 @@ def augment(image: torch.Tensor, tgt: dict, g: torch.Generator | None = None):
             out[k] = (v.float() @ R.T).to(v.dtype)
         elif k == "q_sigma":
             out[k] = v
+        elif k == "sh_t":                                                                           # an SH field: move the cells, rotate the coefficients
+            from .query import sh_rotation
+            R = sh_rotation(perm, flips, 2 * (len(bands_for(v.shape[-4])) - 1), v.device)
+            out[k] = torch.einsum("ij,j...->i...", R, apply_cube(v, perm, flips).float()).to(v.dtype)
         elif torch.is_tensor(v) and v.dim() >= 3:
             out[k] = apply_cube(v, perm, flips, tensor6=(k == "slots"))
         else:

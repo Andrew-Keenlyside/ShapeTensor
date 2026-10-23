@@ -52,3 +52,19 @@ def test_decoder_shapes_and_gradients():
     assert out["q_sh"].shape == (2, 50, n_coef(6))
     out["q_sh"].square().mean().backward()
     assert net.stem.weight.grad is not None and float(net.stem.weight.grad.abs().sum()) > 0
+
+
+def test_exact_lattice_density_commutes_with_the_cube_group():
+    from shapetensor.learn.losses import augment
+    from shapetensor.learn.query import voxel_density
+    from shapetensor.learn.targets import _pool
+    s, d = draw((48,) * 3, seed=6, device=DEV, strength=0.3, modality="hipct", crossing=True)
+    sh = _pool(voxel_density(s, d, 6), 5.0, 4)
+    img = d["image"]
+    for seed in range(3):
+        g = torch.Generator().manual_seed(seed)
+        perm, flips = cube_transform(torch.Generator().manual_seed(seed))
+        _, t2 = augment(img, {"sh_t": sh}, torch.Generator().manual_seed(seed))
+        ref = _pool(voxel_density(s, _cube_drawn(d, perm, flips), 6), 5.0, 4)
+        err = (t2["sh_t"] - ref).abs().max() / ref.abs().max()
+        assert float(err) < 2e-2, (perm, flips, float(err))

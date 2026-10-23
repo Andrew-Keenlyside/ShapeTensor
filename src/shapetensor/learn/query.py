@@ -66,6 +66,54 @@ def layer_density(s, drawn: dict, points: torch.Tensor, sigmas: torch.Tensor, lm
     return out
 
 
+def voxel_density(s, drawn: dict, lmax: int, kappa: float = 20.0, n: int = 600, chunk: int = 32768, floor: float = 1e-4) -> torch.Tensor:
+    """The exact per-voxel orientation density in SH, ``(n_coef, Z, Y, X)``: at every voxel, the sum over the shape
+    layers of its visible occupancy times the angular density of its own label tensor (each lobe normalised over the
+    sphere). A Gaussian window of any sigma applied to it is the window-averaged density of the orientations present
+    -- exact for bends, branches and crossings alike (the per-layer form, :func:`layer_density`, describes a layer by
+    its window-mean tensor instead)."""
+    occ, T, vis = drawn["occupancy"], drawn["tensors"], drawn["visibility"]
+    dev = occ.device
+    shapes = [k for k, L in enumerate(s.layers) if L.role != "isotropic"]
+    vis = vis.view(-1, 1, 1, 1) if vis.dim() == 1 else vis
+    ov = drawn.get("orientation_visibility")
+    if ov is not None:
+        ov = ov.view(-1, 1, 1, 1) if ov.dim() == 1 else ov
+    b = SHBasis(lmax, n, dev)
+    gz, gy, gx = b.grid.unbind(1)
+    quad = torch.stack([gz * gz, gy * gy, gx * gx, 2 * gz * gy, 2 * gz * gx, 2 * gy * gx], 1)              # (n, 6): u^T S u = quad @ S6
+    F = torch.zeros(b.proj.shape[0], *occ.shape[1:], device=dev)
+    Ff = F.view(F.shape[0], -1)
+    iso = torch.tensor([1, 1, 1, 0, 0, 0.0], device=dev) / 3
+    for k in shapes:
+        w = (occ[k] * vis[k if vis.shape[0] > 1 else 0]).reshape(-1).float()
+        idx = (w > floor).nonzero()[:, 0]
+        if idx.numel() == 0:
+            continue
+        Tk = T[k].reshape(6, -1).float()
+        ovk = ov[k].reshape(-1).float() if ov is not None and ov.shape[1:] != (1, 1, 1) else (ov[k].reshape(1).float() if ov is not None else None)
+        for a in range(0, idx.numel(), chunk):
+            ii = idx[a:a + chunk]
+            Sv = Tk[:, ii]
+            if ovk is not None:
+                o_ = ovk[ii] if ovk.numel() > 1 else ovk
+                Sv = Sv * o_ + (1 - o_) * iso[:, None]
+            Sv = Sv / (Sv[0] + Sv[1] + Sv[2]).clamp_min(1e-9)                                          # trace 1
+            e = torch.exp(kappa * (quad @ Sv - 1))                                                     # (n, m)
+            e = e / e.mean(0, keepdim=True).clamp_min(1e-30)
+            Ff[:, ii] += (b.proj @ e) * w[ii]
+    return F
+
+
+def sample_density(F: torch.Tensor, points: torch.Tensor, sigmas: torch.Tensor) -> torch.Tensor:
+    """The per-voxel density ``F (c, Z, Y, X)`` windowed at each query's sigma and sampled at its point: ``(Q, c)``."""
+    out = torch.zeros(points.shape[0], F.shape[0], device=F.device)
+    for lev in torch.unique(sigmas).tolist():
+        q = sigmas == lev
+        out[q] = _sample(gaussian(F, lev, truncate=3.0), points[q]).T
+    return out
+
+
 def draw_queries(shape, n_points: int, n_levels: int, g: torch.Generator, device, margin: float = 12.0,
                  sigma_range=(1.5, 12.0)) -> tuple[torch.Tensor, torch.Tensor]:
     """Query points uniform in the interior (``margin`` voxels from every face) and their sigmas: ``n_levels`` levels
