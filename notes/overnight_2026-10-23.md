@@ -285,3 +285,8 @@ intervals): "learns, but slowly" is not supported; the gap opens at steps 325-45
 easy share falls, and does not close. Shared cells cannot show separation (the metric does not detect it). Width is
 now 32/64/128 by default; narrow runs dropped. (L01's bank row is its step-2000 checkpoint.) Fixed: the untrained
 floor per width in rescore (it used the first run's), paired differences in rescore, a code version in the cache key.
+* G1 (wide, `--gate 0.85 --aniso 1 600`, presence 0.1, no hand-made curriculum): its mixture loss fell below 0.85 of
+  the round floor at step 574 -- it broke away from the round plateau without a hand-made regime (bank pending).
+* F1 (P1@2000 continued with the density head): gate open at 51 (warm start), all SH orders on at 51 -- the density
+  head on P1's trunk reached a mass-weighted order-2 cosine of 0.36 within 50 steps (P1's features carry it).
+* D2 (density only, decoupled loss, curriculum): no order-2 alignment above 0.3 by step 575.
