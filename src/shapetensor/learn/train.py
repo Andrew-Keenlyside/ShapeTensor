@@ -175,16 +175,20 @@ def evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
 def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: int = 4, buffer: int = 128, refresh: int = 1, lr: float = 3e-4,
           warmup: int = 500, margin: int = 4, val_n: int = 32, val_every: int = 500, log_every: int = 25, seed: int = 0, device: str = "cuda",
           strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None,
-          widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0):
+          widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None):
     from .engine import PopulationEngine
     from . import losses as _losses
+    _losses.PRESENCE_BAND = tuple(presence_band) if presence_band else None
+    if weights:
+        _losses.WEIGHTS.update(weights)                                                                   # loss weights for this run
     _losses.DISTINCT = distinct                                                                          # slot order kept only among similar shapes
     outd = Path(out); outd.mkdir(parents=True, exist_ok=True)
     logf = open(outd / "log.jsonl", "a")
     def log(msg):
         print(msg, flush=True)
     args = dict(steps=steps, size=size, batch=batch, accum=accum, buffer=buffer, refresh=refresh, lr=lr, warmup=warmup, margin=margin, val_n=val_n,
-                seed=seed, strength0=strength0, strength1=strength1, overfit=overfit, gen=gen, widths=list(widths), distinct=distinct, sh_lmax=sh_lmax, lcn=lcn)
+                seed=seed, strength0=strength0, strength1=strength1, overfit=overfit, gen=gen, widths=list(widths), distinct=distinct, sh_lmax=sh_lmax, lcn=lcn,
+                presence_band=list(presence_band) if presence_band else None, weights=weights)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed)
     model = PopulationNet.from_args(args).to(device)
     rf = receptive_field(model)
@@ -249,6 +253,8 @@ def main():
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
+    ap.add_argument("--presence-band", type=float, nargs=2, default=None, help="target masses between these two do not train presence (e.g. 0.002 0.02)")
+    ap.add_argument("--weights", type=json.loads, default=None, help='loss weight overrides as JSON, e.g. {"presence": 0.2}')
     ap.add_argument("--lcn", type=float, default=0.0, help="add a local-contrast input channel ((x - mean) / sd in a Gaussian window of this sigma, voxels; e.g. 3)")
     ap.add_argument("--sh-lmax", type=int, default=0, help="also predict the populations' density in even SH to this order (permutation-free; e.g. 8)")
     ap.add_argument("--distinct", type=float, default=None, help="slot order kept only among populations whose eigenvalue spectra lie within this distance (e.g. 0.2); default: among all")
@@ -256,7 +262,7 @@ def main():
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
-          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn)
+          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights)
 
 
 if __name__ == "__main__":

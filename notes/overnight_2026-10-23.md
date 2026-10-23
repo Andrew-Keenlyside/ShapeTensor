@@ -27,7 +27,17 @@ Diagnosis before the loops:
 * Backgrounds: with a textured background the isotropic remainder and the region interfaces are visible populations,
   and lines are the heaviest in only 51-64% of their cells (100% on a flat background); the structure tensor's error on
   line cells rises from 6.8 deg (flat) to 15-19 deg -- harder but visible.
-* The ablation A1 (R2 + backgrounds) was at chance at step 600, where R2 had learned.
+* The ablation A1 (R2 + backgrounds) was at chance at step 600 and 900, where R2 had learned by 600.
+* Gradient on the trunk's last shared layer per loss term (weighted): on R2 the mixture term leads (1.36; presence
+  0.16, shape 0.24); on R4 **presence leads (1.01)**, six times the shape term (0.17), its loss stuck at 2.9 (summed
+  over six slots). Presence there asks whether each slot holds a population above 0.005 mass -- faint, near-threshold
+  populations make it a guess -- and it ramps in at step 300, when orientation should form. Presence is also redundant
+  with the mass (min_mass is an inference predicate). Fix tried: a don't-care band (0.002-0.02) and weight 0.2.
+* Literature (independent survey agent): FOD networks regress SH coefficients (FOD-Net); 4th-order moments separate
+  crossings from sheets (Advani & Tucker); unstable matching gives conflicting targets (DN-DETR) -- add a
+  matching-free path; contrast invariance inside normalisation-free nets (divisive normalisation, GDN); gradient
+  starvation (Pezeshki 2021) -- measure per-head gradients; synthetic-data models train for 10^5 steps (SynthSeg,
+  anatomix); arbitrary-resolution decoders (LIIF) conditioned on the query scale.
 
 ## Loops
 

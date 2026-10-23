@@ -38,6 +38,8 @@ WEIGHTS = {"shape": 1.0, "mass": 1.0, "presence": 0.5, "kind": 0.1, "classes": 0
            "sh": 2.0}
 PRESENT = 0.005                    # a target slot with at least this mass is a population (presence 1); below, empty (presence 0)
 TIE = 0.7                          # target slots whose masses are within this ratio may exchange their predicted slots
+PRESENCE_BAND = None               # None: presence trained on every slot; (lo, hi): slots whose target mass lies between
+                                   # lo and hi (faint populations near the threshold, a guess) do not train presence
 DISTINCT = None                    # None: rank order among all present slots; a float: kept only among slots whose
                                    # trace-1 eigenvalue spectra lie within this distance (ideal tensors: line-blob 0.82,
                                    # line-sheet 0.71, sheet-blob 0.41, two lines 0; window pooling shortens them)
@@ -73,6 +75,9 @@ def match(pred: dict, tgt: dict, m_full: float = 0.02):
     logp = Fn.log_softmax(kl, 2)                                                                          # (B, Kp, nk, c)
     kind = -torch.gather(logp[:, :, None].expand(-1, -1, K, -1, -1, -1, -1), 3, kt.clamp_min(0)[:, None, :, None].expand(-1, K, -1, -1, -1, -1, -1)).squeeze(3) * present[:, None]
     pres = Fn.binary_cross_entropy_with_logits(pl[:, :, None].expand(-1, -1, K, *pl.shape[2:]), present[:, None].expand(-1, K, -1, *present.shape[2:]).float(), reduction="none")
+    if PRESENCE_BAND is not None:
+        lo, hi = PRESENCE_BAND
+        pres = pres * ((mt <= lo) | (mt >= hi))[:, None].float()
     C = WEIGHTS["shape"] * shape + WEIGHTS["mass"] * mass + WEIGHTS["presence"] * pres + WEIGHTS["kind"] * kind   # (B, Kp, Kt, c)
     perms = torch.tensor(list(itertools.permutations(range(K))), device=dev)                               # (P, K): target slot k <- predicted perms[p, k]
     kt_idx = torch.arange(K, device=dev)
