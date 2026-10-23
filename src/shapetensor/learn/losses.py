@@ -29,6 +29,7 @@ import math
 import torch
 import torch.nn.functional as Fn
 
+from .generator import eig3
 from .targets import render_odf
 
 WF = torch.tensor([1.0, 1.0, 1.0, 2.0, 2.0, 2.0])
@@ -36,6 +37,9 @@ KIND_WEIGHT = torch.tensor([1.0, 4.0, 1.0, 4.0])          # line, sheet, blob, i
 WEIGHTS = {"shape": 1.0, "mass": 1.0, "presence": 0.5, "kind": 0.1, "classes": 0.5, "fraction": 0.5, "size": 0.1, "hellinger": 1.0, "identity": 0.1, "mixture": 2.0}
 PRESENT = 0.005                    # a target slot with at least this mass is a population (presence 1); below, empty (presence 0)
 TIE = 0.7                          # target slots whose masses are within this ratio may exchange their predicted slots
+DISTINCT = None                    # None: rank order among all present slots; a float: kept only among slots whose
+                                   # trace-1 eigenvalue spectra lie within this distance (ideal tensors: line-blob 0.82,
+                                   # line-sheet 0.71, sheet-blob 0.41, two lines 0; window pooling shortens them)
 
 
 def _cells(x: torch.Tensor, margin: int) -> torch.Tensor:
@@ -70,8 +74,22 @@ def match(pred: dict, tgt: dict, m_full: float = 0.02):
     mk, mj = mt[:, :, None], mt[:, None, :]                                                               # (B, Kt, 1, c), (B, 1, Kt, c)
     ratio = torch.minimum(mk, mj) / torch.maximum(mk, mj).clamp_min(1e-9)
     pk, pj = present[:, :, None], present[:, None, :]
-    allowed = torch.eye(K, dtype=torch.bool, device=dev).view(1, K, K, *([1] * (mt.dim() - 2))) | ((ratio >= TIE) & pk & pj) | (~pk & ~pj)   # (B, Kt, Kp, c)
-    valid = allowed[:, kt_idx[None].expand_as(perms), perms].all(2)                                      # (B, P, c)
+    if DISTINCT is None:
+        allowed = torch.eye(K, dtype=torch.bool, device=dev).view(1, K, K, *([1] * (mt.dim() - 2))) | ((ratio >= TIE) & pk & pj) | (~pk & ~pj)   # (B, Kt, Kp, c)
+        valid = allowed[:, kt_idx[None].expand_as(perms), perms].all(2)                                  # (B, P, c)
+    else:
+        # order kept only among populations of similar shape: the rank rule exists to break the symmetry between
+        # interchangeable slots (two crossing lines); populations whose eigenvalue spectra differ (a line and a blob,
+        # rotation-invariant, no categories) are told apart by their tensors and may take any present slot
+        ev, _ = eig3(St.movedim(2, 0))                                                                    # (3, B, K, c), ascending
+        ev = ev / ev.sum(0, keepdim=True).clamp_min(1e-9)
+        similar = (ev[:, :, :, None] - ev[:, :, None]).norm(dim=0) <= DISTINCT                            # (B, Kt, Kt, c)
+        need = similar & (ratio < TIE) & pk & pj                                                          # pairs whose order must be kept
+        valid = (present[:, perms] == present[:, None]).all(2)                                            # presents onto present ranks, empties onto empty
+        for k in range(K):
+            for j in range(k + 1, K):
+                ok = (perms[:, k] < perms[:, j]).view(1, -1, *([1] * (mt.dim() - 2)))                     # (1, P, 1...)
+                valid = valid & (~need[:, k, j][:, None] | ok)
     costs = torch.where(valid, costs, torch.full_like(costs, 1e9))
     best = costs.argmin(1)                                                                                # (B, c)
     perm = perms[best].movedim(-1, 1)                                                                     # (B, K, c)

@@ -140,3 +140,38 @@ def test_training_runs_end_to_end(tmp_path):
     train(str(tmp_path), steps=4, size=48, batch=2, accum=2, buffer=3, refresh=1, val_n=1, val_every=4, margin=1, warmup=2, device=DEV)
     ck = torch.load(tmp_path / "model.pt", map_location=DEV)
     assert ck["step"] == 4 and (tmp_path / "log.jsonl").exists()
+
+
+def test_shape_aware_matching():
+    """With ``DISTINCT`` set, populations of distinct shape (a blob and a line) may take each other's slots; two lines
+    keep their rank order. Without it, every present slot keeps its rank."""
+    from shapetensor.learn import losses as L
+    from shapetensor.learn.generator import eye6
+    from shapetensor.learn.losses import match
+    K = 6
+    blob = eye6("cpu", ()) / 3; lx = line_tensor(torch.tensor([1.0, 0.0, 0.0])); ly = line_tensor(torch.tensor([0.0, 1.0, 0.0]))
+    St = torch.zeros(1, K, 6, 1, 1, 1); mt = torch.zeros(1, K, 1, 1, 1); kt = torch.full((1, K, 1, 1, 1), -1)
+    for k, (T_, m_, k_) in enumerate(((blob, 0.3, 2), (lx, 0.1, 0), (ly, 0.05, 0))):
+        St[0, k, :, 0, 0, 0] = T_; mt[0, k] = m_; kt[0, k] = k_
+    tgt = {"slots": St, "mass": mt, "kind": kt}
+
+    def pred(order):                                                                       # predicted slot j holds target order[j]
+        S = torch.zeros_like(St); rm = torch.zeros_like(mt); kl = torch.full((1, K, 4, 1, 1, 1), -10.0); pl = torch.full_like(mt, -10.0)
+        for j, t in enumerate(order):
+            S[0, j] = St[0, t]; rm[0, j] = mt[0, t].sqrt(); kl[0, j, max(int(kt[0, t]), 0)] = 10.0; pl[0, j] = 10.0
+        for j in range(len(order), K):
+            S[0, j] = blob[:, None, None, None]
+        return {"slots": S, "root_mass": rm, "kind": kl, "presence_logit": pl}
+
+    old = L.DISTINCT
+    try:
+        L.DISTINCT = None
+        c_rank, _, _ = match(pred([1, 0, 2]), tgt)                                         # line before blob: the rank rule refuses
+        assert float(c_rank) > 0.05
+        L.DISTINCT = 0.2
+        c, _, perm = match(pred([1, 0, 2]), tgt)                                           # distinct shapes exchange freely
+        assert float(c) < 1e-3 and perm[0, :3, 0, 0, 0].tolist() == [1, 0, 2]
+        c2, _, _ = match(pred([2, 0, 1]), tgt)                                             # the lighter line first: order among lines kept
+        assert float(c2) > 0.05
+    finally:
+        L.DISTINCT = old
