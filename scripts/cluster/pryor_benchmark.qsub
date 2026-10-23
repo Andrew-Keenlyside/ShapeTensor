@@ -25,9 +25,9 @@ run() {  # name, then extra arguments
     local name=$1; shift
     echo "=== $name: $*"
     "$RUNTIME" exec --nv -B "$TMPDIR:$TMPDIR" -B "$P:$P" --env PYTHONPATH="$SRC/src",SHAPETENSOR_SHAPES="$TMPDIR/shape_library",OMP_NUM_THREADS=4 \
-        "$SIF" /opt/venv/bin/python -m shapetensor.learn.train --head lobes --out "$OUT/$name" --steps 40 --benchmark 30 --size 96 --buffer 24 \
+        "$SIF" /opt/venv/bin/python -m shapetensor.learn.train --head lobes --out "$OUT/$name" --steps 40 --benchmark 30 --size 128 --buffer 24 \
         --gate 0.85 --gate-max 5 --lobes-J 6 --query 128 --pairs 8 --pair-every 8 --ssl-every 8 --log-every 10 \
-        --gen '{"scene": {"canvas": 192, "crops_per_scene": 8}}' "$@" 2>&1 | grep -E "BENCHMARK|Error|Traceback|error" || true
+        --gen '{"scene": {"canvas": 256, "crops_per_scene": 8}}' "$@" 2>&1 | grep -E "BENCHMARK|Error|Traceback|error" || true
 }
 "$RUNTIME" exec --nv "$SIF" /opt/venv/bin/python -c "import torch, numpy, zarr; print('torch', torch.__version__, 'cuda', torch.version.cuda, torch.cuda.get_device_name(0)); import importlib; [print(m, bool(importlib.util.find_spec(m))) for m in ('scipy','monai','torchio','nibabel')]"
 run inline_b2x8        --batch 2 --accum 8 --no-producer

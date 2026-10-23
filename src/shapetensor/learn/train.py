@@ -1,6 +1,6 @@
 """Training the population model on the synthesis, generated on the fly.
 
-    python -m shapetensor.learn.train --out DIR [--steps 20000] [--size 96] [--batch 4] [--accum 4] [--buffer 128]
+    python -m shapetensor.learn.train --out DIR [--steps 20000] [--size 128] [--batch 4] [--accum 4] [--buffer 128]
 
 Samples are drawn (:func:`~shapetensor.learn.generator.draw`: a modality, matched content, its acquisition) and their
 lattice targets computed on the GPU into a replay buffer of (image, target) pairs; each step takes ``accum``
@@ -430,7 +430,7 @@ def query_metrics(q_eval, lmax: int) -> dict:
     return out
 
 
-def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: int = 4, buffer: int = 128, refresh: int = 1, lr: float = 3e-4,
+def train(out: str, steps: int = 20000, size: int = 128, batch: int = 4, accum: int = 4, buffer: int = 128, refresh: int = 1, lr: float = 3e-4,
           warmup: int = 500, margin: int = 4, val_n: int = 32, val_every: int = 500, log_every: int = 25, seed: int = 0, device: str = "cuda",
           strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None,
           widths: tuple = (32, 64, 128), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None, query: int = 0,
@@ -574,7 +574,7 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     return model
 
 
-def train_lobes(out: str, steps: int = 6000, size: int = 96, batch: int = 4, accum: int = 4, buffer: int = 128, refresh: int = 1, lr: float = 3e-4,
+def train_lobes(out: str, steps: int = 6000, size: int = 128, batch: int = 4, accum: int = 4, buffer: int = 128, refresh: int = 1, lr: float = 3e-4,
                 warmup: int = 300, margin: int = 4, val_n: int = 24, val_every: int = 500, log_every: int = 25, seed: int = 0, device: str = "cuda",
                 strength0: float = 0.15, strength1: float = 0.8, gen: dict | None = None, widths: tuple = (32, 64, 128), sh_lmax: int = 8, desc_lmax: int = 4,
                 lobes_J: int = 4, context_level: bool = True, voxel_cond: bool = True, identity_dim: int = 8, points: bool = True, query: int = 0,
@@ -841,7 +841,7 @@ def n_coef_(lmax: int) -> int:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--out", required=True); ap.add_argument("--steps", type=int, default=20000); ap.add_argument("--size", type=int, default=96)
+    ap.add_argument("--out", required=True); ap.add_argument("--steps", type=int, default=20000); ap.add_argument("--size", type=int, default=128, help="training crop side (voxels), whatever the voxel size; the scene canvas defaults to twice it")
     ap.add_argument("--batch", type=int, default=4); ap.add_argument("--accum", type=int, default=4); ap.add_argument("--buffer", type=int, default=128)
     ap.add_argument("--refresh", type=int, default=1); ap.add_argument("--lr", type=float, default=3e-4); ap.add_argument("--margin", type=int, default=4)
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)

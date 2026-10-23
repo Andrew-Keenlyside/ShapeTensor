@@ -29,6 +29,6 @@ REALARG=""
 [ -n "$REAL" ] && REALARG="--real $REAL"
 nvidia-smi
 PYTHONPATH=src "$PY" -m shapetensor.learn.train --head lobes --out "$OUT" --seed "$SEED" --steps "$STEPS" \
-  --size 96 --batch 4 --accum 4 --buffer 256 --refresh 2 --gate 0.85 --gate-max 3000 --difficulty auto --level0 0.3 \
+  --size 128 --batch 4 --accum 4 --buffer 256 --refresh 2 --gate 0.85 --gate-max 3000 --difficulty auto --level0 0.3 \
   --pairs 32 --pair-every 4 $REALARG --ssl-every 4 --query 128 --strength1 1.0 --val-n 32 --val-every 2000 \
-  --gen '{"scene": {"canvas": 192, "crops_per_scene": 8}}' $RESUME
+  --gen '{"scene": {"canvas": 256, "crops_per_scene": 8}}' $RESUME

@@ -249,9 +249,12 @@ class Canvas:
 
     NDESC = 5                              # outer radius, wall, lumen fraction, flattening, angularity (voxels / 0-1)
 
+    KEYS_MAX = 30_000_000                  # (voxel, object) keys held before they are summed into unique ones (memory)
+    OBJ = 1 << 22                          # a key is voxel * OBJ + object: up to 4 M objects (dense granule fields pass 65 536)
+
     def __init__(self, shape, device):
         self.shape = tuple(shape); self.device = device; self.n = int(np.prod(shape))
-        self.id_keys, self.id_w = [], []
+        self.id_keys, self.id_w = [], []; self._nkeys = 0
         self.lumen = torch.zeros(self.n, device=device); self.lumen_c = torch.zeros(self.n, device=device)
         self.reset()
 
@@ -276,7 +279,14 @@ class Canvas:
             n = Q.round().long()
             ok = (n[:, 0] >= 0) & (n[:, 0] < Z) & (n[:, 1] >= 0) & (n[:, 1] < Y) & (n[:, 2] >= 0) & (n[:, 2] < X)
             lin = (n[ok, 0] * Y + n[ok, 1]) * X + n[ok, 2]
-            self.id_keys.append(lin * 65536 + obj[ok]); self.id_w.append(W[ok])
+            self._add_keys(lin * self.OBJ + obj[ok], W[ok])
+
+    def _add_keys(self, keys, w):
+        self.id_keys.append(keys); self.id_w.append(w); self._nkeys += keys.numel()
+        if self._nkeys > self.KEYS_MAX:                                        # sum the weights of repeated keys: one per (voxel, object)
+            uk, inv = torch.unique(torch.cat(self.id_keys), return_inverse=True)
+            ws = torch.zeros(uk.shape[0], device=self.device).index_add_(0, inv, torch.cat(self.id_w))
+            self.id_keys, self.id_w, self._nkeys = [uk], [ws], uk.numel()
 
     def splat_lumen(self, Q, W, c):
         Z, Y, X = self.shape
@@ -294,7 +304,7 @@ class Canvas:
         self.acc[:, -1] += o * (contrast.reshape(-1) if torch.is_tensor(contrast) else float(contrast))
         if obj_map is not None:
             m = o > 1e-3; lin = torch.nonzero(m)[:, 0]
-            self.id_keys.append(lin * 65536 + obj_map.reshape(-1)[m]); self.id_w.append(o[m])
+            self._add_keys(lin * self.OBJ + obj_map.reshape(-1)[m], o[m])
 
     def finish(self):
         """This population's maps: occupancy (clamped), tensor (trace 1), descriptors, mean contrast map."""
@@ -316,7 +326,7 @@ class Canvas:
             keys = torch.cat(self.id_keys); w = torch.cat(self.id_w)
             uk, inv = torch.unique(keys, return_inverse=True)
             ws = torch.zeros(uk.shape[0], device=self.device).index_add_(0, inv, w)
-            vox, obj = uk // 65536, uk % 65536
+            vox, obj = uk // self.OBJ, uk % self.OBJ
             # sort by voxel, then by weight descending
             o1 = torch.argsort(-ws); vox1, obj1, ws1 = vox[o1], obj[o1], ws[o1]
             o2 = torch.argsort(vox1, stable=True); vox2, obj2, ws2 = vox1[o2], obj1[o2], ws1[o2]
@@ -337,7 +347,7 @@ def _template2d(n_side: int, device) -> torch.Tensor:
     return torch.stack([u.reshape(-1), w.reshape(-1)], 1), 2.0 / n_side
 
 
-def render_curves(cv: Canvas, c: Curves, max_points: float = 2.5e7):
+def render_curves(cv: Canvas, c: Curves, max_points: float = 8e6):
     """Sweep each curve's cross-section along it and splat the material (and the lumen contents)."""
     P = c.P; N, S, _ = P.shape; dev = P.device
     T = tangents(P); e1, e2 = rmf(P, T)
@@ -429,6 +439,41 @@ def _sym6(M: torch.Tensor) -> torch.Tensor:
     return torch.stack([M[..., 0, 0], M[..., 1, 1], M[..., 2, 2], M[..., 0, 1], M[..., 0, 2], M[..., 1, 2]], -1)
 
 
+# ------------------------------------------------------------------------------------------------------------------
+# scale: the voxel size of a scene, and which families belong at it
+# ------------------------------------------------------------------------------------------------------------------
+
+VOXEL_CORE = (1.0, 60.0)          # um: the tissue scales most of the training is for (HiP-CT, histology, light microscopy)
+VOXEL_WIDE = (0.002, 2000.0)      # um: nanometres (cryo-ET, electron microscopy) to millimetres (clinical CT, MRI)
+P_WIDE = 0.5                      # the share of scenes drawn on the wide prior (log-uniform over it)
+#: the voxel sizes (um) at which each family is what the tissue holds; outside the range its weight falls off by decades
+FAMILY_SCALE = {"bundle": (0.005, 200), "tree": (0.5, 3000), "network": (0.3, 10), "helix": (0.002, 100), "sheet": (0.002, 2000),
+                "foam": (0.05, 2000), "porous": (0.01, 2000), "cells": (0.1, 20), "crystals": (0.002, 2000), "radial": (0.3, 60),
+                "plywood": (0.01, 20), "fascicles": (0.5, 500), "trabecular": (2, 1000), "tubules": (0.3, 30), "epithelium": (0.1, 15),
+                "dendrite": (0.05, 10), "gland": (0.5, 60), "neuron": (0.2, 10), "neuropil": (0.005, 30), "organelles": (0.002, 0.3),
+                "compartments": (0.002, 0.2), "myelin": (0.003, 1.0), "nuclei": (0.005, 3), "myofibrils": (0.005, 1.0), "alveoli": (1, 500),
+                "jigsaw": (0.1, 5), "honeycomb": (0.05, 30), "xylem": (0.5, 60), "lattice": (0.05, 50), "organs": (100, 5000), "granules": (0.01, 60)}
+SCALE_FALLOFF = 0.6               # decades: the width of the fall-off outside a family's range (a Gaussian in log10 voxel size)
+SCALE_FLOOR = 0.02                # never zero: a family out of its range still turns up now and then (generalisation)
+ISO_SCENE_P = 0.08                # scenes of isotropic content only (granules, crystals): there, the right answer is no direction
+
+
+def scale_weight(family: str, voxel_um: float) -> float:
+    """How much ``family`` belongs in a scene at ``voxel_um``: 1 inside its :data:`FAMILY_SCALE` range, falling off by
+    decades outside it, never below :data:`SCALE_FLOOR`."""
+    lo, hi = FAMILY_SCALE.get(family, (1e-3, 1e4)); lv = math.log10(max(voxel_um, 1e-6))
+    d = max(0.0, math.log10(lo) - lv, lv - math.log10(hi))
+    return max(SCALE_FLOOR, math.exp(-0.5 * (d / SCALE_FALLOFF) ** 2))
+
+
+def _stretch_metric(axis: torch.Tensor, s: float) -> torch.Tensor:
+    """A volume-preserving linear map that stretches distances along ``axis`` by ``s`` (cells measured in it come out
+    ``s`` times shorter along the axis: ``s`` < 1 elongates them, ``s`` > 1 flattens them)."""
+    a = Fn.normalize(axis, dim=0)
+    M = torch.eye(3, device=axis.device) + (s - 1.0) * a[:, None] * a[None, :]
+    return M / s ** (1.0 / 3.0)
+
+
 @dataclass
 class Group:
     """One population (one layer of the targets): a bundle, a tree, a sheet, a foam, the cells' membranes..."""
@@ -447,11 +492,16 @@ class Scene:
 
     FAMILIES = {"bundle": 0.24, "tree": 0.11, "network": 0.05, "helix": 0.04, "sheet": 0.09, "foam": 0.04, "porous": 0.03,
                 "cells": 0.09, "crystals": 0.04, "radial": 0.04, "plywood": 0.04, "fascicles": 0.05, "trabecular": 0.03,
-                "tubules": 0.04, "epithelium": 0.03, "dendrite": 0.02, "gland": 0.02, "neuron": 0.03, "neuropil": 0.03}
+                "tubules": 0.04, "epithelium": 0.03, "dendrite": 0.02, "gland": 0.02, "neuron": 0.03, "neuropil": 0.03,
+                "organelles": 0.05, "compartments": 0.05, "myelin": 0.04, "nuclei": 0.04, "myofibrils": 0.03, "alveoli": 0.03,
+                "jigsaw": 0.02, "honeycomb": 0.03, "xylem": 0.02, "lattice": 0.03, "organs": 0.05, "granules": 0.04}
 
     def __init__(self, shape, seed: int, device="cuda", voxel_um: float | None = None, content: str = "general"):
         self.shape = tuple(shape); self.device = device; self.r = Rng(seed, device); self.seed = seed
-        self.voxel_um = float(voxel_um) if voxel_um else self.r.lu(1.0, 60.0)
+        if voxel_um:
+            self.voxel_um = float(voxel_um)
+        else:                                                                                   # the core scales, or anywhere from nm to mm
+            self.voxel_um = self.r.lu(*VOXEL_WIDE) if self.r.p(P_WIDE) else self.r.lu(*VOXEL_CORE)
         self.content = content
         self.groups: list[Group] = []; self.next_obj = 1
         self.branch, self.ends = [], []                    # (n, 3) positions
@@ -460,7 +510,7 @@ class Scene:
         self.obj_r = {}                                    # object id -> its smallest radius (voxels): which level of the hierarchy resolves
         self.depth = None                                  # the laminar depth coordinate (voxels), if a layout was drawn
         self.outside = None                                # (Z, Y, X) bool: beyond the specimen (a real cortical layout's pial side)
-        self.record = {"voxel_um": round(self.voxel_um, 2), "families": []}
+        self.record = {"voxel_um": round(self.voxel_um, 4), "families": []}
 
     # ---- helpers
     def ids(self, n: int, radius: float | torch.Tensor | None = None) -> torch.Tensor:
@@ -593,13 +643,15 @@ class Scene:
             kw["flat"] = torch.full_like(rad, rng.lu(0.25, 0.8)); kw["phi"] = smooth1d(rng.randn(N, S), 20) * 0.3
         return rad, con, kw
 
-    def bundle(self, cross_with: Curves | None = None, mode: str = "angled", axis=None, centre=None, radius=None, curv=None):
+    def bundle(self, cross_with: Curves | None = None, mode: str = "angled", axis=None, centre=None, radius=None, curv=None, fibre: dict | None = None):
         """A bundle of fibres (resolved: packed on a jittered hexagonal section; unresolved: the bundle's partial volume).
         ``mode``: ``single``; ``angled`` / ``kissing`` / ``fanning`` (through a point of ``cross_with``); ``split`` (the
         tract divides past a point into two halves diverging by an angle -- returned as two groups, one population each)."""
         r = self.r; S0 = int(2.2 * max(self.shape) / H)
-        Rb = radius or self.size(20, 3000, 1.5, min(self.shape) / 5)
-        rf_um = r.lu(0.25, 12.0); rf = rf_um / self.voxel_um
+        fibre = fibre or {}
+        nano = self.voxel_um < 0.3                                                          # EM scales: filaments, fibrils, axons
+        Rb = radius or self.size(0.05 if nano else 20, 3000, 1.5, min(self.shape) / 5)
+        rf_um = fibre.get("rf_um") or (r.lu(0.0035, 1.0) if nano else r.lu(0.25, 12.0)); rf = min(rf_um / self.voxel_um, min(self.shape) / 6)
         if Rb is None:
             return None
         Lc = 2.0 * max(self.shape); cross = None
@@ -631,16 +683,17 @@ class Scene:
             n_side = int(2 / sp) + 2
             ii, jj = torch.meshgrid(torch.arange(-n_side, n_side + 1, device=self.device), torch.arange(-n_side, n_side + 1, device=self.device), indexing="ij")
             o = torch.stack([ii.float() + 0.5 * (jj % 2).float(), jj.float() * math.sqrt(3) / 2], -1).reshape(-1, 2) * sp
-            o = o + 0.1 * sp * (r.rand(*o.shape) - 0.5) * 2                # jitter, kept below the gap: no overlaps
+            o = o + fibre.get("jitter", 0.1) * sp * (r.rand(*o.shape) - 0.5) * 2   # jitter, kept below the gap: no overlaps
             o = o[o.norm(dim=1) <= 1 - rf / Rb]
-            if o.shape[0] > 400:
-                o = o[torch.randperm(o.shape[0], generator=r.g, device=self.device)[:400]]
+            nmax = int(fibre.get("max_fibres", 400))
+            if o.shape[0] > nmax:
+                o = o[torch.randperm(o.shape[0], generator=r.g, device=self.device)[:nmax]]
             if o.shape[0] == 0:
                 o = torch.zeros(1, 2, device=self.device)
             N = o.shape[0]
             T = tangents(Pc); e1, e2 = rmf(Pc, T)
             tau = r.u(-0.03, 0.03); psi = tau * s * Lc
-            disp = 0.25 * sp * smooth1d(r.randn(N, S, 2), 30)                # dispersion within half a spacing: no overlaps
+            disp = fibre.get("disp", 0.25) * sp * smooth1d(r.randn(N, S, 2), 30)   # dispersion within half a spacing: no overlaps
             oo = o[:, None] + disp
             ox = oo[..., 0] * torch.cos(psi) - oo[..., 1] * torch.sin(psi); oy = oo[..., 0] * torch.sin(psi) + oo[..., 1] * torch.cos(psi)
             P = Pc + (Rs[None, :, None] * (ox[..., None] * e1 + oy[..., None] * e2))
@@ -653,6 +706,14 @@ class Scene:
                 self.record.setdefault("split", []).append(round(math.degrees(th), 1))
             rad = (rf * torch.exp(0.12 * r.randn(N)).clamp(0.8, 1.15))[:, None].expand(N, S).clone()
             rad, con, kw = self._fibre_extras(N, S, rad, r)
+            if fibre.get("wall"):                                                       # hollow: a wall and contents
+                kw["wall"] = rad * r.u(*fibre["wall"]); kw["lumen_c"] = torch.full_like(rad, fibre.get("lumen_c", r.u(-40, 40))); kw.pop("lam", None)
+            if fibre.get("lam"):                                                        # concentric lamellae
+                kw["lam"] = torch.full((N,), r.i(*fibre["lam"]), device=self.device, dtype=torch.long)
+            if fibre.get("bands"):                                                      # cross bands in register (one phase for all fibres)
+                per, amp, wid = fibre["bands"]; sl_ = torch.arange(S, device=self.device, dtype=torch.float32) * (Lc / max(S - 1, 1))
+                fr_ = ((sl_ - r.u(0, per)) / per).remainder(1.0)
+                con = 1 + amp * (torch.exp(-0.5 * (torch.minimum(fr_, 1 - fr_) / wid) ** 2) - 0.5 * ((fr_ - 0.5).abs() < 0.25).float())[None].expand(N, S)
             cmap = contrast * (con if con is not None else 1.0) * torch.ones(N, S, device=self.device)
             obj = self.ids(N, rad[:, 0])
             for o_ in obj.tolist():
@@ -879,7 +940,7 @@ class Scene:
         """A folded sheet (fenestrated, bilayer, stacked by chance); ``height = (sf, amp, kx, ky, ph, e1, e2)`` puts it on
         the analytic fold of an epithelium (its basement membrane) instead of a random one."""
         r = self.r
-        ht = half_thickness or self.size(0.25, 150, 0.5, min(self.shape) / 10)
+        ht = half_thickness or self.size(0.002, 150, 0.5, min(self.shape) / 10)              # membranes (nm) to fascia (mm)
         if ht is None:
             return None
         n0 = normal if normal is not None else r.unit()
@@ -925,24 +986,9 @@ class Scene:
         if cell is None:
             return None
         hw = max(0.5, r.u(0.06, 0.2) * cell); contrast = self.contrast(); oid = int(self.ids(1, 1e3)[0])
-        Z, Y, X = self.shape; dev = self.device
-        occ = torch.zeros(self.shape, device=dev); nrm = torch.zeros((3,) + self.shape, device=dev)
-        g_ = torch.stack(torch.meshgrid(*[torch.arange(n, device=dev, dtype=torch.float32) for n in self.shape], indexing="ij"), -1)
+        dev = self.device
         if not porous:
-            n = max(4, int(Z * Y * X / cell ** 3)); seeds = r.rand(n, 3) * torch.tensor(self.shape, device=dev)
-            bs = 32; m = 2.5 * cell + 2                                                  # blocks against the seeds near them only (memory ~ block x local seeds)
-            for z0 in range(0, Z, bs):
-                for y0 in range(0, Y, bs):
-                    for x0 in range(0, X, bs):
-                        q = g_[z0:z0 + bs, y0:y0 + bs, x0:x0 + bs]; bsh = q.shape[:3]; q = q.reshape(-1, 3)
-                        lo = torch.tensor([z0, y0, x0], device=dev, dtype=torch.float32) - m; hi = lo + bs + 2 * m
-                        near = ((seeds >= lo) & (seeds <= hi)).all(1)
-                        sd = seeds[near] if int(near.sum()) >= 2 else seeds
-                        d2, i2 = torch.cdist(q, sd).topk(2, dim=1, largest=False)
-                        s1, s2 = sd[i2[:, 0]], sd[i2[:, 1]]; sep = (s2 - s1).norm(dim=1).clamp_min(1e-6)
-                        dist = (d2[:, 1] ** 2 - d2[:, 0] ** 2) / (2 * sep)
-                        occ[z0:z0 + bs, y0:y0 + bs, x0:x0 + bs] = (0.5 + hw - dist).clamp(0, 1).view(bsh)
-                        nrm[:, z0:z0 + bs, y0:y0 + bs, x0:x0 + bs] = ((s2 - s1) / sep[:, None]).T.reshape(3, *bsh)
+            occ, nrm = self._voronoi(cell, hw)
         else:
             phi_ = smooth_noise(self.shape, cell / 3, r.g, dev)
             gz, gy, gx = torch.gradient(phi_); gr = torch.stack([gz, gy, gx]); gm = gr.norm(dim=0).clamp_min(1e-6)
@@ -954,6 +1000,371 @@ class Scene:
         g = Group("porous" if porous else "foam", "sheet", hw, contrast, dense=[(occ, tens, desc, contrast, torch.full(self.shape, oid, device=dev, dtype=torch.long))])
         self.record["families"].append({"porous" if porous else "foam": {"cell_vox": round(cell, 1), "wall_vox": round(hw, 2)}})
         return g
+
+    def _voronoi(self, cell: float, hw: float, metric: torch.Tensor | None = None, warp: float = 0.0, warp_sigma: float | None = None):
+        """Voronoi walls of half-width ``hw`` voxels around seeds ``cell`` voxels apart: occupancy ``(Z, Y, X)`` and unit
+        wall normals ``(3, Z, Y, X)``. ``metric`` (3 x 3, :func:`_stretch_metric`): distances measured after this map
+        (cells elongated or flattened along an axis); ``warp``: query points displaced by a smooth field of this amplitude
+        (voxels, scale ``warp_sigma``) -- wavy, interlocking walls. The normals are the bisector's gradient through both
+        (the metric's transpose and the warp's Jacobian)."""
+        r = self.r; dev = self.device; Z, Y, X = self.shape
+        occ = torch.zeros(self.shape, device=dev); nrm = torch.zeros((3,) + self.shape, device=dev)
+        g_ = torch.stack(torch.meshgrid(*[torch.arange(n, device=dev, dtype=torch.float32) for n in self.shape], indexing="ij"), -1)
+        n = max(4, int(Z * Y * X / cell ** 3)); seeds = r.rand(n, 3) * torch.tensor(self.shape, device=dev)
+        Wf = torch.stack([smooth_noise(self.shape, warp_sigma or cell / 3, r.g, dev) for _ in range(3)], -1) * warp if warp > 0 else None
+        Mt = metric.T if metric is not None else None
+        seeds_t = seeds @ Mt if Mt is not None else seeds
+        bs = 32; m = 2.5 * cell + 2                                                      # blocks against the seeds near them only (memory ~ block x local seeds)
+        for z0 in range(0, Z, bs):
+            for y0 in range(0, Y, bs):
+                for x0 in range(0, X, bs):
+                    blk = (slice(z0, z0 + bs), slice(y0, y0 + bs), slice(x0, x0 + bs))
+                    q = g_[blk]; bsh = q.shape[:3]; q = q.reshape(-1, 3)
+                    if Wf is not None:
+                        q = q + Wf[blk].reshape(-1, 3)
+                    if Mt is not None:
+                        q = q @ Mt
+                    lo = q.min(0).values - m; hi = q.max(0).values + m
+                    near = ((seeds_t >= lo) & (seeds_t <= hi)).all(1)
+                    sd = seeds_t[near] if int(near.sum()) >= 2 else seeds_t
+                    d2, i2 = torch.cdist(q, sd).topk(2, dim=1, largest=False)
+                    s1, s2 = sd[i2[:, 0]], sd[i2[:, 1]]; sep = (s2 - s1).norm(dim=1).clamp_min(1e-6)
+                    dist = (d2[:, 1] ** 2 - d2[:, 0] ** 2) / (2 * sep)
+                    occ[blk] = (0.5 + hw - dist).clamp(0, 1).view(bsh)
+                    nrm[(slice(None),) + blk] = ((s2 - s1) / sep[:, None]).T.reshape(3, *bsh)
+        if metric is not None or Wf is not None:                                          # the wall's normal in the canvas: grad of u . M (q + W(q))
+            v = torch.einsum("ij,i...->j...", metric, nrm) if metric is not None else nrm.clone()
+            if Wf is not None:
+                gv = v.clone()
+                for i in range(3):
+                    gi = torch.gradient(Wf[..., i])
+                    for j in range(3):
+                        gv[j] += v[i] * gi[j]
+                v = gv
+            nrm = v / v.norm(dim=0, keepdim=True).clamp_min(1e-6)
+        return occ, nrm
+
+    def _wall_group(self, name: str, occ: torch.Tensor, nrm: torch.Tensor, hw: float, cell: float, record: dict):
+        """A sheet population from wall occupancy and normals (one object: an extended surface)."""
+        dev = self.device; contrast = self.contrast(); oid = int(self.ids(1, 1e3)[0])
+        tens = sheet_tensor(nrm.movedim(0, -1)).movedim(-1, 0)
+        desc = torch.zeros((5,) + self.shape, device=dev); desc[0] = hw; desc[2] = max(0.0, 1 - 3 * hw / cell)
+        self.record["families"].append({name: record})
+        return Group(name, "sheet", hw, contrast, dense=[(occ, tens, desc, contrast, torch.full(self.shape, oid, device=dev, dtype=torch.long))])
+
+    def _discs(self, C: torch.Tensor, Nrm: torch.Tensor, R: torch.Tensor, ht: float, name: str, oid: torch.Tensor, contrast=None):
+        """Flat discs -- centres ``C (n, 3)``, unit normals ``Nrm (n, 3)``, radii ``R (n,)`` voxels, half thickness ``ht``:
+        sheet tensors along the normal (Z discs across myofibrils, cristae across mitochondria)."""
+        dev = self.device; n = C.shape[0]; contrast = self.contrast() if contrast is None else contrast
+        ns = max(4, int(math.ceil(2 * float(R.max()) / H))); U, du = _template2d(ns, dev); U = U[U.norm(dim=1) <= 1]; m = U.shape[0]
+        a = torch.where(Nrm[:, :1].abs() < 0.9, torch.tensor([1.0, 0, 0], device=dev), torch.tensor([0, 1.0, 0], device=dev))
+        e1 = Fn.normalize(torch.linalg.cross(Nrm, a), dim=1); e2 = torch.linalg.cross(Nrm, e1)
+        ht = max(0.25, float(ht)); nt = max(1, int(math.ceil(2 * ht / H))); tt = (torch.arange(nt, device=dev, dtype=torch.float32) + 0.5) / nt * 2 * ht - ht
+        Q = (C[:, None, None] + R[:, None, None, None] * (U[None, :, None, :1] * e1[:, None, None] + U[None, :, None, 1:] * e2[:, None, None])
+             + tt[None, None, :, None] * Nrm[:, None, None])                                            # (n, m, nt, 3)
+        W = (R ** 2 * du * du * (2 * ht / nt))[:, None, None].expand(n, m, nt)
+        V = torch.cat([sheet_tensor(Nrm), torch.stack([torch.full((n,), ht, device=dev)] + [torch.zeros(n, device=dev)] * 4, 1),
+                       torch.full((n, 1), contrast, device=dev)], 1)
+        g = Group(name, "sheet", ht, contrast)
+        g.points.append((Q.reshape(-1, 3), W.reshape(-1), V[:, None, None].expand(n, m, nt, 12).reshape(-1, 12), oid[:, None, None].expand(n, m, nt).reshape(-1)))
+        return g
+
+    def _place(self, n_max: int, dmin: float) -> torch.Tensor:
+        """Up to ``n_max`` random centres on the canvas, none closer than ``dmin`` voxels to an earlier one."""
+        dev = self.device; n_c = int(min(4000, 2.5 * np.prod(self.shape) / max(dmin, 1.0) ** 3)) + 1
+        C = self.r.rand(n_c, 3) * torch.tensor(self.shape, device=dev, dtype=torch.float32)
+        D = torch.cdist(C, C); earlier = torch.ones_like(D, dtype=torch.bool).tril(-1)
+        return C[~((D < dmin) & earlier).any(1)][:n_max]
+
+    def _wide_radius(self, rf: float, nmax: int = 1500) -> float:
+        """A bundle radius (voxels) spanning a good part of the view, at most ``nmax`` fibres of radius ``rf`` across it
+        (such bundles are drawn nearly straight: a canvas-wide array that curls leaves the view)."""
+        return float(min(self.r.u(0.25, 0.6) * min(self.shape), max(2.5 * rf, 1.05 * rf * math.sqrt(nmax) * 1.2)))
+
+    # ---- electron-microscopy scales: compartments, organelles, myelin, nuclei, myofibrils
+    def compartments(self):
+        """Cytoplasm and neuropil as electron microscopy sees them: space-filling compartments (neurites, processes, cell
+        bodies 0.1-3 um across) bounded by thin membranes -- Voronoi walls about a voxel thick, the compartments often
+        stretched along an axis (neurites cut across or along) and wavy."""
+        r = self.r
+        cell = self.size(0.1, 3.0, 5.0, min(self.shape) / 3)
+        if cell is None:
+            return None
+        hw = max(0.5, min(1.5, r.u(0.02, 0.08) * cell)); st = r.lu(0.25, 1.0) if r.p(0.6) else 1.0
+        M = _stretch_metric(self.r.unit(), st) if st < 0.97 else None; warp = r.u(0.05, 0.25) * cell if r.p(0.5) else 0.0
+        occ, nrm = self._voronoi(cell, hw, metric=M, warp=warp)
+        return self._wall_group("compartments", occ, nrm, hw, cell, {"cell_vox": round(cell, 1), "wall_vox": round(hw, 2), "stretch": round(1 / st, 2), "warp": round(warp, 1)})
+
+    def organelles(self):
+        """A cell's interior at electron-microscopy scales, two to four of: mitochondria (capsules 0.1-0.5 um across and
+        1.5-8 times as long, a double membrane, cristae across them), vesicles in clusters (hollow spheres 15-60 nm),
+        droplets and granules (solid spheres), stacked ER cisternae (sheets 5-30 nm half thick). Only what resolves."""
+        r = self.r; dev = self.device; out = []
+        kinds = [k for k in ("mito", "vesicles", "droplets", "er") if r.p(0.6)] or ["mito"]
+        if "mito" in kinds:
+            rm = self.size(0.1, 0.5, 1.5, min(self.shape) / 10)
+            if rm is not None:
+                L = r.lu(3, 16) * rm; C = self._place(r.i(3, 60), 2.2 * rm + 0.6 * L)
+                n = C.shape[0]
+                if n:
+                    S = max(8, int(L / H)); d = r.unit(n)
+                    P = smooth_paths(C - 0.5 * L * d, d, torch.full((n,), L, device=dev), S, torch.full((n,), r.lu(0.02, 0.2), device=dev), max(L / 3, 1.0), r)
+                    sl = torch.arange(S, device=dev, dtype=torch.float32) / (S - 1) * L; de = torch.minimum(sl, L - sl)
+                    prof = torch.where(de < rm, torch.sqrt((rm ** 2 - (rm - de) ** 2).clamp_min(0)), torch.full_like(de, rm))   # hemispherical ends
+                    rad = (prof[None] * torch.exp(0.15 * r.randn(n, 1))).clamp_min(0.05)
+                    T_ = max(0.5, r.u(0.06, 0.12) * rm); oid = self.ids(n, rad.amax(1))
+                    cv = curves_like(P, rad, r, obj=oid, seg=torch.zeros(n, dtype=torch.long, device=dev), contrast=self.contrast(),
+                                     wall=torch.full_like(rad, T_), lam=torch.full((n,), 2, device=dev, dtype=torch.long))
+                    out.append(Group("mitochondria", "line", rm, float(cv.contrast[0, 0]), curves=[cv]))
+                    sp = r.u(0.6, 1.5) * rm; k = torch.arange(int(L / sp) + 1, device=dev, dtype=torch.float32) * sp + 0.5 * sp   # cristae every sp along each
+                    k = k[k < L - 0.5 * sp]
+                    if k.numel():
+                        ix = (k / L * (S - 1)).round().long().clamp(0, S - 1)
+                        Cc = P[:, ix].reshape(-1, 3); Tc = tangents(P)[:, ix].reshape(-1, 3); Rc = (0.8 * rad[:, ix]).reshape(-1).clamp_min(0.3)
+                        out.append(self._discs(Cc, Tc, Rc, max(0.25, 0.5 * T_), "cristae", oid[:, None].expand(n, ix.numel()).reshape(-1)))
+                    self.obstacles.append((C, torch.full((n,), 0.5 * L, device=dev)))
+        if "vesicles" in kinds:
+            rv = self.size(0.015, 0.06, 0.6, 6.0)
+            if rv is not None:
+                k = r.i(1, 6); cc = r.rand(k, 3) * torch.tensor(self.shape, device=dev, dtype=torch.float32)
+                m = r.i(10, 80); C = (cc[:, None] + r.u(2.5, 6.0) * rv * r.randn(k, m, 3)).reshape(-1, 3)
+                R = rv * torch.exp(0.2 * r.randn(C.shape[0])).clamp(0.6, 1.6)
+                out.append(self._shells(C, R, wall=max(0.5, 0.25 * rv), name="vesicles"))
+        if "droplets" in kinds:
+            rd = self.size(0.02, 1.0, 0.8, min(self.shape) / 10)
+            if rd is not None:
+                C = self._place(r.i(3, 200), 2.2 * rd); n = C.shape[0]
+                if n:
+                    A = torch.eye(3, device=dev)[None] * (rd * torch.exp(0.25 * r.randn(n))).clamp_min(0.5)[:, None, None]
+                    out.append(self._solids(C, A, "droplets", self.ids(n, rd)))
+        if "er" in kinds:
+            ht = self.size(0.005, 0.03, 0.5, 3.0)
+            if ht is not None:
+                g = self.sheet(half_thickness=ht)
+                if g is not None:
+                    g.name = "er"; out.append(g)
+        self.record["families"].append({"organelles": {"kinds": kinds, "groups": len(out)}})
+        return out or None
+
+    def myelin(self):
+        """Myelinated axons, electron to light microscopy: a bundle of axons 0.2-3 um in radius, each in a dark sheath of
+        g-ratio 0.6-0.8 -- concentric lamellae where the voxel resolves them, one ring where not; the axoplasm a lumen."""
+        r = self.r; rf_um = r.lu(0.2, 3.0)
+        if rf_um / self.voxel_um < 1.5:
+            return None
+        rf = min(rf_um / self.voxel_um, min(self.shape) / 6)
+        g = self.bundle(None, "single", curv=r.lu(0.0003, 0.003), radius=self._wide_radius(rf, 800), fibre={"rf_um": rf_um, "jitter": 0.3, "disp": 0.4, "max_fibres": 800})
+        if g is None or isinstance(g, list) or not g.curves or g.curves[0].N < 1 or g.offsets is None:
+            return None
+        for cv in g.curves:
+            sheath = cv.rad * (1 - r.u(0.6, 0.8)); smean = float(sheath.mean())
+            L_ = r.i(1, max(1, min(12, int((smean / 0.6 + 1) // 2))))
+            cv.wall = sheath / (2 * L_ - 1) if L_ > 1 else sheath
+            cv.lam = torch.full((cv.N,), L_, device=self.device, dtype=torch.long)
+            cv.lumen_c = torch.full_like(cv.rad, r.u(-40, 40))
+        g.name = "myelin"; self.record["families"].append({"myelin": {"axon_um": round(rf_um, 2), "lamellae": int(L_)}})
+        return g
+
+    def nuclei(self):
+        """Cell nuclei, electron to light microscopy: one or two large nuclei (radius 2-8 um) partly in view at fine
+        scales, a field of them at coarse ones -- a double envelope, heterochromatin clumped against it, a nucleolus."""
+        r = self.r; dev = self.device
+        R = self.size(2, 8, 4.0, 0.45 * min(self.shape))
+        if R is None:
+            return None
+        if R > min(self.shape) / 5:                                                             # one or two, their envelopes across the view
+            C = self.centre_point(0.0) + (r.rand(r.i(1, 2), 3) - 0.5) * R
+        else:
+            C = self._place(300, 2.1 * R * 1.1)
+        n = C.shape[0]
+        if n == 0:
+            return None
+        Rn = R * torch.exp(0.1 * r.randn(n)).clamp(0.85, 1.1); wall = min(3.0, max(0.5, r.u(0.01, 0.03) * R))
+        cid = self.ids(n, Rn)
+        env = self._shells(C, Rn, wall=wall, name="envelope"); out = [env]
+        rc = max(0.6, r.u(0.03, 0.08) * R); m = int(min(1500, r.u(20, 200) * n))
+        k = torch.randint(0, n, (m,), generator=r.g, device=dev); d = Fn.normalize(r.randn(m, 3), dim=1)
+        Cc = C[k] + d * (Rn[k] * r.u(0.86, 0.95) - rc)[:, None]
+        A = torch.eye(3, device=dev)[None] * (rc * torch.exp(0.3 * r.randn(m))).clamp_min(0.5)[:, None, None]
+        oc = self.ids(m, rc)
+        for a_, b_ in zip(oc.tolist(), cid[k].tolist()):
+            self.parents[a_] = b_
+        out.append(self._solids(Cc, A, "chromatin", oc))
+        rnu = max(0.8, r.u(0.12, 0.3) * R)
+        Cn = C + (r.rand(n, 3) - 0.5) * 0.6 * (Rn[:, None] - rnu)
+        out.append(self._solids(Cn, torch.eye(3, device=dev)[None].expand(n, 3, 3) * rnu, "nucleolus", self.ids(n, rnu)))
+        self.obstacles.append((C, Rn))
+        self.record["families"].append({"nuclei": {"n": n, "radius_vox": round(R, 1)}})
+        return out
+
+    def myofibrils(self):
+        """Striated muscle: myofibrils (radius 0.3-1 um) packed in parallel and cross-banded in register -- a Z disc every
+        1.8-2.6 um (a sarcomere: a sheet across the fibres, so the banding is an orientation of its own, under any
+        physics) and the A band between (contrast)."""
+        r = self.r; rf_um = r.lu(0.3, 1.0); per = r.u(1.8, 2.6) / self.voxel_um
+        if per < 3.0 or rf_um / self.voxel_um < 0.45:
+            return None
+        rf = min(rf_um / self.voxel_um, min(self.shape) / 6)
+        g = self.bundle(None, "single", curv=r.lu(0.0003, 0.003), radius=self._wide_radius(rf, 800),
+                        fibre={"rf_um": rf_um, "jitter": 0.05, "disp": 0.08, "bands": (per, r.u(0.3, 0.9), r.u(0.04, 0.12)), "max_fibres": 800})
+        if g is None or isinstance(g, list) or g.offsets is None:
+            return None
+        cv = g.curves[0]; N, S = cv.P.shape[:2]; Lc = 2.0 * max(self.shape); ds = Lc / max(S - 1, 1)
+        zs = torch.arange(r.u(0, per), Lc, per, device=self.device); ix = (zs / ds).round().long().clamp(0, S - 1)
+        Cz = cv.P[:, ix].reshape(-1, 3); Tz = tangents(cv.P)[:, ix].reshape(-1, 3); Rz = cv.rad[:, ix].reshape(-1)
+        inside = ((Cz > -Rz[:, None]) & (Cz < torch.tensor(self.shape, device=self.device) + Rz[:, None])).all(1)
+        out = [g]
+        if bool(inside.any()):
+            zd = self._discs(Cz[inside], Tz[inside], Rz[inside] * 1.05, max(0.3, 0.06 / self.voxel_um), "z_discs",
+                             cv.obj[:, None].expand(N, ix.numel()).reshape(-1)[inside])
+            out.append(zd)
+        g.name = "myofibrils"; self.record["families"].append({"myofibrils": {"fibril_um": round(rf_um, 2), "sarcomere_vox": round(per, 1)}})
+        return out
+
+    # ---- air spaces, plant cells, lattices
+    def alveoli(self):
+        """Thin-walled air spaces: lung alveoli and parabronchi, leaf mesophyll air space -- Voronoi walls 1.5-5 % of
+        the cell (30-400 um) thick, the cells empty, often opened by a duct running through."""
+        r = self.r
+        cell = self.size(30, 400, 8.0, min(self.shape) / 3)
+        if cell is None:
+            return None
+        hw = max(0.5, r.u(0.015, 0.05) * cell)
+        occ, nrm = self._voronoi(cell, hw, warp=r.u(0.05, 0.15) * cell if r.p(0.5) else 0.0)
+        duct = r.p(0.5)
+        if duct:                                                                                # an alveolar duct: walls opened along a line
+            g_ = torch.stack(torch.meshgrid(*[torch.arange(n, device=self.device, dtype=torch.float32) for n in self.shape], indexing="ij"), -1)
+            c = self.centre_point(0.3); d = r.unit(); rel = g_ - c; dist = (rel - (rel @ d)[..., None] * d).norm(dim=-1)
+            occ = occ * (dist > r.u(0.8, 2.0) * cell).float()
+        return self._wall_group("alveoli", occ, nrm, hw, cell, {"cell_vox": round(cell, 1), "wall_vox": round(hw, 2), "duct": duct})
+
+    def jigsaw(self):
+        """Plant epidermal pavement cells: interlocking lobed walls (Voronoi walls under a strong short-range warp) in a
+        layer about one cell thick, the cells flattened against it."""
+        r = self.r
+        cell = self.size(15, 120, 8.0, min(self.shape) / 3)
+        if cell is None:
+            return None
+        hw = max(0.5, r.u(0.04, 0.1) * cell); n0 = r.unit()
+        occ, nrm = self._voronoi(cell, hw, metric=_stretch_metric(n0, r.u(1.5, 3.0)), warp=r.u(0.25, 0.45) * cell, warp_sigma=cell * r.u(0.15, 0.3))
+        g_ = torch.stack(torch.meshgrid(*[torch.arange(n, device=self.device, dtype=torch.float32) for n in self.shape], indexing="ij"), -1)
+        depth = (g_ - self.centre_point(0.3)) @ n0; half = r.u(0.4, 1.2) * cell
+        occ = occ * torch.sigmoid((half - depth.abs()) / 0.7)                                   # the epidermis: one layer
+        return self._wall_group("jigsaw", occ, nrm, hw, cell, {"cell_vox": round(cell, 1), "wall_vox": round(hw, 2), "layer_vox": round(2 * half, 1)})
+
+    def honeycomb(self):
+        """Walled plant cells -- meristem, parenchyma, xylem fibres and tracheids: Voronoi walls 4-15 % of the cell
+        (5-100 um), the cells round or elongated up to 8 times along an axis."""
+        r = self.r
+        cell = self.size(5, 100, 5.0, min(self.shape) / 3)
+        if cell is None:
+            return None
+        hw = max(0.6, r.u(0.04, 0.15) * cell); el = r.lu(1.0, 8.0) if r.p(0.5) else 1.0
+        occ, nrm = self._voronoi(cell, hw, metric=_stretch_metric(r.unit(), 1.0 / el) if el > 1.05 else None)
+        return self._wall_group("honeycomb", occ, nrm, hw, cell, {"cell_vox": round(cell, 1), "wall_vox": round(hw, 2), "elongation": round(el, 2)})
+
+    def xylem(self):
+        """Xylem vessels: wide hollow tubes (radius 8-100 um) side by side, thick walls with annular or spiral
+        thickenings -- a helical strand on the inside of the wall of some -- and contents of either contrast."""
+        r = self.r; dev = self.device
+        rf_um = r.lu(8, 100); rf = min(rf_um / self.voxel_um, min(self.shape) / 6)
+        if rf < 1.5:
+            return None
+        g = self.bundle(None, "single", curv=r.lu(0.0003, 0.003), radius=self._wide_radius(rf, 600), fibre={"rf_um": rf_um, "jitter": 0.3, "disp": 0.3, "wall": (0.08, 0.25), "max_fibres": 600})
+        if g is None or isinstance(g, list) or g.offsets is None:
+            return None
+        out = [g]; cv = g.curves[0]
+        if r.p(0.6) and float(cv.rad.mean()) >= 2.5:                                            # spiral thickenings
+            k = torch.randperm(cv.N, generator=r.g, device=dev)[:min(cv.N, 30)]
+            P = cv.P[k]; T = tangents(P); e1, e2 = rmf(P, T); N, S = P.shape[:2]
+            rho = cv.rad[k] - cv.wall[k] * 0.5; rf = (cv.wall[k] * r.u(0.4, 0.8)).clamp_min(0.4)
+            sl = torch.arange(S, device=dev, dtype=torch.float32) * (2.0 * max(self.shape) / max(S - 1, 1))
+            pitch = float(cv.rad.mean()) * r.u(0.3, 1.5); ang = 2 * math.pi * sl[None] / pitch + r.rand(N, 1) * 6.28
+            Ph = P + rho[..., None] * (torch.cos(ang)[..., None] * e1 + torch.sin(ang)[..., None] * e2)
+            hv = curves_like(Ph, rf, r, obj=cv.obj[k], seg=torch.zeros(N, dtype=torch.long, device=dev), contrast=self.contrast())
+            out.append(Group("thickenings", "line", float(rf.mean()), float(hv.contrast[0, 0]), curves=[hv]))
+        g.name = "xylem"; self.record["families"].append({"xylem": {"vessels": int(cv.N), "thickenings": len(out) > 1}})
+        return out
+
+    def lattice(self):
+        """Crystalline arrays of parallel tubes or rods: compound-eye ommatidia, stereocilia, honeycomb tubes, the
+        myofilament lattice -- hexagonal packing without jitter, often fanning (radiating) and hollow."""
+        r = self.r
+        rf = self.size(0.005, 30, 0.8, 6.0)
+        if rf is None:
+            return None
+        fib = {"rf_um": rf * self.voxel_um, "jitter": 0.0, "disp": 0.02, "max_fibres": 1500}
+        if r.p(0.5):
+            fib["wall"] = (0.15, 0.4)
+        g = self.bundle(None, "fanning" if r.p(0.4) else "single", curv=r.lu(0.0003, 0.003), radius=self._wide_radius(rf, 1500), fibre=fib)
+        if g is None or isinstance(g, list):
+            return None
+        g.name = "lattice"; self.record["families"].append({"lattice": {"rod_vox": round(rf, 2), "hollow": "wall" in fib}})
+        return g
+
+    # ---- organ scale, and isotropic content
+    def _dense_solid(self, C: torch.Tensor, A: torch.Tensor, exps: tuple, name: str, contrast=None):
+        """A large solid on the grid (a superquadric ``x = C + A g``, ``exps``), one voxel's soft edge: a blob population
+        (its tensor the solid's second moment, constant over it) without sampling its interior point by point."""
+        dev = self.device; contrast = self.contrast() if contrast is None else contrast
+        g_ = torch.stack(torch.meshgrid(*[torch.arange(n, device=dev, dtype=torch.float32) for n in self.shape], indexing="ij"), -1)
+        u = (g_ - C) @ torch.linalg.inv(A).T; e1, e2 = exps
+        f = ((u[..., 1].abs() ** (2 / e2) + u[..., 2].abs() ** (2 / e2)) ** (e2 / e1) + u[..., 0].abs() ** (2 / e1)).clamp_min(1e-9)
+        sv = torch.linalg.svdvals(A); amin = float(sv.min())
+        rho = f ** (e1 / 2)                                                                     # ~ the radial coordinate (1 on the surface)
+        occ = (0.5 + (1 - rho) * amin).clamp(0, 1)
+        M2 = A @ A.T; M2 = M2 / M2.trace()
+        tens = _sym6(M2).view(6, 1, 1, 1).expand(6, *self.shape)
+        desc = torch.zeros((5,) + self.shape, device=dev); desc[0] = float(sv.mean()); desc[3] = float(sv[2] / sv[0])
+        oid = int(self.ids(1, float(sv.min()))[0])
+        return Group(name, "blob", float(sv.mean()), contrast, dense=[(occ, tens, desc, contrast, torch.full(self.shape, oid, device=dev, dtype=torch.long))])
+
+    def organs(self):
+        """Organ-scale anatomy (clinical CT, MRI): three to seven large smooth compartments (deformed superquadrics 3-150 mm),
+        a hollow organ or large vessel (a wide tube: wall and contents) and a bony shell -- piecewise-smooth regions with
+        sharp edges, the scale of SynthSeg-style label maps."""
+        r = self.r; dev = self.device
+        Rv = self.size(3000, 150000, 0.12 * min(self.shape), 0.45 * min(self.shape))
+        if Rv is None:
+            return None
+        out = []
+        for _ in range(r.i(3, 7)):
+            ax = torch.tensor([Rv * r.lu(0.4, 1.0) for _ in range(3)], device=dev)
+            A = _rot(r, 1)[0] @ torch.diag(ax); C = r.rand(3) * torch.tensor(self.shape, device=dev, dtype=torch.float32)
+            out.append(self._dense_solid(C, A, (r.lu(0.5, 2.0), r.lu(0.5, 2.0)), "organ"))
+        rt = self.size(1000, 15000, 2.0, min(self.shape) / 6)
+        if rt is not None and r.p(0.7):                                                         # bowel, airway, aorta
+            c = self.centre_point(); d = r.unit(); Lc = 2.0 * max(self.shape); S = int(Lc / H)
+            P = smooth_paths((c - d * Lc / 2)[None], d[None], torch.tensor([Lc], device=dev), S, torch.tensor([r.lu(0.002, 0.02)], device=dev), r.lu(20, 60), r)
+            rad = torch.full((1, S), rt, device=dev)
+            cv = curves_like(P, rad, r, obj=self.ids(1, rt), seg=torch.zeros(1, dtype=torch.long, device=dev), contrast=self.contrast(),
+                             wall=rad * r.u(0.08, 0.3), lumen_c=torch.full_like(rad, r.u(-80, 80)))
+            out.append(Group("hollow_organ", "line", rt, float(cv.contrast[0, 0]), curves=[cv]))
+        if r.p(0.5):                                                                            # bone: a cortical shell
+            Rb = Rv * r.u(0.3, 0.8)
+            out.append(self._shells(self.centre_point(0.2)[None], torch.tensor([Rb], device=dev), wall=max(1.0, min(8.0, r.u(0.05, 0.15) * Rb)), name="bone"))
+        self.record["families"].append({"organs": {"radius_vox": round(Rv, 1), "groups": len(out)}})
+        return out
+
+    def granules(self):
+        """Isotropic granular content -- secretory granules, starch grains, platelets, a dense field of small nuclei:
+        solid spheres 0.5-4 voxels in radius, packed at random. Spheres carry no direction: where they are all there is,
+        the right answer is an isotropic density."""
+        r = self.r; dev = self.device
+        rg = self.size(0.01, 20, 0.5, 4.0)
+        if rg is None:
+            return None
+        sp = 2.1 * rg * r.u(1.0, 1.8); dev_ = torch.tensor(self.shape, device=dev, dtype=torch.float32)  # a jittered lattice: dense, never overlapping
+        ax = [torch.arange(0.5 * sp, n_ - 0.25 * sp, sp, device=dev) for n_ in self.shape]
+        C = torch.stack(torch.meshgrid(*ax, indexing="ij"), -1).reshape(-1, 3)
+        C = C + (r.rand(*C.shape) - 0.5) * (sp - 2.1 * rg)                                       # jitter within the gap
+        C = C[r.rand(C.shape[0]) < r.u(0.3, 1.0)]
+        C = C[torch.randperm(C.shape[0], generator=r.g, device=dev)[:150000]]; n = C.shape[0]
+        if n == 0:
+            return None
+        A = torch.eye(3, device=dev)[None] * (rg * torch.exp(0.25 * r.randn(n))).clamp(0.5, 1.2 * rg)[:, None, None]
+        self.record["families"].append({"granules": {"n": n, "radius_vox": round(rg, 2)}})
+        return self._solids(C, A, "granules", self.ids(n, rg))
 
     def cells(self):
         r = self.r; dev = self.device
@@ -1067,7 +1478,7 @@ class Scene:
         placed at random: its neurites as curves (radius along them from the reconstruction), its soma a solid; two
         populations by branch side (the thinner child changes side at every branching), one object."""
         files = neuron_files()
-        if not files:
+        if not files or self.voxel_um < 0.15:                                                   # a reconstructed cell spans 10^5 voxels at nm scales
             return None
         r = self.r; fsel = files[r.i(0, len(files) - 1)]; z = np.load(fsel)
         P_um, R_um, par, typ = z["nodes"].astype(np.float64), z["radii"].astype(np.float64), z["parents"], z["types"]
@@ -1132,12 +1543,12 @@ class Scene:
         small somata (3-8 um), filling the canvas -- resolvable at a micron or two, partial-volume texture at 20 um;
         isotropic in aggregate, locally oriented where a fibre is resolved."""
         r = self.r; dev = self.device
-        rf = r.lu(0.1, 1.5) / self.voxel_um
+        rf = min(r.lu(0.1, 1.5) / self.voxel_um, min(self.shape) / 16)                         # nm scenes: a neurite fills the view, no wider
         L = r.lu(20, 200) / self.voxel_um
         if L < 3:
             return None
         L = min(L, 0.5 * max(self.shape))
-        n = int(min(700, r.u(0.3, 1.0) * 700))
+        n = int(min(700, r.u(0.3, 1.0) * 700, 1.5 * np.prod(self.shape) / (math.pi * rf * rf * L) + 1))   # thick neurites (nm scales): about 1.5 canvases of them
         S = max(8, int(L / H))
         start = r.rand(n, 3) * torch.tensor(self.shape, device=dev, dtype=torch.float32)
         P = smooth_paths(start, r.unit(n), torch.full((n,), L, device=dev), S, torch.full((n,), r.lu(0.05, 0.4), device=dev), max(L / 4, 1.0), r)
@@ -1145,7 +1556,7 @@ class Scene:
         cv = curves_like(P, rad, r, obj=self.ids(n, rad[:, 0]), seg=torch.zeros(n, dtype=torch.long, device=dev), contrast=self.contrast(10, 90))
         out = [Group("neuropil", "line", float(rad.median()), float(cv.contrast[0, 0]), curves=[cv])]
         rs = r.lu(3, 8) / self.voxel_um
-        if rs >= 0.4:                                                                           # somata among the fibres
+        if 0.4 <= rs <= min(self.shape) / 6:                                                    # somata among the fibres
             m = int(min(400, r.u(0.2, 1.0) * np.prod(self.shape) / (40 * rs) ** 3 * 8 + 1))
             C = r.rand(m, 3) * torch.tensor(self.shape, device=dev, dtype=torch.float32)
             A = _rot(r, m) @ torch.diag_embed(torch.stack([torch.full((m,), rs, device=dev)] * 2 + [torch.full((m,), rs * r.u(1.0, 1.6), device=dev)], 1))
@@ -1156,7 +1567,7 @@ class Scene:
     def crystals(self):
         """Compact solids (polyhedra, shards, superquadrics), placed without overlap, each its own object: a blob
         population whose tensors are the solids' second moments (rendered as points: no device synchronisation)."""
-        r = self.r; dev = self.device; rad = self.size(2, 200, 1.0, 8.0)
+        r = self.r; dev = self.device; rad = self.size(0.01, 200, 1.0, 8.0)
         if rad is None:
             return None
         prim = ["polyhedron", "shard", "superquadric"][r.i(0, 2)]
@@ -1375,10 +1786,15 @@ class Scene:
             self.layout()
         fam = dict(self.FAMILIES); fam.update(families or {})
         names = [k for k, v in fam.items() if v > 0 and (k != "radial" or self.depth is not None)]
-        p = np.array([fam[k] for k in names], dtype=float); p /= p.sum()
+        iso = r.p(ISO_SCENE_P) and fam.get("granules", 0) > 0                                  # nothing with a direction: granules (and crystals)
+        if iso:
+            names = [k for k in ("granules", "crystals") if fam.get(k, 0) > 0]
+            self.record["iso_scene"] = True
+        p = np.array([fam[k] * scale_weight(k, self.voxel_um) for k in names], dtype=float); p /= p.sum()   # what belongs at this voxel size
         n = r.i(*n_groups)
         chosen = [str(c_) for c_ in r.np.choice(names, size=n, p=p)]
-        order = {"cells": 0, "crystals": 0, "epithelium": 0, "tree": 1, "gland": 1, "network": 2}   # obstacles first, fibres after
+        order = {"cells": 0, "crystals": 0, "epithelium": 0, "nuclei": 0, "organs": 0, "organelles": 0, "granules": 0,
+                 "tree": 1, "gland": 1, "network": 2}                                           # obstacles first, fibres after
         chosen.sort(key=lambda k: order.get(k, 5))
         bundles = []
         for name in chosen:
@@ -1407,7 +1823,7 @@ class Scene:
                 continue
             for g_ in (gs if isinstance(gs, list) else [gs]):
                 self.groups.append(g_)
-        if (families is None or families.get("neuropil", self.FAMILIES["neuropil"]) > 0) and r.p(underlay_p):
+        if not iso and (families is None or families.get("neuropil", self.FAMILIES["neuropil"]) > 0) and r.p(underlay_p * scale_weight("neuropil", self.voxel_um)):
             gs = self.neuropil()                                                       # the underlay
             for g_ in (gs or []):
                 self.groups.append(g_)
@@ -1417,9 +1833,10 @@ class Scene:
                 self.groups.append(g_)
         return self
 
-    def render(self) -> dict:
+    def render(self, half: bool = False) -> dict:
         """All populations on the canvas: per group occupancy / tensor / desc (5, voxels and 0-1) / contrast map; the
-        lumen contents; identities; branch and endpoint maps."""
+        lumen contents; identities; branch and endpoint maps. ``half``: each population's fields kept in half precision
+        as soon as it is rendered (the cache's form: a 256^3 canvas's float32 fields are ~0.9 GB a population)."""
         cv = Canvas(self.shape, self.device); out = []
         for g_ in self.groups:
             if g_.layer is not None:
@@ -1433,7 +1850,10 @@ class Scene:
                 cv.splat(Q, W, V, obj=obj)
             for occ, tens, desc, con, om in g_.dense:
                 cv.add_dense(occ, tens, desc, con, om)
-            res = cv.finish(); res["group"] = g_; out.append(res)
+            res = cv.finish()
+            if half:
+                res = {k: v.half() for k, v in res.items()}
+            res["group"] = g_; out.append(res)
         ids, frac = cv.identities(2)
         lum = cv.lumen.view(self.shape).clamp(0, 1); lum_c = cv.lumen_c.view(self.shape) / cv.lumen.view(self.shape).clamp_min(1e-9)
         maps = torch.zeros((2,) + self.shape, device=self.device)
@@ -1456,7 +1876,7 @@ class Scene:
 import threading
 
 _TLS = threading.local()                   # one scene cache per thread: the background producer and the main thread render apart
-CACHE_SCENES = 3
+CACHE_SCENES = 2                           # a 256^3 canvas's render is several GB: a scene's crops are drawn in sequence anyway
 
 
 def _scene_cache() -> dict:
@@ -1474,6 +1894,16 @@ class _CacheProxy:
 _CACHE = _CacheProxy()
 
 
+def _compact(ren: dict) -> dict:
+    """A render for the cache: fields in half precision, identities as int32 (a 256^3 canvas's render is several GB in
+    float32); :func:`draw_scene` restores the types on the crop."""
+    out = dict(ren)
+    out["groups"] = [{k: (v.half() if torch.is_tensor(v) and v.is_floating_point() else v) for k, v in g.items()} for g in ren["groups"]]
+    out["ids"], out["id_frac"] = ren["ids"].int(), ren["id_frac"].half()
+    out["lumen"], out["lumen_c"] = ren["lumen"].half(), ren["lumen_c"].half()
+    return out
+
+
 def render_scene(canvas, scene_seed: int, device, voxel_um=None, families=None, n_groups=(1, 5), layout_p=0.3, content="general", style=None,
                  underlay_p: float = 0.4):
     """The scene (cached: crops of one scene are drawn in sequence) and its background on the whole canvas -- a
@@ -1488,7 +1918,7 @@ def render_scene(canvas, scene_seed: int, device, voxel_um=None, families=None, 
         sc = Scene(canvas, scene_seed, device, voxel_um, content).build(families, n_groups, layout_p, underlay_p)
         st = style or ["flat", "regions", "tissue", "cells"][sc.r.i(0, 3)]
         bgp = background(tuple(canvas), st, sc.r.g, device, 1.0, content, nprng=sc.r.np)
-        _CACHE[key] = (sc, sc.render(), bgp, st)
+        _CACHE[key] = (sc, _compact(sc.render(half=True)), bgp, st)
     return _CACHE[key]
 
 
@@ -1561,6 +1991,28 @@ def sample_mask(shape, rng: Rng, device) -> torch.Tensor:
     return torch.sigmoid((thr - d) / 0.5)
 
 
+def cutout_mask(shape, rng: Rng, device) -> torch.Tensor:
+    """Tissue removed from the crop -- one to four regions: a block cut away or a missing tile (a rotated cuboid), a
+    bubble or a hole (an ellipsoid), a knife's gap or a section lost from a block (a planar slab through the crop).
+    1 where tissue remains, 0 where it was removed, a soft one-voxel edge. The medium fills the gap and the targets go
+    with the tissue (:func:`draw_scene`)."""
+    g = torch.stack(torch.meshgrid(*[torch.arange(n, device=device, dtype=torch.float32) for n in shape], indexing="ij"), -1)
+    sz = torch.tensor(shape, device=device, dtype=torch.float32); keep = torch.ones(shape, device=device); kinds = []
+    for _ in range(rng.i(1, 4)):
+        kind = ["cuboid", "ellipsoid", "slab"][int(rng.np.choice(3, p=[0.4, 0.35, 0.25]))]
+        c = rng.rand(3) * sz; Rm = _rot(rng, 1)[0]; rel = (g - c) @ Rm
+        if kind == "cuboid":
+            h = torch.tensor([rng.u(0.05, 0.3) * float(n) for n in shape], device=device)
+            q = rel.abs() - h; d = q.clamp_min(0).norm(dim=-1) + q.max(-1).values.clamp_max(0)    # signed distance to the box
+        elif kind == "ellipsoid":
+            ra = torch.tensor([rng.u(0.05, 0.3) * float(n) for n in shape], device=device)
+            d = ((rel / ra).norm(dim=-1) - 1) * float(ra.min())
+        else:
+            d = rel[..., 0].abs() - rng.u(1.0, 0.08 * float(min(shape)))
+        keep = keep * torch.sigmoid(d / 0.5); kinds.append(kind)
+    return keep, kinds
+
+
 def _slice_profile(img, rng: Rng, rec: dict):
     """Native anisotropic acquisition: slices of thickness ``t`` (a Gaussian or box profile) every ``sp`` voxels along a
     random axis (a gap when ``sp > t``), at a random phase, interpolated back to the grid."""
@@ -1590,13 +2042,18 @@ def _slice_profile(img, rng: Rng, rec: dict):
 
 
 def _extra_acquisition(img, layers, rng: Rng, modality: str, rec: dict, strength: float = 1.0):
-    """Artefacts the acquisition model lacks: native slice profiles (MRI, histology), histology tears (tissue missing
-    along a crack, labels removed with it) and folds (a band of a section doubled), local-tomography truncation (low
-    frequencies lost) for HiP-CT / CT. Each scaled by the acquisition ``strength`` (0: none -- the curriculum's clean start)."""
+    """Artefacts the acquisition model lacks: a CT scan of the content (:mod:`~shapetensor.learn.ctsim`: streaks from
+    dense material, dark bands, halos, photon starvation -- CT / HiP-CT, rarely elsewhere), native slice profiles (MRI,
+    histology, EM sections, fluorescence's axial sampling), section tears (tissue missing along a crack, labels removed
+    with it) and folds (a band of a section doubled), local-tomography truncation (low frequencies lost) for HiP-CT /
+    CT. Each scaled by the acquisition ``strength`` (0: none -- the curriculum's clean start)."""
     shp = img.shape; sg = float(min(max(strength, 0.0), 1.0))
-    if modality in ("mri", "histology", "mixed") and rng.p(0.35 * sg):
+    if modality in ("hipct", "ct", "mixed") and rng.p(0.3 * sg) or rng.p(0.03 * sg):        # a scan from the content: streaks, bands, halos
+        from .ctsim import scan
+        img = scan(img, rng, rec, sg)
+    if modality in ("mri", "histology", "mixed", "em", "fluorescence") and rng.p(0.35 * sg):
         img = _slice_profile(img, rng, rec)
-    if modality in ("histology", "mixed") and rng.p(0.3 * sg):
+    if modality in ("histology", "mixed", "em") and rng.p(0.3 * sg):
         k = rng.i(1, 3); a = rng.i(0, shp[0] - 1); n = noise2d(shp[1], shp[2], rng.lu(6, 20), rng)
         crack = (n.abs() < rng.u(0.02, 0.08)).float()
         sl = slice(max(0, a - k), min(shp[0], a + k))
@@ -1604,7 +2061,7 @@ def _extra_acquisition(img, layers, rng: Rng, modality: str, rec: dict, strength
         for L in layers:
             L.occupancy[sl] = L.occupancy[sl] * (1 - crack)
         rec["tear"] = (a, k)
-    if modality in ("histology", "mixed") and rng.p(0.2 * sg):
+    if modality in ("histology", "mixed", "em") and rng.p(0.2 * sg):
         a = rng.i(1, shp[0] - 2); b0 = rng.i(0, shp[1] - 8); w = rng.i(3, 8)
         if b0 + 2 * w <= shp[1]:                                            # the neighbouring band folded over it
             img[a, b0:b0 + w] = img[a, b0:b0 + w] + 0.6 * img[a, b0 + w:b0 + 2 * w]
@@ -1628,7 +2085,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
                zoom: int = 1, physics: str | None = None, p_physics: float = 0.75, p_warp: float = 0.5, acq_seed: int | None = None,
                crop: tuple | None = None, identity_min_r: float = 1.5, p_blend: float = 0.35, p_aniso: float = 0.25, p_scramble: float = 0.3,
                p_texture: float = 0.5, p_merge: float = 0.25, p_boundary: float = 0.2, p_affine: float = 0.3, p_grain: float = 0.8,
-               underlay_p: float = 0.4):
+               underlay_p: float = 0.4, p_sparse: float = 0.12, p_cutout: float = 0.15):
     """A training pair from an object scene, in the format of :func:`~shapetensor.learn.generator.draw`: ``(Sample,
     drawn)``. Scenes are rendered on a ``canvas``³ grid and ``crops_per_scene`` consecutive seeds share one (cut at
     different places), so a scene's cost is spread over its crops.
@@ -1648,7 +2105,10 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
       (SynthSeg's shared classes); ``p_boundary`` -- the specimen's edge (medium beyond it, nothing to find there);
       ``p_affine`` -- a global shear and anisotropic scale with the warp (tensors, identities and descriptors follow);
       ``p_grain`` -- unresolved microstructure as dense isotropic fine texture under the tissue (no orientation: the
-      targets do not change, the visibility measured after it).
+      targets do not change, the visibility measured after it); ``p_sparse`` -- sparse labelling: 1-30 % of the objects
+      visible, the rest gone from image and targets alike (fluorescent reporters, Golgi stains, contrast-filled vessels);
+      ``p_cutout`` -- chunks of tissue removed (:func:`cutout_mask`: blocks, holes, a knife's gap), the medium in their
+      place and nothing to find there.
 
     ``drawn`` also carries ``ids``/``id_frac`` (the two heaviest objects per voxel), ``identity`` (the object at the level
     the resolution separates: smaller than ``identity_min_r`` voxels -> its parent), ``descriptors5`` (per layer:
@@ -1657,7 +2117,8 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     sid = seed // max(1, crops_per_scene)
     sc, ren, bgp, st = render_scene((canvas,) * 3, 7_000_000 + sid, device, voxel_um, families, n_groups, layout_p, content, style, underlay_p)
     r = Rng(seed, device); ra = Rng(acq_seed if acq_seed is not None else seed + 31337, device)
-    names = ["hipct", "ct", "mri", "histology", "mixed"]; modality = modality or names[ra.i(0, 4)]
+    from .generator import MODALITIES
+    names = list(MODALITIES); modality = modality or names[ra.i(0, len(names) - 1)]          # X-ray, MRI, histology, EM, fluorescence, cryo-ET, mixed
     ext = [s_ * zoom for s_ in shape]
     assert all(e <= canvas for e in ext), "the zoomed crop must fit the canvas"
     o = list(crop) if crop is not None else [r.i(0, canvas - e) for e in ext]
@@ -1676,8 +2137,8 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     layers = []
     for res in ren["groups"]:
         g_ = res["group"]
-        occ, (tens, d5, cm) = _pool_fields(res["occupancy"][tuple(sl)], [res["tensor"][(slice(None),) + tuple(sl)], res["desc"][(slice(None),) + tuple(sl)],
-                                                                          res["contrast"][tuple(sl)][None]], zoom)
+        occ, (tens, d5, cm) = _pool_fields(res["occupancy"][tuple(sl)].float(), [res["tensor"][(slice(None),) + tuple(sl)].float(), res["desc"][(slice(None),) + tuple(sl)].float(),
+                                                                          res["contrast"][tuple(sl)][None].float()], zoom)
         if float(occ.max()) <= 1e-3:
             continue
         if zoom > 1:
@@ -1688,11 +2149,22 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
         L.desc5 = d5.clone(); L.cmap = cm[0]; L.name = g_.name
         layers.append(L)
     shapes_ = layers + extra
-    lum = _crop(ren["lumen"], sl, zoom); lum_c = _crop(ren["lumen"] * ren["lumen_c"], sl, zoom) / lum.clamp_min(1e-9)
+    lum = _crop(ren["lumen"].float(), sl, zoom); lum_c = _crop(ren["lumen"].float() * ren["lumen_c"].float(), sl, zoom) / lum.clamp_min(1e-9)
     rec = {"scene": sid, "crop": o, "zoom": zoom, "style": st, **sc.record}
+    keep_lut, kv = None, None
+    if layers and ra.p(p_sparse):                                            # sparse labelling: most objects unlabelled -- gone from image and targets
+        fk = ra.lu(0.01, 0.3); keep_lut = ra.rand(sc.next_obj + 1) < fk
+        ids0 = _crop(ren["ids"][0], sl, zoom, "pick").long(); lab0_ = keep_lut[ids0.clamp_min(0)]
+        hidden = (ids0 >= 0) & ~lab0_; kept = (ids0 >= 0) & lab0_
+        kv = (~((Fn.max_pool3d(hidden.float()[None, None], 3, 1, 1)[0, 0] > 0) & ~kept)).float()   # the hidden objects and their partial-volume rim
+        for L in layers:
+            L.occupancy = L.occupancy * kv
+        lum = lum * kv; rec["sparse"] = round(fk, 3)
     M = None
     if ra.p(p_boundary):                                                     # the specimen's edge: tissue on one side, medium on the other
         M = sample_mask(shape, ra, device)
+    if ra.p(p_cutout):                                                       # chunks of tissue removed: blocks, holes, a knife's gap
+        Mc, kinds = cutout_mask(shape, ra, device); M = Mc if M is None else M * Mc; rec["cutout"] = kinds
     if sc.outside is not None:                                               # a real cortical layout: nothing beyond the pial surface
         Mo = 1.0 - _crop(sc.outside.float(), sl, zoom)
         M = Mo if M is None else M * Mo
@@ -1787,8 +2259,11 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
             lo_, hi_ = torch.quantile(tis[:: max(1, tis.numel() // 100000)], torch.tensor([0.005, 0.995], device=device))
             d["image"] = ((d["image"].float() - lo_) / (hi_ - lo_).clamp_min(1e-6) * 255).clamp(0, 255).round()
             rec["tissue_window"] = True
-    ids = _crop(ren["ids"], sl, zoom, "pick"); frac = _crop(ren["id_frac"], sl, zoom, "pick")
+    ids = _crop(ren["ids"], sl, zoom, "pick").long(); frac = _crop(ren["id_frac"], sl, zoom, "pick").float()
     pts = torch.stack([_point_map(pl, o, zoom, shape, device) for pl in ren["point_lists"]])
+    if keep_lut is not None:                                                 # unlabelled objects: no identity, no points
+        vis_ = (ids >= 0) & keep_lut[ids.clamp_min(0)]
+        ids = torch.where(vis_, ids, torch.full_like(ids, -1)); frac = frac * vis_; pts = pts * kv[None]
     if M is not None:                                                        # nothing beyond the specimen's edge
         ids = torch.where((M > 0.5)[None], ids, torch.full_like(ids, -1)); frac = frac * (M > 0.5)[None]; pts = pts * M[None]
     D5 = torch.zeros(len(s.layers), 5, *shape, device=device)
@@ -1824,7 +2299,7 @@ def draw_pair(shape=(64, 64, 64), seed: int = 0, device="cuda", kind: str = "zoo
     crop's first cell pair); ``modality`` -- the same crop under another acquisition (modality, physics, materials,
     noise). Returns ``(s1, d1), (s2, d2), info``."""
     canvas = kw.get("canvas", 128); r = Rng(seed + 99991, device)
-    kw = {**kw, "p_boundary": 0.0, "p_affine": 0.0, "p_warp": 0.0}                     # one geometry: the renders differ in acquisition only
+    kw = {**kw, "p_boundary": 0.0, "p_affine": 0.0, "p_warp": 0.0, "p_sparse": 0.0, "p_cutout": 0.0}   # one geometry: the renders differ in acquisition only
     if kind == "zoom":
         ext = [2 * n for n in shape]; assert all(e <= canvas for e in ext)
         oc = [8 * r.i(0, (canvas - e) // 8) for e in ext]                    # the coarse crop's origin (multiple of 8: lattice-aligned)

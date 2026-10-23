@@ -37,7 +37,10 @@ from ..filters import gaussian
 MODES = ("additive", "xray", "darkfield", "histology", "pli", "mri")
 #: the physics each modality draws from (with ``additive`` mixed in everywhere)
 BY_MODALITY = {"hipct": ("xray", "xray", "xray", "darkfield"), "ct": ("xray", "xray", "darkfield"),
-               "histology": ("histology", "histology", "pli"), "mri": ("mri",), "mixed": MODES[1:]}
+               "histology": ("histology", "histology", "pli"), "mri": ("mri",), "mixed": MODES[1:],
+               "em": ("histology", "xray"),                              # heavy-metal stain absorbs / backscatters: a dark-stain absorption image
+               "fluorescence": ("darkfield", "additive"),                # emission on a dark field (the populations bright)
+               "cryoet": ("xray",)}                                      # weak phase objects: the phase map and its propagation fringes
 
 
 def _quad(T: torch.Tensor, g) -> torch.Tensor:

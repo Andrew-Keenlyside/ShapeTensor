@@ -147,7 +147,8 @@ def test_split_tract_is_two_populations_diverging():
         if "split" in sc.record and len(sc.groups) == 2:
             break
     g1, g2 = sc.groups
-    ends = lambda g: g.curves[0].P[:, -1].mean(0) - g.curves[0].P[:, 0].mean(0)
+    S = g1.curves[0].P.shape[1]                                                          # the halves' directions past the split (the last 15 %)
+    ends = lambda g: g.curves[0].P[:, -1].mean(0) - g.curves[0].P[:, int(0.85 * S)].mean(0)
     cos = float(Fn.normalize(ends(g1), dim=0) @ Fn.normalize(ends(g2), dim=0))
     assert cos < math.cos(math.radians(0.5 * sc.record["split"][0]))                     # the halves leave at an angle
     assert torch.unique(torch.cat([g1.curves[0].seg, g2.curves[0].seg])).numel() == 1    # one bundle
@@ -218,7 +219,9 @@ def test_zoom_pairs_conserve_volume_and_align_on_the_lattice():
 
 
 def test_warp_moves_the_identities_with_the_labels():
-    s, d = draw_scene((48, 48, 48), seed=9, device=DEV, strength=0.0, p_warp=1.0, canvas=64)
+    fam = {k: (1.0 if k == "bundle" else 0.0) for k in Scene.FAMILIES}                          # resolved fibres: identity voxels are well filled
+    s, d = draw_scene((48, 48, 48), seed=9, device=DEV, strength=0.0, p_warp=1.0, canvas=64, families=fam, underlay_p=0.0, voxel_um=2.0,
+                      p_sparse=0.0, p_cutout=0.0)
     assert d["warp_grid"] is not None
     occ = sum(d["occupancy"][k] for k, L in enumerate(s.layers) if hasattr(L, "desc5"))
     has = d["identity"] >= 0
@@ -338,3 +341,57 @@ def test_neuropil_family_and_underlay():
     assert "neuropil" in names and all(torch.isfinite(g["tensor"]).all() for g in ren["groups"])
     s, d = draw_scene((32, 32, 32), seed=7, device=DEV, strength=0.2, canvas=64, p_grain=1.0)
     assert "grain" in d["record"]["routes"]
+
+
+# ---- scale, the families added for the multimodal sense check, missing tissue, sparse labelling, CT scans
+
+def test_scale_weight_falls_off_outside_a_family_range():
+    from shapetensor.learn.scene import SCALE_FLOOR, scale_weight
+    assert scale_weight("cells", 2.0) == 1.0
+    assert scale_weight("cells", 2000.0) < scale_weight("cells", 200.0) < 1.0                   # decades away: less and less
+    assert scale_weight("organelles", 1000.0) == SCALE_FLOOR                                     # never quite zero
+
+
+@pytest.mark.parametrize("name,vu", [("organelles", 0.02), ("compartments", 0.02), ("myelin", 0.05), ("nuclei", 0.1), ("myofibrils", 0.05),
+                                     ("alveoli", 5.0), ("jigsaw", 1.0), ("honeycomb", 2.0), ("xylem", 3.0), ("lattice", 1.0), ("organs", 1000.0),
+                                     ("granules", 1.0)])
+def test_added_families_render_at_their_scale(name, vu):
+    for sd in range(6):
+        sc = Scene((64, 64, 64), sd, DEV, vu); g = getattr(sc, name)()
+        if g is not None:
+            break
+    gs = g if isinstance(g, list) else [g]; sc.groups = gs; ren = sc.render()
+    assert sum(float(r_["occupancy"].sum()) for r_ in ren["groups"]) > 0
+    for r_ in ren["groups"]:
+        assert torch.isfinite(r_["tensor"]).all() and torch.isfinite(r_["occupancy"]).all()
+
+
+def test_wide_scale_prior_reaches_nm_and_mm():
+    v = [Scene((8, 8, 8), sd, "cpu").voxel_um for sd in range(400)]
+    assert min(v) < 0.01 and max(v) > 500 and 0.3 < np.mean([1.0 <= x <= 60.0 for x in v]) < 0.8
+
+
+def test_cut_out_tissue_takes_its_targets_with_it():
+    kw = dict(seed=5, device=DEV, strength=0.0, canvas=64, p_boundary=0.0, p_warp=0.0, p_affine=0.0, p_sparse=0.0)
+    s0, d0 = draw_scene((48, 48, 48), p_cutout=0.0, **kw); s1, d1 = draw_scene((48, 48, 48), p_cutout=1.0, **kw)
+    assert "cutout" in d1["record"]
+    shp = lambda s, d: sum(float(d["occupancy"][k].sum()) for k, L in enumerate(s.layers) if hasattr(L, "desc5"))   # the populations, not the isotropic rest
+    assert shp(s1, d1) < shp(s0, d0)
+
+
+def test_sparse_labelling_leaves_few_objects():
+    fam = {k: (1.0 if k == "bundle" else 0.0) for k in Scene.FAMILIES}
+    kw = dict(seed=3, device=DEV, strength=0.0, canvas=64, families=fam, underlay_p=0.0, voxel_um=2.0, p_boundary=0.0, p_cutout=0.0, p_warp=0.0, p_affine=0.0)
+    _, d0 = draw_scene((48, 48, 48), p_sparse=0.0, **kw); _, d1 = draw_scene((48, 48, 48), p_sparse=1.0, **kw)
+    n0, n1 = torch.unique(d0["ids"][0]).numel(), torch.unique(d1["ids"][0]).numel()
+    assert "sparse" in d1["record"] and n1 < n0
+
+
+def test_ct_scan_streaks_come_from_the_content():
+    from shapetensor.learn.ctsim import scan
+    Z = 32; g = torch.stack(torch.meshgrid(*[torch.arange(Z, device=DEV, dtype=torch.float32)] * 3, indexing="ij"), -1)
+    img = 50 + 150 * (((g[..., 1:] - 16) ** 2).sum(-1) < 36).float()
+    y0 = scan(img.clone(), Rng(1, DEV), {}, 0.0)                                                 # an ideal scan: the image back
+    assert y0.shape == img.shape and float(torch.corrcoef(torch.stack([y0.flatten(), img.flatten()]))[0, 1]) > 0.85
+    rec = {}; y1 = scan(img.clone(), Rng(2, DEV), rec, 1.0)
+    assert torch.isfinite(y1).all() and "ct_scan" in rec

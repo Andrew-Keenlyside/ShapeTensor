@@ -164,3 +164,34 @@ def test_specimen_medium_is_dark_or_bright():
         if "boundary" in s.record:
             kinds.add(s.record["boundary"][1])
     assert {"dark", "bright"} <= kinds
+
+
+# ---- sections, optics and missing planes (batch time, mild)
+
+@pytest.mark.parametrize("name", ["missing_slices", "thin_slab", "sections", "ls_stripes", "axial_psf", "shot_noise", "saturate"])
+def test_section_and_optics_routes_keep_shape_and_range(name):
+    from shapetensor.learn import augment as AU
+    fn = getattr(AU, name); x = _ball() * 0.8 + 0.1 * torch.rand(48, 48, 48, device=DEV)
+    for s in range(4):
+        rec = {}; y = fn(x, np.random.default_rng(s), rec)
+        assert y.shape == x.shape and torch.isfinite(y).all() and float(y.min()) >= 0 and float(y.max()) <= 1 + 1e-6
+        assert rec and float((y - x).abs().mean()) > 1e-4
+        y2 = fn(x, np.random.default_rng(s), {}); assert torch.allclose(y, y2), name                  # reproducible from the numpy draw
+
+
+def test_missing_slices_and_slabs_touch_whole_planes_only():
+    from shapetensor.learn.augment import missing_slices, thin_slab
+    x = torch.rand(40, 40, 40, device=DEV)
+    for fn in (missing_slices, thin_slab):
+        for s in range(6):
+            rec = {}; y = fn(x, np.random.default_rng(s), rec); ax = list(rec.values())[0][0]
+            changed = (y != x).movedim(ax, 0).flatten(1).any(1)
+            assert 1 <= int(changed.sum()) <= 4 and float((y != x).float().mean()) < 0.12
+
+
+def test_axial_psf_blurs_one_axis_most():
+    from shapetensor.learn.augment import axial_psf
+    x = torch.rand(48, 48, 48, device=DEV); rec = {}; y = axial_psf(x, np.random.default_rng(0), rec)
+    ax = rec["axial_psf"][0]
+    d = [float(torch.diff(y, dim=a).abs().mean()) for a in range(3)]
+    assert d[ax] == min(d)

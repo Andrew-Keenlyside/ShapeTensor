@@ -42,12 +42,12 @@ RUNTIME=$(command -v apptainer || command -v singularity) || { echo "FATAL: no a
     --env PYTHONPATH="$SRC/src",SHAPETENSOR_SHAPES="$TMPDIR/shape_library",OMP_NUM_THREADS=4 \
     "$SIF" /opt/venv/bin/python -m torch.distributed.run --standalone --nproc_per_node "$NGPU" \
     -m shapetensor.learn.train --head lobes --out "$OUT" --seed "$SEED" --steps "$STEPS" --resume auto \
-    --size 96 --batch "${BATCH:-4}" --accum "${ACCUM:-4}" --buffer 256 --refresh 1 --margin "${MARGIN:-4}" \
+    --size 128 --batch "${BATCH:-4}" --accum "${ACCUM:-4}" --buffer 256 --refresh 1 --margin "${MARGIN:-4}" \
     --gate 0.85 --gate-max 3000 --aniso 1 600 --difficulty auto --level0 0.3 --lobes-J 6 \
     --pairs 32 --pair-every 8 --ssl-every 8 --contrast-every 2 --query 128 --strength1 1.0 \
     --real "$TMPDIR/hipct_s2146_cortex_20um_crops.npz=20" "$TMPDIR/hipct_s2146_cortex_40um_crops.npz=40" \
     --cpu-workers "$CPU_WORKERS" --cpu-threads 4 --ckpt-minutes 20 --val-n 32 --val-every 2000 \
-    --gen '{"scene": {"canvas": 192, "crops_per_scene": 8}}' $EXTRA
+    --gen '{"scene": {"canvas": 256, "crops_per_scene": 8}}' $EXTRA
 rc=$?
 echo "exit $rc at $(date)"
 if [ "$rc" = 99 ] && [ "${RESUBMIT:-0}" = 1 ]; then

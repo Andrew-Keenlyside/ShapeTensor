@@ -16,10 +16,17 @@ geometry, so the target (from the geometry) is unchanged:
   ideal low-pass ringing); a low bit depth; lossy compression (JPEG-like block DCT, JPEG2000-like wavelet); and one
   of MONAI's maintained transforms (histogram shift, smooth-field contrast, Gibbs, k-space spikes, low resolution,
   Rician noise);
+* **sections and optics** -- per-plane gain and offset flicker with occasional one-voxel plane shifts (serial sections),
+  light-sheet shadows / curtaining (lines sharp across one axis, constant along another), an axially elongated PSF
+  (confocal, light-sheet), photon shot noise, saturation (clipped at one end);
 * **missing data** -- **missing lines** (scan-line or detector dropouts: thin lines through the block along one axis,
-  all or part of it, filled with a constant, the local mean or the neighbouring line) and **small missing blocks**
-  (cuboids of 2-12 voxels: bubbles, missing tiles, dropouts; filled with a constant, noise or a blur). Small gaps
-  keep their target: the populations continue through them and the network learns to carry them across from context.
+  all or part of it, filled with a constant, the local mean or the neighbouring line), **small missing blocks**
+  (cuboids of 2-12 voxels: bubbles, missing tiles, dropouts; filled with a constant, noise or a blur), **missing
+  slices** (1-4 whole planes: blank, the mean, the neighbour repeated) and **thin slabs** (2-4 planes, the same fills
+  or interpolated). Small gaps keep their target: the populations continue through them and the network learns to
+  carry them across from context. Large gaps are drawn at generation time, where the visibility decides the target:
+  cut-out chunks (tissue removed, the medium in its place, the targets emptied) in ``scene.draw_scene`` and thick slabs
+  of lost sections in ``generator.nuisance``.
 
 ``strength`` (0-1) scales every probability and magnitude (a curriculum: tied to the difficulty level). Scalars come
 from a numpy generator (no device synchronisation); fields are drawn on the device.
@@ -36,7 +43,8 @@ from ..filters import gaussian
 
 P = {"lut": 0.7, "nonmono": 0.35, "spatial": 0.25, "gamma": 0.3, "unsharp": 0.3, "log": 0.15, "relief": 0.15, "field": 0.4,
      "noise": 0.4, "lines": 0.25, "blocks": 0.25, "resolution": 0.25, "motion": 0.1, "spikes": 0.08, "varnoise": 0.2,
-     "resample": 0.15, "quantise": 0.1, "compress": 0.12, "library": 0.15, "ghosting": 0.1}
+     "resample": 0.15, "quantise": 0.1, "compress": 0.12, "library": 0.15, "ghosting": 0.1, "saturate": 0.08, "sections": 0.12,
+     "lsstripes": 0.08, "axial_psf": 0.12, "shot": 0.12, "slices": 0.12, "thin_slabs": 0.08}
 
 
 def random_lut(rng: np.random.Generator, monotone: bool, min_tv: float = 0.6, max_slope: float = 5.0, max_folds: int = 2):
@@ -122,6 +130,100 @@ def missing_blocks(x: torch.Tensor, rng: np.random.Generator, rec: dict, max_sid
             x[idx] = x[idx].mean()
     rec["missing_blocks"] = (n, mode)
     return x
+
+
+def _gen(x: torch.Tensor, rng: np.random.Generator) -> torch.Generator:
+    """A device generator seeded from ``rng`` (a route's fields reproducible from its numpy draw)."""
+    return torch.Generator(device=x.device).manual_seed(int(rng.integers(0, 2 ** 31 - 1)))
+
+
+def _plane_fill(x: torch.Tensor, ax: int, lo: int, hi: int, mode: str) -> None:
+    """Planes ``lo:hi`` along ``ax`` of ``x`` (in place) lost: ``blank`` (0 or 1, either end), ``mean``, ``neighbour``
+    (the plane before repeated), ``interp`` (linear between the planes either side)."""
+    y = x.movedim(ax, 0); n = y.shape[0]
+    if mode == "blank0":
+        y[lo:hi] = 0.0
+    elif mode == "blank1":
+        y[lo:hi] = 1.0
+    elif mode == "mean":
+        y[lo:hi] = y.mean()
+    elif mode == "neighbour":
+        y[lo:hi] = y[lo - 1 if lo > 0 else hi].clone()
+    else:
+        a, b = y[lo - 1 if lo > 0 else hi].clone(), y[hi if hi < n else lo - 1].clone()
+        t = (torch.arange(1, hi - lo + 1, device=x.device, dtype=x.dtype) / (hi - lo + 1)).view(-1, 1, 1)
+        y[lo:hi] = (1 - t) * a + t * b
+
+
+def missing_slices(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
+    """1-4 whole planes along a random axis lost: blank (either end), the mean or the neighbour repeated."""
+    ax = int(rng.integers(0, 3)); n = int(rng.integers(1, 5)); x = x.clone(); m = x.shape[ax]
+    mode = ["blank0", "blank1", "mean", "neighbour"][int(rng.integers(0, 4))]
+    idx = sorted(int(v) for v in rng.choice(np.arange(1, m - 1), size=min(n, m - 2), replace=False))
+    for i in idx:
+        _plane_fill(x, ax, i, i + 1, mode)
+    rec["missing_slices"] = (ax, idx, mode)
+    return x
+
+
+def thin_slab(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
+    """One slab of 2-4 consecutive planes along a random axis lost (the fills of :func:`missing_slices`, or
+    interpolated across)."""
+    ax = int(rng.integers(0, 3)); w = int(rng.integers(2, 5)); x = x.clone(); m = x.shape[ax]
+    lo = int(rng.integers(1, max(2, m - w - 1))); mode = ["blank0", "blank1", "mean", "neighbour", "interp"][int(rng.integers(0, 5))]
+    _plane_fill(x, ax, lo, min(m, lo + w), mode)
+    rec["thin_slab"] = (ax, lo, w, mode)
+    return x
+
+
+def sections(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
+    """Serial sections along a random axis: each plane its own gain (sd 2-10 %) and offset (sd 1-4 %), and a few planes
+    shifted by one voxel in-plane (edges replicated)."""
+    ax = int(rng.integers(0, 3)); g = _gen(x, rng); y = x.movedim(ax, 0).clone(); n = y.shape[0]
+    gs, os_ = float(rng.uniform(0.02, 0.1)), float(rng.uniform(0.01, 0.04))
+    y = y * (1 + gs * torch.randn(n, device=x.device, generator=g)).view(-1, 1, 1) + (os_ * torch.randn(n, device=x.device, generator=g)).view(-1, 1, 1)
+    k = int(rng.integers(0, 5))
+    for i in rng.choice(n, size=min(k, n), replace=False):
+        d = int(rng.integers(1, 3)); s_ = 1 if rng.random() < 0.5 else -1
+        p = Fn.pad(y[int(i)][None, None], (1, 1, 1, 1), mode="replicate")[0, 0]
+        y[int(i)] = p[1:-1, 1 + s_:p.shape[1] - 1 + s_] if d == 2 else p[1 + s_:p.shape[0] - 1 + s_, 1:-1]
+    rec["sections"] = (ax, round(gs, 3), round(os_, 3), k)
+    return y.movedim(0, ax).clamp(0, 1)
+
+
+def ls_stripes(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
+    """Light-sheet shadows / curtaining, mild: a multiplicative field ``1 - a S`` with ``S`` lines (1-4 voxels wide) sharp
+    across one axis and constant along another, slowly modulated; ``|a| <= 0.25``, darker or brighter."""
+    axs = rng.permutation(3); a_ax, b_ax = int(axs[0]), int(axs[1]); g = _gen(x, rng)
+    S = torch.zeros(x.shape[a_ax], device=x.device)
+    for _ in range(int(rng.integers(2, 13))):
+        c0 = int(rng.integers(0, x.shape[a_ax])); S[c0:c0 + int(rng.integers(1, 5))] += float(rng.uniform(0.3, 1.0))
+    S = S.clamp(max=1.0).view([-1 if d == a_ax else 1 for d in range(3)])
+    env = (1 + 0.4 * smooth_field(x.shape, float(rng.uniform(15, 50)), x.device, g)).clamp(0.2, 1.8)
+    a = float(rng.uniform(0.05, 0.25)) * (1 if rng.random() < 0.6 else -1)
+    rec["lsstripes"] = (a_ax, b_ax, round(a, 2))
+    return (x * (1 - a * S * env)).clamp(0, 1)
+
+
+def axial_psf(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
+    """An axially elongated PSF (confocal / light-sheet): sigma 1-3 voxels along one axis, 0-0.7 across."""
+    ax = int(rng.integers(0, 3)); sg = [float(rng.uniform(0, 0.7)) for _ in range(3)]; sg[ax] = float(rng.uniform(1, 3))
+    rec["axial_psf"] = (ax, [round(v, 2) for v in sg])
+    return gaussian(x, tuple(sg), truncate=3.0)
+
+
+def shot_noise(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
+    """Photon shot noise: Poisson at 20-500 photons for the full range."""
+    Pn = float(math.exp(rng.uniform(math.log(20), math.log(500)))); rec["shot"] = round(Pn)
+    return (torch.poisson(x.clamp(0, 1) * Pn, generator=_gen(x, rng)) / Pn).clamp(0, 1)
+
+
+def saturate(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
+    """Saturation: 3-15 % of the voxels clipped at one end, the rest stretched to the full range."""
+    fr = float(rng.uniform(0.03, 0.15)); top = rng.random() < 0.6
+    q = float(torch.quantile(x.flatten()[:: max(1, x.numel() // 50000)].float(), 1 - fr if top else fr))
+    rec["saturate"] = (round(fr, 3), "top" if top else "bottom")
+    return (x.clamp(max=q) / max(q, 1e-6)) if top else ((x.clamp(min=q) - q) / max(1 - q, 1e-6))
 
 
 def per_axis_resolution(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch.Tensor:
@@ -346,10 +448,16 @@ def contrast_route(x: torch.Tensor, rng: np.random.Generator, strength: float = 
     if on("field"):
         y = y * (1 + float(rng.uniform(0.05, 0.4)) * smooth_field(y.shape, float(rng.uniform(15, 60)), y.device, g)) \
             + float(rng.uniform(0, 0.15)) * smooth_field(y.shape, float(rng.uniform(15, 60)), y.device, g); rec["field"] = True
+    if on("sections"):
+        y = sections(y, rng, rec)
+    if on("lsstripes"):
+        y = ls_stripes(y.clamp(0, 1), rng, rec)
     lo, hi = torch.quantile(y.flatten()[:: max(1, y.numel() // 50000)], torch.tensor([0.002, 0.998], device=y.device))
     y = ((y - lo) / (hi - lo).clamp_min(1e-6)).clamp(0, 1)                                          # back to the full range
     if on("resolution"):
         y = per_axis_resolution(y, rng, rec)
+    if on("axial_psf"):
+        y = axial_psf(y, rng, rec)
     if on("resample"):
         y = resample_artefacts(y, rng, rec)
     if on("motion"):
@@ -365,6 +473,10 @@ def contrast_route(x: torch.Tensor, rng: np.random.Generator, strength: float = 
     if on("noise"):
         sd = float(math.exp(rng.uniform(math.log(0.004), math.log(0.06))))
         y = (y + sd * torch.randn(y.shape, device=y.device, generator=g)).clamp(0, 1); rec["noise"] = round(sd, 3)
+    if on("shot"):
+        y = shot_noise(y, rng, rec)
+    if on("saturate"):
+        y = saturate(y, rng, rec)
     if on("varnoise"):                                                                             # a noise level that varies across the block
         sd = float(math.exp(rng.uniform(math.log(0.005), math.log(0.05))))
         fld = torch.exp(float(rng.uniform(0.3, 1.0)) * smooth_field(y.shape, float(rng.uniform(15, 50)), y.device, g))
@@ -377,4 +489,8 @@ def contrast_route(x: torch.Tensor, rng: np.random.Generator, strength: float = 
         y = missing_lines(y, rng, rec)
     if on("blocks"):
         y = missing_blocks(y, rng, rec)
+    if on("slices"):
+        y = missing_slices(y, rng, rec)
+    if on("thin_slabs"):
+        y = thin_slab(y, rng, rec)
     return y

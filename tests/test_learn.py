@@ -155,9 +155,14 @@ def test_interface_independent_of_orientation():
 
 
 def test_saturation_bounded():
+    """The display window does not saturate by itself (draws that saturate on purpose -- a clipped detector, a slab
+    lost at an extreme value -- are left out)."""
     bad = 0
     for k in range(30):
         _, d = draw((40, 40, 40), seed=100 + k, device=DEV)
+        rec = d["record"]
+        if "saturate" in rec or any(m in ("low", "high") for _, _, m in rec.get("slabs", [])):
+            continue
         bad += float(((d["image"] == 0) | (d["image"] == 255)).float().mean()) > 0.10
     assert bad <= 1, bad
 

@@ -20,9 +20,11 @@ attenuated), overlaps never fill more than the voxel; the **isotropic** remainde
 **interface** (a sheet at the background's region boundaries, weighted by the step) is a boundary, not a volume: it is
 outside the volume budget and hidden only by occluders, as the step is in the image.
 
-:func:`nuisance` applies one modality's acquisition (``hipct`` / ``ct`` / ``mri`` / ``histology`` / ``mixed``): an
-elastic warp (shape tensors transformed as ``J⁻¹ S J⁻ᵀ``), intensity remaps, a bias field, the PSF, noise, and the
-modality's artefacts along a randomly drawn acquisition axis, then a display window; it measures each layer's
+:func:`nuisance` applies one modality's acquisition (``hipct`` / ``ct`` / ``mri`` / ``histology`` / ``em`` /
+``fluorescence`` / ``cryoet`` / ``mixed``): an elastic warp (shape tensors transformed as ``J⁻¹ S J⁻ᵀ``), intensity
+remaps, a bias field, the PSF, noise, and the modality's artefacts along a randomly drawn acquisition axis (serial
+sections: shifts, drift, lost sections and slabs, knife chatter; light-sheet shadows, depth attenuation, the cryo-ET
+missing wedge and CTF, photon-starved doses, saturation), then a display window; it measures each layer's
 **visibility** (contrast to noise at the shapes' scale after the whole chain), which scales the layer's mass in the
 target: its local **presence** visibility scales the layer's mass, its **orientation** visibility blends the layer's
 shape tensor towards isotropic (seen but orientation not recoverable). :func:`draw` makes one training pair: content
@@ -963,31 +965,64 @@ ORIENTATION_T = (6.0, 18.0)        # t range over which their orientation goes f
 MODALITIES = {
     "hipct":     {"warp": 0.7, "invert": 0.5, "bend": 0.7, "bias": 0.6, "aniso_psf": 0.6, "resolution": 0.3, "poisson": 0.8, "gaussian": 0.9, "speckle": 0.1,
                   "rings": 0.6, "streaks": 0.5, "slice_jitter": 0.5, "fringes": 0.7, "cupping": 0.5, "seams": 0.3, "zingers": 0.4,
-                  "rician": 0.0, "gibbs": 0.0, "ghosting": 0.0, "thick": 0.1, "misalign": 0.0, "missing": 0.0, "stain": 0.0, "stripes": 0.1, "dust": 0.1, "mosaic": 0.0},
+                  "rician": 0.0, "gibbs": 0.0, "ghosting": 0.0, "thick": 0.1, "misalign": 0.0, "missing": 0.0, "stain": 0.0, "stripes": 0.1, "dust": 0.1, "mosaic": 0.0,
+                  "slabs": 0.05, "drift": 0.0, "chatter": 0.0, "lsstripes": 0.05, "depth": 0.0, "lowdose": 0.0, "wedge": 0.0, "ctf": 0.0, "saturate": 0.1},
     "ct":        {"warp": 0.7, "invert": 0.4, "bend": 0.7, "bias": 0.5, "aniso_psf": 0.5, "resolution": 0.5, "poisson": 0.8, "gaussian": 0.9, "speckle": 0.2,
                   "rings": 0.5, "streaks": 0.6, "slice_jitter": 0.3, "fringes": 0.2, "cupping": 0.7, "seams": 0.2, "zingers": 0.3,
-                  "rician": 0.0, "gibbs": 0.1, "ghosting": 0.0, "thick": 0.2, "misalign": 0.0, "missing": 0.0, "stain": 0.0, "stripes": 0.1, "dust": 0.1, "mosaic": 0.0},
+                  "rician": 0.0, "gibbs": 0.1, "ghosting": 0.0, "thick": 0.2, "misalign": 0.0, "missing": 0.0, "stain": 0.0, "stripes": 0.1, "dust": 0.1, "mosaic": 0.0,
+                  "slabs": 0.05, "drift": 0.0, "chatter": 0.0, "lsstripes": 0.0, "depth": 0.0, "lowdose": 0.0, "wedge": 0.0, "ctf": 0.0, "saturate": 0.15},
     "mri":       {"warp": 0.8, "invert": 0.5, "bend": 0.8, "bias": 0.9, "aniso_psf": 0.5, "resolution": 0.6, "poisson": 0.0, "gaussian": 0.3, "speckle": 0.0,
                   "rings": 0.0, "streaks": 0.0, "slice_jitter": 0.2, "fringes": 0.0, "cupping": 0.0, "seams": 0.0, "zingers": 0.1,
-                  "rician": 0.9, "gibbs": 0.6, "ghosting": 0.4, "thick": 0.6, "misalign": 0.0, "missing": 0.0, "stain": 0.0, "stripes": 0.0, "dust": 0.0, "mosaic": 0.0},
+                  "rician": 0.9, "gibbs": 0.6, "ghosting": 0.4, "thick": 0.6, "misalign": 0.0, "missing": 0.0, "stain": 0.0, "stripes": 0.0, "dust": 0.0, "mosaic": 0.0,
+                  "slabs": 0.05, "drift": 0.0, "chatter": 0.0, "lsstripes": 0.0, "depth": 0.0, "lowdose": 0.0, "wedge": 0.0, "ctf": 0.0, "saturate": 0.05},
     "histology": {"warp": 0.9, "invert": 0.6, "bend": 0.8, "bias": 0.7, "aniso_psf": 0.6, "resolution": 0.5, "poisson": 0.3, "gaussian": 0.7, "speckle": 0.3,
                   "rings": 0.0, "streaks": 0.1, "slice_jitter": 0.8, "fringes": 0.0, "cupping": 0.0, "seams": 0.3, "zingers": 0.2,
-                  "rician": 0.0, "gibbs": 0.0, "ghosting": 0.0, "thick": 0.7, "misalign": 0.7, "missing": 0.3, "stain": 0.7, "stripes": 0.5, "dust": 0.5, "mosaic": 0.5},
+                  "rician": 0.0, "gibbs": 0.0, "ghosting": 0.0, "thick": 0.7, "misalign": 0.7, "missing": 0.3, "stain": 0.7, "stripes": 0.5, "dust": 0.5, "mosaic": 0.5,
+                  "slabs": 0.2, "drift": 0.3, "chatter": 0.3, "lsstripes": 0.1, "depth": 0.0, "lowdose": 0.0, "wedge": 0.0, "ctf": 0.0, "saturate": 0.1},
+    # serial-section TEM / SBEM / FIB-SEM: sections cut and imaged one by one (shifts, drift, flicker, lost sections and slabs,
+    # knife chatter, curtaining), thick sections along the cutting axis, electron shot noise, a little detector saturation
+    "em":        {"warp": 0.5, "invert": 0.5, "bend": 0.5, "bias": 0.4, "aniso_psf": 0.3, "resolution": 0.3, "poisson": 0.7, "gaussian": 0.8, "speckle": 0.1,
+                  "rings": 0.0, "streaks": 0.0, "slice_jitter": 0.6, "fringes": 0.1, "cupping": 0.0, "seams": 0.2, "zingers": 0.1,
+                  "rician": 0.0, "gibbs": 0.0, "ghosting": 0.0, "thick": 0.5, "misalign": 0.5, "missing": 0.3, "stain": 0.5, "stripes": 0.2, "dust": 0.2, "mosaic": 0.2,
+                  "slabs": 0.15, "drift": 0.4, "chatter": 0.3, "lsstripes": 0.3, "depth": 0.1, "lowdose": 0.05, "wedge": 0.0, "ctf": 0.0, "saturate": 0.1},
+    # confocal / light-sheet / two-photon: an axially elongated PSF, photon-limited noise, attenuation and bleaching with
+    # depth, light-sheet shadows, tile vignetting and seams, thick optical sections, saturated bright structures
+    "fluorescence": {"warp": 0.6, "invert": 0.15, "bend": 0.5, "bias": 0.6, "aniso_psf": 0.9, "resolution": 0.3, "poisson": 0.9, "gaussian": 0.7, "speckle": 0.1,
+                  "rings": 0.0, "streaks": 0.0, "slice_jitter": 0.3, "fringes": 0.0, "cupping": 0.0, "seams": 0.2, "zingers": 0.1,
+                  "rician": 0.0, "gibbs": 0.0, "ghosting": 0.0, "thick": 0.4, "misalign": 0.1, "missing": 0.05, "stain": 0.0, "stripes": 0.1, "dust": 0.2, "mosaic": 0.3,
+                  "slabs": 0.05, "drift": 0.05, "chatter": 0.0, "lsstripes": 0.4, "depth": 0.6, "lowdose": 0.3, "wedge": 0.0, "ctf": 0.0, "saturate": 0.2},
+    # cryo-electron tomography: the missing wedge, the contrast transfer function, a dose of a few electrons per voxel
+    "cryoet":    {"warp": 0.3, "invert": 0.5, "bend": 0.3, "bias": 0.2, "aniso_psf": 0.2, "resolution": 0.2, "poisson": 0.5, "gaussian": 0.8, "speckle": 0.0,
+                  "rings": 0.0, "streaks": 0.1, "slice_jitter": 0.1, "fringes": 0.2, "cupping": 0.0, "seams": 0.0, "zingers": 0.2,
+                  "rician": 0.0, "gibbs": 0.0, "ghosting": 0.0, "thick": 0.0, "misalign": 0.0, "missing": 0.0, "stain": 0.0, "stripes": 0.0, "dust": 0.1, "mosaic": 0.0,
+                  "slabs": 0.0, "drift": 0.0, "chatter": 0.0, "lsstripes": 0.0, "depth": 0.1, "lowdose": 0.8, "wedge": 0.9, "ctf": 0.9, "saturate": 0.05},
 }
-MODALITIES["mixed"] = {k: 0.35 for k in MODALITIES["hipct"]}
+NEW_KEYS = ("slabs", "drift", "chatter", "lsstripes", "depth", "lowdose", "wedge", "ctf", "saturate")
+MODALITIES["mixed"] = {k: (0.1 if k in ("wedge", "ctf", "lowdose") else 0.15 if k in NEW_KEYS else 0.35) for k in MODALITIES["hipct"]}
 CROSS_MIX = 0.08                   # every nuisance outside the chosen modality's profile is still drawn with this probability
+CROSS_KEY = {"wedge": 0.03, "ctf": 0.03, "lowdose": 0.03, "slabs": 0.03}   # the most destructive ones less often
 
 
 def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, modality: str | None = None, warp: bool | None = None,
              fast: bool = False, hp_max: float | None = None, vis_opts: dict | None = None, affine: bool = False) -> dict:
     # ``strength`` (0-1) scales the probability and the magnitude of every nuisance that destroys information (PSF,
     # resolution, thick slices, k-space truncation, noise, artefacts); geometric and monotone remaps are not scaled
-    """One draw of a modality's acquisition on a clean sample (``hipct`` / ``ct`` / ``mri`` / ``histology`` /
-    ``mixed``; None picks one), with cross-mixing. The geometry (``warp``; None draws it) moves the labels with the
-    image; every photometric nuisance acts along a randomly drawn **acquisition axis** (slices, thick slices,
-    anisotropic PSF, rings and cupping about it, streaks in planes across it); the image is kept in float to the end,
-    where a display window maps it to 0-255. Returns the image, the warped occupancies ``(K, Z, Y, X)``, the warped
-    shape tensors ``(K, 6, Z, Y, X)``, the layers' ``visibility (K,)`` and the draw's record."""
+    """One draw of a modality's acquisition on a clean sample (``hipct`` / ``ct`` / ``mri`` / ``histology`` / ``em`` /
+    ``fluorescence`` / ``cryoet`` / ``mixed``; None picks one), with cross-mixing. The geometry (``warp``; None draws
+    it) moves the labels with the image; every photometric nuisance acts along a randomly drawn **acquisition axis**
+    (slices, thick slices, anisotropic PSF, rings and cupping about it, streaks in planes across it); the image is kept
+    in float to the end, where a display window maps it to 0-255. Returns the image, the warped occupancies
+    ``(K, Z, Y, X)``, the warped shape tensors ``(K, 6, Z, Y, X)``, the layers' ``visibility (K,)`` and the draw's record.
+
+    Sections (along the axis): misalignment, a cumulative **drift**, lost sections (the previous or next repeated, the
+    mean, blank), stain flicker, **knife chatter** (a sinusoid in each section, its phase drifting); illumination: the
+    bias field, **light-sheet shadows / curtaining** (lines sharp across one in-plane axis, constant along the other),
+    **depth** attenuation or bleaching with a blur that grows with depth; transfer: the PSF, resolution, Gibbs,
+    ghosting, the **CTF** (rings of either sign, possibly phase-flipped); noise: Poisson, Gaussian, Rician, speckle, a
+    **low dose** (0.5-20 photons per voxel, read noise, offset), the cryo-ET **missing wedge** (beam along the axis);
+    then thick slices, the CT artefacts, **saturation** at one end and lost **slabs** of 2-16 sections (a constant,
+    held, interpolated or noise). Everything destructive happens before the visibility is measured, so a lost slab or
+    a region drowned in noise asks for nothing in the targets."""
     g = torch.Generator(device=device).manual_seed(seed + 7919)
     if fast:                                                                                     # scalars from numpy: no device synchronisation per draw
         _np = np.random.default_rng(seed + 7919)
@@ -1001,7 +1036,7 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     P = MODALITIES[modality]
     sg = float(min(max(strength, 0.0), 1.0))                                                     # 0: clean; 1: the full ranges (a training curriculum ramps it)
     KEEP = ("warp", "invert", "bend", "bias")                                                   # remaps that keep the information: not scaled by strength
-    on = lambda key: u(0, 1) < max(P.get(key, 0.0), CROSS_MIX) * (1.0 if key in KEEP else sg)
+    on = lambda key: u(0, 1) < max(P.get(key, 0.0), CROSS_KEY.get(key, CROSS_MIX)) * (1.0 if key in KEEP else sg)
     img = s.image.clone().float(); Z, Y, X = img.shape; rec = {"modality": modality}
     occ = torch.stack([L.occupancy for L in s.layers]); T = torch.stack([L.tensor for L in s.layers])
     Dsc = torch.stack([L.desc if L.desc is not None else torch.zeros((3,) + tuple(img.shape), device=device) for L in s.layers])   # (K, 3, Z, Y, X)
@@ -1050,17 +1085,31 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     if True:                                                                                    # the rotation axis's in-plane position (rings, cupping)
         phi = u(0, 2 * math.pi); dist = (u(0, 0.5) if u(0, 1) < 0.3 else lu(0.5, 5.0)) * max(B, C)
         cy, cx = (B - 1) / 2 + dist * math.sin(phi), (C - 1) / 2 + dist * math.cos(phi)
+    present = torch.ones(A, device=device)                                                      # how much of each section's data is still its own (lost: 0)
     yy, xx = torch.meshgrid(torch.arange(B, device=device, dtype=torch.float32), torch.arange(C, device=device, dtype=torch.float32), indexing="ij")
     rr = torch.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
     # sections: misalignment (no wrap-around), missing sections, stain variation
     if on("misalign"):
         sd = u(0.3, 1.5) * sg; sh = (sd * torch.randn(A, 2, device=device, generator=g)).round().long()
         img = torch.stack([_shift2d(img[a], int(sh[a, 0]), int(sh[a, 1])) for a in range(A)]); rec["misalign"] = round(sd, 2)
-    if on("missing"):
-        k = int(u(1, 4))
+    if on("drift"):                                                                             # a cumulative random walk of the sections (no wrap-around)
+        sd = u(0.2, 1.0) * sg; walk = torch.cumsum(sd * torch.randn(A, 2, device=device, generator=g), 0)
+        walk = (walk - walk[A // 2]).clamp(-6, 6).round().long()
+        img = torch.stack([_shift2d(img[a], int(walk[a, 0]), int(walk[a, 1])) for a in range(A)]); rec["drift"] = round(sd, 2)
+    if on("missing"):                                                                           # single sections lost: the previous or the next repeated, the mean, blank
+        k = int(u(1, 4)); modes = []
         for _ in range(k):
-            a = int(u(1, A - 2)); img[a] = img[a - 1] if u(0, 1) < 0.5 else torch.full_like(img[a], float(img.mean()))
-        rec["missing_sections"] = k
+            a = int(u(1, A - 2)); m = ("previous", "next", "mean", "blank")[_int(0, 4)]; modes.append(m)
+            img[a] = {"previous": lambda: img[a - 1].clone(), "next": lambda: img[a + 1].clone(), "mean": lambda: torch.full_like(img[a], float(img.mean())),
+                      "blank": lambda: torch.full_like(img[a], float(img.min()))}[m]()
+            present[a] = 0.5 if m in ("previous", "next") else 0.0
+        rec["missing_sections"] = (k, modes)
+    if on("chatter"):                                                                           # knife chatter: a sinusoid in each section, its phase drifting
+        j = _int(1, 3); per = lu(3, 20); amp = u(0.03, 0.2) * sg
+        ph = u(0, 2 * math.pi) + torch.cumsum(u(0.1, 1.0) * torch.randn(A, device=device, generator=g), 0)
+        pos = torch.arange(img.shape[j], device=device, dtype=torch.float32)
+        wave = 1 + amp * torch.sin(2 * math.pi * pos[None] / per + ph[:, None])                 # (A, n_j)
+        img = img * (wave[:, :, None] if j == 1 else wave[:, None, :]); rec["chatter"] = (j, round(per, 1), round(amp, 3))
     if on("stain"):
         img = img * (1 + u(0.03, 0.2) * sg * torch.randn(A, device=device, generator=g)).view(A, 1, 1) + u(0, 15) * sg * torch.randn(A, device=device, generator=g).view(A, 1, 1); rec["stain"] = True
     # intensity: polarity, gamma and a bend on the normalised range (no clipping), a log-normal bias field
@@ -1074,6 +1123,26 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     if on("bias"):
         amp = u(0.05, 0.35) * (1.5 if modality == "mri" else 1.0)
         img = img * torch.exp(amp * smooth_noise((A, B, C), lu(20, 60), g, device)); rec["bias"] = round(amp, 2)
+    if on("lsstripes"):                                                                         # light-sheet shadows / FIB-SEM curtaining: lines sharp across one
+        j = _int(1, 3); n_j = img.shape[j]; S = torch.zeros(n_j, device=device)                 # in-plane axis, constant along the other, slowly varying
+        n = _int(2, 13)
+        for _ in range(n):
+            c0 = _int(0, n_j); w = _int(1, 5); S[c0:c0 + w] += u(0.3, 1.0)
+        S = S.clamp(max=1.0)
+        env = (1 + u(0, 0.5) * smooth_noise((A, B, C), lu(20, 60), g, device)).clamp(0, 2)
+        a = u(0.1, 0.6) * sg * (1 if u(0, 1) < 0.6 else -1)                                    # darker (shadows) or brighter
+        Sf = S.view(1, -1, 1) if j == 1 else S.view(1, 1, -1)
+        img = img * (1 - a * Sf * env).clamp_min(0.05); rec["lsstripes"] = (j, n, round(a, 2))
+    if on("depth"):                                                                             # attenuation or bleaching along the axis, blur growing with depth
+        z = torch.arange(A, device=device, dtype=torch.float32) / max(A - 1, 1)
+        z = z if u(0, 1) < 0.5 else 1 - z
+        if u(0, 1) < 0.5:
+            al = u(0.3, 2.5) * sg; att = torch.exp(-al * z); kind = ("attenuation", round(al, 2))
+        else:
+            be = u(0.1, 0.6) * sg; att = 1 - be * z; kind = ("bleaching", round(be, 2))
+        sb = u(0.5, 2.5) * sg; wz = (z ** u(0.5, 2.0)).view(A, 1, 1)
+        img = ((1 - wz) * img + wz * gaussian(img, sb)) if sb > 0.2 else img
+        img = img * att.view(A, 1, 1); rec["depth"] = kind + (round(sb, 2),)
     # CT: beam-hardening cupping (darker towards the rotation axis), phase-contrast fringes (an edge pair, either sign)
     if on("cupping"):
         c = u(0, 0.25) * sg; rmax = float(rr.max()) + 1.0
@@ -1101,7 +1170,17 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
         c = u(0.45 - 0.2 * sg, 0.45); img = gibbs(img, axes, c); rec["gibbs"] = (axes, round(c, 2))
     if on("ghosting"):
         a = int(u(0, 3)); n = img.shape[a]; sh = int(u(n // 6, n // 2)); img = img + u(0.03, 0.15) * sg * torch.roll(img, shifts=sh, dims=a); rec["ghosting"] = (a, sh)
-    # noise: Poisson (on the current range), Gaussian, Rician, speckle
+    if on("ctf"):                                                                               # the contrast transfer function: rings of either sign in frequency
+        kk = torch.sqrt(sum(torch.fft.fftfreq(n_, device=device).view([-1 if b == a else 1 for b in range(3)]) ** 2 for a, n_ in enumerate(img.shape)))
+        per = lu(3, 15); Aa = u(0.05, 0.15); kB = u(0.15, 0.5)
+        chi = math.pi * (kk * per) ** 2
+        ctf = -(math.sqrt(1 - Aa * Aa) * torch.sin(chi) + Aa * torch.cos(chi)) * torch.exp(-(kk / kB) ** 2)
+        flip = u(0, 1) < 0.5
+        if flip:                                                                                 # a phase-flipped (corrected) tomogram
+            ctf = ctf.abs()
+        m0 = float(img.mean()); img = m0 + torch.fft.ifftn(torch.fft.fftn(img - m0) * ctf).real
+        rec["ctf"] = (round(per, 1), round(Aa, 2), round(kB, 2), flip)
+    # noise: Poisson (on the current range), Gaussian, Rician, speckle, a starved dose
     lo, hi = _quantile(img, 0.001), _quantile(img, 0.999); rng = max(hi - lo, 1e-3)
     if on("poisson"):
         Pn = lu(15 / max(sg, 0.01), 1500 / max(sg, 0.01)); img = lo + rng * torch.poisson(((img - lo) / rng).clamp_min(0) * Pn, generator=g) / Pn; rec["poisson_photons"] = round(Pn)
@@ -1112,6 +1191,17 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
         img = lo + torch.sqrt((img - lo + sd * torch.randn(img.shape, device=device, generator=g)) ** 2 + (sd * torch.randn(img.shape, device=device, generator=g)) ** 2); rec["rician_sd"] = round(sd, 1)
     if on("speckle"):
         img = img * (1 + u(0, 0.2) * sg * torch.randn(img.shape, device=device, generator=g)); rec["speckle"] = True
+    if on("lowdose"):                                                                           # a few photons / electrons per voxel, a read noise and an offset
+        Pn = lu(0.5, 20.0) / max(sg, 0.01) ** 2; rd = u(0.3, 2.0); off = u(0, 5)
+        cnt = torch.poisson(((img - lo) / rng).clamp_min(0) * Pn, generator=g) + off + rd * torch.randn(img.shape, device=device, generator=g)
+        img = lo + rng * (cnt - off) / Pn; rec["lowdose"] = (round(Pn, 2), round(rd, 2))
+    if on("wedge"):                                                                             # the missing wedge: beam along the axis, tilt axis the last in-plane
+        th = u(40, 70); k0 = torch.fft.fftfreq(A, device=device).view(-1, 1, 1); k1 = torch.fft.fftfreq(B, device=device).view(1, -1, 1)
+        keep = (k0.abs() <= math.tan(math.radians(th)) * k1.abs()) | (k0 == 0)                  # the planes reached by tilts up to +-th
+        keep = keep.expand(A, B, C).float()
+        if u(0, 1) < 0.5:                                                                        # a soft edge (weighted back-projection)
+            keep = gaussian(keep, (0.7, 0.7, 0.0), truncate=3.0); keep[0, 0, 0] = 1.0
+        m0 = float(img.mean()); img = m0 + torch.fft.ifftn(torch.fft.fftn(img - m0) * keep).real; rec["wedge"] = round(th, 1)
     # thick slices, after the noise: acquired thick, resampled to isotropic (noise correlated along the axis)
     if on("thick"):
         f = lu(2, 2 + 4 * sg); small = Fn.interpolate(img[None, None], size=(max(2, int(A / f)), B, C), mode="area")
@@ -1155,6 +1245,28 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
         img = img + u(-0.8, 0.8) * rng * spots / spots.max().clamp_min(1e-6); rec["dust"] = n
     if on("slice_jitter"):
         img = img * (1 + u(0.02, 0.1) * sg * torch.randn(A, device=device, generator=g)).view(A, 1, 1); rec["slice_jitter"] = True
+    if on("saturate"):                                                                          # the detector clipped at one end
+        fr = u(0.1, 0.4) * sg; top = u(0, 1) < 0.6
+        img = img.clamp(max=_quantile(img, 1 - fr)) if top else img.clamp(min=_quantile(img, fr)); rec["saturate"] = (round(fr, 3), "top" if top else "bottom")
+    if on("slabs") and A >= 8:                                                                  # runs of sections lost: a constant, held, interpolated or noise
+        n = _int(1, 4); wmax = max(2, min(16, int(0.12 * A))); lost = []
+        for _ in range(n):
+            w = _int(2, wmax + 1); a0 = _int(1, A - w); a1 = a0 + w; m = ("mean", "low", "high", "held", "interp", "noise")[_int(0, 6)]
+            if m == "mean":
+                img[a0:a1] = float(img.mean())
+            elif m in ("low", "high"):
+                img[a0:a1] = _quantile(img, 0.001 if m == "low" else 0.999)
+            elif m == "held":
+                img[a0:a1] = img[a0 - 1].clone()
+            elif m == "interp":
+                t = (torch.arange(1, w + 1, device=device, dtype=torch.float32) / (w + 1)).view(-1, 1, 1)
+                nxt = img[a1] if a1 < A else img[a0 - 1]
+                img[a0:a1] = (1 - t) * img[a0 - 1] + t * nxt
+            else:
+                img[a0:a1] = float(img.mean()) + float(img.std()) * torch.randn((w, B, C), device=device, generator=g)
+            present[a0:a1] = 0.5 if m in ("held", "interp") else 0.0                            # a neighbour's data (displaced) or none
+            lost.append((a0, w, m))
+        rec["slabs"] = lost
     img = img.movedim(0, ax).contiguous()
     # ---- the display window: a little clipping at either end, then 8 bits
     clip = u(0.0, 0.05) if u(0, 1) < 0.1 else u(0.0, 0.015)
@@ -1167,6 +1279,9 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     iso = torch.tensor([L.role == "isotropic" for L in s.layers], device=device).view(-1, 1, 1, 1)
     vis = torch.where(iso, torch.ones_like(t), ((t - PRESENCE_T[0]) / (PRESENCE_T[1] - PRESENCE_T[0])).clamp(0, 1))
     ovis = torch.where(iso, torch.ones_like(t), ((t - ORIENTATION_T[0]) / (ORIENTATION_T[1] - ORIENTATION_T[0])).clamp(0, 1))
+    if bool((present < 1).any()):                                                               # lost sections: the visibility window (sigma 5) would
+        pm = gaussian(present.view(A, 1, 1), (1.5, 0.0, 0.0), truncate=3.0).view([-1 if b == ax else 1 for b in range(3)])   # bridge them; a gap of
+        vis = torch.where(iso, vis, vis * pm[None]); ovis = torch.where(iso, ovis, ovis * pm[None])                            # 1-2 sections still is
     wmean = lambda v: [round(float((x * o).sum() / o.sum().clamp_min(1e-6)), 2) for x, o in zip(v, occ)]   # occupancy-weighted means, for the record
     rec["visibility"] = wmean(vis); rec["orientation_visibility"] = wmean(ovis)
     return {"image": img, "occupancy": occ, "tensors": T, "descriptors": Dsc, "visibility": vis, "orientation_visibility": ovis, "stretch": stretch, "record": rec,
