@@ -351,7 +351,7 @@ SH head; D3 = density only with a per-cell-normalised order-2 term.
 | 10 | D2 (decoupled density) | the exact density read without matching; learnable once the trunk has features | the anti-hedging losses (both target-weighted forms fail from scratch) |
 | 8 | S1 (deviator loss) | the evaluation setup (rotated bank, paired bootstrap, a matching rule independent of the training loss) | one tensor per mass-ranked slot under uncertainty: any single-tensor loss yields a mean hedge |
 | 11 | G1 (gated recipe) | the permutation-free mixture head, trained without a hand-made regime (best on every kind: line 0.73, sheet 0.79, blob 0.53, interface 0.81 deviatoric cosine) | the slot set adds nothing the mixture does not carry (round tensors, kind head collapsed to "blob", N no better than a constant, one axis at crossings) |
-| 12 | F1 | (pending) | (pending) |
+| 12 | F1 (final model) | strength robustness is cheap (ramping training strength fixed P1's 0.6 weakness, no loss at 0.3) | second populations in every output: slots copy the first axis; the density head shrinks high orders (MSE) or fills them with noise (decoupled) |
 
 ## Review 8 (06:05 Montreal)
 
@@ -432,3 +432,16 @@ strength 0.3 -> 0.6.
 F1 fixed P1's strength-0.6 weakness (training to 0.7) and kept its standard-bank level; its density head finds second
 peaks on crossing cells at about its false-alarm rate on single cells (no discrimination). G1 remains the best model
 overall. Review 12 scrutinises.
+
+## Review 12 (06:20 Montreal)
+
+Review 12 (F1, paired): strength 0.6, F1 - P1: single -4.6 [-9.4, -1.0], mixture -6.0 [-10.1, -1.7], shared -0.8
+(n.s.); standard bank: no change; strength 0.6, F1 - G1: single -0.9 (n.s.), shared +2.2 [+0.9, +3.3] -- G1 remains
+the best. The gain is confounded (900 more steps, the first lr decay P1 ever had, strength 0.3 -> 0.7, crossings,
+the SH head); likely the strength ramp and the decay. **The SH head's crossing detection is not real**: AUC of
+second-peak strength (crossing vs single cells) 0.49 against the exact target's 0.82; the decoupled loss's magnitude
+term pushes |p_l| to the expected |t_l| with an unknown direction -> energetic random high orders (orders 6-8 at
+0.30-0.44 of the target's energy, cosine ~0) -> false peaks; MSE (C3) shrinks them to ~0 instead -- neither form
+works. Recommended: a clean control for the strength ramp on G1; an overfit test of whether the SH head can
+represent a crossing at all, then a residual head conditioned on the first axis; the axis head through 2000 steps,
+then best-of-2 axis hypotheses per slot. Do not train the decoupled density head further.
