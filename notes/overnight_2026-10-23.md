@@ -199,3 +199,7 @@ Stopped P1 at ~2550 (checkpoint 2000 kept) and D1 at ~900 (checkpoint 750) to fr
 
 P1 is the best model so far; D1 sat on the round plateau too (density-only training does not escape it without a
 curriculum).
+* P1@2000 on the real HiP-CT vessel (`learn_pilot/P1_wide_crossing/real_glyphs_step2000_vessel.png`): sticks and
+  lobes follow the vessel loop's local direction around its whole length, but faint populations (above the engine's
+  min_mass 0.01, presence on) fill the empty dark space -- a presence / mass calibration problem (presence is the
+  term reviews 1 and 4 flagged; G1 weights it 0.1).
