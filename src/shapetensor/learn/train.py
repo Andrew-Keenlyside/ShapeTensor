@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import math
 import time
 from pathlib import Path
@@ -70,7 +71,32 @@ SCALARS = ("classes", "fraction", "size", "identity")
 LATE = ("mass", "presence", "kind", "hellinger")                                                   # after orientation: they swamp it if present from the start
 
 
+CACHE = None                       # a directory: training pairs cached on disk, shared by runs drawing the same pairs
+
+
 def make(seed: int, size: int, device, strength: float = 1.0, gen: dict | None = None) -> tuple[torch.Tensor, dict]:
+    """One training pair (see :func:`_make_pair`); with :data:`CACHE` set, read from / written to a disk cache keyed by
+    everything that determines the pair (atomic writes: concurrent runs share it)."""
+    if CACHE is None:
+        return _make_pair(seed, size, device, strength, gen)
+    import hashlib
+    from pathlib import Path as _P
+    from . import targets as _tg
+    key = json.dumps([seed, size, round(float(strength), 4), gen or {}, QUERY, SH_EXACT, DESC_LMAX, _tg.ORDER], sort_keys=True, default=str)
+    f = _P(CACHE) / (hashlib.sha1(key.encode()).hexdigest() + ".pt")
+    if f.exists():
+        try:
+            img, out = torch.load(f, map_location=device, weights_only=False)
+            return img, out
+        except Exception:
+            pass
+    img, out = _make_pair(seed, size, device, strength, gen)
+    tmp = f.with_suffix(f".{os.getpid()}.tmp")
+    torch.save((img.cpu(), {k: v.cpu() for k, v in out.items()}), tmp); os.replace(tmp, f)
+    return img, out
+
+
+def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | None = None) -> tuple[torch.Tensor, dict]:
     """One training pair: the 8-bit image and its lattice target (floats in half precision). ``gen``: arguments for
     :func:`~shapetensor.learn.generator.draw` (a modality, a background style, crossing groups, layer kinds, ...)."""
     s, d = draw((size,) * 3, seed=seed, device=device, strength=strength, **(gen or {}))
@@ -330,7 +356,7 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
           strength0: float = 0.15, strength1: float = 1.0, overfit: int = 0, gen: dict | None = None, resume: str | None = None,
           widths: tuple = (16, 32, 64), distinct: float | None = None, sh_lmax: int = 0, lcn: float = 0.0, presence_band=None, weights: dict | None = None, query: int = 0,
           simple: dict | None = None, p_simple=(0.0, 0.0), init: str | None = None, order: str = "mass", exact: bool = False, desc_lmax: int = 0,
-          context=None, late_start: int | None = None, scalar_window=None):
+          context=None, late_start: int | None = None, scalar_window=None, cache: str | None = None):
     from .engine import PopulationEngine
     from . import losses as _losses
     _losses.PRESENCE_BAND = tuple(presence_band) if presence_band else None
@@ -338,7 +364,9 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     _targets.ORDER = order                                                                               # slot order of the targets (and of ties)
     global QUERY
     QUERY = {"n_points": query, "n_levels": 4, "lmax": sh_lmax, "exact": exact} if query else None
-    global SH_EXACT, DESC_LMAX, CONTEXT
+    global SH_EXACT, DESC_LMAX, CONTEXT, CACHE
+    if cache:
+        Path(cache).mkdir(parents=True, exist_ok=True); CACHE = cache
     CONTEXT = tuple(context) if context else None
     assert not context or query, "--context needs --query"
     SH_EXACT = sh_lmax if (exact and sh_lmax) else 0
@@ -445,6 +473,7 @@ def main():
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
+    ap.add_argument("--cache", help="a directory caching the training and validation pairs on disk (shared by runs drawing the same pairs)")
     ap.add_argument("--late-start", type=int, default=None, help="step at which mass, presence, kind and Hellinger start ramping in (300 over 300 steps); default max(300, 5%% of steps)")
     ap.add_argument("--scalar-window", type=int, nargs=2, default=None, help="steps over which the cell scalars (classes, fraction, size, identity) ramp from 0 to full; default 20%%-40%% of steps")
     ap.add_argument("--context", type=float, nargs=2, default=None, help="train the query decoder also with the input visible only within a random half-width in [lo, hi] voxels (e.g. 6 32)")
@@ -464,7 +493,7 @@ def main():
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
     a = ap.parse_args()
     train(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=a.warmup, margin=a.margin, val_n=a.val_n, val_every=a.val_every,
-          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact, desc_lmax=a.desc_lmax, context=a.context, late_start=a.late_start, scalar_window=a.scalar_window)
+          seed=a.seed, strength0=a.strength0, strength1=a.strength1, overfit=a.overfit, gen=a.gen, resume=a.resume, widths=tuple(a.widths), distinct=a.distinct, sh_lmax=a.sh_lmax, lcn=a.lcn, presence_band=a.presence_band, weights=a.weights, query=a.query, simple=a.simple, p_simple=tuple(a.p_simple), init=a.init, order=a.order, exact=a.exact, desc_lmax=a.desc_lmax, context=a.context, late_start=a.late_start, scalar_window=a.scalar_window, cache=a.cache)
 
 
 if __name__ == "__main__":
