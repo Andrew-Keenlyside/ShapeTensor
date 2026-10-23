@@ -165,3 +165,33 @@ whose intensities disagree; anatomix features for the coarse, global alignment, 
    suite (serves tractography through crossings).
 3. **v2**: consistency training on real unlabelled volumes.
 4. **v3**: the broad grammar and more modalities; the latent exposed as orientation-aware features.
+
+## 12. The population density as the core object (overnight 23 Oct)
+
+The slots answer "which populations, with which descriptors", but a set output needs a matching, a cap K, a merge rule
+and an order -- each a source of conflicting targets (the full-generator failure: slot ordering and a presence guess
+dominated the gradient). The object that needs none of these is the **population density**:
+
+    f(u; x, sigma, B) = sum_L m_L(x, sigma) w(u | S_L(x, sigma))
+
+over the rendered shape layers L, with m_L = G_sigma * (o_L v_L) the windowed visible mass and m_L S_L = G_sigma * (o_L
+v_L T_L) the windowed mass x tensor; w the angular density of a tensor (a line a lobe, a sheet a girdle, a solid its
+second moment's quadratic form, a blob flat). Properties:
+
+* **any shape**: every layer contributes through its tensor; no kinds. A hollow fibre, a ribbon, a crystal and a sheet
+  differ in w, not in a label. The number of populations is unbounded; crossings are peaks.
+* **any description scale sigma**: linear in the windowed fields, so a coarser sigma is exactly a Gaussian of the
+  finer one, and a query at any sigma has an exact target (`learn/query.py`).
+* **any position x**: the windowed fields are continuous; sub-voxel queries are exact samples of them.
+* **in even SH** (orders 0..8: 45 numbers): order 0 is the mass, order 2 the mixture tensor (the mean tensor head), 4
+  and up separate crossings from sheets (Advani & Tucker's 4th-order orientation tensor). It is what fibre-orientation
+  networks regress (FOD-Net) and what tractography consumes.
+* **descriptors without slots**: any per-layer descriptor q (thickness, hollowness, angularity, contrast) gives a
+  descriptor density f_q(u) = sum_L m_L q_L w_L(u); at a peak direction q(u) = f_q(u) / f(u) is the descriptor of the
+  population pointing there. Selection by predicates becomes thresholds on these fields.
+* **context B**: the trunk's receptive field. Train with random input crops of side B around the queries (B as a
+  decoder input), so a query states how much context it may use; beyond the trained B, expect degradation.
+* **input resolution**: sigma and B in physical units (mm), with the voxel size as an input; the generator already
+  draws physical scale (`scale`); resample-to-train-grid augmentation (SynthSeg's recipe) covers acquisitions.
+
+Slots remain as a readout (peaks of f, with descriptor ratios at the peaks), trained after the density, not before it.
