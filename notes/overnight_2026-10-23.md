@@ -247,3 +247,25 @@ peak stands 0.5x the mean above it; a second peak at (f2 - mean) / (f1 - mean) >
 rate) -- with it D1 and the untrained net give no peaks at all; `--sh-loss decoupled` with order 2 first (all orders
 once the mass-weighted order-2 cosine passes 0.3); `--aniso` uses the density's angular energy when the target has
 one. Launched D2: wide, density only, decoupled loss, curriculum (window 350), angular-energy sampling, 700 steps.
+
+## Review 6 and the final model (04:40 Montreal)
+
+Review 6 (independent agent, on P1@2000, paired bootstrap over draws, extra banks at strength 0.6 and with crossings
+forced): P1 matches the structure tensor on single cells (+0.4 [-1.8, 2.0]); its shared-cell gain is real but small
+(-2.5 [-4.9, -0.3]) and comes from line + interface cells (-6.5), not crossings (-2.0 [-5.1, +0.3]); R2 (never saw
+an interface) is as good there -- a property of any learned model. **P1 does not learn the second population**: its
+two most salient slots are 9.4 deg apart against target crossings of median 60 deg, the second a copy of the first
+(salience 0.67 of it); pair error rises as half the crossing angle (a one-axis model); no better than R2. N agreement
+0.31 is below a constant N = 1 (0.39); a ~0.07 line mass everywhere, the kind head says "line". It generalises to
+draws without crossings, not to strength 0.6 (worse than the structure tensor by 4.2 [1.0, 9.2]; it never saw > 0.34).
+The resume changed nothing (cosine continued at ~1e-3, no decay ever). Bugs: training evaluation still used the
+uncalibrated peaks (fixed, 35d8cc4); `--resume` with `--gate` closes the gate again (use `--init`); the matched-slot
+shared metric rewards copying the dominant axis (compare mixture heads and pair / copy / random-second controls).
+Recommended: continue P1 rather than start fresh, with a density head (the only matching-free route to second
+populations), train at the strength evaluated, de-duplicate slots and decide presence by mass.
+
+Final model launched: F1 = `--init` P1@2000, 900 steps, lr 5e-4 with warmup 50 and the gated schedule (opens at ~50
+for a warm start, then decays -- P1 never decayed), buffer 128, strength 0.3 -> 0.7, ~75% crossing draws (`--simple
+{"crossing": true} --p-simple 0.5 0.5`), exact density head with the decoupled loss, presence 0.1, checkpoints
+every 300 steps. C2 (the five-change general model) stopped at 250 to make room (three reviews called it
+confounded; its parts are covered by tests and by D2 / F1).
