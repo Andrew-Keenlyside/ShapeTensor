@@ -350,7 +350,8 @@ SH head; D3 = density only with a per-cell-normalised order-2 term.
 | 9 | C3 (crossings + SH head) | exact target and bank make the one-axis failure measurable | no output can hold a second orientation |
 | 10 | D2 (decoupled density) | the exact density read without matching; learnable once the trunk has features | the anti-hedging losses (both target-weighted forms fail from scratch) |
 | 8 | S1 (deviator loss) | the evaluation setup (rotated bank, paired bootstrap, a matching rule independent of the training loss) | one tensor per mass-ranked slot under uncertainty: any single-tensor loss yields a mean hedge |
-| 11, 12 | G1, F1 | (pending) | (pending) |
+| 11 | G1 (gated recipe) | the permutation-free mixture head, trained without a hand-made regime (best on every kind: line 0.73, sheet 0.79, blob 0.53, interface 0.81 deviatoric cosine) | the slot set adds nothing the mixture does not carry (round tensors, kind head collapsed to "blob", N no better than a constant, one axis at crossings) |
+| 12 | F1 | (pending) | (pending) |
 
 ## Review 8 (06:05 Montreal)
 
@@ -396,3 +397,19 @@ started at 06:00); add an axis output per slot (committed axis under uncertainty
 head for second populations; weight training towards multi-population cells by the target's order >= 4 energy beyond
 a single lobe; per-order MSE density loss over running energies alongside the slot terms; presence by mass; train at
 the strengths evaluated.
+
+## Review 11 (06:05 Montreal)
+
+Review 11 (G1): G1 beats W2 also on the strength-0.6 bank (single -5.7 [-8.5, -3.5], shared -4.8) and the crossings
+bank (-3.9 / -2.3); at strength 0.6 it holds the structure tensor's level on single cells (20.5 vs 20.0; P1 24.3, W2
+26.2). About 70% of the single-cell gain over W2 is there at equal steps (step 1000 on the run's own draws). **What
+did the work:** the gate ratio sat at 1.01-1.02 from step 100 to 450 while the sampling weight annealed; the escape
+began at ~475 -- with shape + mixture terms only at a constant 1e-3 (the late terms and presence were still off), i.e.
+a "late schedule" for a wide net; the anisotropy sampling was weak (1.5x the round floor, vs 5x for the curriculum).
+Still: slots round (linearity 0.23), the kind head says "blob" for 93% of line-heavy cells, never "sheet"; N 0.36 vs a
+constant N = 2 at 0.32; one axis at crossings (top-2 slots 8 deg apart against 56). Presence 0.1 after the gate
+helped calibration (mass in empty cells 0.09 vs 0.14-0.15; false lines 0.0004). Bugs: no fallback if the gate never
+opens (fixed: `--gate-max`); devcos with the Frobenius floor; sampling not coupled to the gate. Recommended default:
+wide, gate 0.85 with a fallback, presence 0.1, no hand-made curriculum; ablation: G1 without `--aniso`; then the
+exact density head on the G1 recipe for second populations, continuous descriptors instead of the kind head, mixed
+strength 0.3 -> 0.6.
