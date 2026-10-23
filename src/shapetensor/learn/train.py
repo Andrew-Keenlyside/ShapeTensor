@@ -10,8 +10,10 @@ each pair (exact on the lattice) and a random intensity window jitter, and repla
 A curriculum, against the collapse to constant outputs seen when everything is asked at once:
 
 * **nuisance strength** ramps from ``strength0`` to 1 over the first half of training (clear images first);
-* **orientation first** -- the slot terms (shape, mass, presence, kind, Hellinger) from the start; the cell scalars
-  (classes, fraction, size) and the identity term off for the first 20% of steps, ramped in by 40%.
+* **orientation first** -- the slots' orientation and the mixture tensor from the start; mass, presence, kind and the
+  Hellinger term ramped in from max(300, 5% of the steps) over 300 steps (present from the start, they swamp the
+  orientation signal and the network never learns it); the cell scalars (classes, fraction, size) and the identity
+  term off for the first 20% of steps, ramped in by 40%.
 
 AdamW (``lr`` 3e-4), warm-up then cosine, bf16 autocast, clipping at 5. A fixed held-out set (seeds from 10^7, full
 strength, ``strength1``) is scored every ``val_every`` steps with metrics that can see learning: the matched slot axes' error against
@@ -38,6 +40,7 @@ from .targets import target
 TKEYS = ("slots", "mass", "kind", "layer", "fraction", "classes", "size", "size_mask")
 HALF = ("slots", "mass", "fraction", "classes", "size")
 SCALARS = ("classes", "fraction", "size", "identity")
+LATE = ("mass", "presence", "kind", "hellinger")                                                   # after orientation: they swamp it if present from the start
 
 
 def make(seed: int, size: int, device, strength: float = 1.0, gen: dict | None = None) -> tuple[torch.Tensor, dict]:
@@ -94,10 +97,11 @@ def _axes(S: torch.Tensor, kind: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
-    """The held-out set: loss parts; the median axis error of matched populations (target mass > 0.05); the predicted
+    """The held-out set: loss parts; the median axis error of matched line populations whose target is linear (mass >
+    0.05, linearity > 0.5) and of the mixture head on cells with one line population; the predicted
     fraction's spread over the set and its correlation with the target's; the engine's population count (line
     populations, N) against the target's own (the same engine reading the target slots)."""
-    model.eval(); parts, errs, fp, ft, nagree, ntot = {}, [], [], [], 0.0, 0.0
+    model.eval(); parts, errs, mix_errs, fp, ft, nagree, ntot = {}, [], [], [], [], 0.0, 0.0
     crop = lambda v: v[..., margin:-margin, margin:-margin, margin:-margin]
     for img, t in val:
         x, T = stack([(img, t)], aug=False)
@@ -111,9 +115,16 @@ def evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
         Sp = gather_slots(Pc["slots"].float(), perm)
         kt = Tc["kind"]; mt = Tc["mass"].float()
         ang = torch.rad2deg(torch.acos((_axes(Sp.movedim(2, -1), kt) * _axes(Tc["slots"].float().movedim(2, -1), kt)).sum(-1).abs().clamp(max=1.0)))
-        sel = mt > 0.05
+        tv, _ = eig3(Tc["slots"].float().movedim(2, 0))                                                   # (3, 1, K, c): the target's own linearity
+        lin = (tv[2] - tv[1]) / tv[2].clamp_min(1e-9)
+        sel = (mt > 0.05) & (kt == 0) & (lin > 0.5)                                                       # cells where the target is a line with an axis
         if bool(sel.any()):
             errs.append(ang[sel])
+        # the permutation-free mixture head against the target mixture, where the cell holds one line population
+        one = sel[:, 0] & ~(mt[:, 1:] > 0.05).any(1)
+        if bool(one.any()):
+            _, Vm = eig3(Pc["mixture"][0].float()); _, Vt = eig3(Tc["slots"][0, 0].float())
+            mix_errs.append(torch.rad2deg(torch.acos((Vm[2] * Vt[2]).sum(0).abs().clamp(max=1.0)))[one[0]])
         fp.append(torch.sigmoid(Pc["fraction_logit"].float()).flatten()); ft.append(Tc["fraction"].float().flatten())
         if engine is not None:
             pe = engine.populations({k: v[0].float() for k, v in P.items()}, labels=False)
@@ -127,7 +138,9 @@ def evaluate(model, val, grid, margin: int, device, engine=None) -> dict:
     e = torch.cat(errs) if errs else torch.zeros(1)
     fp, ft = torch.cat(fp), torch.cat(ft)
     corr = float(((fp - fp.mean()) * (ft - ft.mean())).mean() / (fp.std() * ft.std()).clamp_min(1e-9))
+    em = torch.cat(mix_errs) if mix_errs else torch.zeros(1)
     out = {**{f"val_{k}": v for k, v in parts.items()}, "val_axis_deg_median": float(e.median()), "val_axis_deg_p90": float(e.quantile(0.9)),
+           "val_mixture_axis_deg_median": float(em.median()),
            "val_fraction_std": float(fp.std()), "val_fraction_corr": corr, "val_fraction_mae": float((fp - ft).abs().mean())}
     if engine is not None:
         out["val_N_agree"] = nagree / max(ntot, 1)
@@ -155,6 +168,8 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     sched = lambda s: min(1.0, (s + 1) / warmup) * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * min(s, steps) / steps)))
     strength = lambda s: strength1 if overfit else strength0 + (strength1 - strength0) * min(1.0, s / (0.5 * steps))
     ramp = lambda s: min(1.0, max(0.0, (s / steps - 0.2) / 0.2))                                     # the cell scalars: 0 until 20%, full by 40%
+    o0 = max(300, int(0.05 * steps))
+    oramp = lambda s: min(1.0, max(0.0, (s - o0) / 300))                                               # mass, presence, kind, Hellinger: after orientation (o0 steps)
     grid = hemisphere(160, device)
     log(f"model: {sum(p.numel() for p in model.parameters())} parameters, receptive field {rf} voxels; args {args}")
     buf = Buffer(overfit or buffer, size, device, seed0=seed * 1_000_000 + start * refresh, strength=strength(start), log=log, gen=gen)
@@ -167,7 +182,8 @@ def train(out: str, steps: int = 20000, size: int = 96, batch: int = 4, accum: i
     for step in range(start, steps):
         for pg in opt.param_groups:
             pg["lr"] = lr * sched(step)
-        r = ramp(step); W = {k: WEIGHTS[k] * r for k in SCALARS}
+        r = ramp(step); ro = oramp(step)
+        W = {**{k: WEIGHTS[k] * r for k in SCALARS}, **{k: WEIGHTS[k] * ro for k in LATE}}
         opt.zero_grad(set_to_none=True); tot_v = 0.0; parts_acc = {}
         for _ in range(accum):
             x, T = buf.batch(batch, g)

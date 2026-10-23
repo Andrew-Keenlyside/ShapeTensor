@@ -13,7 +13,8 @@ A small, strictly local, fully convolutional network whose output *is* the strid
   symmetric positive semi-definite with trace 1, from 6 numbers), a mass (``softplus``, read as √mass), a presence
   logit (is the slot a population at all: a soft mass never reaches zero, so emptiness is decided here), kind logits
   (line / sheet / blob / interface) and an identity embedding (unit length) -- and the cell's scalars: the shape
-  fraction (logit), the class shares (logits over line / sheet / blob / interface / isotropic) and the log size.
+  fraction (logit), the class shares (logits over line / sheet / blob / interface / isotropic), the log size and the
+  mixture tensor (the populations' mass-weighted mean tensor: a permutation-free orientation signal for training).
 
 The receptive field is :func:`receptive_field` voxels (54 for the default; a chunked run needs a halo of half of it);
 the target's support is ±16.5 voxels (σ_w = 5 truncated at 3σ, pooled by 4).
@@ -79,7 +80,7 @@ class PopulationNet(nn.Module):
         self.mix = nn.Conv3d(2 * c2, c2, 1)
         self.per_slot = 6 + 1 + 1 + n_kinds + embed                                             # tensor, root mass, presence logit, kind logits, embedding
         self.slots = nn.Conv3d(c2, K * self.per_slot, 1)
-        self.scalars = nn.Conv3d(c2, 1 + n_classes + 1, 1)
+        self.scalars = nn.Conv3d(c2, 1 + n_classes + 1 + 6, 1)                                     # fraction, classes, log size, the mixture tensor
 
     def forward(self, x: torch.Tensor) -> dict:
         h0 = self.l0(Fn.silu(self.stem(x)))                                                      # nonlinear from the first layer: local energies
@@ -99,8 +100,9 @@ class PopulationNet(nn.Module):
         kind = s[:, :, 8:8 + self.n_kinds]
         e = Fn.normalize(s[:, :, 8 + self.n_kinds:], dim=2)
         sc = self.scalars(h)
+        n_cls = sc.shape[1] - 8
         return {"slots": T, "mass": root_mass ** 2, "root_mass": root_mass, "presence_logit": presence, "kind": kind, "embed": e,
-                "fraction_logit": sc[:, 0], "class_logits": sc[:, 1:-1], "log_size": sc[:, -1]}
+                "fraction_logit": sc[:, 0], "class_logits": sc[:, 1:1 + n_cls], "log_size": sc[:, 1 + n_cls], "mixture": sc[:, 2 + n_cls:]}
 
 
 def receptive_field(model: PopulationNet, size: int = 96) -> int:

@@ -27,7 +27,8 @@ def _exact_pred(T):
     f = T["fraction"].clamp(1e-4, 1 - 1e-4)
     return {"slots": slots, "mass": T["mass"], "root_mass": T["mass"].sqrt(), "kind": kind, "presence_logit": torch.where(T["mass"] > 0.005, 30.0, -30.0),
             "embed": torch.nn.functional.normalize(torch.randn(*T["mass"].shape[:2], 8, *T["mass"].shape[2:], device=DEV), dim=2),
-            "fraction_logit": torch.log(f / (1 - f)), "class_logits": torch.log(T["classes"] + 1e-8), "log_size": T["size"].clamp_min(0.3).log()}
+            "fraction_logit": torch.log(f / (1 - f)), "class_logits": torch.log(T["classes"] + 1e-8), "log_size": T["size"].clamp_min(0.3).log(),
+            "mixture": (T["slots"] * T["mass"][:, :, None]).sum(1) / T["mass"].sum(1).clamp_min(1e-9)[:, None]}
 
 
 @pytest.fixture(scope="module")
@@ -43,15 +44,25 @@ def test_exact_prediction_costs_nothing(sample_target):
     assert parts["shape"] < 1e-6 and parts["mass"] < 1e-6 and parts["presence"] < 1e-6 and parts["kind"] < 1e-3 and parts["hellinger"] < 1e-5, parts
 
 
-def test_loss_ignores_slot_order(sample_target):
+def test_slots_are_rank_ordered(sample_target):
+    """Slot k predicts the k-th heaviest population: exchanging predicted slots whose targets are empty changes
+    nothing; exchanging the two heaviest populations' slots costs (where their masses do not tie)."""
     _, _, T = sample_target
     P = _exact_pred(T)
-    P = {k: (v + 0.05 * torch.randn_like(v) if k in ("root_mass",) else v) for k, v in P.items()}
-    K = P["mass"].shape[1]; perm = [(i * 5 + 2) % K for i in range(K)]                          # a permutation of the K slots
-    Pp = {k: (v[:, perm] if k in ("slots", "mass", "root_mass", "presence_logit", "kind", "embed") else v) for k, v in P.items()}
-    w = {"identity": 0.0}                                                                       # the identity term draws random negatives
-    a, _ = loss(P, T, hemisphere(160, DEV), margin=1, weights=w); b, _ = loss(Pp, T, hemisphere(160, DEV), margin=1, weights=w)
-    assert abs(float(a) - float(b)) < 1e-4 * max(1.0, abs(float(a)))
+    w = {"identity": 0.0}
+    base, _ = loss(P, T, hemisphere(160, DEV), margin=1, weights=w)
+    K = P["mass"].shape[1]
+    swap_empty = list(range(K)); swap_empty[-1], swap_empty[-2] = swap_empty[-2], swap_empty[-1]
+    keys = ("slots", "mass", "root_mass", "presence_logit", "kind", "embed")
+    both_empty = (T["mass"][:, -1] <= 0.005) & (T["mass"][:, -2] <= 0.005)                          # swap only where both targets are empty
+    sw = lambda v: torch.where(both_empty.view(both_empty.shape[0], 1, *([1] * (v.dim() - 5)), *both_empty.shape[1:]) if v.dim() > 5 else both_empty[:, None], v[:, swap_empty], v)
+    Pe = {k: (sw(v) if k in keys else v) for k, v in P.items()}
+    b, _ = loss(Pe, T, hemisphere(160, DEV), margin=1, weights=w)
+    assert abs(float(b) - float(base)) < 1e-3 * max(1.0, abs(float(base)))                       # the last two slots are empty almost everywhere
+    swap_top = list(range(K)); swap_top[0], swap_top[1] = 1, 0
+    Pt = {k: (v[:, swap_top] if k in keys else v) for k, v in P.items()}
+    c, _ = loss(Pt, T, hemisphere(160, DEV), margin=1, weights=w)
+    assert float(c) > float(base) + 1e-3
 
 
 def test_shape_cost_balanced_across_kinds():

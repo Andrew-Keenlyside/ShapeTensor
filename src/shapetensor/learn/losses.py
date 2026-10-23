@@ -10,9 +10,13 @@ Per lattice cell the predicted ``K`` slots are matched to the target's ``K`` slo
   target slot asks for zero mass;
 * **kind**: cross-entropy of the kind logits (present target slots only).
 
-Plus, per cell: the class shares (soft-label cross-entropy), the fraction (binary cross-entropy against the soft
-target), the log size (L1 where defined), a **Hellinger** distance between the rendered densities of the predicted and
-target slots on a direction grid (the chain's view: lobes, rings, flat), and an **identity** term: a contrastive loss
+Each term is averaged over its own support (orientation and kind over present populations; mass and presence over
+slots) -- averaged over all cells, the orientation term was diluted by the empty ones and the other terms swamped it.
+Plus, per cell: the **mixture** tensor (the populations' mass-weighted mean tensor -- a permutation-free orientation
+signal, which the trunk learns from first), the class shares (soft-label cross-entropy), the fraction (binary
+cross-entropy against the soft target), the log size (L1 where defined), a **Hellinger** distance between the rendered
+densities of the predicted and target slots on a direction grid (the chain's view: lobes, rings, flat), and an
+**identity** term: a contrastive loss
 between the embeddings of matched slots in neighbouring cells, the slot of the same layer the positive, batch-wide
 negatives. Only cells ``margin`` cells from the crop's edge count (4 cells = 16 voxels: the receptive field reaches
 ±23.5 voxels, but 99% of a trained network's gradient mass lies within ±12).
@@ -29,8 +33,9 @@ from .targets import render_odf
 
 WF = torch.tensor([1.0, 1.0, 1.0, 2.0, 2.0, 2.0])
 KIND_WEIGHT = torch.tensor([1.0, 4.0, 1.0, 4.0])          # line, sheet, blob, interface
-WEIGHTS = {"shape": 1.0, "mass": 1.0, "presence": 0.5, "kind": 0.1, "classes": 0.5, "fraction": 0.5, "size": 0.1, "hellinger": 1.0, "identity": 0.1}
+WEIGHTS = {"shape": 1.0, "mass": 1.0, "presence": 0.5, "kind": 0.1, "classes": 0.5, "fraction": 0.5, "size": 0.1, "hellinger": 1.0, "identity": 0.1, "mixture": 2.0}
 PRESENT = 0.005                    # a target slot with at least this mass is a population (presence 1); below, empty (presence 0)
+TIE = 0.7                          # target slots whose masses are within this ratio may exchange their predicted slots
 
 
 def _cells(x: torch.Tensor, margin: int) -> torch.Tensor:
@@ -59,6 +64,15 @@ def match(pred: dict, tgt: dict, m_full: float = 0.02):
     perms = torch.tensor(list(itertools.permutations(range(K))), device=dev)                               # (P, K): target slot k <- predicted perms[p, k]
     kt_idx = torch.arange(K, device=dev)
     costs = C[:, perms, kt_idx[None].expand_as(perms)].sum(2)                                             # (B, P, c)
+    # rank-restricted: predicted slot k is the k-th heaviest population (the targets are sorted by mass); a permutation
+    # may only exchange slots whose target masses tie (within TIE of each other) or are both empty -- free matching let
+    # the assignment wander from cell to cell and step to step, and no slot learned orientation
+    mk, mj = mt[:, :, None], mt[:, None, :]                                                               # (B, Kt, 1, c), (B, 1, Kt, c)
+    ratio = torch.minimum(mk, mj) / torch.maximum(mk, mj).clamp_min(1e-9)
+    pk, pj = present[:, :, None], present[:, None, :]
+    allowed = torch.eye(K, dtype=torch.bool, device=dev).view(1, K, K, *([1] * (mt.dim() - 2))) | ((ratio >= TIE) & pk & pj) | (~pk & ~pj)   # (B, Kt, Kp, c)
+    valid = allowed[:, kt_idx[None].expand_as(perms), perms].all(2)                                      # (B, P, c)
+    costs = torch.where(valid, costs, torch.full_like(costs, 1e9))
     best = costs.argmin(1)                                                                                # (B, c)
     perm = perms[best].movedim(-1, 1)                                                                     # (B, K, c)
     sel = lambda X: torch.gather(X, 1, perm.unsqueeze(1)).squeeze(1)                                      # X (B, Kp, Kt, c) -> (B, Kt, c): X[b, perm[b, t], t]
@@ -118,7 +132,9 @@ def loss(pred: dict, tgt: dict, grid: torch.Tensor, margin: int = 4, kappa: floa
     P = {k: _cells(v, margin) for k, v in pred.items()}
     T = {k: _cells(v, margin) if torch.is_tensor(v) and v.dim() >= 4 else v for k, v in tgt.items()}
     cost, parts, perm = match(P, T)
-    out = {"shape": parts["shape"].mean(), "mass": parts["mass"].mean(), "presence": parts["presence"].mean(), "kind": parts["kind"].mean()}
+    n_pop = (T["mass"].float() > PRESENT).sum().clamp_min(1)                                       # each term over its own support: orientation and kind
+    n_slot = T["mass"].numel() / T["mass"].shape[1] * 1.0                                           # per present population; mass and presence per cell
+    out = {"shape": parts["shape"].sum() / n_pop, "mass": parts["mass"].sum() / n_slot, "presence": parts["presence"].sum() / n_slot, "kind": parts["kind"].sum() / n_pop}
     logq = Fn.log_softmax(P["class_logits"].float(), 1)
     out["classes"] = -(T["classes"].float() * logq).sum(1).mean()
     out["fraction"] = Fn.binary_cross_entropy_with_logits(P["fraction_logit"].float(), T["fraction"].float())
@@ -128,8 +144,13 @@ def loss(pred: dict, tgt: dict, grid: torch.Tensor, margin: int = 4, kappa: floa
     f_tgt = torch.stack([render_odf(T["slots"][b].float(), T["mass"][b].float(), grid, kappa) for b in range(T["mass"].shape[0])])
     out["hellinger"] = (((f_pred + 1e-6).sqrt() - (f_tgt + 1e-6).sqrt()) ** 2).mean()          # eps: a finite gradient at zero density
     out["identity"] = identity_loss(P["embed"], perm, T, axis=axis, g=g)
+    # permutation-free orientation: the cell's mass-weighted mean tensor of its populations (no matching needed)
+    mt = T["mass"].float(); St = T["slots"].float(); tot = mt.sum(1)
+    mix = (St * mt[:, :, None]).sum(1) / tot.clamp_min(1e-9)[:, None]
+    wmix = (tot / 0.05).clamp(max=1)
+    out["mixture"] = ((((P["mixture"].float() - mix) ** 2) * WF.to(mix.device).view(1, 6, 1, 1, 1)).sum(1) * wmix).sum() / wmix.sum().clamp_min(1)
     W = {**WEIGHTS, **(weights or {})}
-    total = sum(W[k] * v for k, v in out.items() if k not in ("shape", "mass", "presence", "kind")) + cost.mean()
+    total = sum(W[k] * v for k, v in out.items())
     return total, {k: float(v) for k, v in out.items()}
 
 
