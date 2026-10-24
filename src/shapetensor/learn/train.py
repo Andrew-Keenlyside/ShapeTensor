@@ -43,7 +43,7 @@ TKEYS = ("slots", "mass", "kind", "layer", "fraction", "classes", "size", "size_
 HALF = ("slots", "mass", "fraction", "classes", "size")
 QKEYS = ("q_points", "q_sigma", "q_sh", "sh_t")
 LKEYS = ("identity_t", "points_t", "voxel", "fraction")    # the lobe model's extra targets
-EKEYS = ("e_points", "e_sigma", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa")   # the entity model's
+EKEYS = ("e_points", "e_sigma", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa", "e_gnode")   # the entity model's
 HEAD = "slots"                     # "slots" | "lobes" (set by train())
 DESC_KEY = "descriptors"           # the drawn descriptors the descriptor densities use ("descriptors5": the scenes' five)
 SH_EXACT = 0                       # > 0: the SH head's lattice target from the exact per-voxel density to this order
@@ -157,12 +157,14 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
 ENTITY = {"n_points": 384, "sigma": (1.0, 4.0), "emax": 8, "r_min": 1.5, "c_sig": 0.5, "u_max": 1536, "d_max": 16, "margin": 2, "p_tissue": 0.7}
 
 
-def entity_queries(s, d: dict, size: int, seed: int, device) -> dict:
+def entity_queries(s, d: dict, size: int, seed: int, device, points: torch.Tensor | None = None, sigma: torch.Tensor | None = None) -> dict:
     """Query points and scales drawn in the crop, their entities' targets, and the crop's local tree (the entities'
     nodes and their ancestors, re-indexed; ``e_anc (u_max, d_max)`` each node's chain to the root, -1 padded). The
     objects' entities come from the canvas (:func:`~shapetensor.learn.entities.entity_targets`); layers drawn without
     objects (underlays, region interfaces) are one population-level entity each, under the root
-    (:func:`~shapetensor.learn.entities.dense_entities`) -- together everything the total density holds."""
+    (:func:`~shapetensor.learn.entities.dense_entities`) -- together everything the total density holds. ``points`` /
+    ``sigma``: given queries instead of drawn ones. ``e_gnode`` the entities' nodes in the scene's tree (dense layers:
+    ``tree.n + j``, children of the root; -1: pads) for losses across windows."""
     from .entities import dense_entities, entity_targets
     E = ENTITY; ctx = d["entity_ctx"]; g = torch.Generator(device=device).manual_seed(seed + 4243)
     n = E["n_points"]; m = E["margin"]; emax = E["emax"]
@@ -179,6 +181,8 @@ def entity_queries(s, d: dict, size: int, seed: int, device) -> dict:
             pick = torch.randint(0, cand.shape[0], (k,), generator=g, device=device)
             pts[:k] = cand[pick] + torch.rand(k, 3, generator=g, device=device) - 0.5
     lo, hi = E["sigma"]; sig = torch.exp(math.log(lo) + torch.rand(n, generator=g, device=device) * math.log(hi / lo))
+    if points is not None:
+        pts, sig = points.float(), sigma.float(); n = pts.shape[0]
     vis, ov = d.get("visibility"), d.get("orientation_visibility")
     K = d["occupancy"].shape[0]
     full = lambda x: None if x is None else (x.float().view(-1, 1, 1, 1).expand(K, *d["occupancy"].shape[1:]) if x.dim() == 1 else x.float())
@@ -194,7 +198,7 @@ def entity_queries(s, d: dict, size: int, seed: int, device) -> dict:
     loc = torch.full((tree.n,), -1, dtype=torch.long, device=device); loc[U] = torch.arange(U.numel(), device=device)
     A = tree.ancestors(U)[:, :E["d_max"]]; A = torch.where(A >= 0, loc[A.clamp_min(0)], A)
     e_anc = torch.full((E["u_max"], E["d_max"]), -1, dtype=torch.int32, device=device); e_anc[:A.shape[0], :A.shape[1]] = A.int()
-    e_node = torch.where(live, loc[node.clamp_min(0)], node)
+    e_node = torch.where(live, loc[node.clamp_min(0)], node); gnode = node.clone()
     mass, evis, T, desc = t["mass"], t["vis"], t["T"], t["desc"]
     if nd:                                                                                          # the dense layers' entities, merged by visible mass
         dl = [s.layers[k] for k in dense]
@@ -205,10 +209,12 @@ def entity_queries(s, d: dict, size: int, seed: int, device) -> dict:
         e_anc[ids, 0] = ids.int(); e_anc[ids, 1] = int(loc[0])
         node_d = torch.where(de["live"], ids[None].expand(n, nd), torch.full((n, nd), -1, device=device, dtype=torch.long))
         e_node = torch.cat([e_node, node_d], 1); mass = torch.cat([mass, de["mass"] * de["live"]], 1); evis = torch.cat([evis, de["vis"]], 1)
+        gd_ = tree.n + torch.arange(nd, device=device)                                                   # global: the scene's layers keep their order
+        gnode = torch.cat([gnode, torch.where(de["live"], gd_[None].expand(n, nd), torch.full((n, nd), -1, device=device, dtype=torch.long))], 1)
         T = torch.cat([T, de["T"]], 1); desc = torch.cat([desc, de["desc"]], 1)
         score = torch.where(e_node >= 0, mass * evis, torch.full_like(mass, -1.0))
         o = torch.argsort(score, 1, descending=True)[:, :emax]
-        e_node, mass, evis = e_node.gather(1, o), mass.gather(1, o), evis.gather(1, o)
+        e_node, mass, evis, gnode = e_node.gather(1, o), mass.gather(1, o), evis.gather(1, o), gnode.gather(1, o)
         T = T.gather(1, o[..., None, None].expand(-1, -1, 3, 3)); desc = desc.gather(1, o[..., None].expand(-1, -1, 5))
         mass = mass * (e_node >= 0); evis = evis * (e_node >= 0)
     live = e_node >= 0
@@ -219,7 +225,7 @@ def entity_queries(s, d: dict, size: int, seed: int, device) -> dict:
         Rf, Kf = bfit(T[live].double()); R[live], Kp[live] = Rf.float(), Kf.float()
     return {"e_points": pts, "e_sigma": sig, "e_node": e_node.int(), "e_mass": mass.half(), "e_vis": evis.half(),
             "e_T6": T6.half(), "e_desc": desc.half(), "e_anc": e_anc, "e_n": torch.tensor(U.numel() + nd, device=device),
-            "e_R": R.float(), "e_kappa": Kp.float()}
+            "e_R": R.float(), "e_kappa": Kp.float(), "e_gnode": torch.where(e_node >= 0, gnode, torch.full_like(gnode, -1))}
 
 
 ROUTES = 0.0                       # > 0: batch-time contrast routes (learn/augment.py) at this strength, a fresh draw each use
@@ -915,12 +921,13 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    level0: float = 0.3, level_steps: float = 0.5, voxel_dropout: float = 0.3, weights: dict | None = None, init: str | None = None,
                    resume: str | None = None, routes: float = 1.0, contrast_views: bool = True, contrast_every: int = 2, producer: bool = True,
                    cpu_workers: int = 0, cpu_threads: int = 4, channels_last: bool = False, compile_model: bool = False, ckpt_minutes: float = 20.0,
-                   benchmark: int = 0, device: str = "cuda", log_every: int = 25, n_dirs: int = 32):
+                   benchmark: int = 0, device: str = "cuda", log_every: int = 25, n_dirs: int = 32, pairs: int = 16, pair_every: int = 4):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
     batch-time contrast routes with a second view of the same geometry (consistency every ``contrast_every`` steps),
-    the voxel size dropped at ``voxel_dropout``. The cluster machinery of :func:`train_lobes`: producer thread, CPU
+    the voxel size dropped at ``voxel_dropout``; every ``pair_every`` steps two overlapping windows of one scene (from a
+    buffer of ``pairs``) trained to agree on their entities' places in the tree. The cluster machinery of :func:`train_lobes`: producer thread, CPU
     workers, data parallel, checkpoints and ``--resume auto``, benchmark mode."""
     from . import dataflow as DF
     from . import entity_train as ET
@@ -938,6 +945,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     if weights:
         ET.ENT_WEIGHTS.update(weights)
     base = dict((gen or {}).get("scene") or {"canvas": 2 * size, "crops_per_scene": 8})
+    base.setdefault("cross_p", 0.3); base.setdefault("p_centre", 0.5)                                 # crossing scenes, crops centred on crossings
     level = {"v": level0}
     cur_gen = lambda: {"scene": LT.difficulty_gen(level["v"], base)}
     def set_routes():
@@ -954,7 +962,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 val_n=val_n, seed=seed, strength0=strength0, strength1=strength1, gen={"scene": base}, widths=list(widths), sh_lmax=8, embed=embed,
                 context_level=context_level, voxel_cond=voxel_cond, points=points, level0=level0, level_steps=level_steps, voxel_dropout=voxel_dropout,
                 weights=weights, routes=routes, contrast_views=contrast_views, world=world, contrast_every=contrast_every, n_dirs=n_dirs,
-                channels_last=channels_last, compile_model=compile_model, entity=dict(ENTITY))
+                channels_last=channels_last, compile_model=compile_model, entity=dict(ENTITY), pairs=pairs, pair_every=pair_every)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)
@@ -985,6 +993,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
         state = {"HEAD": HEAD, "DESC_KEY": DESC_KEY, "SH_EXACT": SH_EXACT, "DESC_LMAX": DESC_LMAX, "QUERY": QUERY, "CACHE": None,
                  "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC}
         cpu = DF.CpuWorkers(cpu_workers, size, buf.next + 90_000_000, cfg, state, threads=cpu_threads)
+    pbuf = ET.EntityPairBuffer(pairs, size, device, LT.difficulty_gen(level["v"], base), seed0=60_000_000 + rank * 1_000_000 + start) if pairs else None
     val = []
     if main and not benchmark:
         val = [augment(*make(10_000_000 + i, size, device, strength1, {"scene": {**LT.difficulty_gen(1.0, base), "crops_per_scene": 1}}), torch.Generator().manual_seed(i))
@@ -1049,6 +1058,16 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
             (total / accum).backward(); tot_v = tot_v + total.detach() / accum
             for k, v_ in parts.items():
                 pa[k] = pa.get(k, 0.0) + v_ / accum
+        if pbuf is not None and ET.ENT_WEIGHTS.get("cross", 0) > 0 and step % max(1, pair_every) == 0:   # overlapping windows
+            x1, x2, T1, T2, X = pbuf.batch(2, g)
+            dp = ET.sample_dirs(T1, n_dirs, g=gd)
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=str(device).startswith("cuda")):
+                P1 = fwd(x1, voxel=T1["voxel"], e_points=T1["e_points"], e_sigma=T1["e_sigma"], e_dirs=dp)
+                P2 = fwd(x2, voxel=T2["voxel"], e_points=T2["e_points"], e_sigma=T2["e_sigma"], e_dirs=dp)
+            l1, _ = ET.entity_loss(P1, T1, dp, margin=margin, g=gd); l2, _ = ET.entity_loss(P2, T2, dp, margin=margin, g=gd)
+            lx = ET.cross_window_loss(P1, P2, T1, T2, X, dp)
+            (0.25 * (l1 + l2) + ET.ENT_WEIGHTS["cross"] * lx).backward(); pa["cross"] = lx.detach()
+            pbuf.refresh(1)
         if bench is not None:
             tick(); tm = time.perf_counter()
         DF.allreduce_grads(model, world)
@@ -1056,6 +1075,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
         opt.step()
         if level["v"] < 1.0 and abs(lvl(step + 1) - level["v"]) >= 0.05:                              # the difficulty, widened in steps of 0.05
             level["v"] = lvl(step + 1); buf.gen = cur_gen(); cfg["gen"] = cur_gen(); set_routes()
+            if pbuf is not None:
+                pbuf.gen = dict(cur_gen()["scene"])
             if cpu is not None:
                 cpu.update(gen=cfg["gen"])
         cfg["strength"] = strength(step)
@@ -1078,7 +1099,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
             logj(rec); run = {}; got_pairs = 0
             log(f"step {step + 1} {rec['time_s']}s s={rec['strength']:.2f} lv={rec['level']:.2f} total {rec['total']:.4f} dens {rec.get('density', 0):.4f} "
                 f"vote {rec.get('vote', 0):.4f} kappa {rec.get('kappa', 0):.4f} tree {rec.get('tree', 0):.4f} overall {rec.get('overall', 0):.4f} "
-                f"owned {rec.get('owned_share', 0):.2f} new/step {rec['new_pairs_per_step']:.2f}")
+                f"cross {rec.get('cross', 0):.4f} owned {rec.get('owned_share', 0):.2f} new/step {rec['new_pairs_per_step']:.2f}")
         if not benchmark and ((step + 1) % val_every == 0 or step + 1 == steps):
             if main:
                 v_ = evaluate(); logj({"step": step + 1, **v_}); log(f"  val {step + 1}: " + " ".join(f"{k} {x:.4f}" for k, x in v_.items()))
@@ -1157,7 +1178,7 @@ def main():
     ap.add_argument("--no-points", action="store_true", help="lobes: no branch / endpoint maps")
     ap.add_argument("--difficulty", default="auto", choices=("auto", "fixed"), help="lobes: widen the generator's difficulty as the model learns, or the full mix from the start")
     ap.add_argument("--level0", type=float, default=0.3, help="lobes: the starting difficulty level")
-    ap.add_argument("--pairs", type=int, default=0, help="lobes: paired renders kept for consistency (0: none)")
+    ap.add_argument("--pairs", type=int, default=None, help="paired renders kept for consistency (lobes: default 0, none; entities: overlapping windows, default 16)")
     ap.add_argument("--pair-every", type=int, default=4)
     ap.add_argument("--real", nargs="*", default=None, help="lobes: unlabelled real volumes for self-supervised consistency, PATH[@LEVEL][=VOXEL_UM]")
     ap.add_argument("--ssl-every", type=int, default=4)
@@ -1183,14 +1204,14 @@ def main():
                        voxel_dropout=a.voxel_dropout, weights=a.weights, init=a.init, resume=a.resume, routes=a.routes, contrast_views=not a.no_contrast_views,
                        contrast_every=a.contrast_every, producer=not a.no_producer, cpu_workers=a.cpu_workers, cpu_threads=a.cpu_threads,
                        channels_last=a.channels_last, compile_model=a.compile, ckpt_minutes=a.ckpt_minutes, benchmark=a.benchmark, device=a.device,
-                       log_every=a.log_every, n_dirs=a.n_dirs)
+                       log_every=a.log_every, n_dirs=a.n_dirs, pairs=16 if a.pairs is None else a.pairs, pair_every=a.pair_every)
         return
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,
                     val_every=a.val_every, seed=a.seed, strength0=a.strength0, strength1=a.strength1, gen=a.gen, widths=tuple(a.widths),
                     sh_lmax=a.sh_lmax or 8, desc_lmax=a.desc_lmax or 4, lobes_J=a.lobes_J, context_level=not a.no_context_level, voxel_cond=not a.no_voxel_cond,
                     identity_dim=a.identity_dim, points=not a.no_points, query=a.query, gate=a.gate, gate_max=a.gate_max, difficulty=a.difficulty,
-                    level0=a.level0, pairs=a.pairs, pair_every=a.pair_every, real=a.real, ssl_every=a.ssl_every, voxel_dropout=a.voxel_dropout,
+                    level0=a.level0, pairs=a.pairs or 0, pair_every=a.pair_every, real=a.real, ssl_every=a.ssl_every, voxel_dropout=a.voxel_dropout,
                     weights=a.weights, cache=a.cache, init=a.init, resume=a.resume, aniso=a.aniso, free_sh=a.free_sh, routes=a.routes,
                     contrast_views=not a.no_contrast_views, producer=not a.no_producer, cpu_workers=a.cpu_workers, cpu_threads=a.cpu_threads,
                     channels_last=a.channels_last, compile_model=a.compile, contrast_every=a.contrast_every, ckpt_minutes=a.ckpt_minutes,

@@ -173,8 +173,9 @@ Numbers for the current trunk: receptive field 96 voxels, sigma trained 1–4 vo
   conservative (union-find merges are irreversible).
 - Tree levels defined beyond the receptive field (which tract) are not locally inferable; two tracts identical in
   appearance and orientation share a parent in z. The ball's radius cap allows tree distances up to ~15 (~7 levels).
-- The resolution rule is radius-only (radius >= max(1.5, 0.5 sigma)): isolated thin objects (sparse labelling,
-  light-sheet axons) merge into their population although they are traceable -> to make spacing-aware.
+- The resolution rule was radius-only (radius >= max(1.5, 0.5 sigma)): isolated thin objects (sparse labelling,
+  light-sheet axons) merged into their population although traceable. Now (2026-10-24): an entity holding a single
+  object in its window is that object; objects merge only where they share the window with siblings.
 - At most ``emax`` = 8 entities per query in training (1 % of queries reach it); sharpest lobe ~1.6° (kappa <= 600);
   sigma beyond the trained range is aggregated post hoc, not predicted.
 
@@ -182,8 +183,9 @@ Numbers for the current trunk: receptive field 96 voxels, sigma trained 1–4 vo
 - Directions enter as order-8 SH features: switches between entities closer than ~10–15° are soft (spectral bias);
   measured per angle bin in the pilot; Fourier direction features if needed.
 - No rotation equivariance (augmentation only): residual lattice bias, larger with anisotropic voxels.
-- Stride-8 levels: exact shift equivariance only for shifts by multiples of 8 (no seams; a faint period-8 dependence is
-  possible; anti-aliased pooling removes it).
+- Stride-8 levels: exact shift equivariance only for shifts by multiples of 8 (no seams). The downsampling is already
+  max-blur pooling (binomial anti-aliasing), so the remaining period-8 dependence is small; measured by the sub-stride
+  shift benchmark.
 - Exact tiling needs a halo of RF/2 = 48 voxels and tile origins on multiples of 8: inference tiles of 256–384³.
 
 **Set by synthetic training.** Objects, populations and the fan convention are the generator's; outputs are point

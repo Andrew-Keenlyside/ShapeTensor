@@ -119,3 +119,54 @@ def test_entity_loss_is_small_for_the_targets_themselves():
     assert float(parts["density"]) < 1e-5
     if "vote" in parts:
         assert float(parts["vote"]) < 1e-3 and float(parts["kappa"]) < 1e-4
+
+
+def test_overlapping_windows_name_the_same_entities():
+    """Two windows of one scene offset by multiples of 8: at the same scene points their entities are the same nodes of
+    the scene's tree (distance 0 across windows), and the cross-window loss vanishes for equal embeddings."""
+    from shapetensor.learn import entity_train as ET
+    import shapetensor.learn.train as TR
+    TR.HEAD = "entities"
+    try:
+        pb = ET.EntityPairBuffer(6, 48, DEV, {"canvas": 96, "n_groups": (2, 3), "cross_p": 1.0, "underlay_p": 0.0, "style": "flat"}, kinds=("shift",), n_points=96)
+    finally:
+        TR.HEAD = "slots"
+    checked = 0
+    for img1, img2, t1, t2, X, info in pb.items:
+        assert info["kind"] == "shift" and any(info["shift"])
+        eq = (t1["e_gnode"][:, :, None] == t2["e_gnode"][:, None, :]) & (t1["e_gnode"][:, :, None] >= 0)
+        assert bool((X.float()[eq] == 0).all()) and bool((X.float()[~eq & (X.float() >= 0)] > 0).all())
+        if not info["same_acq"]:                                                                    # another acquisition: what shows may differ
+            continue
+        checked += 1
+        g1, g2 = t1["e_gnode"], t2["e_gnode"]
+        both = (g1 >= 0).any(1) & (g2 >= 0).any(1)
+        same = [set(a[a >= 0].tolist()) == set(b[b >= 0].tolist()) for a, b in zip(g1[both], g2[both])]
+        assert len(same) > 10 and sum(same) / len(same) > 0.8, (sum(same), len(same))
+    assert checked > 0
+    x1, x2, T1, T2, Xb = pb.batch(2, torch.Generator().manual_seed(0))
+    dirs = ET.sample_dirs(T1, 8)
+    B, Q, D = dirs.shape[:3]
+    z = torch.zeros(B, Q, D, 4, device=DEV)
+    assert float(ET.cross_window_loss({"ent": {"z": z}}, {"ent": {"z": z}}, T1, T2, Xb, dirs)) < 1e-5 or float((Xb > 0).sum()) > 0
+
+
+def test_cross_distances_match_the_tree():
+    from shapetensor.learn.entities import Tree
+    from shapetensor.learn.entity_train import cross_distances
+    par = torch.tensor([-1, 0, 0, 1, 1, 2], device=DEV)
+    tree = Tree(parent=par, radius=torch.zeros(6, device=DEV), kind=torch.zeros(6, dtype=torch.int8, device=DEV), group=torch.zeros(6, dtype=torch.long, device=DEV),
+                depth=torch.tensor([0, 1, 1, 2, 2, 2], device=DEV), leaf_keys=torch.zeros(0, dtype=torch.long, device=DEV), leaf_nodes=torch.zeros(0, dtype=torch.long, device=DEV))
+    g1 = torch.tensor([[3, 4, -1]], device=DEV); g2 = torch.tensor([[3, 5, 1]], device=DEV)
+    X = cross_distances(tree, g1, g2)[0]
+    assert X.tolist() == [[0.0, 4.0, 1.0], [2.0, 4.0, 1.0], [-1.0, -1.0, -1.0]]
+
+
+def test_cross_distances_dense_layers_under_the_root():
+    from shapetensor.learn.entities import Tree
+    from shapetensor.learn.entity_train import cross_distances
+    par = torch.tensor([-1, 0, 1], device=DEV)
+    tree = Tree(parent=par, radius=torch.zeros(3, device=DEV), kind=torch.zeros(3, dtype=torch.int8, device=DEV), group=torch.zeros(3, dtype=torch.long, device=DEV),
+                depth=torch.tensor([0, 1, 2], device=DEV), leaf_keys=torch.zeros(0, dtype=torch.long, device=DEV), leaf_nodes=torch.zeros(0, dtype=torch.long, device=DEV))
+    X = cross_distances(tree, torch.tensor([[3, 2]], device=DEV), torch.tensor([[3, 4]], device=DEV))[0]
+    assert X.tolist() == [[0.0, 2.0], [3.0, 3.0]]

@@ -11,8 +11,10 @@ the scene's root. An ancestor shared by several populations sits above them (the
 Any depth; each node carries the radius of what it is (objects: their smallest radius; populations and above: none).
 
 **Resolution.** At a window of scale sigma an object is its own entity when its radius is at least
-``max(r_min, c * sigma)`` (in the crop's voxels); otherwise it merges into its parent, repeatedly -- at fine sigma in
-resolved data entities are single objects, at coarse sigma sub-populations and populations.
+``max(r_min, c * sigma)`` (in the crop's voxels), or when it is the only object of the merged entity in the window
+(nothing to confuse it with: an isolated thin fibre, a sparsely labelled neurite); otherwise it merges into its parent,
+repeatedly -- at fine sigma in resolved data entities are single objects, at coarse sigma sub-populations and
+populations.
 
 **Targets at query points** (:func:`entity_targets`): for each query point x (the output crop's voxels, after the warp)
 and scale sigma, the entries in a Gaussian window around the point the warp pulls x from are grouped by their resolved
@@ -161,7 +163,7 @@ def _pulled(points: torch.Tensor, grid: torch.Tensor | None, shape):
 def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, points: torch.Tensor, sigma: torch.Tensor, grid=None,
                    vis: torch.Tensor | None = None, group_layer=None, r_min: float = 1.5, c_sig: float = 0.5, emax: int = 8,
                    bin_size: int = 2, mask: torch.Tensor | None = None, keep: torch.Tensor | None = None, m_min: float = 1e-3,
-                   ovis: torch.Tensor | None = None) -> dict:
+                   ovis: torch.Tensor | None = None, alone_is_object: bool = True) -> dict:
     """The entities at query ``points (Q, 3)`` (output crop voxels) and scales ``sigma (Q,)`` (crop voxels).
 
     ``entries`` the canvas's ``(vox, group, obj, w, v)`` (canvas linear index; ``v`` the w-weighted tensor (6) and
@@ -171,7 +173,9 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     tissue removed takes its entities with it) and ``keep`` the labelled objects (sparse labelling: the others are gone);
     entities whose visible mass is below ``m_min`` are dropped; ``ovis (K, Z, Y, X)`` the layers' orientation visibility
     (each population's tensor blended toward isotropic where its orientation does not show, as the total density's
-    target, :func:`~shapetensor.learn.query.voxel_density`). Returns, padded to ``emax`` entities per query (by mass):
+    target, :func:`~shapetensor.learn.query.voxel_density`); ``alone_is_object``: an entity the resolution merged that
+    holds a single object in this window (no sibling with mass >= ``m_min`` there) is that object -- an isolated thin
+    fibre, a sparsely labelled neurite is traceable as itself; objects merge only where they share the window. Returns, padded to ``emax`` entities per query (by mass):
     ``node (Q, E)`` (tree nodes, -1 pad), ``mass``, ``vis``, ``T (Q, E, 3, 3)`` (trace 1), ``desc (Q, E, 5)``."""
     vox, grp, obj, w, v = entries
     dev = points.device; Q = points.shape[0]; zf = float(zoom)
@@ -227,6 +231,8 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     thr = zf * torch.clamp(c_sig * sg, min=r_min)
     node = tree.resolve(rleaf[ri], thr)
     gw = g * rw[ri]
+    if alone_is_object:                                                                         # a merged entity holding one object here is that object
+        node = _single_object(qi, node, rleaf[ri], gw / (zf ** 3 * (2 * math.pi * sg ** 2) ** 1.5), m_min, tree.n)
     vl = torch.ones_like(gw); ol = None
     if group_layer is not None:
         gl = torch.as_tensor(group_layer, device=dev)[rgrp[ri]]
@@ -268,6 +274,28 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     out["node"][e_, r_] = en[sel]; out["mass"][e_, r_] = mass[sel]; out["vis"][e_, r_] = Vis[sel]
     out["T"][e_, r_] = T[sel]; out["desc"][e_, r_] = desc[sel]
     return out
+
+
+def _single_object(qi: torch.Tensor, node: torch.Tensor, leaf: torch.Tensor, m: torch.Tensor, m_min: float, n_nodes: int) -> torch.Tensor:
+    """Per (query, row) pair: where the (query, resolved node) group holds exactly one leaf with mass >= ``m_min``,
+    that leaf instead of the node (its other rows, below ``m_min``, stay with the node and are dropped later)."""
+    merged = node != leaf
+    if not bool(merged.any()):
+        return node
+    gk = qi * (n_nodes + 1) + node                                                               # (query, node) groups
+    trip, inv = torch.unique(torch.stack([gk[merged], leaf[merged]], 1), dim=0, return_inverse=True)
+    tm = torch.zeros(trip.shape[0], device=m.device).index_add_(0, inv, m[merged])                # each leaf's mass in the window
+    trip = trip[tm >= m_min]                                                                     # distinct significant leaves per group
+    if trip.shape[0] == 0:
+        return node
+    ug, cnt = torch.unique(trip[:, 0], return_counts=True)
+    one = ug[cnt == 1]
+    if one.numel() == 0:
+        return node
+    lone = trip[torch.isin(trip[:, 0], one)]                                                     # (group, its single leaf)
+    i = torch.searchsorted(lone[:, 0].contiguous(), gk).clamp(max=lone.shape[0] - 1)
+    hit = merged & (lone[i, 0] == gk) & (lone[i, 1] == leaf)
+    return torch.where(hit, leaf, node)
 
 
 def dense_entities(occ: torch.Tensor, T6: torch.Tensor, points: torch.Tensor, sigma: torch.Tensor, vis: torch.Tensor | None = None,

@@ -151,3 +151,20 @@ def test_entity_queries_from_the_training_path():
     if bool(live.any()):
         assert torch.allclose(out["e_T6"].float()[live][:, :3].sum(-1), torch.ones(int(live.sum()), device=DEV), atol=1e-2)
         assert int(out["e_node"][live].max()) < int(out["e_n"])
+
+
+def test_a_lone_thin_fibre_is_its_own_entity():
+    """Sparse labelling: one thin fibre (radius below r_min) kept of a bundle -- alone in its window it is itself; with
+    its siblings in the window it merges into the bundle."""
+    sc, ren, c, a1, a2 = _two_bundles(90, rf_um=1.2, Rb=10.0)                                      # fibres 0.6 voxels in radius
+    vox, grp, obj, w, v = ren["entries"]; tree = build_tree(sc, grp, obj)
+    m = grp == 0; o = int(torch.mode(obj[m]).values)                                                # a fibre of the first bundle
+    sel = m & (obj == o); k = int(torch.argmax(torch.where(sel, w, torch.zeros_like(w))))
+    S = sc.shape; p = torch.tensor([int(vox[k]) // (S[1] * S[2]), (int(vox[k]) // S[2]) % S[1], int(vox[k]) % S[2]], device=DEV).float()[None]
+    sig = torch.tensor([2.0], device=DEV)
+    t_all = entity_targets(ren["entries"], tree, sc.shape, (0, 0, 0), 1, sc.shape, p, sig)
+    leaf = int(tree.leaves(torch.tensor([0], device=DEV), torch.tensor([o], device=DEV))[0])
+    assert leaf not in t_all["node"][0].tolist()                                                    # among its siblings: the bundle
+    keep = torch.zeros(int(obj.max()) + 1, dtype=torch.bool, device=DEV); keep[o] = True
+    t_one = entity_targets(ren["entries"], tree, sc.shape, (0, 0, 0), 1, sc.shape, p, sig, keep=keep)
+    assert t_one["node"][0, 0].item() == leaf and int((t_one["node"][0] >= 0).sum()) == 1

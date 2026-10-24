@@ -706,7 +706,7 @@ class Scene:
                 nrm = Fn.normalize(torch.linalg.cross(d, torch.linalg.cross(t0, d)), dim=0)
                 P0 = P0 + nrm * (float(cross_with.rad[0].mean()) + Rb)
             else:
-                ang = math.radians(r.u(20, 90)); d = math.cos(ang) * t0 + math.sin(ang) * p
+                ang = math.radians(r.u(5, 90)); d = math.cos(ang) * t0 + math.sin(ang) * p          # 5-90: below ~30 deg one SH lobe
             c = P0; cross = (P0, t0, d)
         else:
             c = centre if centre is not None else self.centre_point(); d = axis if axis is not None else r.unit()
@@ -769,12 +769,15 @@ class Scene:
             self.record["families"].append({"bundle": {"unresolved": True, "fibre_um": round(rf_um, 2), "packing": round(phi_, 2), "radius_vox": round(Rb, 1), "mode": mode if cross_with is not None else "single"}})
         g.centreline = curves_like(Pc, Rs[None].clone(), r, obj=torch.tensor([bid], device=self.device), seg=torch.tensor([bid], device=self.device), contrast=contrast)
         g.cross, g.Rb = cross, float(Rs.max())
+        g.centre_pt = c                                                     # where crops centre on it (crossing point, or the fan / split / bend)
+        if cross is not None:
+            self.record.setdefault("cross_deg", []).append(round(math.degrees(math.acos(min(1.0, abs(float(cross[1] @ cross[2]))))), 1))
         if side is not None:                                                # one population per half
             out = []
             for sg in (1.0, -1.0):
                 c_ = curves_subset(g.curves[0], side == sg)
                 if c_ is not None:
-                    h = Group("bundle", "line", g.radius, contrast, curves=[c_]); h.centreline, h.cross, h.Rb, h.offsets = g.centreline, None, g.Rb, None
+                    h = Group("bundle", "line", g.radius, contrast, curves=[c_]); h.centreline, h.cross, h.Rb, h.offsets, h.centre_pt = g.centreline, None, g.Rb, None, c
                     out.append(h)
             return out
         return g
@@ -1820,10 +1823,13 @@ class Scene:
         return cv
 
     # ---- the scene
-    def build(self, families: dict | None = None, n_groups: tuple = (1, 5), layout_p: float = 0.3, underlay_p: float = 0.4):
+    def build(self, families: dict | None = None, n_groups: tuple = (1, 5), layout_p: float = 0.3, underlay_p: float = 0.4,
+              cross_p: float = 0.0):
         """The scene's families; with probability ``underlay_p`` a neuropil underlay as well (real tissue is full of it),
-        unless the families given exclude neuropil."""
+        unless the families given exclude neuropil. With probability ``cross_p`` a crossing scene: two or three bundles,
+        each crossing (or kissing, or fanning through) the one before, beside the other families drawn."""
         r = self.r
+        crossing = cross_p > 0 and r.p(cross_p)
         if r.p(layout_p):
             self.layout()
         fam = dict(self.FAMILIES); fam.update(families or {})
@@ -1837,11 +1843,14 @@ class Scene:
         chosen = [str(c_) for c_ in r.np.choice(names, size=n, p=p)]
         order = {"cells": 0, "crystals": 0, "epithelium": 0, "nuclei": 0, "organs": 0, "organelles": 0, "granules": 0,
                  "tree": 1, "gland": 1, "network": 2}                                           # obstacles first, fibres after
+        if crossing:
+            nb = r.i(2, 3); chosen = chosen[:max(0, n - nb)] + ["bundle"] * nb
+            self.record["crossing_scene"] = nb
         chosen.sort(key=lambda k: order.get(k, 5))
         bundles = []
         for name in chosen:
             if name == "bundle":
-                prev = bundles[-1] if bundles and r.p(0.6) else None
+                prev = bundles[-1] if bundles and (crossing or r.p(0.6)) else None
                 mode = ["angled", "angled", "kissing", "fanning"][r.i(0, 3)] if prev is not None else ("split" if r.p(0.15) else "single")
                 gs = self.bundle(prev.centreline if prev is not None else None, mode)
                 if gs is not None:
@@ -1952,17 +1961,17 @@ def _compact(ren: dict) -> dict:
 
 
 def render_scene(canvas, scene_seed: int, device, voxel_um=None, families=None, n_groups=(1, 5), layout_p=0.3, content="general", style=None,
-                 underlay_p: float = 0.4):
+                 underlay_p: float = 0.4, cross_p: float = 0.0):
     """The scene (cached: crops of one scene are drawn in sequence) and its background on the whole canvas -- a
     texture, regions and possibly a cell stain, so crops at any zoom of one scene share them."""
-    key = (tuple(canvas), scene_seed, str(device), voxel_um, str(families), tuple(n_groups), layout_p, content, style, underlay_p)
+    key = (tuple(canvas), scene_seed, str(device), voxel_um, str(families), tuple(n_groups), layout_p, content, style, underlay_p, cross_p)
     _CACHE = _scene_cache()
     if key in _CACHE:
         _CACHE[key] = _CACHE.pop(key)                                       # most recently used last
     else:
         while len(_CACHE) >= CACHE_SCENES:                                  # a few scenes (training draws and paired renders interleave)
             _CACHE.pop(next(iter(_CACHE)))
-        sc = Scene(canvas, scene_seed, device, voxel_um, content).build(families, n_groups, layout_p, underlay_p)
+        sc = Scene(canvas, scene_seed, device, voxel_um, content).build(families, n_groups, layout_p, underlay_p, cross_p)
         st = style or ["flat", "regions", "tissue", "cells"][sc.r.i(0, 3)]
         bgp = background(tuple(canvas), st, sc.r.g, device, 1.0, content, nprng=sc.r.np)
         _CACHE[key] = (sc, _compact(sc.render(half=True)), bgp, st)
@@ -2132,7 +2141,8 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
                zoom: int = 1, physics: str | None = None, p_physics: float = 0.75, p_warp: float = 0.5, acq_seed: int | None = None,
                crop: tuple | None = None, identity_min_r: float = 1.5, p_blend: float = 0.35, p_aniso: float = 0.25, p_scramble: float = 0.3,
                p_texture: float = 0.5, p_merge: float = 0.25, p_boundary: float = 0.2, p_affine: float = 0.3, p_grain: float = 0.8,
-               underlay_p: float = 0.4, p_sparse: float = 0.12, p_cutout: float = 0.15, entity_ctx: bool = False):
+               underlay_p: float = 0.4, p_sparse: float = 0.12, p_cutout: float = 0.15, entity_ctx: bool = False, cross_p: float = 0.0,
+               p_centre: float = 0.0):
     """A training pair from an object scene, in the format of :func:`~shapetensor.learn.generator.draw`: ``(Sample,
     drawn)``. Scenes are rendered on a ``canvas``³ grid and ``crops_per_scene`` consecutive seeds share one (cut at
     different places), so a scene's cost is spread over its crops.
@@ -2165,13 +2175,20 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     log2(1 + size), relative wall, lumen fraction, flattening, angularity), ``desc_um``, ``points`` (branch points,
     endpoints), ``recoverability``, ``parents``, the voxel size and the physics."""
     sid = seed // max(1, crops_per_scene)
-    sc, ren, bgp, st = render_scene((canvas,) * 3, 7_000_000 + sid, device, voxel_um, families, n_groups, layout_p, content, style, underlay_p)
+    sc, ren, bgp, st = render_scene((canvas,) * 3, 7_000_000 + sid, device, voxel_um, families, n_groups, layout_p, content, style, underlay_p, cross_p)
     r = Rng(seed, device); ra = Rng(acq_seed if acq_seed is not None else seed + 31337, device)
     from .generator import MODALITIES
     names = list(MODALITIES); modality = modality or names[ra.i(0, len(names) - 1)]          # X-ray, MRI, histology, EM, fluorescence, cryo-ET, mixed
     ext = [s_ * zoom for s_ in shape]
     assert all(e <= canvas for e in ext), "the zoomed crop must fit the canvas"
     o = list(crop) if crop is not None else [r.i(0, canvas - e) for e in ext]
+    if crop is None and p_centre > 0 and r.p(p_centre):                        # centred on a crossing (or a bundle's fan / split / bend)
+        cr = [g_.centre_pt for g_ in sc.groups if getattr(g_, "cross", None) is not None]
+        ce = [g_.centre_pt for g_ in sc.groups if getattr(g_, "centre_pt", None) is not None]
+        pick = cr if (cr and (not ce or r.p(0.75))) else ce
+        if pick:
+            P0 = pick[r.i(0, len(pick) - 1)]
+            o = [int(min(max(round(float(P0[a]) - e / 2 + r.u(-e / 6, e / 6)), 0), canvas - e)) for a, e in enumerate(ext)]
     sl = [slice(a, a + e) for a, e in zip(o, ext)]
     shape = tuple(shape)
     # the background, cut from the scene's
@@ -2353,7 +2370,8 @@ def draw_pair(shape=(64, 64, 64), seed: int = 0, device="cuda", kind: str = "zoo
     """Two renders of one scene for consistency: ``zoom`` -- the crop and the region twice its extent around it at
     half the resolution (the fine crop's lattice cells 2³ -> one coarse cell; ``offset``: the coarse cell of the fine
     crop's first cell pair); ``modality`` -- the same crop under another acquisition (modality, physics, materials,
-    noise). Returns ``(s1, d1), (s2, d2), info``."""
+    noise); ``shift`` -- two overlapping windows of the scene, offset by multiples of 8 voxels (``info["shift"]``, crop 2's
+    origin minus crop 1's), under the same acquisition or another. Returns ``(s1, d1), (s2, d2), info``."""
     canvas = kw.get("canvas", 128); r = Rng(seed + 99991, device)
     kw = {**kw, "p_boundary": 0.0, "p_affine": 0.0, "p_warp": 0.0, "p_sparse": 0.0, "p_cutout": 0.0}   # one geometry: the renders differ in acquisition only
     if kind == "zoom":
@@ -2363,6 +2381,15 @@ def draw_pair(shape=(64, 64, 64), seed: int = 0, device="cuda", kind: str = "zoo
         a = draw_scene(shape, seed, device, crop=of, zoom=1, **kw)
         b = draw_scene(shape, seed, device, crop=oc, zoom=2, acq_seed=seed + 4242, **kw)
         return a, b, {"kind": "zoom", "offset_cells": [(f - c) // 8 for f, c in zip(of, oc)], "scale": 2}
+    if kind == "shift":                                                      # two overlapping windows (multiples of 8: lattice-aligned)
+        sh = [8 * r.i(-(n // 2) // 8, (n // 2) // 8) for n in shape]
+        if not any(sh):
+            sh[r.i(0, 2)] = 8
+        o1 = [r.i(max(0, -d_), canvas - n - max(0, d_)) for n, d_ in zip(shape, sh)]; o2 = [a_ + d_ for a_, d_ in zip(o1, sh)]
+        same = r.p(0.5)                                                      # the same acquisition, or another
+        a = draw_scene(shape, seed, device, crop=o1, **kw)
+        b = draw_scene(shape, seed, device, crop=o2, acq_seed=None if same else seed + 4242, **kw)
+        return a, b, {"kind": "shift", "shift": sh, "same_acq": same, "offset_cells": [0, 0, 0], "scale": 1}
     o = [r.i(0, canvas - n) for n in shape]
     a = draw_scene(shape, seed, device, crop=o, **kw)
     b = draw_scene(shape, seed, device, crop=o, acq_seed=seed + 4242, **kw)

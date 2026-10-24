@@ -22,7 +22,7 @@ import torch.nn.functional as Fn
 
 from . import bingham as BG
 
-ENT_WEIGHTS = {"density": 1.0, "vote": 1.0, "kappa": 0.2, "desc": 0.2, "tree": 0.5, "overall": 1.0, "fraction": 0.2, "points": 0.5, "contrast": 0.5}
+ENT_WEIGHTS = {"density": 1.0, "vote": 1.0, "kappa": 0.2, "desc": 0.2, "tree": 0.5, "overall": 1.0, "fraction": 0.2, "points": 0.5, "contrast": 0.5, "cross": 0.5}
 N_DIRS = 32
 TREE_PAIRS = 4096
 OVERALL_FLOOR = 0.01                # the overall ODF's relative error: energy floor per lattice cell (~ occupancy 0.03)
@@ -132,3 +132,97 @@ def axis_error_deg(P: dict, T: dict, dirs: torch.Tensor) -> dict:
     if bool(gd.any()):
         out["a_axis_deg"] = float(ang(Rp[gd][:, :, 0], R_t[gd][:, :, 0]).median())
     return out
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# across windows: overlapping crops of one scene must agree on the entities' places in the tree
+# ---------------------------------------------------------------------------------------------------------------
+
+def owners(T: dict, dirs: torch.Tensor):
+    """The entity owning each direction (its share of the target density > 1/2, density > 0.02): ``(owner, owned)``,
+    both ``(B, Q, D)``."""
+    mass = (T["e_mass"] * T["e_vis"]).clamp_min(0) * (T["e_node"] >= 0)
+    contrib = mass[:, :, None] * BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], T["e_kappa"][:, :, None])
+    rho = contrib.sum(-1); best, owner = (contrib / rho.clamp_min(1e-9)[..., None]).max(-1)
+    return owner, (best > 0.5) & (rho > 0.02)
+
+
+def cross_distances(tree, g1: torch.Tensor, g2: torch.Tensor) -> torch.Tensor:
+    """Tree distances between the entities of two windows at the same queries: ``g1``, ``g2`` ``(Q, E)`` nodes of the
+    scene's tree (-1: none; ``>= tree.n``: dense layers, children of the root) -> ``(Q, E, E)`` (-1 where either is
+    none)."""
+    Q, E = g1.shape; N = tree.n
+    def chains(gg):                                                                               # nodes past the tree (dense layers): under the root
+        gf = gg.flatten(); A = tree.ancestors(gf.clamp(0, N - 1))
+        ext = gf >= N
+        if bool(ext.any()):
+            A[ext] = -1; A[ext, 0] = gf[ext]; A[ext, 1] = 0
+        return A.view(Q, E, -1)
+    A1, A2 = chains(g1), chains(g2)
+    v1, v2 = A1 >= 0, A2 >= 0
+    d1 = (v1.sum(-1) - 1)[:, :, None]; d2 = (v2.sum(-1) - 1)[:, None, :]
+    eq = (A1[:, :, None, :, None] == A2[:, None, :, None, :]) & v1[:, :, None, :, None] & v2[:, None, :, None, :]
+    hit = eq.any(-1)                                                                              # (Q, E, E, D): i's ancestors shared with j
+    k = torch.where(hit.any(-1), hit.float().argmax(-1), (d1 + 1).expand(-1, -1, E))
+    t = (d1 + d2 - 2 * (d1 - k)).float()
+    return torch.where((g1[:, :, None] >= 0) & (g2[:, None, :] >= 0), t, torch.full_like(t, -1.0))
+
+
+def cross_window_loss(P1: dict, P2: dict, T1: dict, T2: dict, X: torch.Tensor, dirs: torch.Tensor) -> torch.Tensor:
+    """At the same points and directions of two overlapping windows: the hyperbolic distance between the two windows'
+    embeddings against the tree distance of their owners (0 for the same entity) -- one embedding across windows."""
+    from .model import poincare_dist
+    o1, w1 = owners(T1, dirs); o2, w2 = owners(T2, dirs)
+    B, Q, D = o1.shape; E = X.shape[-1]
+    t = torch.gather(X.view(B, Q, E * E), 2, (o1 * E + o2)).view(B, Q, D)
+    ok = w1 & w2 & (t >= 0)
+    if not bool(ok.any()):
+        return dirs.new_zeros(())
+    dz = poincare_dist(P1["ent"]["z"][ok].float(), P2["ent"]["z"][ok].float())
+    return ((dz - t[ok]) ** 2 / (1 + t[ok])).mean()
+
+
+class EntityPairBuffer:
+    """Overlapping windows of one scene (``shift``: offset by multiples of 8 voxels, the same acquisition or another;
+    ``modality``: the same window under another acquisition), their entity targets at the same queries (in the overlap)
+    and the tree distances between the two windows' entities; drawn on demand into a small rotating buffer."""
+
+    def __init__(self, n: int, size: int, device, gen: dict, seed0: int = 60_000_000, kinds=("shift", "modality"), n_points: int = 192):
+        self.size, self.device, self.gen, self.next, self.kinds, self.n_points = size, device, dict(gen or {}), seed0, kinds, n_points
+        self.items = [self._make() for _ in range(n)]
+
+    def _make(self):
+        from . import train as TR
+        from .entities import _vis_at
+        from .scene import draw_pair
+        kind = self.kinds[self.next % len(self.kinds)]; seed = self.next; self.next += 1
+        kw = {k: v for k, v in self.gen.items() if k not in ("crops_per_scene", "p_centre")}
+        kw["canvas"] = max(kw.get("canvas", 128), 2 * self.size)
+        (s1, d1), (s2, d2), info = draw_pair((self.size,) * 3, seed=seed, device=self.device, kind=kind, crops_per_scene=4, entity_ctx=True, **kw)
+        sh = torch.tensor(info.get("shift", [0, 0, 0]), device=self.device, dtype=torch.float32)
+        m = TR.ENTITY["margin"]; n = self.n_points; dev = self.device
+        lo = torch.clamp(sh, min=0) + m; hi = torch.clamp(sh + self.size, max=self.size) - 1 - m           # the overlap, crop 1's voxels
+        g = torch.Generator(device=dev).manual_seed(seed + 77)
+        pts = lo + torch.rand(4 * n, 3, generator=g, device=dev) * (hi - lo)
+        kl = [k for k, L in enumerate(s1.layers) if L.role != "isotropic"]                               # most queries on the entities' material
+        occ = d1["occupancy"][kl].float().sum(0) if kl else torch.zeros_like(d1["occupancy"][0]).float()
+        on = _vis_at(occ[None], pts)[:, 0] > 0.05
+        pts = torch.cat([pts[on], pts[~on]])[:n]
+        lo_s, hi_s = TR.ENTITY["sigma"]; sig = torch.exp(math.log(lo_s) + torch.rand(n, generator=g, device=dev) * math.log(hi_s / lo_s))
+        t1 = TR.entity_queries(s1, d1, self.size, seed, dev, points=pts, sigma=sig)
+        t2 = TR.entity_queries(s2, d2, self.size, seed, dev, points=pts - sh, sigma=sig)
+        X = cross_distances(d1["entity_ctx"]["tree"], t1["e_gnode"], t2["e_gnode"]).half()
+        vox = lambda d: torch.tensor(math.log2(d["voxel_um"]), device=dev)
+        t1["voxel"], t2["voxel"] = vox(d1), vox(d2)
+        return d1["image"].to(torch.uint8), d2["image"].to(torch.uint8), t1, t2, X, info
+
+    def refresh(self, k: int = 1):
+        for _ in range(k):
+            i = self.next % len(self.items); self.items[i] = self._make()
+
+    def batch(self, B: int, g: torch.Generator):
+        idx = torch.randint(0, len(self.items), (B,), generator=g).tolist(); sel = [self.items[i] for i in idx]
+        f = lambda k, v: v.float() if k in ("e_mass", "e_vis", "e_T6", "e_desc") else (v.long() if k in ("e_node", "e_anc", "e_gnode") else v)
+        st = lambda j: {k: torch.stack([f(k, it[j][k]) for it in sel]) for k in sel[0][j]}
+        x1 = torch.stack([it[0].float() / 255 for it in sel])[:, None]; x2 = torch.stack([it[1].float() / 255 for it in sel])[:, None]
+        return x1, x2, st(2), st(3), torch.stack([it[4].float() for it in sel])
