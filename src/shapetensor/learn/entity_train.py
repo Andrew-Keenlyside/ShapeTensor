@@ -31,6 +31,7 @@ TREE_PAIRS = 4096
 TREE_EDGE = 0.6                     # hyperbolic length of a tree edge: depth ~16 fits the ball (radius cap 1e-4 -> 9.9 from the centre)
 DENS_FLOOR = 0.05                   # the density loss's floor: this share of the query's mean density (scale-free)
 DENS_EPS = 1e-3                     # ... and at least this (empty queries: pushed to low density, not to -inf)
+DENS_KAPPA_MAX = 40.0               # the density target's lobes no sharper than the direction basis can draw (order 16); votes keep kappa
 OWN_REL = 0.25                      # owned directions: density above this share of the query's mean (any mass)
 OVERALL_FLOOR = 0.01                # the overall ODF's relative error: energy floor per lattice cell (~ occupancy 0.03)
 
@@ -71,7 +72,7 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
     W = {**ENT_WEIGHTS, **(W or {})}
     ent = P["ent"]; dev = dirs.device; parts = {}
     mass = (T["e_mass"] * T["e_vis"]).clamp_min(0) * (T["e_node"] >= 0)                         # (B, Q, E)
-    pe = BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], T["e_kappa"][:, :, None])                # (B, Q, D, E)
+    pe = BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], T["e_kappa"][:, :, None].clamp(max=DENS_KAPPA_MAX))   # (B, Q, D, E)
     contrib = mass[:, :, None] * pe; rho = contrib.sum(-1)
     rm = rho.mean(-1, keepdim=True)                                                                # each query's mean density (its mass)
     eps = (DENS_FLOOR * rm).clamp_min(DENS_EPS)

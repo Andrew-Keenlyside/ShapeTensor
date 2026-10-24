@@ -905,7 +905,7 @@ def _vis_t(img, regressors, idx, s_hp, sigma_v, step, local_corr):
 
 def visibility(img: torch.Tensor, regressors: torch.Tensor, units, radii=None, sigma_v: float = 5.0, step: int = 4,
                t_lo: float = 3.0, t_hi: float = 8.0, return_t: bool = False, s_hp_max: float | None = None,
-               per_layer_hp: bool = False, local_corr: bool = False) -> torch.Tensor:
+               per_layer_hp: bool = False, local_corr: bool = False, ladder=(1,), ladder_max: float = 64.0) -> torch.Tensor:
     """Each layer's **local** visibility ``(K, Z, Y, X)``: how clearly its shapes show in the final image around each
     point. The image and the layers' image signatures (``regressors``: a shape layer's occupancy, an interface's
     region-means image) are high-passed at a scale matched to the shapes (σ = max(4, 2.5 × the largest radius in
@@ -923,6 +923,10 @@ def visibility(img: torch.Tensor, regressors: torch.Tensor, units, radii=None, s
     detection, t 3 to 8 -- and whether their orientation is recoverable -- measured on drawn samples against a local
     structure tensor's orientation error on single-population fibre voxels (about 40° (chance ~60°) up to t ≈ 10,
     24-32° at t 15-25, 17° beyond 25) and set somewhat below it, t 6 to 18.
+    ``ladder``: further high-pass scales, multiples of each scale up to ``ladder_max`` voxels, the evidence the largest
+    t over them -- a shape shows at *some* scale: the interior of a uniform band, of a densely packed bundle, is visible
+    as material at the band's own scale although no edge or texture lies in the window (a single scale at the fibres'
+    size credited only the edges: mass targets ran along both sides of bundles).
     ``units[k] = None`` marks a layer not measured (visibility 1)."""
     K = regressors.shape[0]; dev = img.device; shp = img.shape
     v = torch.ones((K,) + tuple(shp), device=dev)
@@ -939,11 +943,18 @@ def visibility(img: torch.Tensor, regressors: torch.Tensor, units, radii=None, s
         for key, ks in bins.items():
             s_hp = max(scale_of[k] for k in ks)
             tg = _vis_t(img, regressors, idx, s_hp, sigma_v, step, local_corr)
+            for f_ in ladder:
+                if f_ > 1 and s_hp * f_ <= ladder_max * 1.001:
+                    tg = torch.maximum(tg, _vis_t(img, regressors, idx, s_hp * f_, sigma_v, step, local_corr))
             for k in ks:
                 j = idx.index(k); t[..., j] = tg[..., j]
     else:
         rmax = max([float(radii[k]) for k in idx] if radii is not None else [1.0])
-        t = _vis_t(img, regressors, idx, cap(max(4.0, 2.5 * rmax)), sigma_v, step, local_corr)
+        s0 = cap(max(4.0, 2.5 * rmax))
+        t = _vis_t(img, regressors, idx, s0, sigma_v, step, local_corr)
+        for f_ in ladder:
+            if f_ > 1 and s0 * f_ <= ladder_max * 1.001:
+                t = torch.maximum(t, _vis_t(img, regressors, idx, s0 * f_, sigma_v, step, local_corr))
     if return_t:                                                                                  # the evidence itself, upsampled (for calibration)
         tv = Fn.interpolate(t.movedim(-1, 0)[None], scale_factor=step, mode="trilinear", align_corners=False)[0]
         out = torch.zeros((K,) + tuple(shp), device=dev); out[idx] = tv[(slice(None),) + tuple(slice(0, s_) for s_ in shp)]

@@ -108,7 +108,7 @@ def test_entity_loss_is_small_for_the_targets_themselves():
     dirs = ET.sample_dirs(T, 16, g=g)
     from shapetensor.learn import bingham as BG
     mass = (T["e_mass"] * T["e_vis"]).clamp_min(0) * (T["e_node"] >= 0)
-    pe = BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], T["e_kappa"][:, :, None]); contrib = mass[:, :, None] * pe
+    pe = BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], T["e_kappa"][:, :, None].clamp(max=ET.DENS_KAPPA_MAX)); contrib = mass[:, :, None] * pe
     owner = (contrib / contrib.sum(-1, keepdim=True).clamp_min(1e-9)).argmax(-1)
     D = dirs.shape[2]
     R = torch.gather(T["e_R"][:, :, None].expand(-1, -1, D, -1, -1, -1), 3, owner[..., None, None, None].expand(-1, -1, -1, 1, 3, 3))[..., 0, :, :]
