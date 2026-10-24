@@ -188,3 +188,13 @@ def test_deep_tree_fascicles_and_branches():
             if int(t2.depth.max()) >= 5:
                 found = True; break
     assert found
+
+
+def test_entity_targets_on_a_scene_without_populations():
+    """No populations drawn (empty group list): no entities, no crash."""
+    sc = Scene((32,) * 3, 0, DEV, 2.0); sc.groups = []
+    ren = sc.render(); vox, grp, obj, w, v = ren["entries"]; tree = build_tree(sc, grp, obj)
+    p = torch.tensor([[16.0, 16.0, 16.0]], device=DEV)
+    t = entity_targets(ren["entries"], tree, sc.shape, (0, 0, 0), 1, sc.shape, p, torch.tensor([2.0], device=DEV),
+                       vis=torch.ones(1, 32, 32, 32, device=DEV), group_layer=[], ovis=torch.ones(1, 32, 32, 32, device=DEV))
+    assert bool((t["node"] == -1).all())

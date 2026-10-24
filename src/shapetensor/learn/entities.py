@@ -235,7 +235,7 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
         node = _single_object(qi, node, rleaf[ri], gw / (zf ** 3 * (2 * math.pi * sg ** 2) ** 1.5), m_min, tree.n)
     vl = torch.ones_like(gw); ol = None
     if group_layer is not None:
-        gl = torch.as_tensor(group_layer, device=dev)[rgrp[ri]]
+        gl = torch.as_tensor(list(group_layer) + [-1], device=dev, dtype=torch.long)[rgrp[ri].clamp(max=len(group_layer))]   # long even when empty
         if vis is not None:
             vq = _vis_at(vis, points.float())                                                     # (Q, K)
             vl = torch.where(gl >= 0, vq[qi, gl.clamp_min(0)], torch.ones_like(gw))
