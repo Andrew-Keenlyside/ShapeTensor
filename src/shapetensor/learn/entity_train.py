@@ -5,8 +5,10 @@ mass and visibility, Bingham frame ``e_R`` and concentrations ``e_kappa`` (momen
 descriptors. The decoder is asked at D directions per query -- half drawn from the entities' Bingham ODFs (by visible
 mass), half uniform -- and the losses compare, per direction:
 
-* **density**: ``f`` against the target ``rho(u) = sum_e m_e v_e p_e(u)`` (log1p L1);
-* **vote**: on directions one entity owns (its share of rho > 1/2): the Bingham frame (axis-invariant, :func:`~shapetensor.
+* **density**: ``f`` against the target ``rho(u) = sum_e m_e v_e p_e(u)``: L1 of the logs with a floor relative to the
+  query's mean density -- scale-free, so the angular shape is learned at any mass (log1p L1 on raw densities of 0.01-0.3
+  was nearly linear and left the decoder flat);
+* **vote**: on directions one entity owns (its share of rho > 1/2, rho above ``OWN_REL`` of the query's mean): the Bingham frame (axis-invariant, :func:`~shapetensor.
   learn.bingham.frame_loss`), the concentrations (log1p L1) and the descriptors;
 * **tree**: hyperbolic distortion between owned directions' embeddings, ``(d_P(z_i, z_j) - t_ij)^2 / (1 + t_ij)`` with
   ``t_ij`` the tree distance of their entities (0 within an entity) -- any depth, no fixed levels -- and the gauge: each
@@ -27,6 +29,9 @@ ENT_WEIGHTS = {"density": 1.0, "vote": 1.0, "kappa": 0.2, "desc": 0.2, "tree": 0
 N_DIRS = 32
 TREE_PAIRS = 4096
 TREE_EDGE = 0.6                     # hyperbolic length of a tree edge: depth ~16 fits the ball (radius cap 1e-4 -> 9.9 from the centre)
+DENS_FLOOR = 0.05                   # the density loss's floor: this share of the query's mean density (scale-free)
+DENS_EPS = 1e-3                     # ... and at least this (empty queries: pushed to low density, not to -inf)
+OWN_REL = 0.25                      # owned directions: density above this share of the query's mean (any mass)
 OVERALL_FLOOR = 0.01                # the overall ODF's relative error: energy floor per lattice cell (~ occupancy 0.03)
 
 
@@ -68,9 +73,11 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
     mass = (T["e_mass"] * T["e_vis"]).clamp_min(0) * (T["e_node"] >= 0)                         # (B, Q, E)
     pe = BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], T["e_kappa"][:, :, None])                # (B, Q, D, E)
     contrib = mass[:, :, None] * pe; rho = contrib.sum(-1)
-    parts["density"] = (torch.log1p(ent["f"]) - torch.log1p(rho)).abs().mean()
+    rm = rho.mean(-1, keepdim=True)                                                                # each query's mean density (its mass)
+    eps = (DENS_FLOOR * rm).clamp_min(DENS_EPS)
+    parts["density"] = (torch.log(ent["f"].float() + eps) - torch.log(rho + eps)).abs().mean()     # scale-free: shape at any mass
     share = contrib / rho.clamp_min(1e-9)[..., None]; best, owner = share.max(-1)
-    owned = (best > 0.5) & (rho > 0.02)
+    owned = (best > 0.5) & (rho > OWN_REL * rm) & (rm > DENS_EPS)
     total = W["density"] * parts["density"]
     if bool(owned.any()):
         R_t = torch.gather(T["e_R"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1, -1), 3, owner[..., None, None, None].expand(-1, -1, -1, 1, 3, 3))[..., 0, :, :]
@@ -127,7 +134,8 @@ def axis_error_deg(P: dict, T: dict, dirs: torch.Tensor) -> dict:
     ent = P["ent"]
     mass = (T["e_mass"] * T["e_vis"]).clamp_min(0) * (T["e_node"] >= 0)
     pe = BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], T["e_kappa"][:, :, None]); contrib = mass[:, :, None] * pe
-    share = contrib / contrib.sum(-1, keepdim=True).clamp_min(1e-9); best, owner = share.max(-1); owned = (best > 0.5) & (contrib.sum(-1) > 0.02)
+    rho = contrib.sum(-1); rm = rho.mean(-1, keepdim=True)
+    share = contrib / rho.clamp_min(1e-9)[..., None]; best, owner = share.max(-1); owned = (best > 0.5) & (rho > OWN_REL * rm) & (rm > DENS_EPS)
     out = {"owned_share": float(owned.float().mean())}
     if not bool(owned.any()):
         return out
@@ -149,12 +157,13 @@ def axis_error_deg(P: dict, T: dict, dirs: torch.Tensor) -> dict:
 # ---------------------------------------------------------------------------------------------------------------
 
 def owners(T: dict, dirs: torch.Tensor):
-    """The entity owning each direction (its share of the target density > 1/2, density > 0.02): ``(owner, owned)``,
+    """The entity owning each direction (its share of the target density > 1/2, density above OWN_REL of the query's mean): ``(owner, owned)``,
     both ``(B, Q, D)``."""
     mass = (T["e_mass"] * T["e_vis"]).clamp_min(0) * (T["e_node"] >= 0)
     contrib = mass[:, :, None] * BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], T["e_kappa"][:, :, None])
     rho = contrib.sum(-1); best, owner = (contrib / rho.clamp_min(1e-9)[..., None]).max(-1)
-    return owner, (best > 0.5) & (rho > 0.02)
+    rm = rho.mean(-1, keepdim=True)
+    return owner, (best > 0.5) & (rho > OWN_REL * rm) & (rm > DENS_EPS)
 
 
 def cross_distances(tree, g1: torch.Tensor, g2: torch.Tensor) -> torch.Tensor:
