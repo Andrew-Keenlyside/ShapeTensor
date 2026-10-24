@@ -68,7 +68,7 @@ class Down(nn.Module):
         return self.proj(x)
 
 
-def poincare(x: torch.Tensor, eps: float = 1e-3) -> torch.Tensor:
+def poincare(x: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
     """A vector into the open Poincaré ball: ``tanh(|x|) x / |x|`` (radius below 1 - eps)."""
     n = x.norm(dim=-1, keepdim=True).clamp_min(1e-9)
     return x / n * torch.tanh(n) * (1 - eps)
@@ -108,7 +108,7 @@ class EntityDecoder(nn.Module):
             size_v = torch.tensor(h0.shape[-3:], device=points.device, dtype=points.dtype)
             context = torch.minimum(points, size_v - 1 - points).amin(-1)
         lc = torch.log(context.clamp(1.0, 64.0) / 32.0)[..., None]
-        out = 0
+        out = 0; wsum = 0
         for o in range(8):
             off = torch.tensor([(o >> 2) & 1, (o >> 1) & 1, o & 1], device=points.device, dtype=points.dtype)
             idx = (base + off).clamp(min=torch.zeros(3, device=points.device), max=(size - 1).to(points.dtype))
@@ -116,8 +116,8 @@ class EntityDecoder(nn.Module):
             lin = ((idx[..., 0] * size[1] + idx[..., 1]) * size[2] + idx[..., 2]).long()
             fc = torch.gather(hf, 2, lin[:, None].expand(-1, hf.shape[1], -1))
             z = torch.cat([fc, f1, f0], 1).transpose(1, 2)
-            out = out + wgt[..., None] * self.point(torch.cat([z.to(rel.dtype), rel, ls, lc], -1))
-        return out
+            out = out + wgt[..., None] * self.point(torch.cat([z.to(rel.dtype), rel, ls, lc], -1)); wsum = wsum + wgt
+        return out / wsum.clamp_min(1e-6)[..., None]                                                # corners clamped at the faces: weights renormalised
 
     def forward(self, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.Tensor, context: torch.Tensor | None = None) -> dict:
         """``points (B, Q, 3)`` input voxels, ``sigma (B, Q)`` voxels, ``dirs (B, Q, D, 3)`` unit (z, y, x)."""
@@ -215,7 +215,11 @@ class PopulationNet(nn.Module):
                    axis_head=bool(args.get("axis_head", False)), head=args.get("head", "slots") or "slots", J=int(args.get("lobes_J", 4) or 4),
                    context_level=bool(args.get("context_level", False)), voxel_cond=bool(args.get("voxel_cond", False)),
                    identity_dim=int(args.get("identity_dim", 0) or 0), points=bool(args.get("points", False)), free_sh=bool(args.get("free_sh", False)),
-                   embed=int(args.get("embed", 8) or 8), dir_lmax=int(args.get("dir_lmax", 8) or 8), vote_unc=bool(args.get("vote_unc", False)))
+                   embed=int(args.get("embed", 8) or 8), dir_lmax=int(args.get("dir_lmax", 8) or 8), vote_unc=bool(args.get("vote_unc", False))) \
+            ._with_args(args)
+
+    def _with_args(self, args: dict) -> "PopulationNet":
+        self._args = dict(args); return self
 
     def local_contrast(self, x: torch.Tensor) -> torch.Tensor:
         """``(x - mean) / sd`` in a Gaussian window of sigma ``lcn`` voxels (sd floored at 0.01 of the 0-1 range), /3:
@@ -301,10 +305,20 @@ class PopulationNet(nn.Module):
         return out
 
 
-def receptive_field(model: PopulationNet, size: int = 96) -> int:
+def receptive_field(model: PopulationNet, size: int | None = None) -> int:
     """The receptive field (voxels, along one axis) of a lattice output, measured: the extent of the input that changes
-    the centre cell's output."""
+    the centre cell's output. Measured on a narrow copy of the architecture (the extent depends on the topology, not the
+    widths), on an input grown until the extent no longer reaches its faces (a 96³ input clipped a 146-voxel field)."""
     import copy
+    if size is None:
+        args = getattr(model, "_args", None)
+        probe = PopulationNet.from_args({**args, "widths": (4, 4, 4)}).cpu() if args else model
+        s_ = 128
+        while True:
+            rf = receptive_field(probe, s_)
+            if rf <= s_ - 16 or s_ >= 512:
+                return rf
+            s_ *= 2
     m = copy.deepcopy(model).eval(); dev = next(m.parameters()).device
     for p in m.modules():
         if isinstance(p, Block):

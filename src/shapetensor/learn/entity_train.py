@@ -9,7 +9,8 @@ mass), half uniform -- and the losses compare, per direction:
 * **vote**: on directions one entity owns (its share of rho > 1/2): the Bingham frame (axis-invariant, :func:`~shapetensor.
   learn.bingham.frame_loss`), the concentrations (log1p L1) and the descriptors;
 * **tree**: hyperbolic distortion between owned directions' embeddings, ``(d_P(z_i, z_j) - t_ij)^2 / (1 + t_ij)`` with
-  ``t_ij`` the tree distance of their entities (0 within an entity) -- any depth, no fixed levels;
+  ``t_ij`` the tree distance of their entities (0 within an entity) -- any depth, no fixed levels -- and the gauge: each
+  embedding's distance from the centre equals its entity's depth (the root at the centre, ancestors toward it);
 * **overall**: the overall ODF head (free SH per lattice cell) against the exact pooled density; **fraction** and
   **points** as before.
 """
@@ -25,6 +26,7 @@ from . import bingham as BG
 ENT_WEIGHTS = {"density": 1.0, "vote": 1.0, "kappa": 0.2, "desc": 0.2, "tree": 0.5, "overall": 1.0, "fraction": 0.2, "points": 0.5, "contrast": 0.5, "cross": 0.5}
 N_DIRS = 32
 TREE_PAIRS = 4096
+TREE_EDGE = 0.6                     # hyperbolic length of a tree edge: depth ~16 fits the ball (radius cap 1e-4 -> 9.9 from the centre)
 OVERALL_FLOOR = 0.01                # the overall ODF's relative error: energy floor per lattice cell (~ occupancy 0.03)
 
 
@@ -94,10 +96,13 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
             n_ = min(TREE_PAIRS, idx.numel() * 4)
             pi = idx[torch.randint(0, idx.numel(), (n_,), generator=g, device=dev)]; pj = idx[torch.randint(0, idx.numel(), (n_,), generator=g, device=dev)]
             zb = ent["z"][b].reshape(-1, ent["z"].shape[-1]); nb = node[b].flatten()
-            t = tree_distance(T["e_anc"][b], nb[pi], nb[pj])
+            t = TREE_EDGE * tree_distance(T["e_anc"][b], nb[pi], nb[pj])
             from .model import poincare_dist
             dz = poincare_dist(zb[pi], zb[pj])
-            lt.append(((dz - t) ** 2 / (1 + t)).mean())
+            # the gauge: each entity's distance from the ball's centre is its depth in the tree (the root at the centre,
+            # ancestors toward it) -- depth readable at inference, embeddings comparable across windows and volumes
+            dep = TREE_EDGE * ((T["e_anc"][b][nb[idx]] >= 0).sum(1) - 1).float(); r0 = 2 * torch.atanh(zb[idx].norm(dim=-1).clamp(max=1 - 1e-5))
+            lt.append(((dz - t) ** 2 / (1 + t)).mean() + ((r0 - dep) ** 2 / (1 + dep)).mean())
         if lt:
             parts["tree"] = torch.stack(lt).mean(); total = total + W["tree"] * parts["tree"]
         parts["owned_share"] = owned.float().mean().detach()
@@ -180,6 +185,7 @@ def cross_window_loss(P1: dict, P2: dict, T1: dict, T2: dict, X: torch.Tensor, d
     o1, w1 = owners(T1, dirs); o2, w2 = owners(T2, dirs)
     B, Q, D = o1.shape; E = X.shape[-1]
     t = torch.gather(X.view(B, Q, E * E), 2, (o1 * E + o2)).view(B, Q, D)
+    t = torch.where(t >= 0, TREE_EDGE * t, t)
     ok = w1 & w2 & (t >= 0)
     if not bool(ok.any()):
         return dirs.new_zeros(())

@@ -147,6 +147,8 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
         out["q_sh"] = (sample_density(F, pts, sig) if F is not None else layer_density(s, d, pts, sig, QUERY["lmax"])).half()
     if HEAD == "entities":                                                                             # entities at random points and scales
         out.update(entity_queries(s, d, size, seed, device))
+        if "points" in d:                                                                              # branch and end points (the points head)
+            out["points_t"] = Fn.avg_pool3d(d["points"][None].float(), 4)[0].half()
         out["voxel"] = torch.tensor(math.log2(d["voxel_um"]) if d.get("voxel_um") else float("nan"), device=device)
     out["kind"] = out["kind"].to(torch.int8); out["layer"] = out["layer"].to(torch.int16)
     return d["image"].to(torch.uint8), out
@@ -155,6 +157,18 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
 #: the entity targets' sampling: query points per crop, scales (crop voxels, log-uniform), entities kept per query, the
 #: resolution rule (an object is its own entity when its radius >= max(r_min, c_sig * sigma)), padded tree sizes
 ENTITY = {"n_points": 384, "sigma": (1.0, 4.0), "emax": 8, "r_min": 1.5, "c_sig": 0.5, "u_max": 1536, "d_max": 16, "margin": 2, "p_tissue": 0.7}
+
+
+def acquisition_blur(rec: dict) -> float:
+    """The acquisition's own blur as one Gaussian sigma (output voxels): the PSF (rms over the axes), a resolution loss
+    by a factor f (~0.4 f), thick slices along one axis (~0.4 f / sqrt 3, spread over the three)."""
+    psf = rec.get("psf") or [0.0, 0.0, 0.0]
+    s2 = sum(float(v) ** 2 for v in psf) / max(len(psf), 1)
+    if rec.get("resolution"):
+        s2 += (0.4 * float(rec["resolution"])) ** 2
+    if rec.get("thick_slices"):
+        s2 += (0.4 * float(rec["thick_slices"])) ** 2 / 3
+    return math.sqrt(s2)
 
 
 def entity_queries(s, d: dict, size: int, seed: int, device, points: torch.Tensor | None = None, sigma: torch.Tensor | None = None) -> dict:
@@ -188,12 +202,12 @@ def entity_queries(s, d: dict, size: int, seed: int, device, points: torch.Tenso
     full = lambda x: None if x is None else (x.float().view(-1, 1, 1, 1).expand(K, *d["occupancy"].shape[1:]) if x.dim() == 1 else x.float())
     t = entity_targets(ctx["entries"], ctx["tree"], ctx["canvas_shape"], ctx["origin"], ctx["zoom"], (size,) * 3, pts, sig, grid=ctx["grid"],
                        vis=full(vis), group_layer=ctx["group_layer"], r_min=E["r_min"], c_sig=E["c_sig"], emax=emax,
-                       mask=ctx.get("mask"), keep=ctx.get("keep"), ovis=full(ov))
+                       mask=ctx.get("mask"), keep=ctx.get("keep"), ovis=full(ov), sig_acq=acquisition_blur(d.get("record", {})), comp=ctx.get("comp"))
     tree = ctx["tree"]; node = t["node"]; live = node >= 0
     anc = tree.ancestors(torch.unique(node[live])) if bool(live.any()) else torch.zeros(0, 1, dtype=torch.long, device=device)
     U = torch.unique(torch.cat([anc[anc >= 0], torch.zeros(1, dtype=torch.long, device=device)]))   # the root always (the dense entities' parent)
     nd = len(dense)
-    if U.numel() + nd > E["u_max"]:                                                                  # rare: the deepest-first nodes beyond the pad dropped
+    if U.numel() + nd > E["u_max"]:                                                                  # rare: the latest-made nodes beyond the pad dropped (masked)
         U = U[:E["u_max"] - nd]
     loc = torch.full((tree.n,), -1, dtype=torch.long, device=device); loc[U] = torch.arange(U.numel(), device=device)
     A = tree.ancestors(U)[:, :E["d_max"]]; A = torch.where(A >= 0, loc[A.clamp_min(0)], A)
@@ -922,7 +936,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    resume: str | None = None, routes: float = 1.0, contrast_views: bool = True, contrast_every: int = 2, producer: bool = True,
                    cpu_workers: int = 0, cpu_threads: int = 4, channels_last: bool = False, compile_model: bool = False, ckpt_minutes: float = 20.0,
                    benchmark: int = 0, device: str = "cuda", log_every: int = 25, n_dirs: int = 32, pairs: int = 16, pair_every: int = 4,
-                   dir_lmax: int = 8, vote_unc: bool = False, e_sigma: tuple | None = None, deep_tree: bool = False):
+                   dir_lmax: int = 8, vote_unc: bool = False, e_sigma: tuple | None = None, deep_tree: bool = False, lcn: float = 0.0):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -969,7 +983,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 context_level=context_level, voxel_cond=voxel_cond, points=points, level0=level0, level_steps=level_steps, voxel_dropout=voxel_dropout,
                 weights=weights, routes=routes, contrast_views=contrast_views, world=world, contrast_every=contrast_every, n_dirs=n_dirs,
                 channels_last=channels_last, compile_model=compile_model, entity=dict(ENTITY), pairs=pairs, pair_every=pair_every,
-                dir_lmax=dir_lmax, vote_unc=vote_unc)
+                dir_lmax=dir_lmax, vote_unc=vote_unc, lcn=lcn)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)
@@ -1216,7 +1230,7 @@ def main():
                        contrast_every=a.contrast_every, producer=not a.no_producer, cpu_workers=a.cpu_workers, cpu_threads=a.cpu_threads,
                        channels_last=a.channels_last, compile_model=a.compile, ckpt_minutes=a.ckpt_minutes, benchmark=a.benchmark, device=a.device,
                        log_every=a.log_every, n_dirs=a.n_dirs, pairs=16 if a.pairs is None else a.pairs, pair_every=a.pair_every,
-                       dir_lmax=a.dir_lmax, vote_unc=a.vote_unc, e_sigma=a.e_sigma, deep_tree=a.deep_tree)
+                       dir_lmax=a.dir_lmax, vote_unc=a.vote_unc, e_sigma=a.e_sigma, deep_tree=a.deep_tree, lcn=a.lcn)
         return
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,

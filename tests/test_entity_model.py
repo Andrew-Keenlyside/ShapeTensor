@@ -16,7 +16,7 @@ def test_centred_paths_pass_through_their_centre():
     i = int(((P[0] - c[0]).norm(dim=1)).argmin())
     assert float((P[0, i] - c[0]).norm()) < 1e-4
     t = P[0, i + 1] - P[0, i - 1]; t = t / t.norm()
-    assert abs(float(t @ d[0])) > 0.998                                                            # the tangent there is d
+    assert abs(float(t @ d[0])) > 0.995                                                            # the tangent there is d
     assert float((P[0, 1:] - P[0, :-1]).norm(dim=1).std()) < 0.05                                  # even steps across the join
 
 

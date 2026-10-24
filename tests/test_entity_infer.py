@@ -65,9 +65,14 @@ def test_cluster_separates_crossings_and_parallel_neighbours():
     r2 = _fake(dirs, [((1, 0, 0), 30.0, 1.0, za)]); half = dirs[:, 1] > 0
     r2["z"][0, half] = torch.tensor(zb)
     assert int(EI.cluster(r2, dirs)["live"][0].sum()) == 2
-    # two lobes with the same embedding (a branch in the window): one entity
+    # a branch in the window: two lobes of one entity -- the same embedding and the same vote (the entity's one Bingham,
+    # moment matched to both arms) -> one entity, though the lobes lie apart on the sphere
     r3 = _fake(dirs, [((1, 0, 0), 40.0, 1.0, za), ((0, 1, 0), 40.0, 1.0, za)])
+    r3["R"][:] = r3["R"][0, int(r3["f"][0].argmax())]; r3["kappa"][:] = torch.tensor([30.0, 0.5])
     assert int(EI.cluster(r3, dirs)["live"][0].sum()) == 1
+    # two lobes voting for different entities with one embedding (siblings the embedding failed to tell apart): two
+    r4 = _fake(dirs, [((1, 0, 0), 40.0, 1.0, za), ((0, 1, 0), 40.0, 1.0, za)])
+    assert int(EI.cluster(r4, dirs)["live"][0].sum()) == 2
 
 
 def test_link_follows_a_line_and_keeps_neighbours_apart():
@@ -92,7 +97,7 @@ def test_hierarchy_groups_by_tree_position():
 
 def test_follow_runs_on_a_model():
     net = _net(); x = torch.rand(64, 64, 64, device=DEV)
-    out = EI.follow(net, x, (32.0, 32.0, 32.0), (1.0, 0.0, 0.0), voxel=1.0, max_steps=3, n_dirs=60, core=32, f_rel=0.0, f_abs=0.0)
+    out = EI.follow(net, x, (32.0, 32.0, 32.0), (1.0, 0.0, 0.0), voxel=1.0, max_steps=3, n_dirs=60, core=32, f_frac=0.0, f_abs=0.0)
     assert out["points"].shape[1] == 3 and out["points"].shape[0] == out["axes"].shape[0] >= 1
 
 
@@ -125,3 +130,40 @@ def test_link_never_merges_a_crossing():
     ids = EI.link(pts, {"mass": torch.ones(Q, C), "live": live, "z": z, "R": R}, radius=1.5, z_link=0.7, ang_max=95.0)
     assert ids[centre, 0] != ids[centre, 1]
     assert len(set(ids[~on_b, 0].tolist())) == 1
+
+
+def test_cluster_keeps_broad_entities_and_weighs_them():
+    """A sharp lobe (kappa 200) and a broad one (kappa 8) of equal mass crossing at 60 degrees: both found, shares ~1/2
+    -- the cut is relative to the mean density, and the mass comes from the voted Bingham (not the grid)."""
+    from shapetensor.learn import bingham as BG
+    dirs = EI.sphere_dirs(300)
+    D = dirs.shape[0]
+    def lobe(ax, k):
+        ax = torch.nn.functional.normalize(torch.tensor(ax, dtype=torch.float32), dim=0)
+        a = torch.nn.functional.normalize(torch.linalg.cross(ax, torch.tensor([0.3, 0.5, 0.8])), dim=0); b = torch.linalg.cross(ax, a)
+        R = torch.stack([a, b, ax], 1); K = torch.tensor([k, k])
+        return R, K, BG.pdf(dirs, R.expand(D, 3, 3), K.expand(D, 2))
+    R1, K1, p1 = lobe((1, 0, 0), 200.0); R2, K2, p2 = lobe((0.5, math.sqrt(3) / 2, 0), 8.0)
+    f = 0.5 * p1 + 0.5 * p2; own1 = 0.5 * p1 > 0.5 * p2
+    z = torch.zeros(D, 4); z[own1, 0] = 0.6; z[~own1, 0] = -0.6
+    R = torch.where(own1[:, None, None], R1, R2); K = torch.where(own1[:, None], K1, K2)
+    r = {"f": f[None], "z": z[None], "R": R[None], "kappa": K[None], "desc": torch.zeros(1, D, 5)}
+    e = EI.cluster(r, dirs)
+    assert int(e["live"][0].sum()) == 2
+    sh = sorted(e["share"][0][e["live"][0]].tolist())
+    assert abs(sh[0] - 0.5) < 0.12 and abs(sh[1] - 0.5) < 0.12, sh
+    assert abs(float(e["mass"][0][e["live"][0]].sum()) - 1.0) < 0.2
+
+
+def test_link_does_not_chain_parallel_objects_through_their_parent():
+    """Two parallel objects A, B (depth 2) and, at the points between them, their parent (depth 1) as the entity: an
+    anchored embedding puts the parent one tree edge from each, so neither the threshold nor the depth rule links them."""
+    n = 12
+    pts = torch.cat([torch.stack([torch.arange(n).float(), torch.full((n,), y), torch.zeros(n)], 1) for y in (0.0, 1.0, 2.0)])
+    Q, C = pts.shape[0], 2
+    R = torch.eye(3).expand(Q, C, 3, 3).clone(); R[..., :, 2] = torch.tensor([1.0, 0, 0]); R[..., :, 0] = torch.tensor([0, 0, 1.0]); R[..., :, 1] = torch.tensor([0, 1.0, 0])
+    at = lambda d, phi: math.tanh(d / 2) * torch.tensor([math.cos(phi), math.sin(phi), 0.0, 0.0])
+    z = torch.zeros(Q, C, 4); z[:n, 0] = at(2.0, 0.3); z[n:2 * n, 0] = at(1.0, 0.0); z[2 * n:, 0] = at(2.0, -0.3)
+    live = torch.zeros(Q, C, dtype=torch.bool); live[:, 0] = True
+    ids = EI.link(pts, {"mass": torch.ones(Q, C), "live": live, "z": z, "R": R}, radius=1.5)
+    assert len({int(ids[0, 0]), int(ids[n, 0]), int(ids[2 * n, 0])}) == 3

@@ -271,7 +271,7 @@ class Canvas:
 
     def __init__(self, shape, device):
         self.shape = tuple(shape); self.device = device; self.n = int(np.prod(shape))
-        self.id_keys, self.id_w, self.id_v = [], [], []; self._nkeys = 0; self.group = 0
+        self.id_keys, self.id_w, self.id_v = [], [], []; self._nkeys = 0; self.group = 0; self._clampf = {}
         self.lumen = torch.zeros(self.n, device=device); self.lumen_c = torch.zeros(self.n, device=device)
         self.reset()
 
@@ -315,13 +315,20 @@ class Canvas:
     def entries(self):
         """Every (voxel, population, object) with its volume ``w`` (voxel units) and the w-weighted sums of its shape
         tensor (6) and descriptors (5): ``(vox int64, group int64, obj int64, w (n,), v (n, 11))`` -- the entities' targets
-        (an entity's tensor is the exact sum of its objects')."""
+        (an entity's tensor is the exact sum of its objects'); scaled where the population's occupancy was clamped."""
         self._compact()
         if not self.id_keys:
             z = torch.zeros(0, dtype=torch.long, device=self.device)
             return z, z, z, torch.zeros(0, device=self.device), torch.zeros(0, self.NV, device=self.device)
         k = self.id_keys[0]; vg = k // self.OBJ
-        return vg // self.NG, vg % self.NG, k % self.OBJ, self.id_w[0], self.id_v[0]
+        vox, grp, obj, w, v = vg // self.NG, vg % self.NG, k % self.OBJ, self.id_w[0], self.id_v[0]
+        if self._clampf:                                                     # as the population's occupancy: at most one voxel per voxel
+            w = w.clone(); v = v.clone()
+            for g_, (idx, val) in self._clampf.items():
+                fac = torch.ones(self.n, device=self.device); fac[idx] = val
+                m = grp == g_
+                w[m] = w[m] * fac[vox[m]]; v[m] = v[m] * fac[vox[m]][:, None]
+        return vox, grp, obj, w, v
 
     def splat_lumen(self, Q, W, c):
         Z, Y, X = self.shape
@@ -343,8 +350,12 @@ class Canvas:
             self._add_keys((lin * self.NG + self.group) * self.OBJ + obj_map.reshape(-1)[m], o[m], o[m, None] * tv)
 
     def finish(self):
-        """This population's maps: occupancy (clamped), tensor (trace 1), descriptors, mean contrast map."""
+        """This population's maps: occupancy (clamped), tensor (trace 1), descriptors, mean contrast map. Where the
+        occupancy passed one (splats overlapping), the factor that clamps it is kept for this population's entries."""
         occ = self.occ.clamp_min(0); w = occ.clamp_min(1e-9)[:, None]
+        hi = torch.nonzero(occ > 1.0)[:, 0]
+        if hi.numel():
+            self._clampf[self.group] = (hi, 1.0 / occ[hi])
         T = self.acc[:, :6] / w; D = self.acc[:, 6:6 + self.NDESC] / w; C = self.acc[:, -1] / w[:, 0]
         empty = occ < 1e-6
         T = torch.where(empty[:, None], eye6(self.device).view(1, 6) / 3, T)
@@ -754,7 +765,7 @@ class Scene:
                 fr_ = ((sl_ - r.u(0, per)) / per).remainder(1.0)
                 con = 1 + amp * (torch.exp(-0.5 * (torch.minimum(fr_, 1 - fr_) / wid) ** 2) - 0.5 * ((fr_ - 0.5).abs() < 0.25).float())[None].expand(N, S)
             cmap = contrast * (con if con is not None else 1.0) * torch.ones(N, S, device=self.device)
-            obj = self.ids(N, rad[:, 0])
+            obj = self.ids(N, rad.amin(1))                                      # the smallest radius along each fibre
             if getattr(self, "deep", False) and N >= 6:                         # fascicles: fibres grouped around seeds on the section
                 nf = r.i(2, min(7, N // 3))
                 seeds = o[torch.randperm(N, generator=r.g, device=self.device)[:nf]]
@@ -900,6 +911,8 @@ class Scene:
                 nb_ = self.ids(int(grow.sum()), r2g)
                 for c_, p_ in zip(nb_.tolist(), br[grow].tolist()):
                     self.parents[c_] = p_
+                for b_, r_ in zip(br[grow].tolist(), r1g.tolist()):                 # a continuing branch tapers: its smallest radius
+                    self.obj_r[b_] = min(self.obj_r.get(b_, r_), r_)
                 br = torch.cat([br[grow], nb_])
             side = torch.cat([side[grow], 1 - side[grow]])                       # the larger child keeps its parent's side
         g.curves = segs
@@ -1865,9 +1878,11 @@ class Scene:
         chosen = [str(c_) for c_ in r.np.choice(names, size=n, p=p)]
         order = {"cells": 0, "crystals": 0, "epithelium": 0, "nuclei": 0, "organs": 0, "organelles": 0, "granules": 0,
                  "tree": 1, "gland": 1, "network": 2}                                           # obstacles first, fibres after
+        line_sheet = False
         if crossing:
-            nb = r.i(2, 3); chosen = chosen[:max(0, n - nb)] + ["bundle"] * nb
-            self.record["crossing_scene"] = nb
+            line_sheet = r.p(0.3)                                                  # also a line across a sheet (fibres through a membrane, a lamella)
+            nb = r.i(1, 2) if line_sheet else r.i(2, 3); chosen = chosen[:max(0, n - nb)] + ["bundle"] * nb
+            self.record["crossing_scene"] = nb + (2 if line_sheet else 0)
         chosen.sort(key=lambda k: order.get(k, 5))
         bundles = []
         for name in chosen:
@@ -1896,6 +1911,19 @@ class Scene:
                 continue
             for g_ in (gs if isinstance(gs, list) else [gs]):
                 self.groups.append(g_)
+        if line_sheet:                                                          # a sheet, and a bundle through it at 5-90 deg to its plane
+            c = self.centre_point(); nrm = r.unit()
+            sh = self.sheet(normal=nrm, centre=c)
+            if sh is not None:
+                for g_ in (sh if isinstance(sh, list) else [sh]):
+                    self.groups.append(g_)
+                a = torch.tensor([1.0, 0, 0], device=self.device) if abs(float(nrm[0])) < 0.9 else torch.tensor([0, 1.0, 0], device=self.device)
+                e1 = Fn.normalize(torch.linalg.cross(nrm, a), dim=0)
+                beta = math.radians(r.u(5, 90)); ax = math.cos(beta) * e1 + math.sin(beta) * nrm
+                gb = self.bundle(None, "single", axis=ax, centre=c)
+                for g_ in (gb if isinstance(gb, list) else [gb] if gb is not None else []):
+                    g_.cross = (c, e1, ax); g_.centre_pt = c; self.groups.append(g_)
+                self.record["line_sheet_deg"] = round(math.degrees(beta), 1)
         if not iso and (families is None or families.get("neuropil", self.FAMILIES["neuropil"]) > 0) and r.p(underlay_p * scale_weight("neuropil", self.voxel_um)):
             gs = self.neuropil()                                                       # the underlay
             for g_ in (gs or []):
@@ -2268,7 +2296,10 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
         R = M * R + (1 - M) * med                                                              # the specimen's surface is a step (an interface)
         lab = torch.where(M > 0.5, lab, torch.full_like(lab, int(lab.max()) + 1))
         rec["boundary"] = (round(float(1 - M.mean()), 2), kind)
+    pre = [L.occupancy.clone() for L in layers] if entity_ctx else None
     img = _composite(bg, R, shapes_, device)                                 # normalises the occupancies, adds the interface and isotropic states
+    comp = (torch.stack([torch.where(p_ > 1e-6, L.occupancy / p_.clamp_min(1e-6), torch.ones_like(p_)) for p_, L in zip(pre, layers)])
+            if (entity_ctx and layers) else None)                            # occlusion and the volume budget, per population
     mode = physics or (ra.np.choice(PHYS_BY_MODALITY[modality]) if ra.p(p_physics) else "additive")
     n_sh = len(layers) + len(extra)
     filled = sum((L.occupancy for L in shapes_[:n_sh]), torch.zeros(shape, device=device))
@@ -2379,7 +2410,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
             from .entities import build_tree
             ren["tree"] = build_tree(sc, ren["entries"][1], ren["entries"][2])
         d["entity_ctx"] = {"entries": ren["entries"], "tree": ren["tree"], "canvas_shape": (canvas,) * 3, "origin": o, "zoom": zoom,
-                           "group_layer": group_layer, "grid": d.get("warp_grid"), "keep": keep_lut, "mask": M}
+                           "group_layer": group_layer, "grid": d.get("warp_grid"), "keep": keep_lut, "mask": M, "comp": comp}
     if second_contrast:                                                      # a second contrast of the same scene (multi-contrast MRI)
         img2 = bg * 0.5 + 60
         for L in layers:
@@ -2404,6 +2435,7 @@ def draw_pair(shape=(64, 64, 64), seed: int = 0, device="cuda", kind: str = "zoo
         b = draw_scene(shape, seed, device, crop=oc, zoom=2, acq_seed=seed + 4242, **kw)
         return a, b, {"kind": "zoom", "offset_cells": [(f - c) // 8 for f, c in zip(of, oc)], "scale": 2}
     if kind == "shift":                                                      # two overlapping windows (multiples of 8: lattice-aligned)
+        assert int(kw.get("zoom", 1)) == 1, "shift pairs are drawn at zoom 1 (offsets in crop voxels)"
         sh = [8 * r.i(-(n // 2) // 8, (n // 2) // 8) for n in shape]
         if not any(sh):
             sh[r.i(0, 2)] = 8

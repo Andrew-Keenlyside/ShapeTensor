@@ -163,7 +163,8 @@ def _pulled(points: torch.Tensor, grid: torch.Tensor | None, shape):
 def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, points: torch.Tensor, sigma: torch.Tensor, grid=None,
                    vis: torch.Tensor | None = None, group_layer=None, r_min: float = 1.5, c_sig: float = 0.5, emax: int = 8,
                    bin_size: int = 2, mask: torch.Tensor | None = None, keep: torch.Tensor | None = None, m_min: float = 1e-3,
-                   ovis: torch.Tensor | None = None, alone_is_object: bool = True) -> dict:
+                   ovis: torch.Tensor | None = None, alone_is_object: bool = True, sig_acq: float = 0.0, share_keep: float = 0.2,
+                   comp: torch.Tensor | None = None) -> dict:
     """The entities at query ``points (Q, 3)`` (output crop voxels) and scales ``sigma (Q,)`` (crop voxels).
 
     ``entries`` the canvas's ``(vox, group, obj, w, v)`` (canvas linear index; ``v`` the w-weighted tensor (6) and
@@ -175,7 +176,13 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     (each population's tensor blended toward isotropic where its orientation does not show, as the total density's
     target, :func:`~shapetensor.learn.query.voxel_density`); ``alone_is_object``: an entity the resolution merged that
     holds a single object in this window (no sibling with mass >= ``m_min`` there) is that object -- an isolated thin
-    fibre, a sparsely labelled neurite is traceable as itself; objects merge only where they share the window. Returns, padded to ``emax`` entities per query (by mass):
+    fibre, a sparsely labelled neurite is traceable as itself; objects merge only where they share the window;
+    ``sig_acq`` the acquisition's own blur (crop voxels): what the image cannot resolve merges, the resolution rule's
+    scale being ``sqrt(sigma^2 + (2 sig_acq)^2)``; an entity is kept below ``m_min`` when it holds ``share_keep`` of
+    its window's visible mass (a thin bright line alone in a large window); ``comp (L, Z, Y, X)`` each population layer's
+    composite factor (pre-warp crop space: occlusion and the volume budget, as the image and the total target). Only
+    entries inside the crop count (the image shows nothing beyond it); visibility is taken where each part of the
+    window lies (as the total target weighs each voxel). Returns, padded to ``emax`` entities per query (by mass):
     ``node (Q, E)`` (tree nodes, -1 pad), ``mass``, ``vis``, ``T (Q, E, 3, 3)`` (trace 1), ``desc (Q, E, 5)``."""
     vox, grp, obj, w, v = entries
     dev = points.device; Q = points.shape[0]; zf = float(zoom)
@@ -185,9 +192,11 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     o = torch.as_tensor(origin, device=dev, dtype=torch.float32)
     c = (torch.stack([cz, cy, cx], 1).float() - o - (zf - 1) / 2) / zf
     xp, Jq = _pulled(points.float(), grid, shape)
+    hi_ = torch.tensor(shape, device=dev, dtype=torch.float32) - 1
+    xp = torch.minimum(torch.maximum(xp, torch.zeros_like(xp)), hi_)                              # pulled beyond a face: the face (the image's padding)
     smax = float(sigma.max()); m = 3 * smax + bin_size
     lo = xp.min(0).values - m; hi = xp.max(0).values + m
-    sel_ = ((c >= lo) & (c <= hi)).all(1)
+    sel_ = ((c >= lo) & (c <= hi)).all(1) & ((c >= -0.5) & (c <= hi_ + 0.5)).all(1)              # inside the crop only
     if keep is not None:                                                                        # sparse labelling: unlabelled objects are gone
         sel_ &= torch.as_tensor(keep, device=dev)[obj.long().clamp(max=int(keep.numel()) - 1)]
     c, grp, obj, w, v = c[sel_], grp[sel_].long(), obj[sel_].long(), w[sel_].float(), v[sel_].float()
@@ -207,6 +216,13 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     rc = torch.zeros(R, 3, device=dev).index_add_(0, inv, w[:, None] * c) / rw.clamp_min(1e-12)[:, None]
     rbin = uk // (tree.n + 1); rleaf = uk % (tree.n + 1)
     rgrp = torch.zeros(R, dtype=torch.long, device=dev).index_put_((inv,), grp)
+    if comp is not None and group_layer is not None:                                           # composite: occlusion, the volume budget
+        gl_r = torch.as_tensor(list(group_layer) + [-1], device=dev, dtype=torch.long)[rgrp.clamp(max=len(group_layer))]
+        fr = torch.ones(R, device=dev)
+        for k in torch.unique(gl_r[gl_r >= 0]).tolist():
+            mk = gl_r == k
+            fr[mk] = _vis_at(comp[k:k + 1].float(), rc[mk])[:, 0]
+        rw = rw * fr; rv = rv * fr[:, None]
     # (query, row) pairs: the bins within 3 sigma of each query's pulled point
     starts = torch.searchsorted(rbin, torch.arange(int(nb.prod()), device=dev))
     ends = torch.searchsorted(rbin, torch.arange(int(nb.prod()), device=dev), right=True)
@@ -228,20 +244,25 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     d2 = ((rc[ri] - xp[qi]) ** 2).sum(1); sg = sigma[qi]
     g = torch.exp(-0.5 * d2 / sg ** 2) * (d2 <= (3 * sg) ** 2)
     # the resolved entity of each pair, then sums per (query, entity)
-    thr = zf * torch.clamp(c_sig * sg, min=r_min)
+    thr = zf * torch.clamp(c_sig * torch.sqrt(sg ** 2 + (2 * float(sig_acq)) ** 2), min=r_min)
     node = tree.resolve(rleaf[ri], thr)
     gw = g * rw[ri]
     if alone_is_object:                                                                         # a merged entity holding one object here is that object
         node = _single_object(qi, node, rleaf[ri], gw / (zf ** 3 * (2 * math.pi * sg ** 2) ** 1.5), m_min, tree.n)
     vl = torch.ones_like(gw); ol = None
-    if group_layer is not None:
+    if group_layer is not None and (vis is not None or ovis is not None):
         gl = torch.as_tensor(list(group_layer) + [-1], device=dev, dtype=torch.long)[rgrp[ri].clamp(max=len(group_layer))]   # long even when empty
-        if vis is not None:
-            vq = _vis_at(vis, points.float())                                                     # (Q, K)
-            vl = torch.where(gl >= 0, vq[qi, gl.clamp_min(0)], torch.ones_like(gw))
-        if ovis is not None:
-            oq = _vis_at(ovis, points.float())
-            ol = torch.where(gl >= 0, oq[qi, gl.clamp_min(0)], torch.ones_like(gw)).clamp(0, 1)
+        Ji_q = torch.linalg.inv(Jq)                                                                # each part of the window where it lies in the output
+        y = (points.float()[qi] + (Ji_q[qi] @ (rc[ri] - xp[qi])[..., None])[..., 0])
+        y = torch.minimum(torch.maximum(y, torch.zeros_like(y)), hi_)
+        vl = torch.zeros_like(gw) if vis is not None else vl                                       # a population absent from the crop: not visible
+        ol = torch.ones_like(gw) if ovis is not None else None
+        for k in torch.unique(gl[gl >= 0]).tolist():
+            mk = gl == k
+            if vis is not None:
+                vl[mk] = _vis_at(vis[k:k + 1].float(), y[mk])[:, 0]
+            if ovis is not None:
+                ol[mk] = _vis_at(ovis[k:k + 1].float(), y[mk])[:, 0].clamp(0, 1)
     ek = qi * (tree.n + 1) + node
     ue, einv = torch.unique(ek, return_inverse=True)
     eq = ue // (tree.n + 1); en = ue % (tree.n + 1)
@@ -260,9 +281,11 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     Ji = torch.linalg.inv(Jq[eq])
     T = Ji @ T @ Ji.transpose(1, 2); T = T / T.diagonal(dim1=1, dim2=2).sum(-1).clamp_min(1e-9)[:, None, None]
     desc = Vs[:, 6:] / Wm.clamp_min(1e-12)[:, None]; desc[:, :2] = desc[:, :2] / zf                 # sizes in the crop's voxels
+    desc[:, :2] = desc[:, :2] * torch.linalg.det(Jq[eq]).abs().clamp_min(1e-6).pow(-1.0 / 3)[:, None]   # and in the output's (the warp's stretch)
     # visible mass; negligible entities (window edges, masked tissue) dropped; pad per query, heaviest first
     score = mass * Vis
-    big = score >= m_min
+    tot = torch.zeros(Q, device=dev).index_add_(0, eq, score)
+    big = (score >= m_min) | ((score >= share_keep * tot[eq]) & (score > 1e-7))
     eq, en, mass, Vis, T, desc, score = eq[big], en[big], mass[big], Vis[big], T[big], desc[big], score[big]
     o1 = torch.argsort(-score); order = o1[torch.argsort(eq[o1], stable=True)]                  # by query, then visible mass descending
     eq, en, mass, Vis, T, desc = eq[order], en[order], mass[order], Vis[order], T[order], desc[order]
