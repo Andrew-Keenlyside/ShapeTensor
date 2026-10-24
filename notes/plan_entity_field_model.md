@@ -143,15 +143,17 @@ scales, morphologies) after the generator targets, after the first pilot, and be
 
 ## 9. Theoretical bounds and limits (2026-10-24)
 
-Numbers for the current trunk: receptive field 96 voxels, sigma trained 1–4 voxels, ``emax`` 8.
+Numbers for the current trunk: receptive field 146 voxels (54 without the stride-8 context level; an earlier
+measurement on a 96³ input clipped it to 96), sigma trained 1–4 voxels (1–6 with ``--e-sigma``), ``emax`` 8.
 
 **Set by the image (no model removes them).**
 - Orientation lives only in spatial pattern: populations mixed below the blur scale carry no orientation in the
   intensity. The targets blend each layer's tensor toward isotropic by its orientation visibility (entities and the
   total alike), so the model is not asked for what does not show.
-- Uniform material farther than ~RF/2 (~48 voxels) from any edge or texture has no measurable orientation.
+- Uniform material farther than ~RF/2 (~73 voxels) from any edge or texture has no measurable orientation (the
+  effective field, where the weights are, is smaller: to be measured on the pilot).
 - Crossing vs fan vs split vs kiss needs both sides of the overlap in view: bundles of radius R overlap over ~2R/sin θ,
-  so below θ ≈ asin(2R/RF) (≈ 6° at R = 5, 12° at R = 10, 25° at R = 20 voxels) the entity count is the generator's
+  so below θ ≈ asin(2R/RF) (≈ 4° at R = 5, 8° at R = 10, 16° at R = 20 voxels) the entity count is the generator's
   prior (fans one entity, crossings two). Resolved fibres inside the bundles lower this to a few degrees.
 - Partial volume: below resolution, volume fraction, size and contrast are confounded (training is contrast-agnostic);
   absolute masses and sizes are priors, shares between entities better determined.
@@ -170,9 +172,12 @@ Numbers for the current trunk: receptive field 96 voxels, sigma trained 1–4 vo
   told apart by position (spatial clustering, seeded following).
 - z is defined per window up to an isometry; the overlap and continuity losses align neighbouring windows; whole-volume
   identities come from linking, whose errors compound (90 % per step -> ~35 % intact over 10 windows): linking must be
-  conservative (union-find merges are irreversible).
+  conservative (union-find merges are irreversible): links are mutual-best, never join objects seen apart at one point
+  (cannot-link), never join different tree depths (a parent between two parallel children cannot chain them).
 - Tree levels defined beyond the receptive field (which tract) are not locally inferable; two tracts identical in
-  appearance and orientation share a parent in z. The ball's radius cap allows tree distances up to ~15 (~7 levels).
+  appearance and orientation share a parent in z. Tree edges have hyperbolic length 0.6 and the ball's cap is 1e-4:
+  ~16 levels fit (the deep-tree generator reaches 10). The embedding's distance from the centre is trained to equal
+  the entity's depth (root at the centre), so depth is readable at inference.
 - The resolution rule was radius-only (radius >= max(1.5, 0.5 sigma)): isolated thin objects (sparse labelling,
   light-sheet axons) merged into their population although traceable. Now (2026-10-24): an entity holding a single
   object in its window is that object; objects merge only where they share the window with siblings.
@@ -186,7 +191,16 @@ Numbers for the current trunk: receptive field 96 voxels, sigma trained 1–4 vo
 - Stride-8 levels: exact shift equivariance only for shifts by multiples of 8 (no seams). The downsampling is already
   max-blur pooling (binomial anti-aliasing), so the remaining period-8 dependence is small; measured by the sub-stride
   shift benchmark.
-- Exact tiling needs a halo of RF/2 = 48 voxels and tile origins on multiples of 8: inference tiles of 256–384³.
+- Exact tiling needs a halo of RF/2 + a lattice corner = 80 voxels and tile origins on multiples of 8 (inputs padded
+  to multiples of 8): inference tiles of 256³ cores (416³ inputs) or more; a measured effective halo can trade a
+  bounded error for speed.
+- Training crops (64³ locally, 128³ planned) are smaller than the receptive field: no training query is free of the
+  crop's padding, while interior points of a large volume are. To measure on the pilot (the gradient's support beyond
+  32 / 48 / 64 voxels); if it matters, part of the cluster run at 160–192³ with queries placed centrally.
+
+**Inputs.** Training windows each crop's intensities; at inference one window for the whole volume (``normalise``) and
+the local-contrast input channel (``--lcn``, translation-equivariant) -- a per-tile window would make blocks. Voxel
+size is given in µm (``voxel_um``); anisotropic volumes are resampled to isotropic voxels first.
 
 **Set by synthetic training.** Objects, populations and the fan convention are the generator's; outputs are point
 estimates (kappa mixes dispersion and uncertainty); large-scale coherence remains the generator's weakest area.
