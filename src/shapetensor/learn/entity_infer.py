@@ -70,27 +70,56 @@ def features(model, x: torch.Tensor, voxel: float | None = None):
 
 
 @torch.no_grad()
+def total_odf(model, feats, points: torch.Tensor, dirs: torch.Tensor, offset=(0, 0, 0)) -> torch.Tensor:
+    """The total-ODF head (SH on the stride-4 lattice) at ``points (Q, 3)`` (trilinear), evaluated at ``dirs``: ``(Q, D)``."""
+    from .query import _sample
+    from .sh import real_sh
+    off = torch.as_tensor(offset, device=points.device, dtype=torch.float32)
+    c = model.total(feats[2])[0].float()                                                          # (n_coef, z, y, x)
+    cq = _sample(c, ((points.float() - off) - 1.5) / 4).T                                         # (Q, n_coef): lattice cell i at voxel 4 i + 1.5
+    lmax = int(round((math.sqrt(8 * c.shape[0] + 1) - 3) / 2))
+    return cq @ real_sh(dirs.float(), lmax).T
+
+
+@torch.no_grad()
 def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.Tensor, offset=(0, 0, 0), vol_shape=None,
-          chunk: int = 1024) -> dict:
+          chunk: int = 1024, t_rel: float | None = None, t_abs: float = 0.0) -> dict:
     """The decoder at ``points (Q, 3)`` (volume voxels), ``sigma (Q,)`` (voxels), every direction of ``dirs (D, 3)``, from
-    ``feats`` of the region starting at ``offset``; the context is the distance to ``vol_shape``'s edge. Returns ``f (Q,
-    D)``, ``z (Q, D, E)``, ``R (Q, D, 3, 3)``, ``kappa (Q, D, 2)``, ``desc (Q, D, 5)``."""
+    ``feats`` of the region starting at ``offset``; the context is the distance to ``vol_shape``'s edge. With ``t_rel``,
+    only where the total ODF (the cheap SH head) reaches ``t_rel`` of its peak at the point and ``t_abs`` absolute (the
+    rest: no density) -- most directions and empty points skipped. Returns ``f (Q, D)``, ``z (Q, D, E)``, ``R (Q, D, 3,
+    3)``, ``kappa (Q, D, 2)``, ``desc (Q, D, 5)`` and ``evaluated (Q, D)``."""
+    from .sh import real_sh
     off = torch.as_tensor(offset, device=points.device, dtype=torch.float32)
     vs = torch.as_tensor(vol_shape if vol_shape is not None else feats[0].shape[-3:], device=points.device, dtype=torch.float32)
+    dec = model.ent; Y = real_sh(dirs.float(), dec.lmax)
     out = {}
     for a in range(0, points.shape[0], chunk):
-        p = points[a:a + chunk].float(); s = sigma[a:a + chunk].float()
+        p = points[a:a + chunk].float(); s = sigma[a:a + chunk].float(); n = p.shape[0]; D = dirs.shape[0]
         ctx = torch.minimum(p, vs - 1 - p).amin(-1)
-        d = dirs[None, None].expand(1, p.shape[0], -1, -1)
-        r = model.ent(feats, (p - off)[None], s[None], d, ctx[None])
-        for k, v in r.items():
-            out.setdefault(k, []).append(v[0].float())
+        enc = dec.encode(feats, (p - off)[None], s[None], ctx[None])[0]                            # (n, hidden): once per point
+        if t_rel is None:
+            ev = torch.ones(n, D, dtype=torch.bool, device=p.device)
+        else:
+            odf = total_odf(model, feats, p, dirs, offset)
+            ev = (odf >= t_rel * odf.amax(1, keepdim=True)) & (odf >= t_abs)
+        qi, di = torch.nonzero(ev, as_tuple=True)
+        r = dec.decode(enc[qi], Y[di].to(enc.dtype)) if qi.numel() else None
+        full = {"f": torch.zeros(n, D, device=p.device), "z": torch.zeros(n, D, dec.emb, device=p.device),
+                "R": torch.eye(3, device=p.device).expand(n, D, 3, 3).clone(), "kappa": torch.zeros(n, D, 2, device=p.device),
+                "desc": torch.zeros(n, D, 5, device=p.device)}
+        if r is not None:
+            for k in full:
+                full[k][qi, di] = r[k].float()
+        full["evaluated"] = ev
+        for k, v in full.items():
+            out.setdefault(k, []).append(v)
     return {k: torch.cat(v) for k, v in out.items()}
 
 
 @torch.no_grad()
 def query_volume(model, x: torch.Tensor, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.Tensor, voxel: float | None = None,
-                 core: int = 128, halo: int | None = None, chunk: int = 1024) -> dict:
+                 core: int = 128, halo: int | None = None, chunk: int = 1024, t_rel: float | None = None, t_abs: float = 0.0) -> dict:
     """:func:`query` over a volume of any size, tiled (the result equals the whole-volume result)."""
     halo = halo_for(model) if halo is None else halo
     res = None
@@ -101,9 +130,9 @@ def query_volume(model, x: torch.Tensor, points: torch.Tensor, sigma: torch.Tens
             continue
         sl = tuple(slice(int(a), int(b)) for a, b in zip(ilo, ihi))
         f = features(model, x[sl], voxel)
-        r = query(model, f, points[sel], sigma[sel], dirs, offset=ilo.tolist(), vol_shape=x.shape, chunk=chunk)
+        r = query(model, f, points[sel], sigma[sel], dirs, offset=ilo.tolist(), vol_shape=x.shape, chunk=chunk, t_rel=t_rel, t_abs=t_abs)
         if res is None:
-            res = {k: torch.zeros((points.shape[0],) + v.shape[1:], device=v.device) for k, v in r.items()}
+            res = {k: torch.zeros((points.shape[0],) + v.shape[1:], device=v.device, dtype=v.dtype) for k, v in r.items()}
         for k, v in r.items():
             res[k][sel] = v
     return res
@@ -127,7 +156,8 @@ def cluster(r: dict, dirs: torch.Tensor, f_rel: float = 0.15, f_abs: float = 0.0
     """Entities per point from the decoder at the direction grid (:func:`query`): directions with density above
     ``max(f_abs, f_rel * the point's peak)``; neighbouring directions (``k`` nearest) joined when their embeddings lie
     within ``z_link`` (hyperbolic); components with mean embeddings within ``z_merge`` merged (lobes of one entity).
-    Returns padded ``(Q, C)`` arrays (heaviest first): ``mass`` (the density's mean over the sphere), ``R``, ``kappa``
+    Returns padded ``(Q, C)`` arrays (heaviest first): ``mass`` (the density's mean over the sphere), ``share`` (of the
+    point's entity mass: what partial volume leaves identifiable), ``R``, ``kappa``
     (the votes' Bingham), ``R_odf``, ``kappa_odf`` (the entity's own density, moment matched), ``z``, ``desc``,
     ``live``, and ``label (Q, D)`` (the entity of each direction, -1 none)."""
     f, z = r["f"], r["z"]; Q, D = f.shape; dev = f.device
@@ -183,7 +213,8 @@ def _entity_stats(r: dict, dirs: torch.Tensor, w: torch.Tensor, ent: torch.Tenso
     if bool(live.any()):
         a, b = BG.fit(mv[live].double()); R[live], K[live] = a.float(), b.float()
         a, b = BG.fit(mo[live].double()); Ro[live], Ko[live] = a.float(), b.float()
-    return {"mass": mass, "R": R, "kappa": K, "R_odf": Ro, "kappa_odf": Ko, "z": zm, "desc": dm, "live": live}
+    share = mass / mass.sum(1, keepdim=True).clamp_min(1e-12)                                       # identifiable under partial volume
+    return {"mass": mass, "share": share, "R": R, "kappa": K, "R_odf": Ro, "kappa_odf": Ko, "z": zm, "desc": dm, "live": live}
 
 
 def hierarchy(z: torch.Tensor):
@@ -197,12 +228,15 @@ def hierarchy(z: torch.Tensor):
 
 def link(points: torch.Tensor, ents: dict, radius: float = 2.5, z_link: float = 0.6, ang_max: float = 25.0) -> torch.Tensor:
     """Object identities across points: entity ``c`` at point ``i`` and ``c'`` at a point within ``radius`` voxels are
-    one object when their embeddings lie within ``z_link`` and their mode axes within ``ang_max`` degrees
-    (union-find). ``ents`` from :func:`cluster` at ``points (Q, 3)``. Returns ``(Q, C)`` ids (-1 none)."""
+    candidates when their embeddings lie within ``z_link`` and their mode axes within ``ang_max`` degrees, and each is
+    the other's best match there (mutual best). Candidates are joined strongest first (union-find), never joining two
+    objects that share a point -- entities seen apart at one point stay apart, so a chain of weak links through a
+    crossing cannot merge the crossing objects. ``ents`` from :func:`cluster` at ``points (Q, 3)``. Returns ``(Q, C)``
+    ids (-1 none)."""
     from scipy.spatial import cKDTree
     Q, C = ents["mass"].shape
     live = ents["live"].cpu().numpy(); z = ents["z"].cpu().double(); ax = ents["R"][..., :, 2].cpu()
-    parent = np.arange(Q * C)
+    parent = np.arange(Q * C); members = {a: {a // C} for a in range(Q * C) if live.reshape(-1)[a]}
     def find(a):
         while parent[a] != a:
             parent[a] = parent[parent[a]]; a = parent[a]
@@ -214,10 +248,16 @@ def link(points: torch.Tensor, ents: dict, radius: float = 2.5, z_link: float = 
         ca = (ax[i][:, :, None] * ax[j][:, None, :]).sum(-1).abs()
         ok = (dz < z_link) & (ca > math.cos(math.radians(ang_max)))
         ok &= torch.as_tensor(live[pairs[:, 0]])[:, :, None] & torch.as_tensor(live[pairs[:, 1]])[:, None, :]
-        for p, a, b in torch.nonzero(ok).tolist():
-            ra, rb = find(int(pairs[p, 0]) * C + a), find(int(pairs[p, 1]) * C + b)
-            if ra != rb:
-                parent[max(ra, rb)] = min(ra, rb)
+        sc = torch.where(ok, dz, torch.full_like(dz, math.inf))
+        mutual = ok & (sc == sc.amin(2, keepdim=True)) & (sc == sc.amin(1, keepdim=True))
+        p_, a_, b_ = torch.nonzero(mutual, as_tuple=True)
+        for k in torch.argsort(sc[p_, a_, b_]).tolist():                                            # strongest first
+            ra, rb = find(int(pairs[p_[k], 0]) * C + int(a_[k])), find(int(pairs[p_[k], 1]) * C + int(b_[k]))
+            if ra == rb or (members[ra] & members[rb]):                                             # cannot-link: one point, two objects
+                continue
+            if len(members[ra]) < len(members[rb]):
+                ra, rb = rb, ra
+            parent[rb] = ra; members[ra] |= members.pop(rb)
     ids = np.array([find(a) for a in range(Q * C)]).reshape(Q, C)
     ids = np.where(live, ids, -1)
     u, inv = np.unique(ids[ids >= 0], return_inverse=True)

@@ -94,3 +94,34 @@ def test_follow_runs_on_a_model():
     net = _net(); x = torch.rand(64, 64, 64, device=DEV)
     out = EI.follow(net, x, (32.0, 32.0, 32.0), (1.0, 0.0, 0.0), voxel=1.0, max_steps=3, n_dirs=60, core=32, f_rel=0.0, f_abs=0.0)
     assert out["points"].shape[1] == 3 and out["points"].shape[0] == out["axes"].shape[0] >= 1
+
+
+def test_sparse_directions_match_the_dense_query():
+    net = _net(); g = torch.Generator(device=DEV).manual_seed(2)
+    x = torch.rand(48, 48, 48, generator=g, device=DEV)
+    pts = 8 + torch.rand(50, 3, generator=g, device=DEV) * 32; sig = torch.full((50,), 2.0, device=DEV)
+    dirs = EI.sphere_dirs(40, DEV); f = EI.features(net, x, 1.0)
+    dense = EI.query(net, f, pts, sig, dirs, vol_shape=x.shape)
+    sparse = EI.query(net, f, pts, sig, dirs, vol_shape=x.shape, t_rel=0.5)
+    ev = sparse["evaluated"]
+    assert 0 < int(ev.sum()) < ev.numel()
+    for k in ("f", "z", "kappa"):
+        assert torch.allclose(dense[k][ev], sparse[k][ev], atol=1e-5)
+    assert bool((sparse["f"][~ev] == 0).all())
+
+
+def test_link_never_merges_a_crossing():
+    """Two lines crossing at one point, with embeddings drifting so a chain of weak links could join them: the
+    cannot-link rule keeps them two objects."""
+    n = 21; t = torch.arange(n).float() - 10
+    A = torch.stack([t, torch.zeros(n), torch.zeros(n)], 1); B = torch.stack([torch.zeros(n), t, torch.zeros(n)], 1)
+    pts = torch.cat([A, B[B.abs().sum(1) > 0]])                                                    # the crossing point once, in A
+    Q, C = pts.shape[0], 2
+    R = torch.eye(3).expand(Q, C, 3, 3).clone(); z = torch.zeros(Q, C, 4); live = torch.zeros(Q, C, dtype=torch.bool)
+    on_b = torch.zeros(Q, dtype=torch.bool); on_b[n:] = True
+    R[~on_b, 0, :, 2] = torch.tensor([1.0, 0, 0]); live[~on_b, 0] = True; z[~on_b, 0, 0] = 0.3
+    R[on_b, 0, :, 2] = torch.tensor([0, 1.0, 0]); live[on_b, 0] = True; z[on_b, 0, 0] = 0.0
+    centre = 10; R[centre, 1, :, 2] = torch.tensor([0, 1.0, 0]); live[centre, 1] = True; z[centre, 1, 0] = 0.15   # B seen at the crossing
+    ids = EI.link(pts, {"mass": torch.ones(Q, C), "live": live, "z": z, "R": R}, radius=1.5, z_link=0.7, ang_max=95.0)
+    assert ids[centre, 0] != ids[centre, 1]
+    assert len(set(ids[~on_b, 0].tolist())) == 1

@@ -126,7 +126,13 @@ class EntityDecoder(nn.Module):
         p = self.encode(feats, points, sigma, context)
         D = dirs.shape[2]
         Y = real_sh(dirs.reshape(-1, 3).float(), self.lmax).view(*dirs.shape[:3], -1)
-        y = self.dir(torch.cat([p[:, :, None].expand(-1, -1, D, -1), Y.to(p.dtype)], -1)).float()
+        return self.decode(p[:, :, None].expand(-1, -1, D, -1), Y)
+
+    def decode(self, p: torch.Tensor, Y: torch.Tensor) -> dict:
+        """The outputs from point encodings ``p (..., hidden)`` and direction bases ``Y (..., n_coef)`` (same leading
+        shape): any set of (point, direction) pairs -- inference evaluates only where the total ODF has density."""
+        from .bingham import rot6d_to_matrix
+        y = self.dir(torch.cat([p, Y.to(p.dtype)], -1)).float()
         e = self.emb
         k = Fn.softplus(y[..., 7 + e:9 + e]) * 10.0
         k = torch.stack([k.amax(-1), k.amin(-1)], -1)
