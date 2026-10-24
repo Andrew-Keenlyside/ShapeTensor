@@ -8,6 +8,8 @@ mass), half uniform -- and the losses compare, per direction:
 * **density**: ``f`` against the target ``rho(u) = sum_e m_e v_e p_e(u)``: L1 of the logs with a floor relative to the
   query's mean density -- scale-free, so the angular shape is learned at any mass (log1p L1 on raw densities of 0.01-0.3
   was nearly linear and left the decoder flat);
+* **mass**: the density's mean over the uniformly drawn directions against the entities' total visible mass (log
+  ratio) -- the density's level, which its shape term alone let drift low;
 * **vote**: on directions one entity owns (its share of rho > 1/2, rho above ``OWN_REL`` of the query's mean): the Bingham frame (axis-invariant, :func:`~shapetensor.
   learn.bingham.frame_loss`), the concentrations (log1p L1) and the descriptors;
 * **tree**: hyperbolic distortion between owned directions' embeddings, ``(d_P(z_i, z_j) - t_ij)^2 / (1 + t_ij)`` with
@@ -25,11 +27,12 @@ import torch.nn.functional as Fn
 
 from . import bingham as BG
 
-ENT_WEIGHTS = {"density": 1.0, "vote": 1.0, "kappa": 0.2, "desc": 0.2, "tree": 0.5, "overall": 1.0, "fraction": 0.2, "points": 0.5, "contrast": 0.5, "cross": 0.5}
+ENT_WEIGHTS = {"density": 1.0, "mass": 1.0, "vote": 1.0, "kappa": 0.2, "desc": 0.2, "tree": 0.5, "overall": 1.0, "fraction": 0.2, "points": 0.5, "contrast": 0.5, "cross": 0.5}
 N_DIRS = 32
 TREE_PAIRS = 4096
 TREE_EDGE = 0.6                     # hyperbolic length of a tree edge: depth ~16 fits the ball (radius cap 1e-4 -> 9.9 from the centre)
-DENS_FLOOR = 0.05                   # the density loss's floor: this share of the query's mean density (scale-free)
+DENS_FLOOR = 0.05                   # the density loss's floor: this share of the query's mean density (scale-free); its tails cost
+                                    # more than its peaks, so the mass term below holds the level (without it: mass 0.2-0.7x)
 DENS_EPS = 1e-3                     # ... and at least this (empty queries: pushed to low density, not to -inf)
 DENS_KAPPA_MAX = 40.0               # the density target's lobes no sharper than the direction basis can draw (order 16); votes keep kappa
 OWN_REL = 0.25                      # owned directions: density above this share of the query's mean (any mass)
@@ -77,9 +80,13 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
     rm = rho.mean(-1, keepdim=True)                                                                # each query's mean density (its mass)
     eps = (DENS_FLOOR * rm).clamp_min(DENS_EPS)
     parts["density"] = (torch.log(ent["f"].float() + eps) - torch.log(rho + eps)).abs().mean()     # scale-free: shape at any mass
+    n_uni = dirs.shape[2] - int(round(dirs.shape[2] * 0.5))                                        # sample_dirs: the uniform directions first
+    if n_uni > 0:                                                                                  # the mass: the density's mean over the sphere
+        m_p = ent["f"][:, :, :n_uni].float().mean(-1); m_t = mass.sum(-1)
+        parts["mass"] = (torch.log(m_p + DENS_EPS) - torch.log(m_t + DENS_EPS)).abs().mean()
     share = contrib / rho.clamp_min(1e-9)[..., None]; best, owner = share.max(-1)
     owned = (best > 0.5) & (rho > OWN_REL * rm) & (rm > DENS_EPS)
-    total = W["density"] * parts["density"]
+    total = W["density"] * parts["density"] + W.get("mass", 0.0) * parts.get("mass", 0.0)
     if bool(owned.any()):
         R_t = torch.gather(T["e_R"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1, -1), 3, owner[..., None, None, None].expand(-1, -1, -1, 1, 3, 3))[..., 0, :, :]
         k_t = torch.gather(T["e_kappa"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1), 3, owner[..., None, None].expand(-1, -1, -1, 1, 2))[..., 0, :]
