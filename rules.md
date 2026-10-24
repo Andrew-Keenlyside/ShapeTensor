@@ -398,7 +398,18 @@ synthetic; collected real images only find the generator's gaps. Training crops 
 Plan: `notes/plan_entity_field_model.md`. A direction-queried decoder `D(x, σ, u)` → density, hyperbolic tree embedding,
 Bingham vote and descriptors of the entity owning direction u; entities are clusters (no fixed K); Bingham entity ODFs
 rendered to SH; arbitrary-depth tree; overlap linking and seeded following across windows; the lobe head removed.
-Status: being built (generator and targets first).
+Status: built (decoder, losses, training, inference, crossing mode, overlapping windows, deep trees); interim
+adversarial reviews applied; local pilot EP4 running (2026-10-24).
+
+Later instructions (2026-10-24, verbatim):
+- "Describe the theoretical bounds and limits of this model, what can the model not do inteherantly due to design?"
+  (answered; plan section 9).
+- "Based on limits defined, are there any additional easy wins you can identify?" and "Do any of the easy wins need
+  work included at this stage in generator or training?" (deep trees, sigma range, direction order 16, vote
+  uncertainty built as flags; inference wins built).
+- "Is there a current model you can quickly run in a phantom for me to sense check ?" and "Phantoms don't look quite
+  right, also show separated image layers" (scripts/learn/phantom_layers_entities.py: generator crossing phantoms
+  with ground-truth layers beside the model's separated layers).
 
 ### Conflicts between instructions (for you to settle)
 
@@ -421,6 +432,8 @@ Status: being built (generator and targets first).
 
 - Commit as Andrew-Keenlyside (noreply); no Claude attribution lines; history rewrites only where you authorise them
   (done for ShapeTensor only).
+- "Also don't keep calling CI and GitHub tests on each commit (it's spamming my inbox)" (2026-10-24): commit locally,
+  push only occasionally in batches, with `[skip ci]` in the head commit message (tests.yml runs on every push).
 - Install into the shapetensors env, or build new conda envs, only without breaking other envs; dry-run first.
 - Prototypes are labelled as prototypes; the docs carry settled solutions only; figures and results go in the results
   log and changelog.
