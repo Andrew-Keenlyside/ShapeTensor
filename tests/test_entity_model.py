@@ -170,3 +170,19 @@ def test_cross_distances_dense_layers_under_the_root():
                 depth=torch.tensor([0, 1, 2], device=DEV), leaf_keys=torch.zeros(0, dtype=torch.long, device=DEV), leaf_nodes=torch.zeros(0, dtype=torch.long, device=DEV))
     X = cross_distances(tree, torch.tensor([[3, 2]], device=DEV), torch.tensor([[3, 4]], device=DEV))[0]
     assert X.tolist() == [[0.0, 2.0], [3.0, 3.0]]
+
+
+def test_decoder_options_dir_order_and_vote_uncertainty():
+    from shapetensor.learn.model import PopulationNet
+    from shapetensor.learn import entity_train as ET
+    net = PopulationNet.from_args(dict(head="entities", widths=[8, 16, 32], sh_lmax=8, embed=4, context_level=True, voxel_cond=True, points=True,
+                                       dir_lmax=16, vote_unc=True)).to(DEV)
+    assert net.ent.lmax == 16 and net.ent.dir[0].in_features == 256 + 153
+    x, T = _one_crop_batch()
+    dirs = ET.sample_dirs(T, 8)
+    P = net(x, voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
+    assert "log_s2" in P["ent"] and P["ent"]["log_s2"].shape == dirs.shape[:3]
+    tot, parts = ET.entity_loss(P, T, dirs)
+    tot.backward()
+    if "vote" in parts:
+        assert "vote_unc" in parts and net.ent.dir[-1].weight.grad is not None

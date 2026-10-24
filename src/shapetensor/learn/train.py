@@ -921,13 +921,16 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    level0: float = 0.3, level_steps: float = 0.5, voxel_dropout: float = 0.3, weights: dict | None = None, init: str | None = None,
                    resume: str | None = None, routes: float = 1.0, contrast_views: bool = True, contrast_every: int = 2, producer: bool = True,
                    cpu_workers: int = 0, cpu_threads: int = 4, channels_last: bool = False, compile_model: bool = False, ckpt_minutes: float = 20.0,
-                   benchmark: int = 0, device: str = "cuda", log_every: int = 25, n_dirs: int = 32, pairs: int = 16, pair_every: int = 4):
+                   benchmark: int = 0, device: str = "cuda", log_every: int = 25, n_dirs: int = 32, pairs: int = 16, pair_every: int = 4,
+                   dir_lmax: int = 8, vote_unc: bool = False, e_sigma: tuple | None = None, deep_tree: bool = False):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
     batch-time contrast routes with a second view of the same geometry (consistency every ``contrast_every`` steps),
     the voxel size dropped at ``voxel_dropout``; every ``pair_every`` steps two overlapping windows of one scene (from a
-    buffer of ``pairs``) trained to agree on their entities' places in the tree. The cluster machinery of :func:`train_lobes`: producer thread, CPU
+    buffer of ``pairs``) trained to agree on their entities' places in the tree. ``dir_lmax``: the decoder's direction
+    basis order; ``vote_unc``: a vote uncertainty output; ``e_sigma``: the query scales (voxels); ``deep_tree``:
+    fascicles and branches in the generator's hierarchies. The cluster machinery of :func:`train_lobes`: producer thread, CPU
     workers, data parallel, checkpoints and ``--resume auto``, benchmark mode."""
     from . import dataflow as DF
     from . import entity_train as ET
@@ -946,6 +949,9 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
         ET.ENT_WEIGHTS.update(weights)
     base = dict((gen or {}).get("scene") or {"canvas": 2 * size, "crops_per_scene": 8})
     base.setdefault("cross_p", 0.3); base.setdefault("p_centre", 0.5)                                 # crossing scenes, crops centred on crossings
+    base.setdefault("deep_tree", bool(deep_tree))
+    if e_sigma:
+        ENTITY["sigma"] = (float(e_sigma[0]), float(e_sigma[1]))
     level = {"v": level0}
     cur_gen = lambda: {"scene": LT.difficulty_gen(level["v"], base)}
     def set_routes():
@@ -962,7 +968,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 val_n=val_n, seed=seed, strength0=strength0, strength1=strength1, gen={"scene": base}, widths=list(widths), sh_lmax=8, embed=embed,
                 context_level=context_level, voxel_cond=voxel_cond, points=points, level0=level0, level_steps=level_steps, voxel_dropout=voxel_dropout,
                 weights=weights, routes=routes, contrast_views=contrast_views, world=world, contrast_every=contrast_every, n_dirs=n_dirs,
-                channels_last=channels_last, compile_model=compile_model, entity=dict(ENTITY), pairs=pairs, pair_every=pair_every)
+                channels_last=channels_last, compile_model=compile_model, entity=dict(ENTITY), pairs=pairs, pair_every=pair_every,
+                dir_lmax=dir_lmax, vote_unc=vote_unc)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)
@@ -991,7 +998,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     cpu = None
     if cpu_workers > 0:
         state = {"HEAD": HEAD, "DESC_KEY": DESC_KEY, "SH_EXACT": SH_EXACT, "DESC_LMAX": DESC_LMAX, "QUERY": QUERY, "CACHE": None,
-                 "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC}
+                 "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC, "ENTITY": dict(ENTITY)}
         cpu = DF.CpuWorkers(cpu_workers, size, buf.next + 90_000_000, cfg, state, threads=cpu_threads)
     pbuf = ET.EntityPairBuffer(pairs, size, device, LT.difficulty_gen(level["v"], base), seed0=60_000_000 + rank * 1_000_000 + start) if pairs else None
     val = []
@@ -1171,6 +1178,10 @@ def main():
     ap.add_argument("--head", default="slots", choices=("slots", "lobes", "entities"), help="output: slots (+ SH head), the lobe mixture, or the entity field (notes/plan_entity_field_model.md)")
     ap.add_argument("--embed", type=int, default=16, help="entities: Poincare embedding size")
     ap.add_argument("--n-dirs", type=int, default=32, help="entities: directions asked per query point")
+    ap.add_argument("--dir-lmax", type=int, default=8, help="entities: the decoder's direction basis order (16: sharper switches between close entities)")
+    ap.add_argument("--vote-unc", action="store_true", help="entities: a vote uncertainty output (a readout of the vote's expected error)")
+    ap.add_argument("--e-sigma", type=float, nargs=2, default=None, help="entities: query scales, voxels (default 1 4)")
+    ap.add_argument("--deep-tree", action="store_true", help="entities: fascicles and branches in the generator's hierarchies")
     ap.add_argument("--lobes-J", type=int, default=6, help="lobes per cell (6: direct fits recover two crossing axes ~90 % of the time from random starts, 4: ~75 %)")
     ap.add_argument("--no-context-level", action="store_true", help="lobes: no stride-8 trunk level")
     ap.add_argument("--no-voxel-cond", action="store_true", help="lobes: no voxel-size conditioning")
@@ -1204,7 +1215,8 @@ def main():
                        voxel_dropout=a.voxel_dropout, weights=a.weights, init=a.init, resume=a.resume, routes=a.routes, contrast_views=not a.no_contrast_views,
                        contrast_every=a.contrast_every, producer=not a.no_producer, cpu_workers=a.cpu_workers, cpu_threads=a.cpu_threads,
                        channels_last=a.channels_last, compile_model=a.compile, ckpt_minutes=a.ckpt_minutes, benchmark=a.benchmark, device=a.device,
-                       log_every=a.log_every, n_dirs=a.n_dirs, pairs=16 if a.pairs is None else a.pairs, pair_every=a.pair_every)
+                       log_every=a.log_every, n_dirs=a.n_dirs, pairs=16 if a.pairs is None else a.pairs, pair_every=a.pair_every,
+                       dir_lmax=a.dir_lmax, vote_unc=a.vote_unc, e_sigma=a.e_sigma, deep_tree=a.deep_tree)
         return
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,

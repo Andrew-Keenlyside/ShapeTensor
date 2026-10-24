@@ -87,13 +87,13 @@ class EntityDecoder(nn.Module):
     (the owning entity's place in the tree), its Bingham frame ``R`` (6-D rotation) and concentrations ``kappa``
     (kappa1 >= kappa2 >= 0), and its 5 descriptors (log size, relative wall, lumen, flattening, angularity)."""
 
-    def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8):
+    def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8, unc: bool = False):
         super().__init__()
         from .sh import n_coef
-        self.emb, self.lmax = emb, lmax
+        self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
         self.point = nn.Sequential(nn.Linear(c2 + c1 + c0 + 3 + 2, hidden), nn.SiLU(), nn.Linear(hidden, hidden))
         self.dir = nn.Sequential(nn.Linear(hidden + n_coef(lmax), hidden), nn.SiLU(), nn.Linear(hidden, hidden), nn.SiLU(),
-                                 nn.Linear(hidden, 1 + emb + 6 + 2 + 5))
+                                 nn.Linear(hidden, 1 + emb + 6 + 2 + 5 + int(self.unc)))
         nn.init.constant_(self.dir[-1].bias[0], -2.0)                                             # little density at the start
 
     def encode(self, feats, points: torch.Tensor, sigma: torch.Tensor, context: torch.Tensor | None = None) -> torch.Tensor:
@@ -136,8 +136,11 @@ class EntityDecoder(nn.Module):
         e = self.emb
         k = Fn.softplus(y[..., 7 + e:9 + e]) * 10.0
         k = torch.stack([k.amax(-1), k.amin(-1)], -1)
-        return {"f": Fn.softplus(y[..., 0]), "z": poincare(y[..., 1:1 + e]), "R": rot6d_to_matrix(y[..., 1 + e:7 + e]), "kappa": k,
-                "desc": y[..., 9 + e:]}
+        out = {"f": Fn.softplus(y[..., 0]), "z": poincare(y[..., 1:1 + e]), "R": rot6d_to_matrix(y[..., 1 + e:7 + e]), "kappa": k,
+               "desc": y[..., 9 + e:14 + e]}
+        if self.unc:                                                                              # the vote's uncertainty: log variance of its error
+            out["log_s2"] = y[..., 14 + e].clamp(-8.0, 8.0)
+        return out
 
 
 class PopulationNet(nn.Module):
@@ -146,7 +149,7 @@ class PopulationNet(nn.Module):
     def __init__(self, K: int = 6, widths=(16, 32, 64), embed: int = 8, n_kinds: int = 4, n_classes: int = 5, sh_lmax: int = 0,
                  lcn: float = 0.0, query: bool = False, desc_lmax: int = 0, axis_head: bool = False, head: str = "slots", J: int = 4,
                  context_level: bool = False, voxel_cond: bool = False, identity_dim: int = 0, points: bool = False, nd: int = 5,
-                 free_sh: bool = False):
+                 free_sh: bool = False, dir_lmax: int = 8, vote_unc: bool = False):
         super().__init__()
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
         self.head, self.J, self.nd, self.free_sh = head, J, (nd if head == "lobes" else 0), bool(free_sh)
@@ -170,7 +173,7 @@ class PopulationNet(nn.Module):
             self.frac = nn.Conv3d(c2, 1, 1)
             if self.has_points:
                 self.points = nn.Conv3d(c2, 2, 1); nn.init.constant_(self.points.bias, -4.0)
-            self.ent = EntityDecoder(c0, c1, c2, emb=max(int(embed), 2), hidden=256, lmax=8)
+            self.ent = EntityDecoder(c0, c1, c2, emb=max(int(embed), 2), hidden=256, lmax=int(dir_lmax), unc=bool(vote_unc))
             return
         if head == "lobes":                                                                      # J lobes per cell (axis, mass, kappa, spare, descriptors)
             from .sh import n_coef as _nc
@@ -212,7 +215,7 @@ class PopulationNet(nn.Module):
                    axis_head=bool(args.get("axis_head", False)), head=args.get("head", "slots") or "slots", J=int(args.get("lobes_J", 4) or 4),
                    context_level=bool(args.get("context_level", False)), voxel_cond=bool(args.get("voxel_cond", False)),
                    identity_dim=int(args.get("identity_dim", 0) or 0), points=bool(args.get("points", False)), free_sh=bool(args.get("free_sh", False)),
-                   embed=int(args.get("embed", 8) or 8))
+                   embed=int(args.get("embed", 8) or 8), dir_lmax=int(args.get("dir_lmax", 8) or 8), vote_unc=bool(args.get("vote_unc", False)))
 
     def local_contrast(self, x: torch.Tensor) -> torch.Tensor:
         """``(x - mean) / sd`` in a Gaussian window of sigma ``lcn`` voxels (sd floored at 0.01 of the 0-1 range), /3:

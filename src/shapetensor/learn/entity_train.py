@@ -74,7 +74,12 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         R_t = torch.gather(T["e_R"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1, -1), 3, owner[..., None, None, None].expand(-1, -1, -1, 1, 3, 3))[..., 0, :, :]
         k_t = torch.gather(T["e_kappa"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1), 3, owner[..., None, None].expand(-1, -1, -1, 1, 2))[..., 0, :]
         d_t = torch.gather(T["e_desc"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1), 3, owner[..., None, None].expand(-1, -1, -1, 1, 5))[..., 0, :]
-        parts["vote"] = BG.frame_loss(ent["R"][owned], R_t[owned], k_t[owned]).mean()
+        fl = BG.frame_loss(ent["R"][owned], R_t[owned], k_t[owned])
+        parts["vote"] = fl.mean()
+        if "log_s2" in ent:                                                                            # the vote's uncertainty: a readout of its error
+            ls = ent["log_s2"][owned]                                                                  # (error / s^2 + log s^2 on the detached error:
+            parts["vote_unc"] = 0.5 * ((fl.detach() + 1e-3) * torch.exp(-ls) + ls).mean()             # the vote itself keeps its plain loss)
+            total = total + W.get("vote_unc", 0.2) * parts["vote_unc"]
         parts["kappa"] = (torch.log1p(ent["kappa"][owned]) - torch.log1p(k_t[owned])).abs().mean()
         dt = torch.cat([torch.log2(1 + d_t[..., :1].clamp_min(0)), (d_t[..., 1:2] / d_t[..., :1].clamp_min(1e-3)).clamp(0, 1), d_t[..., 2:]], -1)
         parts["desc"] = (ent["desc"][owned] - dt[owned]).abs().mean()

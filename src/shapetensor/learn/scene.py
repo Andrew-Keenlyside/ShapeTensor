@@ -755,8 +755,19 @@ class Scene:
                 con = 1 + amp * (torch.exp(-0.5 * (torch.minimum(fr_, 1 - fr_) / wid) ** 2) - 0.5 * ((fr_ - 0.5).abs() < 0.25).float())[None].expand(N, S)
             cmap = contrast * (con if con is not None else 1.0) * torch.ones(N, S, device=self.device)
             obj = self.ids(N, rad[:, 0])
-            for o_ in obj.tolist():
-                self.parents[o_] = bid
+            if getattr(self, "deep", False) and N >= 6:                         # fascicles: fibres grouped around seeds on the section
+                nf = r.i(2, min(7, N // 3))
+                seeds = o[torch.randperm(N, generator=r.g, device=self.device)[:nf]]
+                fa = torch.cdist(o, seeds).argmin(1)
+                cnt = torch.bincount(fa, minlength=nf).float()
+                fid = self.ids(nf, Rb * torch.sqrt(cnt / N))                      # area-equivalent radius (voxels)
+                for o_, f_ in zip(obj.tolist(), fa.tolist()):
+                    self.parents[o_] = int(fid[f_])
+                for f_ in fid.tolist():
+                    self.parents[f_] = bid
+            else:
+                for o_ in obj.tolist():
+                    self.parents[o_] = bid
             cv = curves_like(P, rad, r, obj=obj, seg=torch.full((N,), bid, device=self.device), contrast=cmap, **kw)
             g = Group("bundle", "line", float(rad.median()), contrast, curves=[cv])
             g.offsets, g.rf = o, float(rad.max())
@@ -836,6 +847,9 @@ class Scene:
         c = self.centre_point(0.1); d = r.unit()
         start = (c - d * r0 * 4)[None]; dirs = d[None]; rads = torch.tensor([r0], device=self.device)
         side = torch.zeros(1, device=self.device, dtype=torch.long)
+        deep = getattr(self, "deep", False)
+        if deep:                                                                # branches as objects: the trunk first, under the tree
+            br = self.ids(1, r0); self.parents[int(br[0])] = tid
         nseg = 0; segs, sides, ends_all = [], [], []
         for depth in range(12):
             A = start.shape[0]
@@ -862,7 +876,7 @@ class Scene:
                 flat = torch.ones(A, S, device=self.device)
             seg_ids = torch.arange(nseg, nseg + A, device=self.device); nseg += A
             kw = {"wall": prof * wf, "lumen_c": torch.full((A, S), lumen_c, device=self.device)} if wf > 0 else {}
-            cvs = curves_like(P, prof, r, obj=torch.full((A,), tid, device=self.device), seg=seg_ids, contrast=contrast, flat=flat, **kw)
+            cvs = curves_like(P, prof, r, obj=br.clone() if deep else torch.full((A,), tid, device=self.device), seg=seg_ids, contrast=contrast, flat=flat, **kw)
             segs.append(cvs); sides.append(side)
             ends = P[:, -1]; tend = tangents(P)[:, -1]
             if bool((~grow).any()):
@@ -882,6 +896,11 @@ class Scene:
             d1 = Fn.normalize(cos1[:, None] * te + torch.sqrt(1 - cos1 ** 2)[:, None] * pe, dim=1)
             d2 = Fn.normalize(cos2[:, None] * te - torch.sqrt(1 - cos2 ** 2)[:, None] * pe, dim=1)
             start = torch.cat([ends[grow], ends[grow]]); dirs = torch.cat([d1, d2]); rads = torch.cat([r1g, r2g])
+            if deep:                                                            # the larger child continues its branch; the smaller is a new one under it
+                nb_ = self.ids(int(grow.sum()), r2g)
+                for c_, p_ in zip(nb_.tolist(), br[grow].tolist()):
+                    self.parents[c_] = p_
+                br = torch.cat([br[grow], nb_])
             side = torch.cat([side[grow], 1 - side[grow]])                       # the larger child keeps its parent's side
         g.curves = segs
         self.obstacles.append((torch.cat([cv.P[:, ::4].reshape(-1, 3) for cv in segs]), torch.cat([cv.rad[:, ::4].reshape(-1) for cv in segs])))
@@ -1824,11 +1843,14 @@ class Scene:
 
     # ---- the scene
     def build(self, families: dict | None = None, n_groups: tuple = (1, 5), layout_p: float = 0.3, underlay_p: float = 0.4,
-              cross_p: float = 0.0):
+              cross_p: float = 0.0, deep_tree: bool = False):
         """The scene's families; with probability ``underlay_p`` a neuropil underlay as well (real tissue is full of it),
         unless the families given exclude neuropil. With probability ``cross_p`` a crossing scene: two or three bundles,
-        each crossing (or kissing, or fanning through) the one before, beside the other families drawn."""
+        each crossing (or kissing, or fanning through) the one before, beside the other families drawn. ``deep_tree``:
+        objects in deeper hierarchies -- a resolved bundle's fibres in fascicles (fibre -> fascicle -> bundle), a tree's
+        branches as objects under the branch they leave (twig -> branch -> ... -> trunk -> tree)."""
         r = self.r
+        self.deep = bool(deep_tree)                                            # hierarchies below the population: fascicles, branches
         crossing = cross_p > 0 and r.p(cross_p)
         if r.p(layout_p):
             self.layout()
@@ -1961,17 +1983,17 @@ def _compact(ren: dict) -> dict:
 
 
 def render_scene(canvas, scene_seed: int, device, voxel_um=None, families=None, n_groups=(1, 5), layout_p=0.3, content="general", style=None,
-                 underlay_p: float = 0.4, cross_p: float = 0.0):
+                 underlay_p: float = 0.4, cross_p: float = 0.0, deep_tree: bool = False):
     """The scene (cached: crops of one scene are drawn in sequence) and its background on the whole canvas -- a
     texture, regions and possibly a cell stain, so crops at any zoom of one scene share them."""
-    key = (tuple(canvas), scene_seed, str(device), voxel_um, str(families), tuple(n_groups), layout_p, content, style, underlay_p, cross_p)
+    key = (tuple(canvas), scene_seed, str(device), voxel_um, str(families), tuple(n_groups), layout_p, content, style, underlay_p, cross_p, deep_tree)
     _CACHE = _scene_cache()
     if key in _CACHE:
         _CACHE[key] = _CACHE.pop(key)                                       # most recently used last
     else:
         while len(_CACHE) >= CACHE_SCENES:                                  # a few scenes (training draws and paired renders interleave)
             _CACHE.pop(next(iter(_CACHE)))
-        sc = Scene(canvas, scene_seed, device, voxel_um, content).build(families, n_groups, layout_p, underlay_p, cross_p)
+        sc = Scene(canvas, scene_seed, device, voxel_um, content).build(families, n_groups, layout_p, underlay_p, cross_p, deep_tree)
         st = style or ["flat", "regions", "tissue", "cells"][sc.r.i(0, 3)]
         bgp = background(tuple(canvas), st, sc.r.g, device, 1.0, content, nprng=sc.r.np)
         _CACHE[key] = (sc, _compact(sc.render(half=True)), bgp, st)
@@ -2142,7 +2164,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
                crop: tuple | None = None, identity_min_r: float = 1.5, p_blend: float = 0.35, p_aniso: float = 0.25, p_scramble: float = 0.3,
                p_texture: float = 0.5, p_merge: float = 0.25, p_boundary: float = 0.2, p_affine: float = 0.3, p_grain: float = 0.8,
                underlay_p: float = 0.4, p_sparse: float = 0.12, p_cutout: float = 0.15, entity_ctx: bool = False, cross_p: float = 0.0,
-               p_centre: float = 0.0):
+               p_centre: float = 0.0, deep_tree: bool = False):
     """A training pair from an object scene, in the format of :func:`~shapetensor.learn.generator.draw`: ``(Sample,
     drawn)``. Scenes are rendered on a ``canvas``³ grid and ``crops_per_scene`` consecutive seeds share one (cut at
     different places), so a scene's cost is spread over its crops.
@@ -2175,7 +2197,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     log2(1 + size), relative wall, lumen fraction, flattening, angularity), ``desc_um``, ``points`` (branch points,
     endpoints), ``recoverability``, ``parents``, the voxel size and the physics."""
     sid = seed // max(1, crops_per_scene)
-    sc, ren, bgp, st = render_scene((canvas,) * 3, 7_000_000 + sid, device, voxel_um, families, n_groups, layout_p, content, style, underlay_p, cross_p)
+    sc, ren, bgp, st = render_scene((canvas,) * 3, 7_000_000 + sid, device, voxel_um, families, n_groups, layout_p, content, style, underlay_p, cross_p, deep_tree)
     r = Rng(seed, device); ra = Rng(acq_seed if acq_seed is not None else seed + 31337, device)
     from .generator import MODALITIES
     names = list(MODALITIES); modality = modality or names[ra.i(0, len(names) - 1)]          # X-ray, MRI, histology, EM, fluorescence, cryo-ET, mixed

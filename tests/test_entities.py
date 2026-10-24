@@ -168,3 +168,23 @@ def test_a_lone_thin_fibre_is_its_own_entity():
     keep = torch.zeros(int(obj.max()) + 1, dtype=torch.bool, device=DEV); keep[o] = True
     t_one = entity_targets(ren["entries"], tree, sc.shape, (0, 0, 0), 1, sc.shape, p, sig, keep=keep)
     assert t_one["node"][0, 0].item() == leaf and int((t_one["node"][0] >= 0).sum()) == 1
+
+
+def test_deep_tree_fascicles_and_branches():
+    """deep_tree: a resolved bundle's fibres sit in fascicles under the bundle; a vessel tree's branches under the
+    branch they leave -- trees deeper than root / population / object."""
+    from shapetensor.learn.entities import build_tree
+    sc = Scene((64,) * 3, 4, DEV, 3.0); sc.deep = True
+    g = sc.bundle(None, "single", radius=12.0, fibre={"rf_um": 4.5})
+    sc.groups = [g]
+    ren = sc.render(); vox, grp, obj, w, v = ren["entries"]; tree = build_tree(sc, grp, obj)
+    assert int(tree.depth.max()) >= 4                                                               # root, population, bundle, fascicle, fibre
+    found = False
+    for seed in range(20):
+        sc2 = Scene((96,) * 3, seed, DEV, 20.0); sc2.deep = True
+        gs = sc2.tree("vessel")
+        if gs:
+            sc2.groups = gs; ren2 = sc2.render(); t2 = build_tree(sc2, ren2["entries"][1], ren2["entries"][2])
+            if int(t2.depth.max()) >= 5:
+                found = True; break
+    assert found
