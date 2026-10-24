@@ -383,7 +383,7 @@ def cube_tensor6(v: torch.Tensor, perm, flips) -> torch.Tensor:
     return torch.stack([v[..., idx[(perm[j], perm[k])]] * (sgn[j] * sgn[k]) for j, k in SYM], -1)
 
 
-ENTITY_STATIC = ("e_sigma", "e_node", "e_mass", "e_vis", "e_desc", "e_anc", "e_depth", "e_n")
+ENTITY_STATIC = ("e_sigma", "e_node", "e_mass", "e_vis", "e_desc", "e_anc", "e_depth", "e_n", "e_kappa")
 
 
 def augment(image: torch.Tensor, tgt: dict, g: torch.Generator | None = None):
@@ -399,6 +399,9 @@ def augment(image: torch.Tensor, tgt: dict, g: torch.Generator | None = None):
             out[k] = cube_points(v, perm, flips, image.shape[-3:])
         elif k == "e_T6":
             out[k] = cube_tensor6(v.float(), perm, flips).to(v.dtype)
+        elif k == "e_R":                                                                            # frames: each column a direction (z, y, x)
+            sgn = torch.tensor([-1.0 if f else 1.0 for f in flips], dtype=v.dtype, device=v.device)
+            out[k] = v[..., perm, :] * sgn.view(*([1] * (v.dim() - 2)), 3, 1)
         elif k == "q_points":
             from .query import cube_points
             out[k] = cube_points(v, perm, flips, image.shape[-3:])

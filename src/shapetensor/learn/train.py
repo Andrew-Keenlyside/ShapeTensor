@@ -43,7 +43,7 @@ TKEYS = ("slots", "mass", "kind", "layer", "fraction", "classes", "size", "size_
 HALF = ("slots", "mass", "fraction", "classes", "size")
 QKEYS = ("q_points", "q_sigma", "q_sh", "sh_t")
 LKEYS = ("identity_t", "points_t", "voxel", "fraction")    # the lobe model's extra targets
-EKEYS = ("e_points", "e_sigma", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n")   # the entity model's
+EKEYS = ("e_points", "e_sigma", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa")   # the entity model's
 HEAD = "slots"                     # "slots" | "lobes" (set by train())
 DESC_KEY = "descriptors"           # the drawn descriptors the descriptor densities use ("descriptors5": the scenes' five)
 SH_EXACT = 0                       # > 0: the SH head's lattice target from the exact per-voxel density to this order
@@ -146,7 +146,7 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
         out["q_points"], out["q_sigma"] = pts, sig
         out["q_sh"] = (sample_density(F, pts, sig) if F is not None else layer_density(s, d, pts, sig, QUERY["lmax"])).half()
     if HEAD == "entities":                                                                             # entities at random points and scales
-        out.update(entity_queries(d, size, seed, device))
+        out.update(entity_queries(s, d, size, seed, device))
         out["voxel"] = torch.tensor(math.log2(d["voxel_um"]) if d.get("voxel_um") else float("nan"), device=device)
     out["kind"] = out["kind"].to(torch.int8); out["layer"] = out["layer"].to(torch.int16)
     return d["image"].to(torch.uint8), out
@@ -157,15 +157,21 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
 ENTITY = {"n_points": 384, "sigma": (1.0, 4.0), "emax": 8, "r_min": 1.5, "c_sig": 0.5, "u_max": 1536, "d_max": 16, "margin": 2, "p_tissue": 0.7}
 
 
-def entity_queries(d: dict, size: int, seed: int, device) -> dict:
+def entity_queries(s, d: dict, size: int, seed: int, device) -> dict:
     """Query points and scales drawn in the crop, their entities' targets, and the crop's local tree (the entities'
-    nodes and their ancestors, re-indexed; ``e_anc (u_max, d_max)`` each node's chain to the root, -1 padded)."""
-    from .entities import entity_targets
+    nodes and their ancestors, re-indexed; ``e_anc (u_max, d_max)`` each node's chain to the root, -1 padded). The
+    objects' entities come from the canvas (:func:`~shapetensor.learn.entities.entity_targets`); layers drawn without
+    objects (underlays, region interfaces) are one population-level entity each, under the root
+    (:func:`~shapetensor.learn.entities.dense_entities`) -- together everything the total density holds."""
+    from .entities import dense_entities, entity_targets
     E = ENTITY; ctx = d["entity_ctx"]; g = torch.Generator(device=device).manual_seed(seed + 4243)
-    n = E["n_points"]; m = E["margin"]
+    n = E["n_points"]; m = E["margin"]; emax = E["emax"]
+    gl_ = [k for k in ctx["group_layer"] if k >= 0]
+    dense = [k for k, L in enumerate(s.layers) if L.role != "isotropic" and k not in gl_]
+    ent_layers = gl_ + dense
     pts = m + torch.rand(n, 3, generator=g, device=device) * (size - 1 - 2 * m)
-    occ = d["occupancy"][:len(ctx["group_layer"])].sum(0) if "occupancy" in d else None                    # most queries on tissue
-    if occ is not None:
+    if ent_layers:                                                                                  # most queries on the entities' material
+        occ = d["occupancy"][ent_layers].float().sum(0)
         inner = occ[m:size - m, m:size - m, m:size - m] > 0.05
         cand = torch.nonzero(inner).float() + m
         k = int(E.get("p_tissue", 0.7) * n)
@@ -173,22 +179,47 @@ def entity_queries(d: dict, size: int, seed: int, device) -> dict:
             pick = torch.randint(0, cand.shape[0], (k,), generator=g, device=device)
             pts[:k] = cand[pick] + torch.rand(k, 3, generator=g, device=device) - 0.5
     lo, hi = E["sigma"]; sig = torch.exp(math.log(lo) + torch.rand(n, generator=g, device=device) * math.log(hi / lo))
+    vis, ov = d.get("visibility"), d.get("orientation_visibility")
+    K = d["occupancy"].shape[0]
+    full = lambda x: None if x is None else (x.float().view(-1, 1, 1, 1).expand(K, *d["occupancy"].shape[1:]) if x.dim() == 1 else x.float())
     t = entity_targets(ctx["entries"], ctx["tree"], ctx["canvas_shape"], ctx["origin"], ctx["zoom"], (size,) * 3, pts, sig, grid=ctx["grid"],
-                       vis=d.get("visibility"), group_layer=ctx["group_layer"], r_min=E["r_min"], c_sig=E["c_sig"], emax=E["emax"],
-                       mask=ctx.get("mask"), keep=ctx.get("keep"))
+                       vis=full(vis), group_layer=ctx["group_layer"], r_min=E["r_min"], c_sig=E["c_sig"], emax=emax,
+                       mask=ctx.get("mask"), keep=ctx.get("keep"), ovis=full(ov))
     tree = ctx["tree"]; node = t["node"]; live = node >= 0
     anc = tree.ancestors(torch.unique(node[live])) if bool(live.any()) else torch.zeros(0, 1, dtype=torch.long, device=device)
-    U = torch.unique(anc[anc >= 0]) if anc.numel() else torch.zeros(0, dtype=torch.long, device=device)
-    if U.numel() > E["u_max"]:                                                                      # rare: the deepest-first nodes beyond the pad dropped
-        U = U[:E["u_max"]]
+    U = torch.unique(torch.cat([anc[anc >= 0], torch.zeros(1, dtype=torch.long, device=device)]))   # the root always (the dense entities' parent)
+    nd = len(dense)
+    if U.numel() + nd > E["u_max"]:                                                                  # rare: the deepest-first nodes beyond the pad dropped
+        U = U[:E["u_max"] - nd]
     loc = torch.full((tree.n,), -1, dtype=torch.long, device=device); loc[U] = torch.arange(U.numel(), device=device)
     A = tree.ancestors(U)[:, :E["d_max"]]; A = torch.where(A >= 0, loc[A.clamp_min(0)], A)
     e_anc = torch.full((E["u_max"], E["d_max"]), -1, dtype=torch.int32, device=device); e_anc[:A.shape[0], :A.shape[1]] = A.int()
     e_node = torch.where(live, loc[node.clamp_min(0)], node)
-    T = t["T"]
+    mass, evis, T, desc = t["mass"], t["vis"], t["T"], t["desc"]
+    if nd:                                                                                          # the dense layers' entities, merged by visible mass
+        dl = [s.layers[k] for k in dense]
+        dd = torch.tensor([[float(getattr(L, "radius", 0.0)), 0.0, 0.0, 1.0, 0.0] for L in dl], device=device)
+        de = dense_entities(d["occupancy"][dense], d["tensors"][dense], pts, sig, vis=full(vis)[dense] if vis is not None else None,
+                            ovis=full(ov)[dense] if ov is not None else None, desc=dd)
+        ids = U.numel() + torch.arange(nd, device=device)
+        e_anc[ids, 0] = ids.int(); e_anc[ids, 1] = int(loc[0])
+        node_d = torch.where(de["live"], ids[None].expand(n, nd), torch.full((n, nd), -1, device=device, dtype=torch.long))
+        e_node = torch.cat([e_node, node_d], 1); mass = torch.cat([mass, de["mass"] * de["live"]], 1); evis = torch.cat([evis, de["vis"]], 1)
+        T = torch.cat([T, de["T"]], 1); desc = torch.cat([desc, de["desc"]], 1)
+        score = torch.where(e_node >= 0, mass * evis, torch.full_like(mass, -1.0))
+        o = torch.argsort(score, 1, descending=True)[:, :emax]
+        e_node, mass, evis = e_node.gather(1, o), mass.gather(1, o), evis.gather(1, o)
+        T = T.gather(1, o[..., None, None].expand(-1, -1, 3, 3)); desc = desc.gather(1, o[..., None].expand(-1, -1, 5))
+        mass = mass * (e_node >= 0); evis = evis * (e_node >= 0)
+    live = e_node >= 0
     T6 = torch.stack([T[..., 0, 0], T[..., 1, 1], T[..., 2, 2], T[..., 0, 1], T[..., 0, 2], T[..., 1, 2]], -1)
-    return {"e_points": pts, "e_sigma": sig, "e_node": e_node.int(), "e_mass": t["mass"].half(), "e_vis": t["vis"].half(),
-            "e_T6": T6.half(), "e_desc": t["desc"].half(), "e_anc": e_anc, "e_n": torch.tensor(U.numel(), device=device)}
+    from .bingham import fit as bfit                                                                   # the entities' Bingham ODFs (moment matched)
+    R = torch.eye(3, device=device).expand(*e_node.shape, 3, 3).clone(); Kp = torch.zeros(*e_node.shape, 2, device=device)
+    if bool(live.any()):
+        Rf, Kf = bfit(T[live].double()); R[live], Kp[live] = Rf.float(), Kf.float()
+    return {"e_points": pts, "e_sigma": sig, "e_node": e_node.int(), "e_mass": mass.half(), "e_vis": evis.half(),
+            "e_T6": T6.half(), "e_desc": desc.half(), "e_anc": e_anc, "e_n": torch.tensor(U.numel() + nd, device=device),
+            "e_R": R.float(), "e_kappa": Kp.float()}
 
 
 ROUTES = 0.0                       # > 0: batch-time contrast routes (learn/augment.py) at this strength, a fresh draw each use
@@ -878,6 +909,206 @@ def train_lobes(out: str, steps: int = 6000, size: int = 128, batch: int = 4, ac
     return model
 
 
+def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4, accum: int = 4, buffer: int = 128, refresh: int = 1, lr: float = 3e-4,
+                   warmup: int = 300, margin: int = 4, val_n: int = 16, val_every: int = 500, seed: int = 0, strength0: float = 0.15, strength1: float = 1.0,
+                   gen: dict | None = None, widths=(32, 64, 128), embed: int = 16, context_level: bool = True, voxel_cond: bool = True, points: bool = True,
+                   level0: float = 0.3, level_steps: float = 0.5, voxel_dropout: float = 0.3, weights: dict | None = None, init: str | None = None,
+                   resume: str | None = None, routes: float = 1.0, contrast_views: bool = True, contrast_every: int = 2, producer: bool = True,
+                   cpu_workers: int = 0, cpu_threads: int = 4, channels_last: bool = False, compile_model: bool = False, ckpt_minutes: float = 20.0,
+                   benchmark: int = 0, device: str = "cuda", log_every: int = 25, n_dirs: int = 32):
+    """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
+    the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
+    sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
+    batch-time contrast routes with a second view of the same geometry (consistency every ``contrast_every`` steps),
+    the voxel size dropped at ``voxel_dropout``. The cluster machinery of :func:`train_lobes`: producer thread, CPU
+    workers, data parallel, checkpoints and ``--resume auto``, benchmark mode."""
+    from . import dataflow as DF
+    from . import entity_train as ET
+    from . import lobe_train as LT
+    from . import losses as _losses
+    from .model import poincare_dist
+    global HEAD, DESC_KEY, SH_EXACT, DESC_LMAX, QUERY, CACHE, ROUTES, VIEWS
+    rank, world, local = DF.init_distributed(device)
+    if str(device).startswith("cuda"):
+        device = f"cuda:{local}"; torch.cuda.set_device(device)
+        torch.backends.cudnn.benchmark = True; torch.backends.cuda.matmul.allow_tf32 = True; torch.backends.cudnn.allow_tf32 = True
+    HEAD, DESC_KEY, SH_EXACT, DESC_LMAX, QUERY = "entities", "descriptors5", 8, 0, None
+    VIEWS = 2 if (routes and contrast_views) else 1
+    _losses.DESC_K = 5; _losses.DESC_NC = 0
+    if weights:
+        ET.ENT_WEIGHTS.update(weights)
+    base = dict((gen or {}).get("scene") or {"canvas": 2 * size, "crops_per_scene": 8})
+    level = {"v": level0}
+    cur_gen = lambda: {"scene": LT.difficulty_gen(level["v"], base)}
+    def set_routes():
+        global ROUTES
+        ROUTES = routes * (0.4 + 0.6 * level["v"]) if routes else 0.0
+    main = rank == 0
+    outd = Path(out); outd.mkdir(parents=True, exist_ok=True)
+    logf = open(outd / "log.jsonl", "a") if main else None
+    log = (lambda m: print(m, flush=True)) if main else (lambda m: None)
+    def logj(d):
+        if main:
+            logf.write(json.dumps(d) + "\n"); logf.flush()
+    args = dict(head="entities", steps=steps, size=size, batch=batch, accum=accum, buffer=buffer, refresh=refresh, lr=lr, warmup=warmup, margin=margin,
+                val_n=val_n, seed=seed, strength0=strength0, strength1=strength1, gen={"scene": base}, widths=list(widths), sh_lmax=8, embed=embed,
+                context_level=context_level, voxel_cond=voxel_cond, points=points, level0=level0, level_steps=level_steps, voxel_dropout=voxel_dropout,
+                weights=weights, routes=routes, contrast_views=contrast_views, world=world, contrast_every=contrast_every, n_dirs=n_dirs,
+                channels_last=channels_last, compile_model=compile_model, entity=dict(ENTITY))
+    torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
+    gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
+    model = PopulationNet.from_args(args).to(device)
+    rf = receptive_field(model)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    start = 0
+    if resume == "auto":
+        resume = str(outd / "model.pt") if (outd / "model.pt").exists() else None
+    if init and not resume:
+        DF.load_partial(model, torch.load(init, map_location=device)["model"], log)
+    if resume:
+        ck = torch.load(resume, map_location=device)
+        model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); start = ck["step"]; level["v"] = ck.get("level", level["v"])
+        log(f"resumed at step {start} (level {level['v']:.2f})")
+    if channels_last:
+        model = model.to(memory_format=torch.channels_last_3d)
+    fwd = torch.compile(model) if compile_model else model
+    strength = lambda s_: strength0 + (strength1 - strength0) * min(1.0, s_ / (0.5 * steps))
+    lvl = lambda s_: level0 + (1.0 - level0) * min(1.0, s_ / max(1.0, level_steps * steps))
+    level["v"] = lvl(start)
+    log(f"model: {sum(p.numel() for p in model.parameters())} parameters, receptive field {rf} voxels, {world} GPU(s); args {args}")
+    seed0 = seed * 1_000_000_000 + rank * 100_000_000 + start * refresh * 4
+    buf = Buffer(buffer, size, device, seed0=seed0, strength=strength(start), log=log, gen=cur_gen())
+    cfg = {"strength": strength(start), "gen": cur_gen()}
+    prod = DF.Producer(make, size, device, buf.next + 50_000_000, cfg) if producer else None
+    cpu = None
+    if cpu_workers > 0:
+        state = {"HEAD": HEAD, "DESC_KEY": DESC_KEY, "SH_EXACT": SH_EXACT, "DESC_LMAX": DESC_LMAX, "QUERY": QUERY, "CACHE": None,
+                 "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC}
+        cpu = DF.CpuWorkers(cpu_workers, size, buf.next + 90_000_000, cfg, state, threads=cpu_threads)
+    val = []
+    if main and not benchmark:
+        val = [augment(*make(10_000_000 + i, size, device, strength1, {"scene": {**LT.difficulty_gen(1.0, base), "crops_per_scene": 1}}), torch.Generator().manual_seed(i))
+               for i in range(val_n)]
+    def evaluate():
+        model.eval(); acc = {}
+        gv = torch.Generator(device=device).manual_seed(123) if str(device).startswith("cuda") else torch.Generator().manual_seed(123)
+        with torch.no_grad():
+            for i in range(0, len(val), 2):
+                x, T = stack(val[i:i + 2], aug=False)
+                dirs = ET.sample_dirs(T, n_dirs, g=gv)
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=str(device).startswith("cuda")):
+                    P = model(x, voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
+                _, parts = ET.entity_loss(P, T, dirs, margin=margin, g=gv)
+                for k, v_ in {**{k: float(v) for k, v in parts.items()}, **ET.axis_error_deg(P, T, dirs)}.items():
+                    acc.setdefault(k, []).append(v_)
+        model.train()
+        return {f"val_{k}": float(np.mean(v)) for k, v in acc.items()}
+    import numpy as np
+    if main and not benchmark:
+        v0 = evaluate(); logj({"step": start, "baseline": True, **v0}); log(f"  val {start} (baseline): " + " ".join(f"{k} {x:.4f}" for k, x in v0.items()))
+    ckp = DF.Checkpointer(ckpt_minutes)
+    def save(step_):
+        if main:
+            tmp = outd / "model.pt.tmp"
+            torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step_, "args": args, "receptive_field": rf, "level": level["v"]}, tmp)
+            os.replace(tmp, outd / "model.pt")
+    tick = (lambda: torch.cuda.synchronize(device)) if str(device).startswith("cuda") else (lambda: None)
+    bench = {k: [] for k in ("data", "main", "opt", "step")} if benchmark else None
+    t0 = time.time(); run = {}; got_pairs = 0
+    set_routes()
+    end = min(steps, start + benchmark) if benchmark else steps
+    for step in range(start, end):
+        if bench is not None:
+            tick(); ts = time.perf_counter()
+        prog = step / max(steps, 1)
+        lr_now = lr * min(1.0, (step + 1) / warmup) * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * prog)))
+        for pg in opt.param_groups:
+            pg["lr"] = lr_now
+        opt.zero_grad(set_to_none=True); pa = {}; tot_v = 0.0; t_data = 0.0
+        for mb in range(accum):
+            if bench is not None:
+                tick(); td = time.perf_counter()
+            x, T = buf.batch(batch, g, 0.0)
+            if channels_last:
+                x = x.contiguous(memory_format=torch.channels_last_3d)
+            v = T["voxel"].clone(); v[torch.rand(v.shape[0], generator=g).to(v.device) < voxel_dropout] = float("nan")
+            dirs = ET.sample_dirs(T, n_dirs, g=gd)
+            if bench is not None:
+                tick(); t_data += time.perf_counter() - td
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=str(device).startswith("cuda")):
+                P = fwd(x, voxel=v, e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
+            total, parts = ET.entity_loss(P, T, dirs, margin=margin, g=gd)
+            if "_view2" in T and ET.ENT_WEIGHTS.get("contrast", 0) > 0 and mb == 0 and step % max(1, contrast_every) == 0:   # another route, same geometry
+                x2 = T["_view2"].contiguous(memory_format=torch.channels_last_3d) if channels_last else T["_view2"]
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=str(device).startswith("cuda")):
+                    P2 = fwd(x2, voxel=v, e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
+                e1, e2 = P["ent"], P2["ent"]
+                lcon = (torch.log1p(e1["f"]) - torch.log1p(e2["f"])).abs().mean() + 0.1 * poincare_dist(e1["z"], e2["z"]).mean() \
+                    + ((P["total_sh"].float() - P2["total_sh"].float()) ** 2).mean() / (P["total_sh"].float() ** 2).mean().clamp_min(1e-6)
+                total = total + ET.ENT_WEIGHTS["contrast"] * lcon; parts["contrast"] = lcon.detach()
+            (total / accum).backward(); tot_v = tot_v + total.detach() / accum
+            for k, v_ in parts.items():
+                pa[k] = pa.get(k, 0.0) + v_ / accum
+        if bench is not None:
+            tick(); tm = time.perf_counter()
+        DF.allreduce_grads(model, world)
+        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+        opt.step()
+        if level["v"] < 1.0 and abs(lvl(step + 1) - level["v"]) >= 0.05:                              # the difficulty, widened in steps of 0.05
+            level["v"] = lvl(step + 1); buf.gen = cur_gen(); cfg["gen"] = cur_gen(); set_routes()
+            if cpu is not None:
+                cpu.update(gen=cfg["gen"])
+        cfg["strength"] = strength(step)
+        if cpu is not None and step % 25 == 0:
+            cpu.update(strength=cfg["strength"])
+        new = (prod.take(refresh) if prod is not None else []) + (cpu.take(refresh, device) if cpu is not None else [])
+        if prod is None and cpu is None:
+            buf.refresh(refresh, g, strength(step))
+        else:
+            buf.put(new, g); got_pairs += len(new)
+        if bench is not None:
+            tick(); tend = time.perf_counter()
+            bench["data"].append(t_data); bench["main"].append(tm - ts - t_data); bench["opt"].append(tend - tm); bench["step"].append(tend - ts)
+        for k, v_ in {**pa, "total": tot_v, "grad_norm": gn.detach(), "level": level["v"], "_n": 1}.items():
+            run[k] = run.get(k, 0.0) + v_
+        if (step + 1) % log_every == 0:
+            nw = max(int(run.pop("_n", 1)), 1)
+            rec = {"step": step + 1, "time_s": round(time.time() - t0, 1), "lr": lr_now, "strength": strength(step),
+                   **{k: float(v_) / nw for k, v_ in run.items()}, "new_pairs_per_step": got_pairs / nw}
+            logj(rec); run = {}; got_pairs = 0
+            log(f"step {step + 1} {rec['time_s']}s s={rec['strength']:.2f} lv={rec['level']:.2f} total {rec['total']:.4f} dens {rec.get('density', 0):.4f} "
+                f"vote {rec.get('vote', 0):.4f} kappa {rec.get('kappa', 0):.4f} tree {rec.get('tree', 0):.4f} overall {rec.get('overall', 0):.4f} "
+                f"owned {rec.get('owned_share', 0):.2f} new/step {rec['new_pairs_per_step']:.2f}")
+        if not benchmark and ((step + 1) % val_every == 0 or step + 1 == steps):
+            if main:
+                v_ = evaluate(); logj({"step": step + 1, **v_}); log(f"  val {step + 1}: " + " ".join(f"{k} {x:.4f}" for k, x in v_.items()))
+            save(step + 1); ckp.last = time.time()
+        elif not benchmark and ckp.due():
+            save(step + 1); log(f"checkpoint at step {step + 1}")
+        stop = torch.tensor([1.0 if ckp.stop else 0.0], device=device)
+        if float(DF.allreduce_mean(stop, world)) > 0:
+            save(step + 1); log(f"stopping at step {step + 1} on the scheduler's signal (exit 99: resubmit)")
+            if prod is not None:
+                prod.close()
+            if cpu is not None:
+                cpu.close()
+            raise SystemExit(99)
+    if bench is not None and main:
+        k0 = max(1, len(bench["step"]) // 5)
+        rep = {k: round(float(np.median(v[k0:])), 4) for k, v in bench.items() if len(v) > k0}
+        rep.update({"samples_per_s_per_gpu": round(batch * accum / max(rep.get("step", 1e9), 1e-9), 2), "gpus": world,
+                    "producer_pairs_s": round(prod.rate(), 3) if prod is not None else 0.0,
+                    "peak_mem_gb": round(torch.cuda.max_memory_allocated(device) / 2 ** 30, 2) if str(device).startswith("cuda") else 0.0,
+                    "gpu": torch.cuda.get_device_name(device) if str(device).startswith("cuda") else "cpu", "batch": batch, "accum": accum, "size": size})
+        log("BENCHMARK " + json.dumps(rep)); logj({"benchmark": rep})
+    if prod is not None:
+        prod.close()
+    if cpu is not None:
+        cpu.close()
+    DF.finish_distributed(world)
+    return model
+
+
 def n_coef_(lmax: int) -> int:
     from .sh import n_coef
     return n_coef(lmax)
@@ -916,7 +1147,9 @@ def main():
     ap.add_argument("--distinct", type=float, default=None, help="slot order kept only among populations whose eigenvalue spectra lie within this distance (e.g. 0.2); default: among all")
     ap.add_argument("--widths", type=int, nargs=3, default=[32, 64, 128], help="channels at strides 1, 2, 4")
     ap.add_argument("--gen", type=json.loads, default=None, help='draw() arguments as JSON, e.g. {"style": "flat", "crossing": false, "k_layers": 1, "kinds": ["line"]}')
-    ap.add_argument("--head", default="slots", choices=("slots", "lobes"), help="output: slots (+ SH head) or the lobe mixture (scene generator, exact density, descriptors, identities)")
+    ap.add_argument("--head", default="slots", choices=("slots", "lobes", "entities"), help="output: slots (+ SH head), the lobe mixture, or the entity field (notes/plan_entity_field_model.md)")
+    ap.add_argument("--embed", type=int, default=16, help="entities: Poincare embedding size")
+    ap.add_argument("--n-dirs", type=int, default=32, help="entities: directions asked per query point")
     ap.add_argument("--lobes-J", type=int, default=6, help="lobes per cell (6: direct fits recover two crossing axes ~90 % of the time from random starts, 4: ~75 %)")
     ap.add_argument("--no-context-level", action="store_true", help="lobes: no stride-8 trunk level")
     ap.add_argument("--no-voxel-cond", action="store_true", help="lobes: no voxel-size conditioning")
@@ -943,6 +1176,15 @@ def main():
     ap.add_argument("--log-every", type=int, default=25)
     ap.add_argument("--device", default="cuda", help="lobes: cuda (each torchrun rank its local GPU) or cpu (tests)")
     a = ap.parse_args()
+    if a.head == "entities":
+        train_entities(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,
+                       val_every=a.val_every, seed=a.seed, strength0=a.strength0, strength1=a.strength1, gen=a.gen, widths=tuple(a.widths), embed=a.embed,
+                       context_level=not a.no_context_level, voxel_cond=not a.no_voxel_cond, points=not a.no_points, level0=a.level0,
+                       voxel_dropout=a.voxel_dropout, weights=a.weights, init=a.init, resume=a.resume, routes=a.routes, contrast_views=not a.no_contrast_views,
+                       contrast_every=a.contrast_every, producer=not a.no_producer, cpu_workers=a.cpu_workers, cpu_threads=a.cpu_threads,
+                       channels_last=a.channels_last, compile_model=a.compile, ckpt_minutes=a.ckpt_minutes, benchmark=a.benchmark, device=a.device,
+                       log_every=a.log_every, n_dirs=a.n_dirs)
+        return
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,
                     val_every=a.val_every, seed=a.seed, strength0=a.strength0, strength1=a.strength1, gen=a.gen, widths=tuple(a.widths),

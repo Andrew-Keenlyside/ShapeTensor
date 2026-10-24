@@ -68,6 +68,72 @@ class Down(nn.Module):
         return self.proj(x)
 
 
+def poincare(x: torch.Tensor, eps: float = 1e-3) -> torch.Tensor:
+    """A vector into the open Poincaré ball: ``tanh(|x|) x / |x|`` (radius below 1 - eps)."""
+    n = x.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+    return x / n * torch.tanh(n) * (1 - eps)
+
+
+def poincare_dist(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """Hyperbolic distance between points of the Poincaré ball (last dim the coordinates)."""
+    du = (u - v).pow(2).sum(-1); a = (1 - u.pow(2).sum(-1)).clamp_min(1e-6); b = (1 - v.pow(2).sum(-1)).clamp_min(1e-6)
+    return torch.acosh((1 + 2 * du / (a * b)).clamp_min(1 + 1e-7))
+
+
+class EntityDecoder(nn.Module):
+    """The entity field at any point x, scale sigma and direction u: from the trunk's three levels at x (trilinear over
+    the lattice corners, as :class:`~shapetensor.learn.query.QueryDecoder`), log sigma and the visible context, a point
+    code; with the even SH basis of u (order ``lmax``), per direction: density ``f >= 0``, a Poincaré embedding ``z``
+    (the owning entity's place in the tree), its Bingham frame ``R`` (6-D rotation) and concentrations ``kappa``
+    (kappa1 >= kappa2 >= 0), and its 5 descriptors (log size, relative wall, lumen, flattening, angularity)."""
+
+    def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8):
+        super().__init__()
+        from .sh import n_coef
+        self.emb, self.lmax = emb, lmax
+        self.point = nn.Sequential(nn.Linear(c2 + c1 + c0 + 3 + 2, hidden), nn.SiLU(), nn.Linear(hidden, hidden))
+        self.dir = nn.Sequential(nn.Linear(hidden + n_coef(lmax), hidden), nn.SiLU(), nn.Linear(hidden, hidden), nn.SiLU(),
+                                 nn.Linear(hidden, 1 + emb + 6 + 2 + 5))
+        nn.init.constant_(self.dir[-1].bias[0], -2.0)                                             # little density at the start
+
+    def encode(self, feats, points: torch.Tensor, sigma: torch.Tensor, context: torch.Tensor | None = None) -> torch.Tensor:
+        from .query import _sample
+        h0, h1, h = feats
+        B, Q = points.shape[:2]
+        f0 = torch.stack([_sample(h0[b], points[b]) for b in range(B)])
+        f1 = torch.stack([_sample(h1[b], (points[b] - 0.5) / 2) for b in range(B)])
+        u = (points - 1.5) / 4; size = torch.tensor(h.shape[-3:], device=points.device); base = u.floor(); hf = h.flatten(2)
+        ls = torch.log(sigma.clamp_min(1e-3) / 3.0)[..., None]
+        if context is None:
+            size_v = torch.tensor(h0.shape[-3:], device=points.device, dtype=points.dtype)
+            context = torch.minimum(points, size_v - 1 - points).amin(-1)
+        lc = torch.log(context.clamp(1.0, 64.0) / 32.0)[..., None]
+        out = 0
+        for o in range(8):
+            off = torch.tensor([(o >> 2) & 1, (o >> 1) & 1, o & 1], device=points.device, dtype=points.dtype)
+            idx = (base + off).clamp(min=torch.zeros(3, device=points.device), max=(size - 1).to(points.dtype))
+            rel = u - idx; wgt = (1 - rel.abs()).clamp_min(0).prod(-1)
+            lin = ((idx[..., 0] * size[1] + idx[..., 1]) * size[2] + idx[..., 2]).long()
+            fc = torch.gather(hf, 2, lin[:, None].expand(-1, hf.shape[1], -1))
+            z = torch.cat([fc, f1, f0], 1).transpose(1, 2)
+            out = out + wgt[..., None] * self.point(torch.cat([z.to(rel.dtype), rel, ls, lc], -1))
+        return out
+
+    def forward(self, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.Tensor, context: torch.Tensor | None = None) -> dict:
+        """``points (B, Q, 3)`` input voxels, ``sigma (B, Q)`` voxels, ``dirs (B, Q, D, 3)`` unit (z, y, x)."""
+        from .bingham import rot6d_to_matrix
+        from .sh import real_sh
+        p = self.encode(feats, points, sigma, context)
+        D = dirs.shape[2]
+        Y = real_sh(dirs.reshape(-1, 3).float(), self.lmax).view(*dirs.shape[:3], -1)
+        y = self.dir(torch.cat([p[:, :, None].expand(-1, -1, D, -1), Y.to(p.dtype)], -1)).float()
+        e = self.emb
+        k = Fn.softplus(y[..., 7 + e:9 + e]) * 10.0
+        k = torch.stack([k.amax(-1), k.amin(-1)], -1)
+        return {"f": Fn.softplus(y[..., 0]), "z": poincare(y[..., 1:1 + e]), "R": rot6d_to_matrix(y[..., 1 + e:7 + e]), "kappa": k,
+                "desc": y[..., 9 + e:]}
+
+
 class PopulationNet(nn.Module):
     """Image ``(B, 1, Z, Y, X)`` (grey levels scaled to 0-1) -> a dict of lattice outputs at stride 4 (``Z/4``...)."""
 
@@ -92,6 +158,14 @@ class PopulationNet(nn.Module):
         if self.voxel_cond:                                                                      # the voxel size (log2 um, and whether known): FiLM
             self.film = nn.Sequential(nn.Linear(2, 32), nn.SiLU(), nn.Linear(32, 2 * c2))
             nn.init.zeros_(self.film[-1].weight); nn.init.zeros_(self.film[-1].bias)
+        if head == "entities":                                                                   # the entity field (notes/plan_entity_field_model.md)
+            from .sh import n_coef as _nc
+            self.total = nn.Conv3d(c2, _nc(sh_lmax or 8), 1)                                     # the overall ODF per lattice cell (free SH)
+            self.frac = nn.Conv3d(c2, 1, 1)
+            if self.has_points:
+                self.points = nn.Conv3d(c2, 2, 1); nn.init.constant_(self.points.bias, -4.0)
+            self.ent = EntityDecoder(c0, c1, c2, emb=max(int(embed), 2), hidden=256, lmax=8)
+            return
         if head == "lobes":                                                                      # J lobes per cell (axis, mass, kappa, spare, descriptors)
             from .sh import n_coef as _nc
             # the ablation: the same trunk and targets with free harmonics (density to order sh_lmax, descriptors to desc_lmax)
@@ -131,7 +205,8 @@ class PopulationNet(nn.Module):
                    query=bool(args.get("query", False)), desc_lmax=int(args.get("desc_lmax", 0) or 0),
                    axis_head=bool(args.get("axis_head", False)), head=args.get("head", "slots") or "slots", J=int(args.get("lobes_J", 4) or 4),
                    context_level=bool(args.get("context_level", False)), voxel_cond=bool(args.get("voxel_cond", False)),
-                   identity_dim=int(args.get("identity_dim", 0) or 0), points=bool(args.get("points", False)), free_sh=bool(args.get("free_sh", False)))
+                   identity_dim=int(args.get("identity_dim", 0) or 0), points=bool(args.get("points", False)), free_sh=bool(args.get("free_sh", False)),
+                   embed=int(args.get("embed", 8) or 8))
 
     def local_contrast(self, x: torch.Tensor) -> torch.Tensor:
         """``(x - mean) / sd`` in a Gaussian window of sigma ``lcn`` voxels (sd floored at 0.01 of the 0-1 range), /3:
@@ -166,13 +241,22 @@ class PopulationNet(nn.Module):
         return h * (1 + gb[:, :c].view(B, c, 1, 1, 1)) + gb[:, c:].view(B, c, 1, 1, 1)
 
     def forward(self, x: torch.Tensor, points: torch.Tensor | None = None, sigma: torch.Tensor | None = None,
-                context: torch.Tensor | None = None, voxel: torch.Tensor | None = None) -> dict:
+                context: torch.Tensor | None = None, voxel: torch.Tensor | None = None, e_points: torch.Tensor | None = None,
+                e_sigma: torch.Tensor | None = None, e_dirs: torch.Tensor | None = None) -> dict:
         """The lattice outputs; with ``points (B, Q, 3)`` (input voxel coordinates) and ``sigma (B, Q)`` (voxels) and a
         query decoder, also ``q_sh (B, Q, n_coef)``: the populations' density at those points and scales. ``voxel``
         (B,): log2 of the voxel size in µm (NaN: unknown) for a voxel-conditioned model."""
         h0, h1, h = self.features(x)
         h = self.condition(h, voxel)
         B = x.shape[0]; cs = h.shape[2:]
+        if self.head == "entities":
+            out = {"total_sh": self.total(h), "fraction_logit": self.frac(h)[:, 0]}
+            if self.has_points:
+                out["points"] = Fn.softplus(self.points(h))
+            if e_points is not None:
+                out["ent"] = self.ent((h0, h1, h), e_points.float(), e_sigma.float(), e_dirs, None if context is None else context.float())
+            out["_feats"] = (h0, h1, h)
+            return out
         if self.head == "lobes":
             out = {"lobes_raw": self.lobes(h), "fraction_logit": self.frac(h)[:, 0], "aux_sh": self.aux(h)}
             if self.has_points:
@@ -218,7 +302,7 @@ def receptive_field(model: PopulationNet, size: int = 96) -> int:
             p.g.data.fill_(1.0)                                                                  # measure with the residual branches open
     x = torch.randn(1, 1, size, size, size, device=dev, requires_grad=True)
     out = m(x); c = size // 8
-    head = out["slots"][0, :, :, c, c, c].sum() if "slots" in out else out["lobes_raw"][0, :, c, c, c].sum()
+    head = out["slots"][0, :, :, c, c, c].sum() if "slots" in out else out["total_sh"][0, :, c, c, c].sum() if "total_sh" in out else out["lobes_raw"][0, :, c, c, c].sum()
     (head + out["fraction_logit"][0, c, c, c]).backward()
     gnz = (x.grad[0, 0].abs() > 0).nonzero()
     return int(gnz[:, 0].max() - gnz[:, 0].min() + 1)

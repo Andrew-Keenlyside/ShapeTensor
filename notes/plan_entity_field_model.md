@@ -140,3 +140,54 @@ scales, morphologies) after the generator targets, after the first pilot, and be
 | 3 | very small pilot (64³ locally), benchmarks, review | day 1–2 |
 | 4 | speed: generator and training profiling | after correctness |
 | 5 | cluster run at 128³ (H100) — with the user's go-ahead to stage and submit | after acceptance |
+
+## 9. Theoretical bounds and limits (2026-10-24)
+
+Numbers for the current trunk: receptive field 96 voxels, sigma trained 1–4 voxels, ``emax`` 8.
+
+**Set by the image (no model removes them).**
+- Orientation lives only in spatial pattern: populations mixed below the blur scale carry no orientation in the
+  intensity. The targets blend each layer's tensor toward isotropic by its orientation visibility (entities and the
+  total alike), so the model is not asked for what does not show.
+- Uniform material farther than ~RF/2 (~48 voxels) from any edge or texture has no measurable orientation.
+- Crossing vs fan vs split vs kiss needs both sides of the overlap in view: bundles of radius R overlap over ~2R/sin θ,
+  so below θ ≈ asin(2R/RF) (≈ 6° at R = 5, 12° at R = 10, 25° at R = 20 voxels) the entity count is the generator's
+  prior (fans one entity, crossings two). Resolved fibres inside the bundles lower this to a few degrees.
+- Partial volume: below resolution, volume fraction, size and contrast are confounded (training is contrast-agnostic);
+  absolute masses and sizes are priors, shares between entities better determined.
+- No polarity: Bingham ODFs are antipodal; branch / end points come from the points head.
+
+**Set by the representation.**
+- One entity per direction at a (x, sigma): co-directional entities at one point and scale (intermixed parallel
+  populations differing only in contrast or calibre) merge there and separate only at finer sigma or other x.
+  (Removable with two votes per direction; not done unless the pilot shows the need.)
+- Separability scales with angle over dispersion: votes are trained where one entity owns > 1/2 of the density.
+- An entity's Bingham is its second moment: an arc (a bend in the window) or two arms (a branch) are smeared into one
+  lobe. The density f(u) is free; at inference the entity ODF is also given non-parametrically (f over the entity's
+  directions), the Bingham as its summary.
+- Translation equivariance (no coordinates, no norms: no block artefacts) gives identical-looking objects in a regular
+  arrangement the same embedding: z encodes structure (population, shared ancestors); single look-alike objects are
+  told apart by position (spatial clustering, seeded following).
+- z is defined per window up to an isometry; the overlap and continuity losses align neighbouring windows; whole-volume
+  identities come from linking, whose errors compound (90 % per step -> ~35 % intact over 10 windows): linking must be
+  conservative (union-find merges are irreversible).
+- Tree levels defined beyond the receptive field (which tract) are not locally inferable; two tracts identical in
+  appearance and orientation share a parent in z. The ball's radius cap allows tree distances up to ~15 (~7 levels).
+- The resolution rule is radius-only (radius >= max(1.5, 0.5 sigma)): isolated thin objects (sparse labelling,
+  light-sheet axons) merge into their population although they are traceable -> to make spacing-aware.
+- At most ``emax`` = 8 entities per query in training (1 % of queries reach it); sharpest lobe ~1.6° (kappa <= 600);
+  sigma beyond the trained range is aggregated post hoc, not predicted.
+
+**Set by the architecture.**
+- Directions enter as order-8 SH features: switches between entities closer than ~10–15° are soft (spectral bias);
+  measured per angle bin in the pilot; Fourier direction features if needed.
+- No rotation equivariance (augmentation only): residual lattice bias, larger with anisotropic voxels.
+- Stride-8 levels: exact shift equivariance only for shifts by multiples of 8 (no seams; a faint period-8 dependence is
+  possible; anti-aliased pooling removes it).
+- Exact tiling needs a halo of RF/2 = 48 voxels and tile origins on multiples of 8: inference tiles of 256–384³.
+
+**Set by synthetic training.** Objects, populations and the fan convention are the generator's; outputs are point
+estimates (kappa mixes dispersion and uncertainty); large-scale coherence remains the generator's weakest area.
+
+**Inference cost.** Points x directions: ~5 min per 1000³ x 300 directions on an H100; whole brains on coarser grids or
+with directions chosen from the total ODF's peaks. Entity counts come from clustering thresholds (inference-time knobs).

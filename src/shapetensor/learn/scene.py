@@ -131,13 +131,26 @@ def smooth1d(x: torch.Tensor, sigma: float) -> torch.Tensor:
 # ------------------------------------------------------------------------------------------------------------------
 
 def smooth_paths(start: torch.Tensor, d0: torch.Tensor, length: torch.Tensor, S: int, curv: torch.Tensor, corr: float,
-                 rng: Rng) -> torch.Tensor:
+                 rng: Rng, exact_start: bool = False) -> torch.Tensor:
     """``N`` paths of ``S`` points from ``start (N, 3)`` along ``d0 (N, 3)``, each ``length`` voxels: the direction drifts
-    by a smoothed random walk (``curv``: turning per voxel, rad; ``corr``: its correlation length, voxels)."""
+    by a smoothed random walk (``curv``: turning per voxel, rad; ``corr``: its correlation length, voxels).
+    ``exact_start``: the direction at the start is ``d0`` itself (no first turn)."""
     ds = (length / max(S - 1, 1))[:, None, None]
     w = smooth1d(rng.randn(start.shape[0], S, 3), corr / max(float(ds.mean()), 1e-3))
-    d = Fn.normalize(d0[:, None] + torch.cumsum(w * curv[:, None, None] * ds, 1), dim=-1)
+    inc = w * curv[:, None, None] * ds
+    d = Fn.normalize(d0[:, None] + torch.cumsum(inc, 1) - (inc[:, :1] if exact_start else 0), dim=-1)
     return start[:, None] + torch.cumsum(d * ds, 1) - d[:, :1] * ds
+
+
+def centred_paths(centre: torch.Tensor, d0: torch.Tensor, length: torch.Tensor, S: int, curv: torch.Tensor, corr: float,
+                  rng: Rng) -> torch.Tensor:
+    """As :func:`smooth_paths`, but each path grown both ways from ``centre (N, 3)`` along +-``d0``: it passes through the
+    centre with tangent ``d0`` there however much it turns (a path grown from one end can curl off the canvas and miss the
+    point it was meant to cross)."""
+    h = S // 2 + 1
+    fw = smooth_paths(centre, d0, length / 2, h, curv, corr, rng, exact_start=True)
+    bw = smooth_paths(centre, -d0, length / 2, S - h + 1, curv, corr, rng, exact_start=True)
+    return torch.cat([bw.flip(1)[:, :-1], fw], 1)
 
 
 def tangents(P: torch.Tensor) -> torch.Tensor:
@@ -697,8 +710,8 @@ class Scene:
             c = P0; cross = (P0, t0, d)
         else:
             c = centre if centre is not None else self.centre_point(); d = axis if axis is not None else r.unit()
-        start = (c - d * Lc / 2)[None]; S = S0
-        Pc = smooth_paths(start, d[None], torch.tensor([Lc], device=self.device), S, torch.tensor([curv if curv is not None else r.lu(0.001, 0.02)], device=self.device), r.lu(15, 80), r)
+        S = S0                                                              # through c with direction d there (the crossing point and angle)
+        Pc = centred_paths(c[None], d[None], torch.tensor([Lc], device=self.device), S, torch.tensor([curv if curv is not None else r.lu(0.001, 0.02)], device=self.device), r.lu(15, 80), r)
         s = torch.arange(S, device=self.device, dtype=torch.float32) / (S - 1)
         fan = r.u(0.3, 1.5) if (mode == "fanning" or r.p(0.15)) else 0.0
         Rs = Rb * (1 + fan * torch.relu(s - 0.5) * 2)                       # fanning: the bundle widens past its middle
@@ -925,7 +938,7 @@ class Scene:
             return None
         rho = rf * r.u(1.5, 5.0); pitch = rf * r.u(4, 25); n_str = r.i(1, 3)
         c = self.centre_point(); d = r.unit(); Lc = 2.0 * max(self.shape); S = int(Lc / H)
-        Pc = smooth_paths((c - d * Lc / 2)[None], d[None], torch.tensor([Lc], device=self.device), S, torch.tensor([r.lu(0.001, 0.01)], device=self.device), 40.0, r)
+        Pc = centred_paths(c[None], d[None], torch.tensor([Lc], device=self.device), S, torch.tensor([r.lu(0.001, 0.01)], device=self.device), 40.0, r)
         T = tangents(Pc); e1, e2 = rmf(Pc, T)
         sl = torch.arange(S, device=self.device, dtype=torch.float32) * (Lc / (S - 1))
         ph = torch.arange(n_str, device=self.device, dtype=torch.float32)[:, None] * (2 * math.pi / n_str)
@@ -1364,7 +1377,7 @@ class Scene:
         rt = self.size(1000, 15000, 2.0, min(self.shape) / 6)
         if rt is not None and r.p(0.7):                                                         # bowel, airway, aorta
             c = self.centre_point(); d = r.unit(); Lc = 2.0 * max(self.shape); S = int(Lc / H)
-            P = smooth_paths((c - d * Lc / 2)[None], d[None], torch.tensor([Lc], device=dev), S, torch.tensor([r.lu(0.002, 0.02)], device=dev), r.lu(20, 60), r)
+            P = centred_paths(c[None], d[None], torch.tensor([Lc], device=dev), S, torch.tensor([r.lu(0.002, 0.02)], device=dev), r.lu(20, 60), r)
             rad = torch.full((1, S), rt, device=dev)
             cv = curves_like(P, rad, r, obj=self.ids(1, rt), seg=torch.zeros(1, dtype=torch.long, device=dev), contrast=self.contrast(),
                              wall=rad * r.u(0.08, 0.3), lumen_c=torch.full_like(rad, r.u(-80, 80)))

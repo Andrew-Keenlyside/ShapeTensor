@@ -160,7 +160,8 @@ def _pulled(points: torch.Tensor, grid: torch.Tensor | None, shape):
 
 def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, points: torch.Tensor, sigma: torch.Tensor, grid=None,
                    vis: torch.Tensor | None = None, group_layer=None, r_min: float = 1.5, c_sig: float = 0.5, emax: int = 8,
-                   bin_size: int = 2, mask: torch.Tensor | None = None, keep: torch.Tensor | None = None, m_min: float = 1e-3) -> dict:
+                   bin_size: int = 2, mask: torch.Tensor | None = None, keep: torch.Tensor | None = None, m_min: float = 1e-3,
+                   ovis: torch.Tensor | None = None) -> dict:
     """The entities at query ``points (Q, 3)`` (output crop voxels) and scales ``sigma (Q,)`` (crop voxels).
 
     ``entries`` the canvas's ``(vox, group, obj, w, v)`` (canvas linear index; ``v`` the w-weighted tensor (6) and
@@ -168,7 +169,9 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     warp's sampling grid (None: no warp); ``vis (K, Z, Y, X)`` the layers' visibility in the output crop and
     ``group_layer`` the layer of each population (-1: none); ``mask (Z, Y, X)`` the crop's tissue (specimen edge, cut-outs:
     tissue removed takes its entities with it) and ``keep`` the labelled objects (sparse labelling: the others are gone);
-    entities whose visible mass is below ``m_min`` are dropped. Returns, padded to ``emax`` entities per query (by mass):
+    entities whose visible mass is below ``m_min`` are dropped; ``ovis (K, Z, Y, X)`` the layers' orientation visibility
+    (each population's tensor blended toward isotropic where its orientation does not show, as the total density's
+    target, :func:`~shapetensor.learn.query.voxel_density`). Returns, padded to ``emax`` entities per query (by mass):
     ``node (Q, E)`` (tree nodes, -1 pad), ``mass``, ``vis``, ``T (Q, E, 3, 3)`` (trace 1), ``desc (Q, E, 5)``."""
     vox, grp, obj, w, v = entries
     dev = points.device; Q = points.shape[0]; zf = float(zoom)
@@ -224,16 +227,24 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     thr = zf * torch.clamp(c_sig * sg, min=r_min)
     node = tree.resolve(rleaf[ri], thr)
     gw = g * rw[ri]
-    vl = torch.ones_like(gw)
-    if vis is not None and group_layer is not None:
+    vl = torch.ones_like(gw); ol = None
+    if group_layer is not None:
         gl = torch.as_tensor(group_layer, device=dev)[rgrp[ri]]
-        vq = _vis_at(vis, points.float())                                                         # (Q, K)
-        vl = torch.where(gl >= 0, vq[qi, gl.clamp_min(0)], torch.ones_like(gw))
+        if vis is not None:
+            vq = _vis_at(vis, points.float())                                                     # (Q, K)
+            vl = torch.where(gl >= 0, vq[qi, gl.clamp_min(0)], torch.ones_like(gw))
+        if ovis is not None:
+            oq = _vis_at(ovis, points.float())
+            ol = torch.where(gl >= 0, oq[qi, gl.clamp_min(0)], torch.ones_like(gw)).clamp(0, 1)
     ek = qi * (tree.n + 1) + node
     ue, einv = torch.unique(ek, return_inverse=True)
     eq = ue // (tree.n + 1); en = ue % (tree.n + 1)
     Wm = torch.zeros(ue.shape[0], device=dev).index_add_(0, einv, gw)
-    Vs = torch.zeros(ue.shape[0], v.shape[1], device=dev).index_add_(0, einv, g[:, None] * rv[ri])
+    vr = g[:, None] * rv[ri]
+    if ol is not None:                                                                             # orientation not visible: toward isotropic
+        iso = torch.tensor([1, 1, 1, 0, 0, 0.0], device=dev) / 3
+        vr = torch.cat([ol[:, None] * vr[:, :6] + (1 - ol)[:, None] * gw[:, None] * iso, vr[:, 6:]], 1)
+    Vs = torch.zeros(ue.shape[0], v.shape[1], device=dev).index_add_(0, einv, vr)
     Vis = torch.zeros(ue.shape[0], device=dev).index_add_(0, einv, gw * vl) / Wm.clamp_min(1e-12)
     norm = zf ** 3 * (2 * math.pi * sigma[eq] ** 2) ** 1.5
     mass = Wm / norm
@@ -257,6 +268,41 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     out["node"][e_, r_] = en[sel]; out["mass"][e_, r_] = mass[sel]; out["vis"][e_, r_] = Vis[sel]
     out["T"][e_, r_] = T[sel]; out["desc"][e_, r_] = desc[sel]
     return out
+
+
+def dense_entities(occ: torch.Tensor, T6: torch.Tensor, points: torch.Tensor, sigma: torch.Tensor, vis: torch.Tensor | None = None,
+                   ovis: torch.Tensor | None = None, desc: torch.Tensor | None = None, m_min: float = 1e-3) -> dict:
+    """Layers drawn without objects (a background's cell stain, the interfaces between regions): one population-level
+    entity each, from the crop's own fields (output space, after the warp) -- so the entities together hold everything the
+    total density holds. ``occ (K, Z, Y, X)``, ``T6 (K, 6, Z, Y, X)`` (trace 1), ``vis`` / ``ovis`` ``(K, Z, Y, X)`` or
+    ``(K,)``, ``desc (K, 5)``; at ``points (Q, 3)`` and ``sigma (Q,)`` (voxels): ``mass``, ``vis (Q, K)``, ``T (Q, K, 3,
+    3)``, ``desc (Q, K, 5)``, ``live (Q, K)``. The Gaussian window is evaluated at sigma steps of sqrt(2) and
+    interpolated in log sigma."""
+    from ..filters import gaussian
+    K = occ.shape[0]; Q = points.shape[0]; dev = points.device
+    full = lambda x: x.float().view(-1, 1, 1, 1).expand(K, *occ.shape[1:]) if x.dim() == 1 else x.float()
+    o = occ.float()
+    Tb = T6.float()
+    if ovis is not None:
+        ov = full(ovis).clamp(0, 1)[:, None]; iso = torch.tensor([1, 1, 1, 0, 0, 0.0], device=dev).view(1, 6, 1, 1, 1) / 3
+        Tb = ov * Tb + (1 - ov) * iso
+    F = torch.cat([o[:, None], o[:, None] * Tb], 1).reshape(K * 7, *occ.shape[1:])                  # (K * 7, Z, Y, X)
+    s_lo, s_hi = float(sigma.min()), float(sigma.max())
+    n_lv = max(2, int(math.ceil(math.log(max(s_hi / s_lo, 1.0001)) / math.log(math.sqrt(2)))) + 1)
+    lv = torch.exp(torch.linspace(math.log(s_lo), math.log(max(s_hi, s_lo * 1.0001)), n_lv, device=dev))
+    S = torch.stack([_vis_at(gaussian(F, float(sl_)), points.float()) for sl_ in lv])            # (n_lv, Q, K * 7)
+    t = (torch.log(sigma.float()) - math.log(float(lv[0]))) / (math.log(float(lv[-1])) - math.log(float(lv[0]))) * (n_lv - 1)
+    i0 = t.floor().long().clamp(0, n_lv - 2); a = (t - i0.float()).clamp(0, 1)[:, None]
+    qi = torch.arange(Q, device=dev)
+    Sq = ((1 - a) * S[i0, qi] + a * S[i0 + 1, qi]).view(Q, K, 7)
+    mass = Sq[..., 0].clamp_min(0)
+    T6q = Sq[..., 1:] / mass.clamp_min(1e-12)[..., None]
+    T = torch.stack([torch.stack([T6q[..., 0], T6q[..., 3], T6q[..., 4]], -1), torch.stack([T6q[..., 3], T6q[..., 1], T6q[..., 5]], -1),
+                     torch.stack([T6q[..., 4], T6q[..., 5], T6q[..., 2]], -1)], -2)
+    T = T / T.diagonal(dim1=-2, dim2=-1).sum(-1).clamp_min(1e-9)[..., None, None]
+    V = _vis_at(full(vis), points.float()) if vis is not None else torch.ones(Q, K, device=dev)
+    dsc = (desc.float()[None].expand(Q, K, 5) if desc is not None else torch.zeros(Q, K, 5, device=dev)).clone()
+    return {"mass": mass, "vis": V, "T": T, "desc": dsc, "live": mass * V >= m_min}
 
 
 def _vis_at(vis: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
