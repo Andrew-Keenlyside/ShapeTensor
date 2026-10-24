@@ -250,11 +250,15 @@ class Canvas:
     NDESC = 5                              # outer radius, wall, lumen fraction, flattening, angularity (voxels / 0-1)
 
     KEYS_MAX = 30_000_000                  # (voxel, object) keys held before they are summed into unique ones (memory)
-    OBJ = 1 << 22                          # a key is voxel * OBJ + object: up to 4 M objects (dense granule fields pass 65 536)
+    OBJ = 1 << 22                          # a key is (voxel * NG + group) * OBJ + object: up to 4 M objects (granule fields pass 65 536)
+    NG = 64                                # populations (groups) per scene
+    NV = 11                                # per key also the weighted shape tensor (6) and descriptors (5): the entities' targets
+    NVD = 5
+    ID_MIN = 0.05                          # the identity target: an object owns a voxel's identity only with >= 5 % of it
 
     def __init__(self, shape, device):
         self.shape = tuple(shape); self.device = device; self.n = int(np.prod(shape))
-        self.id_keys, self.id_w = [], []; self._nkeys = 0
+        self.id_keys, self.id_w, self.id_v = [], [], []; self._nkeys = 0; self.group = 0
         self.lumen = torch.zeros(self.n, device=device); self.lumen_c = torch.zeros(self.n, device=device)
         self.reset()
 
@@ -265,7 +269,7 @@ class Canvas:
     def splat(self, Q, W, V, obj=None):
         """Points ``Q (n, 3)`` with weights ``W (n,)`` (volumes, voxel units) carrying ``V (n, 12)`` (weighted later)."""
         Z, Y, X = self.shape
-        p0 = Q.floor(); fr = Q - p0; i0 = p0.long()
+        p0 = Q.floor(); fr = Q - p0; i0 = p0.long(); kc, wc, vc = [], [], []
         for dz in (0, 1):
             for dy in (0, 1):
                 for dx in (0, 1):
@@ -275,18 +279,36 @@ class Canvas:
                     lin = ((iz * Y + iy) * X + ix)[ok]; ww = w[ok]
                     self.occ.index_add_(0, lin, ww)
                     self.acc.index_add_(0, lin, ww[:, None] * V[ok])
-        if obj is not None:                                                  # nearest voxel, for the identities
-            n = Q.round().long()
-            ok = (n[:, 0] >= 0) & (n[:, 0] < Z) & (n[:, 1] >= 0) & (n[:, 1] < Y) & (n[:, 2] >= 0) & (n[:, 2] < X)
-            lin = (n[ok, 0] * Y + n[ok, 1]) * X + n[ok, 2]
-            self._add_keys(lin * self.OBJ + obj[ok], W[ok])
+                    if obj is not None:                                      # the same trilinear weights per (voxel, population, object):
+                        kc.append((lin * self.NG + self.group) * self.OBJ + obj[ok]); wc.append(ww); vc.append(ww[:, None] * V[ok, :self.NV])
+        if obj is not None and kc:                                           # entities sum exactly to the population; summed per call first
+            uk, inv = torch.unique(torch.cat(kc), return_inverse=True)
+            self._add_keys(uk, torch.zeros(uk.shape[0], device=self.device).index_add_(0, inv, torch.cat(wc)),
+                           torch.zeros(uk.shape[0], self.NV, device=self.device).index_add_(0, inv, torch.cat(vc)))
 
-    def _add_keys(self, keys, w):
-        self.id_keys.append(keys); self.id_w.append(w); self._nkeys += keys.numel()
-        if self._nkeys > self.KEYS_MAX:                                        # sum the weights of repeated keys: one per (voxel, object)
-            uk, inv = torch.unique(torch.cat(self.id_keys), return_inverse=True)
-            ws = torch.zeros(uk.shape[0], device=self.device).index_add_(0, inv, torch.cat(self.id_w))
-            self.id_keys, self.id_w, self._nkeys = [uk], [ws], uk.numel()
+    def _add_keys(self, keys, w, v):
+        self.id_keys.append(keys); self.id_w.append(w); self.id_v.append(v.float()); self._nkeys += keys.numel()
+        if self._nkeys > self.KEYS_MAX:                                        # sum repeated keys: one per (voxel, population, object)
+            self._compact()
+
+    def _compact(self):
+        if not self.id_keys:
+            return
+        uk, inv = torch.unique(torch.cat(self.id_keys), return_inverse=True)
+        ws = torch.zeros(uk.shape[0], device=self.device).index_add_(0, inv, torch.cat(self.id_w))
+        vs = torch.zeros(uk.shape[0], self.NV, device=self.device).index_add_(0, inv, torch.cat(self.id_v))
+        self.id_keys, self.id_w, self.id_v, self._nkeys = [uk], [ws], [vs], uk.numel()
+
+    def entries(self):
+        """Every (voxel, population, object) with its volume ``w`` (voxel units) and the w-weighted sums of its shape
+        tensor (6) and descriptors (5): ``(vox int64, group int64, obj int64, w (n,), v (n, 11))`` -- the entities' targets
+        (an entity's tensor is the exact sum of its objects')."""
+        self._compact()
+        if not self.id_keys:
+            z = torch.zeros(0, dtype=torch.long, device=self.device)
+            return z, z, z, torch.zeros(0, device=self.device), torch.zeros(0, self.NV, device=self.device)
+        k = self.id_keys[0]; vg = k // self.OBJ
+        return vg // self.NG, vg % self.NG, k % self.OBJ, self.id_w[0], self.id_v[0]
 
     def splat_lumen(self, Q, W, c):
         Z, Y, X = self.shape
@@ -304,7 +326,8 @@ class Canvas:
         self.acc[:, -1] += o * (contrast.reshape(-1) if torch.is_tensor(contrast) else float(contrast))
         if obj_map is not None:
             m = o > 1e-3; lin = torch.nonzero(m)[:, 0]
-            self._add_keys(lin * self.OBJ + obj_map.reshape(-1)[m], o[m])
+            tv = torch.cat([tensor.reshape(6, -1)[:, m].T, desc.reshape(self.NVD, -1)[:, m].T], 1)
+            self._add_keys((lin * self.NG + self.group) * self.OBJ + obj_map.reshape(-1)[m], o[m], o[m, None] * tv)
 
     def finish(self):
         """This population's maps: occupancy (clamped), tensor (trace 1), descriptors, mean contrast map."""
@@ -323,9 +346,12 @@ class Canvas:
         """Per voxel the ``K`` heaviest objects and their share of the voxel: ``ids (K, Z, Y, X)`` (-1 none), ``frac``."""
         ids = torch.full((K, self.n), -1, dtype=torch.long, device=self.device); frac = torch.zeros(K, self.n, device=self.device)
         if self.id_keys:
-            keys = torch.cat(self.id_keys); w = torch.cat(self.id_w)
+            k0 = torch.cat(self.id_keys); w = torch.cat(self.id_w)
+            keys = (k0 // (self.OBJ * self.NG)) * self.OBJ + k0 % self.OBJ                 # the population folded out: (voxel, object)
             uk, inv = torch.unique(keys, return_inverse=True)
             ws = torch.zeros(uk.shape[0], device=self.device).index_add_(0, inv, w)
+            big = ws >= self.ID_MIN                                                         # trilinear rims: an identity needs some of the voxel
+            uk, ws = uk[big], ws[big]
             vox, obj = uk // self.OBJ, uk % self.OBJ
             # sort by voxel, then by weight descending
             o1 = torch.argsort(-ws); vox1, obj1, ws1 = vox[o1], obj[o1], ws[o1]
@@ -1841,7 +1867,9 @@ class Scene:
         lumen contents; identities; branch and endpoint maps. ``half``: each population's fields kept in half precision
         as soon as it is rendered (the cache's form: a 256^3 canvas's float32 fields are ~0.9 GB a population)."""
         cv = Canvas(self.shape, self.device); out = []
-        for g_ in self.groups:
+        assert len(self.groups) <= Canvas.NG, f"{len(self.groups)} populations > Canvas.NG"
+        for gi, g_ in enumerate(self.groups):
+            cv.group = gi
             if g_.layer is not None:
                 occ, tens = render_layer(g_.layer, self.shape, self.r.g, self.device)
                 d3 = g_.layer.desc
@@ -1858,6 +1886,7 @@ class Scene:
                 res = {k: v.half() for k, v in res.items()}
             res["group"] = g_; out.append(res)
         ids, frac = cv.identities(2)
+        ent = cv.entries()                                                                      # (voxel, population, object): the entities' targets
         lum = cv.lumen.view(self.shape).clamp(0, 1); lum_c = cv.lumen_c.view(self.shape) / cv.lumen.view(self.shape).clamp_min(1e-9)
         maps = torch.zeros((2,) + self.shape, device=self.device)
         for k, pts in enumerate((self.branch, self.ends)):
@@ -1867,7 +1896,7 @@ class Scene:
                 if bool(ok.any()):
                     maps[k].index_put_((idx[ok, 0], idx[ok, 1], idx[ok, 2]), torch.ones(int(ok.sum()), device=self.device), accumulate=True)
                     maps[k] = gaussian(maps[k], 1.0) * (2 * math.pi) ** 1.5
-        return {"groups": out, "ids": ids, "id_frac": frac, "lumen": lum, "lumen_c": lum_c, "points": maps,
+        return {"groups": out, "ids": ids, "id_frac": frac, "lumen": lum, "lumen_c": lum_c, "points": maps, "entries": ent,
                 "point_lists": (torch.cat(self.branch) if self.branch else torch.zeros(0, 3, device=self.device),
                                 torch.cat(self.ends) if self.ends else torch.zeros(0, 3, device=self.device))}
 
@@ -1904,6 +1933,8 @@ def _compact(ren: dict) -> dict:
     out["groups"] = [{k: (v.half() if torch.is_tensor(v) and v.is_floating_point() else v) for k, v in g.items()} for g in ren["groups"]]
     out["ids"], out["id_frac"] = ren["ids"].int(), ren["id_frac"].half()
     out["lumen"], out["lumen_c"] = ren["lumen"].half(), ren["lumen_c"].half()
+    vox, grp, obj, w, v = ren["entries"]
+    out["entries"] = (vox.int(), grp.to(torch.int8), obj.int(), w.half(), v.half())
     return out
 
 
@@ -2088,7 +2119,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
                zoom: int = 1, physics: str | None = None, p_physics: float = 0.75, p_warp: float = 0.5, acq_seed: int | None = None,
                crop: tuple | None = None, identity_min_r: float = 1.5, p_blend: float = 0.35, p_aniso: float = 0.25, p_scramble: float = 0.3,
                p_texture: float = 0.5, p_merge: float = 0.25, p_boundary: float = 0.2, p_affine: float = 0.3, p_grain: float = 0.8,
-               underlay_p: float = 0.4, p_sparse: float = 0.12, p_cutout: float = 0.15):
+               underlay_p: float = 0.4, p_sparse: float = 0.12, p_cutout: float = 0.15, entity_ctx: bool = False):
     """A training pair from an object scene, in the format of :func:`~shapetensor.learn.generator.draw`: ``(Sample,
     drawn)``. Scenes are rendered on a ``canvas``³ grid and ``crops_per_scene`` consecutive seeds share one (cut at
     different places), so a scene's cost is spread over its crops.
@@ -2112,6 +2143,9 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
       visible, the rest gone from image and targets alike (fluorescent reporters, Golgi stains, contrast-filled vessels);
       ``p_cutout`` -- chunks of tissue removed (:func:`cutout_mask`: blocks, holes, a knife's gap), the medium in their
       place and nothing to find there.
+
+    With ``entity_ctx``, ``drawn["entity_ctx"]`` holds what :func:`~shapetensor.learn.entities.entity_targets` needs: the
+    canvas's (voxel, population, object) entries, its tree, the crop's origin / zoom, each population's layer, the warp.
 
     ``drawn`` also carries ``ids``/``id_frac`` (the two heaviest objects per voxel), ``identity`` (the object at the level
     the resolution separates: smaller than ``identity_min_r`` voxels -> its parent), ``descriptors5`` (per layer:
@@ -2137,9 +2171,9 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
                   E.contrast, occupancy=oc.clone(), tensor=tc.clone())
         L.desc = torch.tensor([E.radius / zoom, 0.0, 0.0], device=device).view(3, 1, 1, 1) * (oc > 0)[None]
         extra.append(L)
-    layers = []
+    layers = []; group_layer = []
     for res in ren["groups"]:
-        g_ = res["group"]
+        g_ = res["group"]; group_layer.append(-1)
         occ, (tens, d5, cm) = _pool_fields(res["occupancy"][tuple(sl)].float(), [res["tensor"][(slice(None),) + tuple(sl)].float(), res["desc"][(slice(None),) + tuple(sl)].float(),
                                                                           res["contrast"][tuple(sl)][None].float()], zoom)
         if float(occ.max()) <= 1e-3:
@@ -2150,7 +2184,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
                   torch.ones(shape, dtype=torch.bool, device=device), g_.contrast, occupancy=occ.clone(), tensor=tens.clone())
         L.desc = torch.stack([d5[0], d5[2], d5[4]])                          # the layer descriptors: thickness, hollowness, angularity
         L.desc5 = d5.clone(); L.cmap = cm[0]; L.name = g_.name
-        layers.append(L)
+        group_layer[-1] = len(layers); layers.append(L)
     shapes_ = layers + extra
     lum = _crop(ren["lumen"].float(), sl, zoom); lum_c = _crop(ren["lumen"].float() * ren["lumen_c"].float(), sl, zoom) / lum.clamp_min(1e-9)
     rec = {"scene": sid, "crop": o, "zoom": zoom, "style": st, **sc.record}
@@ -2288,6 +2322,12 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     d["desc_um"] = [torch.stack([L.desc5[0] * vu, L.desc5[1] * vu, L.desc5[2], L.desc5[3], L.desc5[4]]) for L in layers]
     d["recoverability"] = d["orientation_visibility"]; d["parents"] = sc.parents; d["voxel_um"] = vu
     d["record"].update({k: v for k, v in rec.items() if k not in d["record"]})
+    if entity_ctx:                                                           # the entities' targets are computed from these
+        if "tree" not in ren:
+            from .entities import build_tree
+            ren["tree"] = build_tree(sc, ren["entries"][1], ren["entries"][2])
+        d["entity_ctx"] = {"entries": ren["entries"], "tree": ren["tree"], "canvas_shape": (canvas,) * 3, "origin": o, "zoom": zoom,
+                           "group_layer": group_layer, "grid": d.get("warp_grid"), "keep": keep_lut, "mask": M}
     if second_contrast:                                                      # a second contrast of the same scene (multi-contrast MRI)
         img2 = bg * 0.5 + 60
         for L in layers:

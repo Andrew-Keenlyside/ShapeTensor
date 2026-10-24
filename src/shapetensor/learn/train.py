@@ -43,6 +43,7 @@ TKEYS = ("slots", "mass", "kind", "layer", "fraction", "classes", "size", "size_
 HALF = ("slots", "mass", "fraction", "classes", "size")
 QKEYS = ("q_points", "q_sigma", "q_sh", "sh_t")
 LKEYS = ("identity_t", "points_t", "voxel", "fraction")    # the lobe model's extra targets
+EKEYS = ("e_points", "e_sigma", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n")   # the entity model's
 HEAD = "slots"                     # "slots" | "lobes" (set by train())
 DESC_KEY = "descriptors"           # the drawn descriptors the descriptor densities use ("descriptors5": the scenes' five)
 SH_EXACT = 0                       # > 0: the SH head's lattice target from the exact per-voxel density to this order
@@ -120,7 +121,7 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
     :func:`~shapetensor.learn.generator.draw` (a modality, a background style, crossing groups, layer kinds, ...)."""
     if gen and "scene" in gen:                                                                         # the object-scene generator
         from .scene import draw_scene
-        s, d = draw_scene((size,) * 3, seed=seed, device=device, strength=strength, **(gen["scene"] or {}))
+        s, d = draw_scene((size,) * 3, seed=seed, device=device, strength=strength, entity_ctx=(HEAD == "entities"), **(gen["scene"] or {}))
     else:
         s, d = draw((size,) * 3, seed=seed, device=device, strength=strength, **(gen or {}))
     t = target(s, d)
@@ -144,8 +145,50 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
         pts, sig = draw_queries((size,) * 3, QUERY["n_points"], QUERY["n_levels"], gq, device)
         out["q_points"], out["q_sigma"] = pts, sig
         out["q_sh"] = (sample_density(F, pts, sig) if F is not None else layer_density(s, d, pts, sig, QUERY["lmax"])).half()
+    if HEAD == "entities":                                                                             # entities at random points and scales
+        out.update(entity_queries(d, size, seed, device))
+        out["voxel"] = torch.tensor(math.log2(d["voxel_um"]) if d.get("voxel_um") else float("nan"), device=device)
     out["kind"] = out["kind"].to(torch.int8); out["layer"] = out["layer"].to(torch.int16)
     return d["image"].to(torch.uint8), out
+
+
+#: the entity targets' sampling: query points per crop, scales (crop voxels, log-uniform), entities kept per query, the
+#: resolution rule (an object is its own entity when its radius >= max(r_min, c_sig * sigma)), padded tree sizes
+ENTITY = {"n_points": 384, "sigma": (1.0, 4.0), "emax": 8, "r_min": 1.5, "c_sig": 0.5, "u_max": 1536, "d_max": 16, "margin": 2, "p_tissue": 0.7}
+
+
+def entity_queries(d: dict, size: int, seed: int, device) -> dict:
+    """Query points and scales drawn in the crop, their entities' targets, and the crop's local tree (the entities'
+    nodes and their ancestors, re-indexed; ``e_anc (u_max, d_max)`` each node's chain to the root, -1 padded)."""
+    from .entities import entity_targets
+    E = ENTITY; ctx = d["entity_ctx"]; g = torch.Generator(device=device).manual_seed(seed + 4243)
+    n = E["n_points"]; m = E["margin"]
+    pts = m + torch.rand(n, 3, generator=g, device=device) * (size - 1 - 2 * m)
+    occ = d["occupancy"][:len(ctx["group_layer"])].sum(0) if "occupancy" in d else None                    # most queries on tissue
+    if occ is not None:
+        inner = occ[m:size - m, m:size - m, m:size - m] > 0.05
+        cand = torch.nonzero(inner).float() + m
+        k = int(E.get("p_tissue", 0.7) * n)
+        if cand.shape[0] > 0 and k > 0:
+            pick = torch.randint(0, cand.shape[0], (k,), generator=g, device=device)
+            pts[:k] = cand[pick] + torch.rand(k, 3, generator=g, device=device) - 0.5
+    lo, hi = E["sigma"]; sig = torch.exp(math.log(lo) + torch.rand(n, generator=g, device=device) * math.log(hi / lo))
+    t = entity_targets(ctx["entries"], ctx["tree"], ctx["canvas_shape"], ctx["origin"], ctx["zoom"], (size,) * 3, pts, sig, grid=ctx["grid"],
+                       vis=d.get("visibility"), group_layer=ctx["group_layer"], r_min=E["r_min"], c_sig=E["c_sig"], emax=E["emax"],
+                       mask=ctx.get("mask"), keep=ctx.get("keep"))
+    tree = ctx["tree"]; node = t["node"]; live = node >= 0
+    anc = tree.ancestors(torch.unique(node[live])) if bool(live.any()) else torch.zeros(0, 1, dtype=torch.long, device=device)
+    U = torch.unique(anc[anc >= 0]) if anc.numel() else torch.zeros(0, dtype=torch.long, device=device)
+    if U.numel() > E["u_max"]:                                                                      # rare: the deepest-first nodes beyond the pad dropped
+        U = U[:E["u_max"]]
+    loc = torch.full((tree.n,), -1, dtype=torch.long, device=device); loc[U] = torch.arange(U.numel(), device=device)
+    A = tree.ancestors(U)[:, :E["d_max"]]; A = torch.where(A >= 0, loc[A.clamp_min(0)], A)
+    e_anc = torch.full((E["u_max"], E["d_max"]), -1, dtype=torch.int32, device=device); e_anc[:A.shape[0], :A.shape[1]] = A.int()
+    e_node = torch.where(live, loc[node.clamp_min(0)], node)
+    T = t["T"]
+    T6 = torch.stack([T[..., 0, 0], T[..., 1, 1], T[..., 2, 2], T[..., 0, 1], T[..., 0, 2], T[..., 1, 2]], -1)
+    return {"e_points": pts, "e_sigma": sig, "e_node": e_node.int(), "e_mass": t["mass"].half(), "e_vis": t["vis"].half(),
+            "e_T6": T6.half(), "e_desc": t["desc"].half(), "e_anc": e_anc, "e_n": torch.tensor(U.numel(), device=device)}
 
 
 ROUTES = 0.0                       # > 0: batch-time contrast routes (learn/augment.py) at this strength, a fresh draw each use
@@ -161,7 +204,8 @@ def stack(pairs, g=None, aug: bool = True):
     from .augment import contrast_route
     imgs, imgs2, tgts = [], [], []
     for img, t in pairs:
-        t = {k: (v.float() if k in HALF or k in ("q_sh", "sh_t", "points_t") else v.long() if k in ("kind", "layer", "identity_t") else v) for k, v in t.items()}
+        t = {k: (v.float() if k in HALF or k in ("q_sh", "sh_t", "points_t", "e_mass", "e_vis", "e_T6", "e_desc") else
+                 v.long() if k in ("kind", "layer", "identity_t", "e_node", "e_anc") else v) for k, v in t.items()}
         x = img.float() / 255.0
         if aug:
             x, t = augment(x, t, g)
@@ -174,7 +218,7 @@ def stack(pairs, g=None, aug: bool = True):
                 if VIEWS == 2:
                     imgs2.append(contrast_route(base, _np.random.default_rng(int(torch.randint(0, 2 ** 31 - 1, (1,), generator=g))), ROUTES))
         imgs.append(x); tgts.append(t)
-    keys = TKEYS + tuple(k for k in QKEYS + LKEYS if k in tgts[0] and k not in TKEYS)
+    keys = TKEYS + tuple(k for k in QKEYS + LKEYS + EKEYS if k in tgts[0] and k not in TKEYS)
     T = {k: torch.stack([t[k] for t in tgts]) for k in keys}
     if imgs2:
         T["_view2"] = torch.stack(imgs2)[:, None]

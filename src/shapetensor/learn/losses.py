@@ -374,12 +374,32 @@ def _sh_block_rotation(perm, flips, n: int, device) -> torch.Tensor:
     return torch.block_diag(R, *([Rd] * DESC_K))
 
 
+def cube_tensor6(v: torch.Tensor, perm, flips) -> torch.Tensor:
+    """Shape tensors with their 6 components (zz, yy, xx, zy, zx, yx) on the LAST dim, under a cube-group element:
+    ``S'_jk = s_j s_k S_perm[j] perm[k]``."""
+    from .generator import SYM
+    sgn = [-1.0 if f else 1.0 for f in flips]
+    idx = {(i, j): c for c, (i, j) in enumerate(SYM)}; idx.update({(j, i): c for (i, j), c in list(idx.items())})
+    return torch.stack([v[..., idx[(perm[j], perm[k])]] * (sgn[j] * sgn[k]) for j, k in SYM], -1)
+
+
+ENTITY_STATIC = ("e_sigma", "e_node", "e_mass", "e_vis", "e_desc", "e_anc", "e_depth", "e_n")
+
+
 def augment(image: torch.Tensor, tgt: dict, g: torch.Generator | None = None):
-    """The same random cube-group element applied to an image ``(..., Z, Y, X)`` and its lattice target."""
+    """The same random cube-group element applied to an image ``(..., Z, Y, X)`` and its lattice target (entity
+    targets: query points moved, shape tensors permuted and sign-flipped, the rest unchanged)."""
     perm, flips = cube_transform(g)                                                             # drawn on the CPU
     out = {}
     for k, v in tgt.items():
-        if k == "q_points":
+        if k in ENTITY_STATIC:
+            out[k] = v
+        elif k == "e_points":
+            from .query import cube_points
+            out[k] = cube_points(v, perm, flips, image.shape[-3:])
+        elif k == "e_T6":
+            out[k] = cube_tensor6(v.float(), perm, flips).to(v.dtype)
+        elif k == "q_points":
             from .query import cube_points
             out[k] = cube_points(v, perm, flips, image.shape[-3:])
         elif k == "q_sh":
