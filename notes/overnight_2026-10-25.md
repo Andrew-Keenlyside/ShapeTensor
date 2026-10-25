@@ -22,7 +22,7 @@ and validation.
   hand-feature probe reaches 0.03-0.27); EP14b (region decoder + interface hard negatives) no longer marks a grey /
   white step as material and is the best model; **the tree embedding does not separate populations** (crossings: two
   density peaks, one entity) -- the main open problem; z-vote + population weighting did not fix it in 900 steps.
-* **Running**: EP14b, resumed at 05:45. Pre-existing test failures (not tonight's): 2, listed in section 7.
+* **Running**: EP14b, resumed at 05:45 (step 3500 at 06:25 -- phantoms worse than at 2193; best checkpoint: eval_FINAL/EP14b_64_dec_iface_pl4.pt). Pre-existing test failures (not tonight's): 2, listed in section 7.
 
 ## 1. Why the entity pilots (EP9 / EP10) never learned density, mass or region
 
@@ -276,4 +276,12 @@ two-lobe density (test). On EP14b (crossing benchmark, 40 crops, `--lobes`): sec
 but a false second entity in 87 % of single-entity windows (votes: 2 %) -- the learned density has extra maxima and its
 second crossing peak is off-axis (the suite's 32-74 deg). Kept as an option for when the density sharpens; the votes'
 clustering stays the default.
+
+## 13. EP14b at step 3500 (06:25, still training; `pilot_entities/eval_0625/`)
+
+Held-out skill about the same as at 2193 (region 0.19-0.36, density 0.33-0.54, mode axis 12-16 deg); on the phantoms
+the **region got worse** (planes 0.79 -> 0.08, bundle through the step 0.50 -> 0.23, vote axes 15-33 deg) while the
+density axes held (7-15 deg). The difficulty had widened from level 0.45 to 0.73 over those steps. The best checkpoint
+so far is EP14b at step 2193: `pilot_entities/eval_FINAL/EP14b_64_dec_iface_pl4.pt`. Phantom skill moves a lot between
+checkpoints -- track it every few hundred steps rather than trusting one snapshot.
 
