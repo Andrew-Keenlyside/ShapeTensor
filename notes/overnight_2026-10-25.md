@@ -17,10 +17,12 @@ and validation.
   producer thread, start-up 13 min -> 36 s; trainer stalls traced to per-candidate GPU syncs in blob placement (fixed).
 * **Validation built**: phantom suite (11 phantoms x 3 imagings, axis truth checked to 0.7 deg), held-out skill at three
   levels, crossing benchmark, separated layers (tree or vote grouping), presence calibration, label-free real-data check.
-* **State of the model** (see sections 7-8 and the final table): the density now has shape and the vote is ~14-18 deg;
-  the region is learning slowly (it is a hard target: a hand-feature probe reaches only 0.03-0.27); step edges still
-  light up as material; **the tree embedding is not learning** (populations are not separated in crossings) -- the main
-  open problem; EP15 tests giving the embedding the vote's axes.
+* **State of the model** (section 11): the density now has shape (held-out corr 0.27-0.63, EP10 ~0; phantom axes
+  5-20 deg) and mass fills resolved bundles; region / mass skill on held-out crops is still low (a hard target: a
+  hand-feature probe reaches 0.03-0.27); EP14b (region decoder + interface hard negatives) no longer marks a grey /
+  white step as material and is the best model; **the tree embedding does not separate populations** (crossings: two
+  density peaks, one entity) -- the main open problem; z-vote + population weighting did not fix it in 900 steps.
+* **Running**: EP14b, resumed at 06:00. Pre-existing test failures (not tonight's): 2, listed in section 7.
 
 ## 1. Why the entity pilots (EP9 / EP10) never learned density, mass or region
 
