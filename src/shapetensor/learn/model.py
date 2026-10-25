@@ -196,7 +196,7 @@ class PopulationNet(nn.Module):
                  lcn: float = 0.0, query: bool = False, desc_lmax: int = 0, axis_head: bool = False, head: str = "slots", J: int = 4,
                  context_level: bool = False, voxel_cond: bool = False, identity_dim: int = 0, points: bool = False, nd: int = 5,
                  free_sh: bool = False, dir_lmax: int = 8, vote_unc: bool = False, mass_head: bool = False, region_head: bool = False,
-                 dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False):
+                 dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False):
         super().__init__()
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
         self.head, self.J, self.nd, self.free_sh = head, J, (nd if head == "lobes" else 0), bool(free_sh)
@@ -224,6 +224,12 @@ class PopulationNet(nn.Module):
                                      mass_head=bool(mass_head) and not mass_region, dens_sh=bool(dens_sh), dens_mlp=bool(dens_mlp))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
+            self.region_dec = None
+            if region_head and region_dec:                                                      # a small decoder: lattice -> stride 2 -> full,
+                self.region_dec = nn.ModuleDict({                                                # 3x3x3 convolutions at each (shapes, not only
+                    "r2": nn.Conv3d(c2, 32, 1), "r1": nn.Conv3d(c1, 32, 1), "c1": nn.Conv3d(64, 32, 3, padding=1),   # a per-voxel
+                    "r0": nn.Conv3d(c0, 16, 1), "c0": nn.Conv3d(48, 32, 3, padding=1), "out": nn.Conv3d(32, 1, 1)})   # readout)
+                nn.init.zeros_(self.region_dec["out"].weight); nn.init.zeros_(self.region_dec["out"].bias)   # starts as the plain head
             return
         if head == "lobes":                                                                      # J lobes per cell (axis, mass, kappa, spare, descriptors)
             from .sh import n_coef as _nc
@@ -268,7 +274,7 @@ class PopulationNet(nn.Module):
                    embed=int(args.get("embed", 8) or 8), dir_lmax=int(args.get("dir_lmax", 8) or 8), vote_unc=bool(args.get("vote_unc", False)),
                    mass_head=bool(args.get("mass_head", False)), region_head=bool(args.get("region_head", False)),
                    dens_sh=bool(args.get("dens_sh", False)), dens_mlp=bool(args.get("dens_mlp", False)),
-                   mass_region=bool(args.get("mass_region", False))) \
+                   mass_region=bool(args.get("mass_region", False)), region_dec=bool(args.get("region_dec", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
@@ -300,7 +306,11 @@ class PopulationNet(nn.Module):
         from the three levels brought to full resolution (trilinear: the stride-2 and lattice centres land where they lie)
         -- a segmentation-like objective that teaches the trunk regions (inside / outside), not only their edges."""
         sz = h0.shape[2:]
-        up = lambda t: Fn.interpolate(t, size=sz, mode="trilinear", align_corners=False)
+        up = lambda t, size=sz: Fn.interpolate(t, size=size, mode="trilinear", align_corners=False)
+        if getattr(self, "region_dec", None) is not None:
+            d = self.region_dec; a = Fn.silu(d["c1"](torch.cat([up(Fn.silu(d["r2"](h)), h1.shape[2:]), Fn.silu(d["r1"](h1))], 1)))
+            a = Fn.silu(d["c0"](torch.cat([up(a), Fn.silu(d["r0"](h0))], 1)))
+            return (d["out"](a) + self.region(torch.cat([h0, up(h1), up(h)], 1)))[:, 0]
         return self.region(torch.cat([h0, up(h1), up(h)], 1))[:, 0]
 
     def condition(self, h: torch.Tensor, voxel: torch.Tensor | None) -> torch.Tensor:
