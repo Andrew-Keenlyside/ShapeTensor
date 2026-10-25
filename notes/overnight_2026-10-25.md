@@ -69,8 +69,12 @@ element (median relative error 3.1 % lines, 3.4 % sheets, 2.4 % blobs). Figures:
 * EP14b: EP13 + region decoder + interface hard negatives (`iface 2`)
 * EP16: from EP13 (step 1250) + `--z-vote` + `tree_pop 2` (the tree embedding)
 * X1 / X2: region-only diagnostics (with / without contrast routes)
-* note: an evaluation process on the shared GPU (~47 of 48 GB in use) stalled the trainers for tens of minutes;
-  so did per-candidate GPU syncs in the trainers' own in-process draws -- both fixed / avoided
+* **trainer stalls** (EP12 from step 2000: 24 s/step; EP13 twice for 15-20 min): (1) an evaluation process on the
+  shared GPU (~47 of 48 GB in use); (2) the trainers' own in-process draws (overlapping-window pairs, every 4 steps,
+  on the GPU) -- many small kernels and syncs starve behind the other pilots' work (a blob-spacing loop with one sync
+  per candidate made it worse). Fixed: the spacing on the CPU; the pairs drawn on the CPU, refreshed every 16 steps;
+  no large evaluation beside three pilots. Also: `close()` now waits for and kills the CPU workers (one run's workers
+  outlived terminate).
 
 ## 5. Phantom suite
 
