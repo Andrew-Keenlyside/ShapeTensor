@@ -200,6 +200,8 @@ def cross_distances(tree, g1: torch.Tensor, g2: torch.Tensor) -> torch.Tensor:
     Q, E = g1.shape; N = tree.n
     def chains(gg):                                                                               # nodes past the tree (dense layers): under the root
         gf = gg.flatten(); A = tree.ancestors(gf.clamp(0, N - 1))
+        if A.shape[1] < 2:                                                                       # a tree of the root alone: room for a dense layer's chain
+            A = torch.cat([A, torch.full_like(A[:, :1], -1)], 1)
         ext = gf >= N
         if bool(ext.any()):
             A[ext] = -1; A[ext, 0] = gf[ext]; A[ext, 1] = 0

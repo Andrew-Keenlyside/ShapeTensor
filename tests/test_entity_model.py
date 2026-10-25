@@ -207,3 +207,14 @@ def test_mass_and_region_heads():
     assert "mass" in parts and "region" in parts and torch.isfinite(tot)
     tot.backward()
     assert net.ent.mass.weight.grad is not None and net.region[0].weight.grad is not None
+
+
+def test_cross_distances_with_a_root_only_tree():
+    """A scene drawn with no objects (only dense layers): the tree is the root alone; dense entities still get distances."""
+    from shapetensor.learn.entities import Tree
+    from shapetensor.learn.entity_train import cross_distances
+    tree = Tree(parent=torch.tensor([-1], device=DEV), radius=torch.zeros(1, device=DEV), kind=torch.zeros(1, dtype=torch.int8, device=DEV),
+                group=torch.zeros(1, dtype=torch.long, device=DEV), depth=torch.tensor([0], device=DEV),
+                leaf_keys=torch.zeros(0, dtype=torch.long, device=DEV), leaf_nodes=torch.zeros(0, dtype=torch.long, device=DEV))
+    X = cross_distances(tree, torch.tensor([[1, -1]], device=DEV), torch.tensor([[1, 2]], device=DEV))[0]
+    assert X.tolist() == [[0.0, 2.0], [-1.0, -1.0]]
