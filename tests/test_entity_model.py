@@ -218,3 +218,21 @@ def test_cross_distances_with_a_root_only_tree():
                 leaf_keys=torch.zeros(0, dtype=torch.long, device=DEV), leaf_nodes=torch.zeros(0, dtype=torch.long, device=DEV))
     X = cross_distances(tree, torch.tensor([[1, -1]], device=DEV), torch.tensor([[1, 2]], device=DEV))[0]
     assert X.tolist() == [[0.0, 2.0], [-1.0, -1.0]]
+
+
+def test_window_mean_is_the_gaussian_average():
+    """The region-mass window: at any point and sigma, the zero-padded Gaussian-weighted mean of the map."""
+    import math
+    import torch
+    from shapetensor.learn.model import window_mean
+    g = torch.Generator().manual_seed(0)
+    r = torch.rand(1, 24, 20, 28, generator=g)
+    pts = torch.tensor([[[12.0, 10.0, 14.0], [3.3, 15.7, 2.0], [20.0, 1.0, 26.5]]]); sig = torch.tensor([[1.0, 2.83, 4.0]])
+    m = window_mean(r, pts, sig)
+    zz, yy, xx = torch.meshgrid(torch.arange(24.0), torch.arange(20.0), torch.arange(28.0), indexing="ij")
+    for q in range(3):
+        p = pts[0, q]; s = float(sig[0, q])
+        w = torch.exp(-0.5 * ((zz - p[0]) ** 2 + (yy - p[1]) ** 2 + (xx - p[2]) ** 2) / s ** 2)
+        k1 = lambda n: torch.exp(-0.5 * (torch.arange(-int(math.ceil(3 * s)), int(math.ceil(3 * s)) + 1.0) / s) ** 2).sum()
+        ref = float((w * r[0]).sum() / (k1(0) ** 3))                                               # normalised over the infinite grid: zero beyond
+        assert abs(float(m[0, q]) - ref) < 0.02 * max(ref, 0.05), (q, float(m[0, q]), ref)
