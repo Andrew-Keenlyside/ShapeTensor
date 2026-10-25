@@ -89,3 +89,16 @@ The phantom suite (step ~1300): density axis 11-37 deg on every phantom (EP10: 3
 Two pre-existing test failures (they fail identically at 411e99e, before tonight): `test_learn::test_no_falloff_at_the_faces`
 (the old voxel generator's fibres, face / centre occupancy 0.75) and `test_model::test_lattice_cells_centred_on_the_target_cells`
 (0.33 > 0.25). Everything touched tonight passes (346 passed).
+
+## 8. The tree embedding is not learning yet (main open problem)
+
+EP12 at step 2000 (and EP10): the Poincaré distance between two owned directions' embeddings does not depend on their
+target tree distance -- median 0.49-0.53 whether the same fibre (t = 0), siblings (0.6-1.2) or different populations
+(2.4-3.0); corr 0.085. `val_tree` 0.68-0.73 from step 750 to 2000 -- about what a collapsed embedding scores. On a
+fixed batch it fits (0.65 -> 0.32 in 100 steps): no bug, slow generalisation of instance embeddings from the stream.
+Consequence: crossings come out as one model layer (populations not separated).
+
+Options (for discussion): weight the population level first (pairs from different populations vs the same population,
+before instance pairs); an explicit spatial-embedding form (each direction's offset to its entity's centreline, plus
+the population's orientation / appearance code) instead of a free embedding; much longer / larger-batch training
+(the cluster run).
