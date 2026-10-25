@@ -75,6 +75,9 @@ element (median relative error 3.1 % lines, 3.4 % sheets, 2.4 % blobs). Figures:
   per candidate made it worse). Fixed: the spacing on the CPU; the pairs drawn on the CPU, refreshed every 16 steps;
   no large evaluation beside three pilots. Also: `close()` now waits for and kills the CPU workers (one run's workers
   outlived terminate).
+* still to do: the trainer's own CPU threads (the pair draws now run on the CPU with torch's default thread count):
+  three pilots on 64 cores reached load 80 and 3.5-9 s/step -- cap the main process's threads (e.g. 4-6) alongside
+  `--cpu-workers`; the val set is also drawn in-process on the GPU (minutes at start-up on a shared GPU).
 
 ## 5. Phantom suite
 
