@@ -835,6 +835,11 @@ def train_lobes(out: str, steps: int = 6000, size: int = 128, batch: int = 4, ac
     bench = {k: [] for k in ("data", "main", "extra", "opt", "step")} if benchmark else None
     t0 = time.time(); run = {}; got_pairs = 0
     set_routes()
+    WHICH = ("density", "vote", "vote_unc", "kappa", "desc", "tree")
+    ramp = lambda s_: 1.0 if where_first <= 0 else min(1.0, max(0.0, (s_ - where_first) / where_first))
+    def which_w(s_):                                                                                 # the "which way" losses, ramped
+        a_ = ramp(s_)
+        return None if a_ >= 1.0 else {k: ET.ENT_WEIGHTS.get(k, 0.2) * a_ for k in WHICH}
     end = min(steps, start + benchmark) if benchmark else steps
     for step in range(start, end):
         if bench is not None:
@@ -981,7 +986,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    benchmark: int = 0, device: str = "cuda", log_every: int = 25, n_dirs: int = 32, pairs: int = 16, pair_every: int = 4,
                    dir_lmax: int = 8, vote_unc: bool = False, e_sigma: tuple | None = None, deep_tree: bool = False, lcn: float = 0.0,
                    dens_sh: bool = True, read_keep: float = READ_KEEP, dens_mlp: bool = True, mass_region: bool = True,
-                   region_dec: bool = False):
+                   region_dec: bool = False, where_first: int = 0):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -991,7 +996,9 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     basis order; ``vote_unc``: a vote uncertainty output; ``e_sigma``: the query scales (voxels); ``deep_tree``:
     fascicles and branches in the generator's hierarchies; ``dens_sh``: the density's shape as harmonics of the point
     code (``dens_mlp``: through a small MLP); ``read_keep``: the share of (almost) unreadable crops kept (:data:`READ_KEEP`);
-    ``mass_region``: the mass is the region map's mean in the query's window (where, once), not a separate output. The cluster machinery of :func:`train_lobes`: producer thread, CPU
+    ``mass_region``: the mass is the region map's mean in the query's window (where, once), not a separate output;
+    ``where_first``: steps of the "where" losses alone (region, mass, overall ODF, fraction, points), the "which way"
+    losses (density shape, vote, concentration, descriptors, tree, cross-window, contrast) then ramped in over as many. The cluster machinery of :func:`train_lobes`: producer thread, CPU
     workers, data parallel, checkpoints and ``--resume auto``, benchmark mode."""
     from . import dataflow as DF
     from . import entity_train as ET
@@ -1032,7 +1039,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 weights=weights, routes=routes, contrast_views=contrast_views, world=world, contrast_every=contrast_every, n_dirs=n_dirs,
                 channels_last=channels_last, compile_model=compile_model, entity=dict(ENTITY), pairs=pairs, pair_every=pair_every,
                 dir_lmax=dir_lmax, vote_unc=vote_unc, lcn=lcn, mass_head=True, region_head=True, dens_sh=bool(dens_sh), read_keep=READ_KEEP,
-                dens_mlp=bool(dens_mlp), mass_region=bool(mass_region), region_dec=bool(region_dec))
+                dens_mlp=bool(dens_mlp), mass_region=bool(mass_region), region_dec=bool(region_dec), where_first=int(where_first))
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)
@@ -1096,6 +1103,11 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     bench = {k: [] for k in ("data", "main", "opt", "step")} if benchmark else None
     t0 = time.time(); run = {}; got_pairs = 0
     set_routes()
+    WHICH = ("density", "vote", "vote_unc", "kappa", "desc", "tree")
+    ramp = lambda s_: 1.0 if where_first <= 0 else min(1.0, max(0.0, (s_ - where_first) / where_first))
+    def which_w(s_):                                                                                 # the "which way" losses, ramped
+        a_ = ramp(s_)
+        return None if a_ >= 1.0 else {k: ET.ENT_WEIGHTS.get(k, 0.2) * a_ for k in WHICH}
     end = min(steps, start + benchmark) if benchmark else steps
     for step in range(start, end):
         if bench is not None:
@@ -1117,27 +1129,27 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 tick(); t_data += time.perf_counter() - td
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=str(device).startswith("cuda")):
                 P = fwd(x, voxel=v, e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
-            total, parts = ET.entity_loss(P, T, dirs, margin=margin, g=gd)
-            if "_view2" in T and ET.ENT_WEIGHTS.get("contrast", 0) > 0 and mb == 0 and step % max(1, contrast_every) == 0:   # another route, same geometry
+            total, parts = ET.entity_loss(P, T, dirs, W=which_w(step), margin=margin, g=gd)
+            if "_view2" in T and ET.ENT_WEIGHTS.get("contrast", 0) * ramp(step) > 0 and mb == 0 and step % max(1, contrast_every) == 0:   # another route, same geometry
                 x2 = T["_view2"].contiguous(memory_format=torch.channels_last_3d) if channels_last else T["_view2"]
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=str(device).startswith("cuda")):
                     P2 = fwd(x2, voxel=v, e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
                 e1, e2 = P["ent"], P2["ent"]
                 lcon = (torch.log1p(e1["f"]) - torch.log1p(e2["f"])).abs().mean() + 0.1 * poincare_dist(e1["z"], e2["z"]).mean() \
                     + ((P["total_sh"].float() - P2["total_sh"].float()) ** 2).mean() / (P["total_sh"].float() ** 2).mean().clamp_min(1e-6)
-                total = total + ET.ENT_WEIGHTS["contrast"] * lcon; parts["contrast"] = lcon.detach()
+                total = total + ET.ENT_WEIGHTS["contrast"] * ramp(step) * lcon; parts["contrast"] = lcon.detach()
             (total / accum).backward(); tot_v = tot_v + total.detach() / accum
             for k, v_ in parts.items():
                 pa[k] = pa.get(k, 0.0) + v_ / accum
-        if pbuf is not None and ET.ENT_WEIGHTS.get("cross", 0) > 0 and step % max(1, pair_every) == 0:   # overlapping windows
+        if pbuf is not None and ET.ENT_WEIGHTS.get("cross", 0) * ramp(step) > 0 and step % max(1, pair_every) == 0:   # overlapping windows
             x1, x2, T1, T2, X = pbuf.batch(2, g)
             dp = ET.sample_dirs(T1, n_dirs, g=gd)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=str(device).startswith("cuda")):
                 P1 = fwd(x1, voxel=T1["voxel"], e_points=T1["e_points"], e_sigma=T1["e_sigma"], e_dirs=dp)
                 P2 = fwd(x2, voxel=T2["voxel"], e_points=T2["e_points"], e_sigma=T2["e_sigma"], e_dirs=dp)
-            l1, _ = ET.entity_loss(P1, T1, dp, margin=margin, g=gd); l2, _ = ET.entity_loss(P2, T2, dp, margin=margin, g=gd)
+            l1, _ = ET.entity_loss(P1, T1, dp, W=which_w(step), margin=margin, g=gd); l2, _ = ET.entity_loss(P2, T2, dp, W=which_w(step), margin=margin, g=gd)
             lx = ET.cross_window_loss(P1, P2, T1, T2, X, dp)
-            (0.25 * (l1 + l2) + ET.ENT_WEIGHTS["cross"] * lx).backward(); pa["cross"] = lx.detach()
+            (0.25 * (l1 + l2) + ET.ENT_WEIGHTS["cross"] * ramp(step) * lx).backward(); pa["cross"] = lx.detach()
             pbuf.refresh(1)
         if bench is not None:
             tick(); tm = time.perf_counter()
@@ -1248,6 +1260,7 @@ def main():
     ap.add_argument("--deep-tree", action="store_true", help="entities: fascicles and branches in the generator's hierarchies")
     ap.add_argument("--no-dens-sh", action="store_true", help="entities: the density from the direction MLP only (no harmonics of the point code)")
     ap.add_argument("--read-keep", type=float, default=READ_KEEP, help="entities: the share of (almost) unreadable crops kept (1: no cap)")
+    ap.add_argument("--where-first", type=int, default=0, help="entities: steps of the where-losses alone (region, mass, overall), the which-way losses then ramped in over as many")
     ap.add_argument("--region-dec", action="store_true", help="entities: a small decoder (lattice -> stride 2 -> full, 3x3x3) for the region map")
     ap.add_argument("--no-dens-mlp", action="store_true", help="entities: the density's harmonics linear in the point code")
     ap.add_argument("--no-mass-region", action="store_true", help="entities: the mass from its own output on the point code, not the region map's window")
@@ -1288,7 +1301,7 @@ def main():
                        log_every=a.log_every, n_dirs=a.n_dirs, pairs=16 if a.pairs is None else a.pairs, pair_every=a.pair_every,
                        dir_lmax=a.dir_lmax, vote_unc=a.vote_unc, e_sigma=a.e_sigma, deep_tree=a.deep_tree, lcn=a.lcn, dens_sh=not a.no_dens_sh,
                        read_keep=a.read_keep, level_steps=a.level_steps, dens_mlp=not a.no_dens_mlp, mass_region=not a.no_mass_region,
-                       region_dec=a.region_dec)
+                       region_dec=a.region_dec, where_first=a.where_first)
         return
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,
