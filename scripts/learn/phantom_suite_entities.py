@@ -4,7 +4,9 @@ normal) -- imaged simply (a contrast per population, a background, blur, noise) 
 
 Phantoms: stacked planes; concentric cylindrical shells; a two-layer helical wall (+-30 deg); a laminar stack whose fibre
 direction turns 90 deg across it; fibres fanning from a source; spindle blobs aligned to a smooth field; fibres crossing
-a sheet; a bundle through a grey / white-like step (its contrast flips across the step).
+a sheet; a bundle through a grey / white-like step (its contrast flips across the step); fibre populations crossing at
+90 and 45 deg (``two_peaks``: the share of shared windows whose density has two peaks; ``cross_err_deg``: their error);
+hollow tubes. Imaging: easy, hard (more blur and noise), inverted (easy, negated).
 
 Per checkpoint, phantom and imaging: ``region_corr`` (the region map against the populations' occupancy), ``mass_corr``
 and ``mass_ratio`` (the mass output against the occupancy windowed at the query's sigma), ``axis_deg`` (median angle
@@ -93,6 +95,15 @@ def build(name, seed=7):
         n = U(0.0, 0.2, 1.0); gs.append(sheets(sc, (G - c0) @ n + 4.0, 1e4, 4.0))
         d = U(0.9, 0.0, 0.45)
         gs.append(lines(sc, C.Smooth(d, 0.0, 50.0, r), C.seeds_in("disc", 120, (N,) * 3, r, c=c0, d=d, R=16.0), 160.0, 1.0))
+    elif name in ("crossing_90", "crossing_45"):
+        ang = math.radians(90.0 if name == "crossing_90" else 45.0)
+        for k, t in enumerate((-ang / 2, ang / 2)):
+            d = U(0.25, math.cos(t), math.sin(t))
+            gs.append(lines(sc, C.Smooth(d, 0.0, 50.0, r), C.seeds_in("disc", 130, (N,) * 3, r, c=c0, d=d, R=26.0), 170.0, 1.0))
+    elif name == "tubes":
+        f = C.Smooth(U(0.3, 0.8, 0.5), 0.25, 80.0, r)
+        g_ = lines(sc, f, C.seeds_in("box", 9, (N,) * 3, r), 170.0, 4.0)
+        cv = g_.curves[0]; cv.wall = cv.rad * 0.3; cv.lumen_c = torch.full_like(cv.rad, -30.0); gs.append(g_)
     elif name == "bundle_through_step":
         a = U(math.cos(math.radians(60)), 0.0, math.sin(math.radians(60)))
         gs.append(sc.bundle(None, "single", axis=a, centre=c0, radius=18.0, curv=1e-4, fibre={"rf_um": 3.0, "jitter": 0.1, "disp": 0.1}))
@@ -105,7 +116,7 @@ def build(name, seed=7):
     return occ, tens, kinds, step
 
 
-def image(occ, step, hard, seed=3):
+def image(occ, step, hard, seed=3, invert=False):
     rng = torch.Generator(device=dev).manual_seed(seed)
     con = [-0.3, 0.25, -0.2][:occ.shape[0]]
     if step is not None:
@@ -114,7 +125,7 @@ def image(occ, step, hard, seed=3):
     else:
         img = 0.55 + sum(cc * o for cc, o in zip(con, occ))
     img = gaussian(img, 1.5 if hard else 1.0) + (0.08 if hard else 0.03) * torch.randn(img.shape, generator=rng, device=dev)
-    return img.clamp(0, 1)
+    return (1 - img).clamp(0, 1) if invert else img.clamp(0, 1)
 
 
 def sym(t6):
@@ -122,7 +133,8 @@ def sym(t6):
                         torch.stack([t6[..., 4], t6[..., 5], t6[..., 2]], -1)], -2)
 
 
-PHANTOMS = ["planes", "shells", "helical_wall", "laminar_rotation", "fanning", "spindles", "fibres_through_sheet", "bundle_through_step"]
+PHANTOMS = ["planes", "shells", "helical_wall", "laminar_rotation", "fanning", "spindles", "fibres_through_sheet", "bundle_through_step",
+            "crossing_90", "crossing_45", "tubes"]
 models = []
 for c in ckpts:
     ck = torch.load(c, map_location=dev, weights_only=False)
@@ -144,8 +156,8 @@ for ph in PHANTOMS:
     Tt = sym(tk[torch.arange(pts.shape[0], device=dev), dom]); ev, evec = torch.linalg.eigh(Tt)
     is_sheet = torch.tensor([kinds[int(k)] == "sheet" for k in dom.tolist()], device=dev)
     ax_true = torch.where(is_sheet[:, None], evec[..., 0], evec[..., 2])                           # a sheet's normal, a line's (blob's) long axis
-    for hard in (False, True):
-        x = image(occ, step, hard)
+    for hard in (False, True, "inverted"):
+        x = image(occ, step, hard is True, invert=hard == "inverted")
         fr = {"phantom": ph, "hard": hard, "img": x[N // 2].cpu(), "truth": tot[N // 2].cpu(), "pred": []}
         for name, model in models:
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=dev == "cuda"):
@@ -174,13 +186,26 @@ for ph in PHANTOMS:
             av = torch.rad2deg(torch.acos((ax_v * ax_true).sum(-1).abs().clamp(max=1)))
             row["vote_axis_deg"] = round(float(av[sel].median()), 1) if bool(sel.any()) else None
             row["n_eval"] = int(sel.sum())
+            if ph.startswith("crossing"):                                                          # two peaks where both populations share
+                both = (wk.min(1).values / m_true.clamp_min(1e-6) > 0.3) & (m_true > 0.15)
+                if bool(both.any()):
+                    nb = EI.dir_neighbours(dirs, 8)
+                    fb = f[both]; ismax = (fb[:, :, None] >= fb[:, nb]).all(-1)                      # local maxima on the hemisphere grid
+                    val = torch.where(ismax, fb, torch.zeros_like(fb)); top = val.topk(2, dim=1)
+                    p1, p2 = dirs[top.indices[:, 0]], dirs[top.indices[:, 1]]
+                    t1 = sym(tk[both, 0]); t2 = sym(tk[both, 1])
+                    a1 = torch.linalg.eigh(t1)[1][..., 2]; a2 = torch.linalg.eigh(t2)[1][..., 2]
+                    A = lambda u, v: torch.rad2deg(torch.acos((u * v).sum(-1).abs().clamp(max=1)))
+                    err = torch.minimum(torch.maximum(A(p1, a1), A(p2, a2)), torch.maximum(A(p1, a2), A(p2, a1)))
+                    two = (top.values[:, 1] > 0.3 * top.values[:, 0]) & (A(p1, p2) > 20)
+                    row["two_peaks"] = round(float(two.float().mean()), 3); row["cross_err_deg"] = round(float(err[two].median()), 1) if bool(two.any()) else None
             rows.append(row); print(json.dumps(row), flush=True)
         figrows.append(fr)
 json.dump(rows, open(out_stem + ".json", "w"), indent=1)
 nc = 2 + len(models)
 fig, axs = plt.subplots(len(figrows), nc, figsize=(2.6 * nc, 2.6 * len(figrows)), squeeze=False)
 for i, fr in enumerate(figrows):
-    axs[i, 0].imshow(fr["img"], cmap="gray", vmin=0, vmax=1); axs[i, 0].set_title(f"{fr['phantom']}{' (hard)' if fr['hard'] else ''}", fontsize=7)
+    axs[i, 0].imshow(fr["img"], cmap="gray", vmin=0, vmax=1); axs[i, 0].set_title(f"{fr['phantom']} ({'hard' if fr['hard'] is True else fr['hard'] or 'easy'})", fontsize=7)
     axs[i, 1].imshow(fr["truth"], cmap="magma", vmin=0, vmax=1); axs[i, 1].set_title("population region (truth)", fontsize=7)
     for j, (name, rp) in enumerate(fr["pred"]):
         axs[i, 2 + j].imshow(rp, cmap="magma", vmin=0, vmax=1)
