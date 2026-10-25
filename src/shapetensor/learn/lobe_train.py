@@ -224,8 +224,9 @@ def difficulty_gen(level: float, base: dict) -> dict:
     mostly additive images, to every family, up to five populations and every imaging physics."""
     from .scene import Scene
     lv = float(min(max(level, 0.0), 1.0))
-    fam = {k: (1 - lv) * EASY.get(k, 0.0) + lv * v for k, v in Scene.FAMILIES.items()}
     g = dict(base or {})
+    fw = g.pop("family_w", None) or {}                                                              # per-family factors (e.g. {"compose": 0}: off)
+    fam = {k: ((1 - lv) * EASY.get(k, 0.0) + lv * v) * float(fw.get(k, 1.0)) for k, v in Scene.FAMILIES.items()}
     g.update({"families": fam, "n_groups": [1, 1 + int(round(1 + 3 * lv))], "p_physics": 0.25 + 0.6 * lv})
     return g
 

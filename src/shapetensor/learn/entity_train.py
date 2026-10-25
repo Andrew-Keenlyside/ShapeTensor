@@ -179,6 +179,32 @@ def axis_error_deg(P: dict, T: dict, dirs: torch.Tensor) -> dict:
     return out
 
 
+@torch.no_grad()
+def where_skill(P: dict, T: dict, dirs: torch.Tensor, margin: int = 4) -> dict:
+    """Whether the model knows where the material is and which way it lies, as skills a constant cannot fake:
+    ``region_corr`` (the region map against its target, voxels away from the faces), ``mass_skill`` (1 - the mass
+    error / the error of the batch's median mass: 0 a constant, 1 exact) and ``dens_corr`` (per query with an
+    anisotropic target, the correlation of the density with its target over the asked directions; median)."""
+    out = {}
+    if "region_logit" in P and "region_t" in T:
+        mv = 2 * margin; cr = lambda x: x[..., mv:x.shape[-3] - mv, mv:x.shape[-2] - mv, mv:x.shape[-1] - mv]
+        a = torch.sigmoid(cr(P["region_logit"].float())).flatten(); b = cr(T["region_t"].float()).flatten()
+        if float(b.std()) > 1e-6:
+            out["region_corr"] = float(torch.corrcoef(torch.stack([a, b]))[0, 1])
+    ent = P["ent"]
+    mass = (T["e_mass"] * T["e_vis"]).clamp_min(0) * (T["e_node"] >= 0); m_t = mass.sum(-1)
+    if "m" in ent:
+        lt = torch.log(m_t + MASS_EPS); e_m = (torch.log(ent["m"].float() + MASS_EPS) - lt).abs().mean(); e_c = (lt - lt.median()).abs().mean()
+        out["mass_skill"] = float(1 - e_m / e_c.clamp_min(1e-6))
+    rho = (mass[:, :, None] * BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], T["e_kappa"][:, :, None].clamp(max=DENS_KAPPA_MAX))).sum(-1)
+    f = ent["f"].float(); an = (rho.amax(-1) > 2 * rho.mean(-1)) & (m_t > MASS_EPS)
+    if bool(an.any()):
+        a = f[an] - f[an].mean(-1, keepdim=True); b = rho[an] - rho[an].mean(-1, keepdim=True)
+        c = (a * b).sum(-1) / (a.norm(dim=-1) * b.norm(dim=-1)).clamp_min(1e-9)
+        out["dens_corr"] = float(c.median())
+    return out
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # across windows: overlapping crops of one scene must agree on the entities' places in the tree
 # ---------------------------------------------------------------------------------------------------------------

@@ -116,12 +116,36 @@ def make(seed: int, size: int, device, strength: float = 1.0, gen: dict | None =
     return img, out
 
 
+READ_MIN = 0.01                    # entities: a crop's visible material (population occupancy x visibility, away from the faces) below this
+READ_KEEP = 0.25                   # share is (almost) unreadable: kept at this rate, else drawn again (about 40 % of draws were; 1.0: off)
+
+
+def visible_material(s, d, margin: int = 8) -> float:
+    """The visible material of a drawn crop: the population layers' occupancy x visibility, summed and clipped at 1,
+    its mean away from the faces -- the population-region target's mean."""
+    occ = d["occupancy"]; K = occ.shape[0]
+    keep = [k for k, L in enumerate(s.layers) if L.role not in NOT_ENTITY]
+    if not keep:
+        return 0.0
+    vis = d["visibility"].float(); vis = vis.view(-1, 1, 1, 1).expand(K, *occ.shape[1:]) if vis.dim() == 1 else vis
+    m = slice(margin, -margin) if min(occ.shape[1:]) > 4 * margin else slice(None)
+    return float((occ[keep][:, m, m, m].float() * vis[keep][:, m, m, m]).sum(0).clamp(0, 1).mean())
+
+
 def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | None = None) -> tuple[torch.Tensor, dict]:
     """One training pair: the 8-bit image and its lattice target (floats in half precision). ``gen``: arguments for
     :func:`~shapetensor.learn.generator.draw` (a modality, a background style, crossing groups, layer kinds, ...)."""
     if gen and "scene" in gen:                                                                         # the object-scene generator
         from .scene import draw_scene
         s, d = draw_scene((size,) * 3, seed=seed, device=device, strength=strength, entity_ctx=(HEAD == "entities"), **(gen["scene"] or {}))
+        if HEAD == "entities" and READ_KEEP < 1.0:                                                     # the readability cap: most crops with
+            for k in range(1, 4):                                                                      # (almost) no visible material are drawn
+                vm = visible_material(s, d)                                                            # again; READ_KEEP of them stay (empty and
+                u = ((seed * 2654435761 + 97 * k) % 4294967296) / 4294967296.0                         # unreadable crops teach "nothing here")
+                if vm >= READ_MIN or u < READ_KEEP:
+                    break
+                s, d = draw_scene((size,) * 3, seed=seed + k * 1_000_003, device=device, strength=strength, entity_ctx=True, **(gen["scene"] or {}))
+                d.setdefault("record", {})["redrawn"] = k
     else:
         s, d = draw((size,) * 3, seed=seed, device=device, strength=strength, **(gen or {}))
     t = target(s, d)
@@ -702,7 +726,8 @@ def train_lobes(out: str, steps: int = 6000, size: int = 128, batch: int = 4, ac
     from . import dataflow as DF
     from . import lobe_train as LT
     from . import losses as _losses
-    global HEAD, DESC_KEY, SH_EXACT, DESC_LMAX, QUERY, CACHE, ROUTES, VIEWS
+    global HEAD, DESC_KEY, SH_EXACT, DESC_LMAX, QUERY, CACHE, ROUTES, VIEWS, READ_KEEP
+    READ_KEEP = float(read_keep)
     rank, world, local = DF.init_distributed(device)
     if str(device).startswith("cuda"):
         device = f"cuda:{local}"
@@ -947,7 +972,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    resume: str | None = None, routes: float = 1.0, contrast_views: bool = True, contrast_every: int = 2, producer: bool = True,
                    cpu_workers: int = 0, cpu_threads: int = 4, channels_last: bool = False, compile_model: bool = False, ckpt_minutes: float = 20.0,
                    benchmark: int = 0, device: str = "cuda", log_every: int = 25, n_dirs: int = 32, pairs: int = 16, pair_every: int = 4,
-                   dir_lmax: int = 8, vote_unc: bool = False, e_sigma: tuple | None = None, deep_tree: bool = False, lcn: float = 0.0):
+                   dir_lmax: int = 8, vote_unc: bool = False, e_sigma: tuple | None = None, deep_tree: bool = False, lcn: float = 0.0,
+                   dens_sh: bool = True, read_keep: float = READ_KEEP):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -955,14 +981,16 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     the voxel size dropped at ``voxel_dropout``; every ``pair_every`` steps two overlapping windows of one scene (from a
     buffer of ``pairs``) trained to agree on their entities' places in the tree. ``dir_lmax``: the decoder's direction
     basis order; ``vote_unc``: a vote uncertainty output; ``e_sigma``: the query scales (voxels); ``deep_tree``:
-    fascicles and branches in the generator's hierarchies. The cluster machinery of :func:`train_lobes`: producer thread, CPU
+    fascicles and branches in the generator's hierarchies; ``dens_sh``: the density's shape as harmonics of the point
+    code; ``read_keep``: the share of (almost) unreadable crops kept (:data:`READ_KEEP`). The cluster machinery of :func:`train_lobes`: producer thread, CPU
     workers, data parallel, checkpoints and ``--resume auto``, benchmark mode."""
     from . import dataflow as DF
     from . import entity_train as ET
     from . import lobe_train as LT
     from . import losses as _losses
     from .model import poincare_dist
-    global HEAD, DESC_KEY, SH_EXACT, DESC_LMAX, QUERY, CACHE, ROUTES, VIEWS
+    global HEAD, DESC_KEY, SH_EXACT, DESC_LMAX, QUERY, CACHE, ROUTES, VIEWS, READ_KEEP
+    READ_KEEP = float(read_keep)
     rank, world, local = DF.init_distributed(device)
     if str(device).startswith("cuda"):
         device = f"cuda:{local}"; torch.cuda.set_device(device)
@@ -994,7 +1022,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 context_level=context_level, voxel_cond=voxel_cond, points=points, level0=level0, level_steps=level_steps, voxel_dropout=voxel_dropout,
                 weights=weights, routes=routes, contrast_views=contrast_views, world=world, contrast_every=contrast_every, n_dirs=n_dirs,
                 channels_last=channels_last, compile_model=compile_model, entity=dict(ENTITY), pairs=pairs, pair_every=pair_every,
-                dir_lmax=dir_lmax, vote_unc=vote_unc, lcn=lcn, mass_head=True, region_head=True)
+                dir_lmax=dir_lmax, vote_unc=vote_unc, lcn=lcn, mass_head=True, region_head=True, dens_sh=bool(dens_sh), read_keep=READ_KEEP)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)
@@ -1023,7 +1051,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     cpu = None
     if cpu_workers > 0:
         state = {"HEAD": HEAD, "DESC_KEY": DESC_KEY, "SH_EXACT": SH_EXACT, "DESC_LMAX": DESC_LMAX, "QUERY": QUERY, "CACHE": None,
-                 "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC, "ENTITY": dict(ENTITY)}
+                 "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC, "ENTITY": dict(ENTITY), "READ_KEEP": READ_KEEP}
         cpu = DF.CpuWorkers(cpu_workers, size, buf.next + 90_000_000, cfg, state, threads=cpu_threads)
     pbuf = ET.EntityPairBuffer(pairs, size, device, LT.difficulty_gen(level["v"], base), seed0=60_000_000 + rank * 1_000_000 + start) if pairs else None
     val = []
@@ -1040,7 +1068,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=str(device).startswith("cuda")):
                     P = model(x, voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
                 _, parts = ET.entity_loss(P, T, dirs, margin=margin, g=gv)
-                for k, v_ in {**{k: float(v) for k, v in parts.items()}, **ET.axis_error_deg(P, T, dirs)}.items():
+                for k, v_ in {**{k: float(v) for k, v in parts.items()}, **ET.axis_error_deg(P, T, dirs), **ET.where_skill(P, T, dirs, margin)}.items():
                     acc.setdefault(k, []).append(v_)
         model.train()
         return {f"val_{k}": float(np.mean(v)) for k, v in acc.items()}
@@ -1207,6 +1235,9 @@ def main():
     ap.add_argument("--vote-unc", action="store_true", help="entities: a vote uncertainty output (a readout of the vote's expected error)")
     ap.add_argument("--e-sigma", type=float, nargs=2, default=None, help="entities: query scales, voxels (default 1 4)")
     ap.add_argument("--deep-tree", action="store_true", help="entities: fascicles and branches in the generator's hierarchies")
+    ap.add_argument("--no-dens-sh", action="store_true", help="entities: the density from the direction MLP only (no harmonics of the point code)")
+    ap.add_argument("--read-keep", type=float, default=READ_KEEP, help="entities: the share of (almost) unreadable crops kept (1: no cap)")
+    ap.add_argument("--level-steps", type=float, default=0.5, help="entities: the share of the run over which the difficulty widens to 1")
     ap.add_argument("--lobes-J", type=int, default=6, help="lobes per cell (6: direct fits recover two crossing axes ~90 % of the time from random starts, 4: ~75 %)")
     ap.add_argument("--no-context-level", action="store_true", help="lobes: no stride-8 trunk level")
     ap.add_argument("--no-voxel-cond", action="store_true", help="lobes: no voxel-size conditioning")
@@ -1241,7 +1272,8 @@ def main():
                        contrast_every=a.contrast_every, producer=not a.no_producer, cpu_workers=a.cpu_workers, cpu_threads=a.cpu_threads,
                        channels_last=a.channels_last, compile_model=a.compile, ckpt_minutes=a.ckpt_minutes, benchmark=a.benchmark, device=a.device,
                        log_every=a.log_every, n_dirs=a.n_dirs, pairs=16 if a.pairs is None else a.pairs, pair_every=a.pair_every,
-                       dir_lmax=a.dir_lmax, vote_unc=a.vote_unc, e_sigma=a.e_sigma, deep_tree=a.deep_tree, lcn=a.lcn)
+                       dir_lmax=a.dir_lmax, vote_unc=a.vote_unc, e_sigma=a.e_sigma, deep_tree=a.deep_tree, lcn=a.lcn, dens_sh=not a.no_dens_sh,
+                       read_keep=a.read_keep, level_steps=a.level_steps)
         return
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,
