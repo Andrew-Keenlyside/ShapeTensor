@@ -39,6 +39,10 @@ element (median relative error 3.1 % lines, 3.4 % sheets, 2.4 % blobs). Figures:
   with CPU workers
 * the buffer starts at 16 pairs and fills from the workers (start-up 13 min -> 36 s)
 * compositional lines capped at ~35 % of the canvas (overpacked draws were the slow tail)
+* **CPU workers drew strided seeds**: each worker rendered a new scene for almost every crop (8 crops share a scene):
+  0.5 -> 1.0 new pairs per step after drawing whole seed blocks per worker; redraws reuse the cached scene once
+* channels-last 3-D layout: no measurable effect (1.25 vs 1.17-1.26 s/step, A6000 shared) -- not used
+* GPU at 100 % with the pilots: the step is now compute-bound
 
 ## 4. Pilots (64^3, PL4 init, 8000 steps, A6000 shared)
 
