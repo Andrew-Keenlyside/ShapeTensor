@@ -75,9 +75,9 @@ element (median relative error 3.1 % lines, 3.4 % sheets, 2.4 % blobs). Figures:
   per candidate made it worse). Fixed: the spacing on the CPU; the pairs drawn on the CPU, refreshed every 16 steps;
   no large evaluation beside three pilots. Also: `close()` now waits for and kills the CPU workers (one run's workers
   outlived terminate).
-* still to do: the trainer's own CPU threads (the pair draws now run on the CPU with torch's default thread count):
-  three pilots on 64 cores reached load 80 and 3.5-9 s/step -- cap the main process's threads (e.g. 4-6) alongside
-  `--cpu-workers`; the val set is also drawn in-process on the GPU (minutes at start-up on a shared GPU).
+* the trainer's own CPU threads (its pair draws on the CPU with torch's default count): three pilots on 64 cores reached
+  load 80 and 3.5-9 s/step -- now capped at 6 (commit 7a1159c, for runs started after it). Still in-process on the
+  GPU: the val set (minutes at start-up on a shared GPU) -- cache it or draw it on the CPU.
 
 ## 5. Phantom suite
 
@@ -135,6 +135,12 @@ Consequence: crossings come out as one model layer (populations not separated).
 Tried tonight (from EP13's step-1250 weights, level from 0.45): **EP15** `--z-vote` -- the embedding gets the vote's
 axes (detached, zero-initialised linear term); its training tree loss at step 150 was 0.49 (EP13 0.60-0.67), stopped
 at 161 for **EP16** = `--z-vote` + `tree_pop 2` (pairs from two populations weighted, not discounted by their distance).
+
+Result at 05:00 (CPU check, 6 crops at level 0.5, owned-direction pairs): Poincaré distance by target tree distance --
+EP12 final 0.47 (t = 0) ... 0.45 (t = 3), corr 0.125; EP13 step 2000 0.33 ... 0.30, corr 0.07; **EP16 step 500
+1.39 ... 1.36, corr 0.16** -- the population weight spread every embedding further apart (same entity included)
+without structure. Neither change separates populations within 500 steps. The embedding also varies with direction
+for one entity (same-entity pairs are not close), which a per-direction output invites.
 
 Options (for discussion): weight the population level first (pairs from different populations vs the same population,
 before instance pairs); an explicit spatial-embedding form (each direction's offset to its entity's centreline, plus
