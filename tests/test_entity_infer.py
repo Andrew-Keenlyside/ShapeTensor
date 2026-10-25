@@ -167,3 +167,20 @@ def test_link_does_not_chain_parallel_objects_through_their_parent():
     live = torch.zeros(Q, C, dtype=torch.bool); live[:, 0] = True
     ids = EI.link(pts, {"mass": torch.ones(Q, C), "live": live, "z": z, "R": R}, radius=1.5)
     assert len({int(ids[0, 0]), int(ids[n, 0]), int(ids[2 * n, 0])}) == 3
+
+
+def test_mass_from_region_tiled_equals_whole():
+    """A model whose mass is the region map's window mean: the tiled query's mass equals the whole volume's."""
+    import torch
+    from shapetensor.learn import entity_infer as EI
+    from shapetensor.learn.model import PopulationNet
+    torch.manual_seed(0)
+    net = PopulationNet.from_args(dict(head="entities", widths=[8, 8, 8], sh_lmax=8, embed=4, context_level=True, voxel_cond=True, points=True,
+                                       dir_lmax=4, mass_head=True, region_head=True, dens_sh=True, dens_mlp=True, mass_region=True)).eval()
+    x = torch.rand(48, 40, 56)
+    pts = torch.rand(30, 3) * (torch.tensor([47.0, 39.0, 55.0]))
+    sig = 1 + torch.rand(30) * 4; dirs = EI.sphere_dirs(20)
+    with torch.no_grad():
+        whole = EI.query(net, EI.features(net, x), pts, sig, dirs, vol_shape=x.shape)
+        tiled = EI.query_volume(net, x, pts, sig, dirs, core=16, halo=EI.halo_for(net))
+    assert "m" in whole and torch.allclose(whole["m"], tiled["m"], atol=2e-3, rtol=1e-2)
