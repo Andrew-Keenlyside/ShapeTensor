@@ -159,8 +159,12 @@ class CpuWorkers:
         return self.made / max(time.time() - self.t0, 1e-6)
 
     def close(self):
+        for p in self.procs:                                                                       # terminate, wait, then kill: a worker
+            p.terminate()                                                                          # left behind keeps drawing for nothing
         for p in self.procs:
-            p.terminate()
+            p.join(timeout=10)
+            if p.is_alive():
+                p.kill(); p.join(timeout=5)
 
 
 # ---------------------------------------------------------------------------------------------------------------
