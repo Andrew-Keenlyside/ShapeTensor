@@ -113,7 +113,7 @@ class EntityDecoder(nn.Module):
     (kappa1 >= kappa2 >= 0), and its 5 descriptors (log size, relative wall, lumen, flattening, angularity)."""
 
     def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8, unc: bool = False, mass_head: bool = False,
-                 dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False):
+                 dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -133,6 +133,13 @@ class EntityDecoder(nn.Module):
         self.zv = nn.Linear(12, emb) if z_vote else None
         if self.zv is not None:
             nn.init.zeros_(self.zv.weight); nn.init.zeros_(self.zv.bias)
+        # the other per-direction outputs (embedding, vote frame, concentrations, descriptors) get the same direct path as
+        # the density: harmonics of the point code up to order ``dir_sh``, added to the MLP's output -- an owner that
+        # switches between a crossing's lobes is a function of p x u the concatenated MLP finds slowly (the density's saddle)
+        self.n_out = 1 + emb + 6 + 2 + 5 + int(self.unc); self.dir_sh = int(dir_sh)
+        self.dsh = nn.Linear(hidden, (self.n_out - 1) * n_coef(self.dir_sh)) if self.dir_sh > 0 else None
+        if self.dsh is not None:
+            nn.init.zeros_(self.dsh.weight); nn.init.zeros_(self.dsh.bias)
         self.point = nn.Sequential(nn.Linear(c2 + c1 + c0 + 3 + 2, hidden), nn.SiLU(), nn.Linear(hidden, hidden))
         self.dir = nn.Sequential(nn.Linear(hidden + n_coef(lmax), hidden), nn.SiLU(), nn.Linear(hidden, hidden), nn.SiLU(),
                                  nn.Linear(hidden, 1 + emb + 6 + 2 + 5 + int(self.unc)))
@@ -183,6 +190,11 @@ class EntityDecoder(nn.Module):
         shape): any set of (point, direction) pairs -- inference evaluates only where the total ODF has density."""
         from .bingham import rot6d_to_matrix
         y = self.dir(torch.cat([p, Y.to(p.dtype)], -1)).float()
+        if getattr(self, "dsh", None) is not None:
+            from .sh import n_coef
+            nc = n_coef(self.dir_sh)
+            c = self.dsh(p).float().view(*p.shape[:-1], self.n_out - 1, nc)
+            y = torch.cat([y[..., :1], y[..., 1:] + (c * Y[..., None, :nc].float()).sum(-1)], -1)
         e = self.emb
         k = Fn.softplus(y[..., 7 + e:9 + e]) * 10.0
         k = torch.stack([k.amax(-1), k.amin(-1)], -1)
@@ -205,7 +217,8 @@ class PopulationNet(nn.Module):
                  lcn: float = 0.0, query: bool = False, desc_lmax: int = 0, axis_head: bool = False, head: str = "slots", J: int = 4,
                  context_level: bool = False, voxel_cond: bool = False, identity_dim: int = 0, points: bool = False, nd: int = 5,
                  free_sh: bool = False, dir_lmax: int = 8, vote_unc: bool = False, mass_head: bool = False, region_head: bool = False,
-                 dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False):
+                 dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False,
+                 dir_sh: int = 0):
         super().__init__()
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
         self.head, self.J, self.nd, self.free_sh = head, J, (nd if head == "lobes" else 0), bool(free_sh)
@@ -231,7 +244,7 @@ class PopulationNet(nn.Module):
                 self.points = nn.Conv3d(c2, 2, 1); nn.init.constant_(self.points.bias, -4.0)
             self.ent = EntityDecoder(c0, c1, c2, emb=max(int(embed), 2), hidden=256, lmax=int(dir_lmax), unc=bool(vote_unc),
                                      mass_head=bool(mass_head) and not mass_region, dens_sh=bool(dens_sh), dens_mlp=bool(dens_mlp),
-                                     z_vote=bool(z_vote))
+                                     z_vote=bool(z_vote), dir_sh=int(dir_sh))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             self.region_dec = None
@@ -285,7 +298,7 @@ class PopulationNet(nn.Module):
                    mass_head=bool(args.get("mass_head", False)), region_head=bool(args.get("region_head", False)),
                    dens_sh=bool(args.get("dens_sh", False)), dens_mlp=bool(args.get("dens_mlp", False)),
                    mass_region=bool(args.get("mass_region", False)), region_dec=bool(args.get("region_dec", False)),
-                   z_vote=bool(args.get("z_vote", False))) \
+                   z_vote=bool(args.get("z_vote", False)), dir_sh=int(args.get("dir_sh", 0) or 0)) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":

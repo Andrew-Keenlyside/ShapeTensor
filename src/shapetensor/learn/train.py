@@ -751,7 +751,7 @@ def train_lobes(out: str, steps: int = 6000, size: int = 128, batch: int = 4, ac
     from . import lobe_train as LT
     from . import losses as _losses
     global HEAD, DESC_KEY, SH_EXACT, DESC_LMAX, QUERY, CACHE, ROUTES, VIEWS, READ_KEEP
-    READ_KEEP = float(read_keep)
+    READ_KEEP = float(read_keep); set_background_entity(background_entity)
     rank, world, local = DF.init_distributed(device)
     if str(device).startswith("cuda"):
         device = f"cuda:{local}"
@@ -1003,7 +1003,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    benchmark: int = 0, device: str = "cuda", log_every: int = 25, n_dirs: int = 32, pairs: int = 16, pair_every: int = 4,
                    dir_lmax: int = 8, vote_unc: bool = False, e_sigma: tuple | None = None, deep_tree: bool = False, lcn: float = 0.0,
                    dens_sh: bool = True, read_keep: float = READ_KEEP, dens_mlp: bool = True, mass_region: bool = True,
-                   region_dec: bool = False, where_first: int = 0, z_vote: bool = False):
+                   region_dec: bool = False, where_first: int = 0, z_vote: bool = False, dir_sh: int = 0, background_entity: bool = True):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -1023,7 +1023,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     from . import losses as _losses
     from .model import poincare_dist
     global HEAD, DESC_KEY, SH_EXACT, DESC_LMAX, QUERY, CACHE, ROUTES, VIEWS, READ_KEEP
-    READ_KEEP = float(read_keep)
+    READ_KEEP = float(read_keep); set_background_entity(background_entity)
     rank, world, local = DF.init_distributed(device)
     if str(device).startswith("cuda"):
         device = f"cuda:{local}"; torch.cuda.set_device(device)
@@ -1059,7 +1059,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 channels_last=channels_last, compile_model=compile_model, entity=dict(ENTITY), pairs=pairs, pair_every=pair_every,
                 dir_lmax=dir_lmax, vote_unc=vote_unc, lcn=lcn, mass_head=True, region_head=True, dens_sh=bool(dens_sh), read_keep=READ_KEEP,
                 dens_mlp=bool(dens_mlp), mass_region=bool(mass_region), region_dec=bool(region_dec), where_first=int(where_first),
-                z_vote=bool(z_vote))
+                z_vote=bool(z_vote), dir_sh=int(dir_sh), background_entity=bool(background_entity))
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)
@@ -1283,6 +1283,8 @@ def main():
     ap.add_argument("--no-dens-sh", action="store_true", help="entities: the density from the direction MLP only (no harmonics of the point code)")
     ap.add_argument("--read-keep", type=float, default=READ_KEEP, help="entities: the share of (almost) unreadable crops kept (1: no cap)")
     ap.add_argument("--where-first", type=int, default=0, help="entities: steps of the where-losses alone (region, mass, overall), the which-way losses then ramped in over as many")
+    ap.add_argument("--dir-sh", type=int, default=0, help="entities: the per-direction outputs also as harmonics of the point code to this order (0: off; e.g. 6)")
+    ap.add_argument("--no-background-entity", action="store_true", help="entities: the isotropic background not a population (before)")
     ap.add_argument("--z-vote", action="store_true", help="entities: the tree embedding sees the vote's axes (detached)")
     ap.add_argument("--region-dec", action="store_true", help="entities: a small decoder (lattice -> stride 2 -> full, 3x3x3) for the region map")
     ap.add_argument("--no-dens-mlp", action="store_true", help="entities: the density's harmonics linear in the point code")
@@ -1324,7 +1326,8 @@ def main():
                        log_every=a.log_every, n_dirs=a.n_dirs, pairs=16 if a.pairs is None else a.pairs, pair_every=a.pair_every,
                        dir_lmax=a.dir_lmax, vote_unc=a.vote_unc, e_sigma=a.e_sigma, deep_tree=a.deep_tree, lcn=a.lcn, dens_sh=not a.no_dens_sh,
                        read_keep=a.read_keep, level_steps=a.level_steps, dens_mlp=not a.no_dens_mlp, mass_region=not a.no_mass_region,
-                       region_dec=a.region_dec, where_first=a.where_first, z_vote=a.z_vote)
+                       region_dec=a.region_dec, where_first=a.where_first, z_vote=a.z_vote, dir_sh=a.dir_sh,
+                       background_entity=not a.no_background_entity)
         return
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,

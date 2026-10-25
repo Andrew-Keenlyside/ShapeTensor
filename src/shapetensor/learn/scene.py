@@ -2000,6 +2000,7 @@ import threading
 
 _TLS = threading.local()                   # one scene cache per thread: the background producer and the main thread render apart
 VIS_LADDER = (1, 2, 4, 8)                  # visibility evidence at the shapes' scale and up to 8x it (64 voxels): interiors count
+VIS_WINDOWS = (1, 2, 4)                    # ... in windows of 5, 10 and 20 voxels: a crossing's featureless core counts (context)
 CACHE_SCENES = 2                           # a 256^3 canvas's render is several GB: a scene's crops are drawn in sequence anyway
 
 
@@ -2392,7 +2393,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     img = _extra_acquisition(img, layers, ra, modality, rec, strength)
     s = Sample(img, shapes_, bg, lab, st, 1.0, content, rec, R)
     d = nuisance(s, seed=acq_seed if acq_seed is not None else seed, device=device, strength=strength, modality=modality, warp=ra.p(p_warp), fast=True, hp_max=12.0,
-                 vis_opts={"per_layer_hp": True, "local_corr": True, "ladder": VIS_LADDER}, affine=ra.p(p_affine))
+                 vis_opts={"per_layer_hp": True, "local_corr": True, "ladder": VIS_LADDER, "window_ladder": VIS_WINDOWS}, affine=ra.p(p_affine))
     if medium is not None and ra.p(0.5):                                                       # the tissue's range stretched to the display, the medium
         tis = d["image"].float()[M > 0.5]                                                      # clipped -- as a real crop normalised by its tissue
         if tis.numel() > 100:

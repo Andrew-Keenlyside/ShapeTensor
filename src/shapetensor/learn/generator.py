@@ -903,9 +903,15 @@ def _vis_t(img, regressors, idx, s_hp, sigma_v, step, local_corr):
     return c.abs() / se.clamp_min(1e-12)
 
 
+#: a larger evidence window pools more voxels (t grows as their root): its t can be divided by this (e.g. sqrt(fw)) so
+#: the larger window credits only a pattern that shows nearby -- off: the penalty gave crossings back to the background
+#: (orientation visibility at crossing cores 0.33, target crossings resolved 12 % vs 88 % without it)
+WINDOW_PENALTY = lambda fw: 1.0
+
+
 def visibility(img: torch.Tensor, regressors: torch.Tensor, units, radii=None, sigma_v: float = 5.0, step: int = 4,
                t_lo: float = 3.0, t_hi: float = 8.0, return_t: bool = False, s_hp_max: float | None = None,
-               per_layer_hp: bool = False, local_corr: bool = False, ladder=(1,), ladder_max: float = 64.0) -> torch.Tensor:
+               per_layer_hp: bool = False, local_corr: bool = False, ladder=(1,), ladder_max: float = 64.0, window_ladder=(1,)) -> torch.Tensor:
     """Each layer's **local** visibility ``(K, Z, Y, X)``: how clearly its shapes show in the final image around each
     point. The image and the layers' image signatures (``regressors``: a shape layer's occupancy, an interface's
     region-means image) are high-passed at a scale matched to the shapes (σ = max(4, 2.5 × the largest radius in
@@ -927,6 +933,10 @@ def visibility(img: torch.Tensor, regressors: torch.Tensor, units, radii=None, s
     t over them -- a shape shows at *some* scale: the interior of a uniform band, of a densely packed bundle, is visible
     as material at the band's own scale although no edge or texture lies in the window (a single scale at the fibres'
     size credited only the edges: mass targets ran along both sides of bundles).
+    ``window_ladder``: further evidence windows, multiples of ``sigma_v``, the evidence the largest t over them too -- a
+    population shows *somewhere near*: where two packed bundles cross, the core is a featureless block of material (each
+    layer's own pattern gone), yet both bundles show as they enter and leave it, so the crossing is inferable from that
+    context; a single window of the target's size called the core invisible and the targets dropped the crossing.
     ``units[k] = None`` marks a layer not measured (visibility 1)."""
     K = regressors.shape[0]; dev = img.device; shp = img.shape
     v = torch.ones((K,) + tuple(shp), device=dev)
@@ -942,19 +952,23 @@ def visibility(img: torch.Tensor, regressors: torch.Tensor, units, radii=None, s
         t = torch.zeros(tuple(s // step for s in shp) + (len(idx),), device=dev)
         for key, ks in bins.items():
             s_hp = max(scale_of[k] for k in ks)
-            tg = _vis_t(img, regressors, idx, s_hp, sigma_v, step, local_corr)
-            for f_ in ladder:
-                if f_ > 1 and s_hp * f_ <= ladder_max * 1.001:
-                    tg = torch.maximum(tg, _vis_t(img, regressors, idx, s_hp * f_, sigma_v, step, local_corr))
+            tg = None
+            for fw in window_ladder:
+                for f_ in ladder:
+                    if f_ == 1 or s_hp * f_ <= ladder_max * 1.001:
+                        t_ = _vis_t(img, regressors, idx, s_hp * f_, sigma_v * fw, step, local_corr) / WINDOW_PENALTY(fw)
+                        tg = t_ if tg is None else torch.maximum(tg, t_)
             for k in ks:
                 j = idx.index(k); t[..., j] = tg[..., j]
     else:
         rmax = max([float(radii[k]) for k in idx] if radii is not None else [1.0])
         s0 = cap(max(4.0, 2.5 * rmax))
-        t = _vis_t(img, regressors, idx, s0, sigma_v, step, local_corr)
-        for f_ in ladder:
-            if f_ > 1 and s0 * f_ <= ladder_max * 1.001:
-                t = torch.maximum(t, _vis_t(img, regressors, idx, s0 * f_, sigma_v, step, local_corr))
+        t = None
+        for fw in window_ladder:
+            for f_ in ladder:
+                if f_ == 1 or s0 * f_ <= ladder_max * 1.001:
+                    t_ = _vis_t(img, regressors, idx, s0 * f_, sigma_v * fw, step, local_corr) / WINDOW_PENALTY(fw)
+                    t = t_ if t is None else torch.maximum(t, t_)
     if return_t:                                                                                  # the evidence itself, upsampled (for calibration)
         tv = Fn.interpolate(t.movedim(-1, 0)[None], scale_factor=step, mode="trilinear", align_corners=False)[0]
         out = torch.zeros((K,) + tuple(shp), device=dev); out[idx] = tv[(slice(None),) + tuple(slice(0, s_) for s_ in shp)]
