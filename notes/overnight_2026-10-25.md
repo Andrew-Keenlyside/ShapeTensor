@@ -261,3 +261,12 @@ Checkpoints: EP10 (step 2000, before the fixes), EP12 (2075), EP13 (2433), EP14b
 tree embedding needs a different formulation (see section 8) before the cluster run. EP14b was resumed at 05:45 and keeps
 training (`pilot_entities/EP14b_64_dec_iface_pl4`); EP13 / EP16 resume with the same command line (`--resume auto`).
 
+## 12. Entities from the density's lobes (06:00)
+
+`entity_infer.cluster_lobes`: entities from the density alone (steepest ascent to its maxima on the direction grid,
+maxima within 25 deg merged) -- for when the votes do not switch between a crossing's lobes. Exact on a synthetic
+two-lobe density (test). On EP14b (crossing benchmark, 40 crops, `--lobes`): second-entity recall 0.01-0.05 (votes: 0)
+but a false second entity in 87 % of single-entity windows (votes: 2 %) -- the learned density has extra maxima and its
+second crossing peak is off-axis (the suite's 32-74 deg). Kept as an option for when the density sharpens; the votes'
+clustering stays the default.
+
