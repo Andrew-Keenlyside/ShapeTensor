@@ -473,6 +473,8 @@ def population(sc, prev: list | None = None, dense: bool = False):
         tubes = arr == "tubes"
         rf = sc.size(0.03, 400, 0.6 if tubes else 0.3, Z / (10 if tubes else 25)) or (r.u(1.0, 4.0) if tubes else r.u(0.4, 1.5))
         n = r.i(2, 12) if tubes else int(min(400, max(4, r.lu(8, 220) * (2.5 if dense else 1.0))))
+        vol = Lp * math.pi * rf * rf                                                              # at most ~35 % of the canvas in lines: an
+        n = int(min(n, max(2, 0.35 * math.prod(shape) / max(vol, 1.0))))                          # overpacked draw is occluded anyway, and slow
         region = {"cylinder": "shell", "laminar": "slab", "surface": "band", "boundary": "band"}.get(field.name, "box")
         if rel == "embed" and around is not None:
             region = "disc"

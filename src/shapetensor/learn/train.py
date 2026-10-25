@@ -313,14 +313,15 @@ def stack(pairs, g=None, aug: bool = True):
 
 class Buffer:
     def __init__(self, n: int, size: int, device, seed0: int = 0, strength: float = 1.0, log=print, gen: dict | None = None,
-                 simple: dict | None = None, p_simple: float = 0.0):
+                 simple: dict | None = None, p_simple: float = 0.0, n0: int | None = None):
+        # ``n0``: pairs drawn at the start (default ``n``); new pairs then fill the buffer up to ``n`` before replacing any
         self.size, self.device, self.next, self.gen, self.simple = size, device, seed0, gen, simple
-        t0 = time.time()
+        t0 = time.time(); self.cap = int(n)
         self.items, self.simple_flag = [], []
-        for _ in range(n):
+        for _ in range(min(n, n0) if n0 else n):
             self.items.append(self._make(strength, p_simple)); self.simple_flag.append(self.last_simple)
         self.w = [anisotropy(t) for _, t in self.items]
-        log(f"buffer: {n} pairs at {size}^3 (strength {strength:.2f}, simple share {p_simple:.2f}) in {time.time() - t0:.0f} s")
+        log(f"buffer: {len(self.items)} of {n} pairs at {size}^3 (strength {strength:.2f}, simple share {p_simple:.2f}) in {time.time() - t0:.0f} s")
 
     def _make(self, strength, p_simple: float = 0.0):
         import random
@@ -331,12 +332,18 @@ class Buffer:
 
     def refresh(self, k: int, g: torch.Generator, strength: float, p_simple: float = 0.0):
         for _ in range(k):
+            if len(self.items) < self.cap:
+                self.items.append(self._make(strength, p_simple)); self.w.append(anisotropy(self.items[-1][1])); self.simple_flag.append(self.last_simple)
+                continue
             i = int(torch.randint(0, len(self.items), (1,), generator=g))
             self.items[i] = self._make(strength, p_simple); self.w[i] = anisotropy(self.items[i][1]); self.simple_flag[i] = self.last_simple
 
     def put(self, items: list, g: torch.Generator):
         """Replace random buffer slots with ``items`` (from a producer)."""
         for it in items:
+            if len(self.items) < self.cap:
+                self.items.append(it); self.w.append(anisotropy(it[1])); self.simple_flag.append(False)
+                continue
             i = int(torch.randint(0, len(self.items), (1,), generator=g))
             self.items[i] = it; self.w[i] = anisotropy(it[1]); self.simple_flag[i] = False
 
@@ -1045,7 +1052,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     level["v"] = lvl(start)
     log(f"model: {sum(p.numel() for p in model.parameters())} parameters, receptive field {rf} voxels, {world} GPU(s); args {args}")
     seed0 = seed * 1_000_000_000 + rank * 100_000_000 + start * refresh * 4
-    buf = Buffer(buffer, size, device, seed0=seed0, strength=strength(start), log=log, gen=cur_gen())
+    buf = Buffer(buffer, size, device, seed0=seed0, strength=strength(start), log=log, gen=cur_gen(),
+                 n0=min(buffer, max(16, 2 * batch)) if (producer or cpu_workers > 0) else None)   # the rest from the producers, as they come
     cfg = {"strength": strength(start), "gen": cur_gen()}
     prod = DF.Producer(make, size, device, buf.next + 50_000_000, cfg) if producer else None
     cpu = None
