@@ -347,6 +347,27 @@ def _entity_stats(r: dict, dirs: torch.Tensor, f: torch.Tensor, ent: torch.Tenso
     return {"mass": mass, "share": share, "R": R, "kappa": K, "R_odf": Ro, "kappa_odf": Ko, "z": zm, "desc": dm, "live": live}
 
 
+def split_mass(r: dict, dirs: torch.Tensor, e: dict, kappa_max: float = 40.0, iters: int = 300) -> dict:
+    """The point's mass split among its entities by their lobes, not by direction: the density (scaled to the point's
+    mass: ``r["m"]``, else its sphere mean) fitted as a non-negative sum of each entity's voted Bingham (concentrations
+    capped at ``kappa_max``, as the density's targets) and a uniform floor (multiplicative NNLS updates). Where a lobe
+    stands on the isotropic floor, the floor under it stays the floor's -- assigning whole directions gives it to the
+    lobe. Returns ``mass (Q, C)`` (the entities') and ``floor (Q,)`` (the uniform component's)."""
+    f = r["f"].float(); Q, D = f.shape; dev = f.device
+    m_tot = r["m"].float() if "m" in r else f.mean(1)
+    y = f / f.mean(1, keepdim=True).clamp_min(1e-12) * m_tot[:, None]                             # mean over the sphere: the mass
+    live = e["live"]; C = live.shape[1]
+    Phi = BG.pdf(dirs[None, :, None], e["R"][:, None], e["kappa"][:, None].clamp(max=kappa_max)) * live[:, None]   # (Q, D, C)
+    Phi = torch.cat([Phi, torch.ones(Q, D, 1, device=dev)], -1)                                     # + the uniform floor
+    ok = torch.cat([live, torch.ones(Q, 1, dtype=torch.bool, device=dev)], 1)
+    m = ok.float() * (m_tot / ok.sum(1).clamp_min(1))[:, None]
+    PtY = (Phi * y[..., None]).sum(1); PtP = Phi.transpose(1, 2) @ Phi
+    for _ in range(iters):
+        m = m * PtY.clamp_min(0) / (PtP @ m[..., None])[..., 0].clamp_min(1e-12)
+    m = m * ok
+    return {"mass": m[:, :C], "floor": m[:, C]}
+
+
 def hierarchy(z: torch.Tensor):
     """Average-linkage clustering of entities ``z (N, E)`` by hyperbolic distance (scipy linkage matrix): cut at any
     distance for the groups at that depth (``scipy.cluster.hierarchy.fcluster(L, t, "distance")``)."""

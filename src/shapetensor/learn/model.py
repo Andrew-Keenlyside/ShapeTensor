@@ -113,10 +113,15 @@ class EntityDecoder(nn.Module):
     (kappa1 >= kappa2 >= 0), and its 5 descriptors (log size, relative wall, lumen, flattening, angularity)."""
 
     def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8, unc: bool = False, mass_head: bool = False,
-                 dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False):
+                 dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False,
+                 kappa_log: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
+        # the vote's concentrations in log space (5 tanh(y / 5): 0.007-150): ``softplus(y) * 10`` collapses -- most
+        # owned directions are the isotropic background's (kappa 0), the softplus saturates there and the lobes' own
+        # directions cannot pull it back; with kappa ~1 votes 90 deg apart are the same vote to the readout
+        self.kappa_log = bool(kappa_log)
         # the ray probe: per (point, direction), the features along a line through the point in that direction -- short
         # (full resolution, +-K0 voxels) and long (the lattice, +-K2 x 4 voxels) -- folded axially (u, -u: sum and |diff|):
         # where two packed bundles cross, the core is featureless but a ray along either bundle runs into it outside
@@ -214,6 +219,16 @@ class EntityDecoder(nn.Module):
             out["m"] = self.mass_of(p)
         return out
 
+    def reset_kappa(self):
+        """The concentration outputs restarted at kappa ~1 (log space), e.g. after loading a ``softplus`` checkpoint."""
+        e = self.emb; last = self.dir[-1]
+        with torch.no_grad():
+            last.weight[7 + e:9 + e] *= 0.01; last.bias[7 + e:9 + e] = 0.0
+            if self.dsh is not None:
+                from .sh import n_coef
+                nc = n_coef(self.dir_sh); w = self.dsh.weight.view(self.n_out - 1, nc, -1); b = self.dsh.bias.view(self.n_out - 1, nc)
+                w[6 + e:8 + e] = 0.0; b[6 + e:8 + e] = 0.0
+
     def mass_of(self, p: torch.Tensor) -> torch.Tensor:
         """The mass (visible volume fraction of oriented material in the window) from point encodings ``p (..., hidden)``:
         a scalar per point, apart from the directional density (which then carries only the angular shape)."""
@@ -234,7 +249,7 @@ class EntityDecoder(nn.Module):
             c = self.dsh(p).float().view(*p.shape[:-1], self.n_out - 1, nc)
             y = torch.cat([y[..., :1], y[..., 1:] + (c * Y[..., None, :nc].float()).sum(-1)], -1)
         e = self.emb
-        k = Fn.softplus(y[..., 7 + e:9 + e]) * 10.0
+        k = torch.exp(5.0 * torch.tanh(y[..., 7 + e:9 + e] / 5.0)) if getattr(self, "kappa_log", False) else Fn.softplus(y[..., 7 + e:9 + e]) * 10.0
         k = torch.stack([k.amax(-1), k.amin(-1)], -1)
         y0 = y[..., 0] + (self.dens(p).float() * Y.float()).sum(-1) if self.dens is not None else y[..., 0]
         R = rot6d_to_matrix(y[..., 1 + e:7 + e]); zr = y[..., 1:1 + e]
@@ -256,7 +271,7 @@ class PopulationNet(nn.Module):
                  context_level: bool = False, voxel_cond: bool = False, identity_dim: int = 0, points: bool = False, nd: int = 5,
                  free_sh: bool = False, dir_lmax: int = 8, vote_unc: bool = False, mass_head: bool = False, region_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False,
-                 dir_sh: int = 0, ray: bool = False, region_density: bool = False):
+                 dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -283,7 +298,7 @@ class PopulationNet(nn.Module):
                 self.points = nn.Conv3d(c2, 2, 1); nn.init.constant_(self.points.bias, -4.0)
             self.ent = EntityDecoder(c0, c1, c2, emb=max(int(embed), 2), hidden=256, lmax=int(dir_lmax), unc=bool(vote_unc),
                                      mass_head=bool(mass_head) and not mass_region, dens_sh=bool(dens_sh), dens_mlp=bool(dens_mlp),
-                                     z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray))
+                                     z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             self.region_dec = None
@@ -338,7 +353,7 @@ class PopulationNet(nn.Module):
                    dens_sh=bool(args.get("dens_sh", False)), dens_mlp=bool(args.get("dens_mlp", False)),
                    mass_region=bool(args.get("mass_region", False)), region_dec=bool(args.get("region_dec", False)),
                    z_vote=bool(args.get("z_vote", False)), dir_sh=int(args.get("dir_sh", 0) or 0), ray=bool(args.get("ray", False)),
-                   region_density=bool(args.get("region_density", False))) \
+                   region_density=bool(args.get("region_density", False)), kappa_log=bool(args.get("kappa_log", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":

@@ -201,3 +201,36 @@ def test_cluster_lobes_separates_a_crossing_density():
     assert int(e["live"][0].sum()) == 2 and int(e["live"][1].sum()) == 1
     ax = [e["R_odf"][0, i, :, 2] for i in torch.nonzero(e["live"][0])[:, 0].tolist()]
     assert min(A(ax[0], a1), A(ax[1], a1)) < 5 and min(A(ax[0], a2), A(ax[1], a2)) < 5
+
+
+def test_split_mass_keeps_the_floor_under_a_lobe():
+    """A sharp lobe (mass 0.3) on an isotropic floor (mass 0.7): split by the lobes, the entity keeps 0.3 and the floor
+    0.7 (whole directions would give the lobe the floor beneath it); a crossing's two lobes keep their own masses."""
+    from shapetensor.learn import bingham as BG
+    dirs = EI.sphere_dirs(300)
+    I = torch.eye(3)
+    RA, RB = I.clone(), torch.stack([I[:, 0], I[:, 2], I[:, 1]], 1)                               # mode axes z (column 2) and y
+    k = torch.tensor([17.0, 17.0])
+    pA, pB = BG.pdf(dirs, RA, k), BG.pdf(dirs, RB, k)
+    f = torch.stack([0.3 * pA + 0.7, 0.3 * pA + 0.3 * pB + 0.4])
+    Q, D = f.shape
+    R = torch.stack([RA, RB, I]).expand(Q, 3, 3, 3); K = torch.stack([k, k, torch.zeros(2)]).expand(Q, 3, 2)
+    e = {"live": torch.tensor([[True, False, False], [True, True, False]]), "R": R, "kappa": K}
+    r = {"f": f, "m": f.mean(1)}
+    sp = EI.split_mass(r, dirs, e)
+    assert abs(float(sp["mass"][0, 0]) - 0.3) < 0.03 and abs(float(sp["floor"][0]) - 0.7) < 0.03
+    assert abs(float(sp["mass"][1, 0]) - 0.3) < 0.03 and abs(float(sp["mass"][1, 1]) - 0.3) < 0.03 and abs(float(sp["floor"][1]) - 0.4) < 0.03
+
+
+def test_kappa_log_concentrations_are_alive_and_bounded():
+    """``kappa_log``: concentrations in (0.006, 150) with gradient everywhere -- the softplus head saturates at 0."""
+    torch.manual_seed(0)
+    net = PopulationNet.from_args(dict(head="entities", widths=[8, 8, 8], sh_lmax=8, embed=4, context_level=True, voxel_cond=True, points=True,
+                                       dir_lmax=4, mass_head=True, region_head=True, dens_sh=True, dens_mlp=True, mass_region=True, kappa_log=True))
+    net.ent.reset_kappa()
+    x = torch.rand(1, 1, 32, 32, 32); pts = torch.rand(1, 20, 3) * 31; sig = torch.full((1, 20), 2.0); dirs = torch.nn.functional.normalize(torch.randn(1, 20, 8, 3), dim=-1)
+    P = net(x, e_points=pts, e_sigma=sig, e_dirs=dirs)
+    k = P["ent"]["kappa"]
+    assert float(k.min()) > 0.006 and float(k.max()) < 150 and 0.3 < float(k.median()) < 3.0
+    k.sum().backward()
+    assert float(net.ent.dir[-1].weight.grad.abs().sum()) > 0
