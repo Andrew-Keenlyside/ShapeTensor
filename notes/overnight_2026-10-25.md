@@ -52,3 +52,23 @@ aligned spindles, fibres through a sheet, a bundle through a step; region / mass
 truth checked against the analytic field: 0.7 deg). EP10 (before the fixes, step 2000): vote axis 6.5 deg on planes,
 18 deg shells, but 49-56 deg on dense 1-voxel fibres (laminar rotation, fanning, fibres through a sheet, the step) --
 the density axis is meaningless there (f flat).
+
+## 6. Is the region learnable? (01:00-02:00)
+
+The region map stayed a near-uniform haze for ~1000 steps in every run. Checks, in order:
+
+* **not interference between losses**: X1 -- the region loss alone (every other weight 0), PL4 init -- region corr
+  0.04 at 300 steps, BCE at the constant-predictor level, no better than the multi-task runs;
+* **not the batch-time contrast routes**: X2 -- X1 without routes -- the same (0.03-0.06);
+* **not a misalignment**: image / target correlations are unchanged by the cube augmentation;
+* **the target is hard**: a linear probe on hand features (intensity, deviation, local variances, band-pass) predicts
+  the region at held-out per-crop corr 0.27 (level 0.4, strength 0.3) and **0.03** at the validation set's level 1 /
+  strength 1 (pooled across crops 0.25-0.29). The networks' pooled validation corr (EP12 0.19 at step 1250) is at
+  that level; on the phantom suite (simple imaging) EP12 reaches 0.81 on planes. The val set (hardest level) cannot
+  show early progress: skill_eval at levels 0.3 / 0.6 / 1.0 and the phantoms are the measures to watch.
+* fixed batches fit (region 0.92) -- capacity is there; generalisation is slow on a hard, partly ambiguous target
+  (resolvable background texture vs population blobs; very large blobs looked like background regions -> blobs now
+  capped at a sixth of the canvas).
+
+Options left for the region: a small decoder (`--region-dec`, EP14), a where-first curriculum (`--where-first`,
+implemented, no evidence yet that it helps: X1 learned no faster alone).
