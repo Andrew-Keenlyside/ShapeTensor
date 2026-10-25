@@ -29,6 +29,7 @@ ap.add_argument("--steps", type=int, default=1500); ap.add_argument("--lr", type
 ap.add_argument("--train-angles", type=float, nargs=2, default=[30.0, 90.0]); ap.add_argument("--test-angles", type=float, nargs="+", default=[90.0, 60.0, 45.0, 30.0])
 ap.add_argument("--noise", type=float, default=0.01); ap.add_argument("--n-points", type=int, default=512); ap.add_argument("--plot-only", action="store_true")
 ap.add_argument("--tag", default=""); ap.add_argument("--rotate", action="store_true", help="the crossing in a random 3-D orientation (training and held out)")
+ap.add_argument("--floor", type=float, default=0.05, help="readout: the density's floor (this quantile) is the background (entity_infer.cluster floor); < 0: off")
 ap.add_argument("--vary-look", action="store_true", help="each bundle's fibre spacing / radius, the bundles' width, bright or dark fibres, background, noise drawn")
 a = ap.parse_args(); dev = "cuda"; stem = a.out.rsplit(".", 1)[0]
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None
@@ -116,7 +117,7 @@ def maps(ph):
     out = {"tA": t["e_mass"][:, 0], "tB": t["e_mass"][:, 1], "tI": t["e_mass"][:, 2]}
     with torch.no_grad():
         f = EI.features(net, ph["image"], voxel_um=None); r = EI.query(net, f, pts, sig, sph, vol_shape=ph["image"].shape)
-        e = EI.cluster(r, sph); sp = EI.split_mass(r, sph, e)
+        e = EI.cluster(r, sph, floor=a.floor if a.floor >= 0 else None); sp = EI.split_mass(r, sph, e)
     ms = sp["mass"]; iso = e["kappa"][..., 0].float() < 2.0; ax = e["R"][..., :, 2].float()
     cA = (ax @ ph["axes"]["A"]).abs(); cB = (ax @ ph["axes"]["B"]).abs()
     toA = ~iso & (cA >= C30) & (cA >= cB); toB = ~iso & (cB >= C30) & (cB > cA)
@@ -164,5 +165,5 @@ for j, c_ in enumerate(cols):
 fig.colorbar(im, ax=axs[:, 1:-1].ravel().tolist(), shrink=0.5, label="mass per voxel (square-root scale)", extend="max")
 st = curves[-1]["step"] if curves else 0
 fig.suptitle(f"crossing ladder -- trained on {a.tag}, {st} steps (from {a.init.split('/')[-1]}); "
-             f"held-out phantoms{' in random 3-D orientations (the crossing plane shown)' if a.rotate else ''}{', varied look' if a.vary_look else f', noise {a.noise}'}; model mass split by lobe fit", fontsize=11)
+             f"held-out phantoms{' in random 3-D orientations (the crossing plane shown)' if a.rotate else ''}{', varied look' if a.vary_look else f', noise {a.noise}'}; model mass split by lobe fit{f', the density floor (q {a.floor}) the background' if a.floor >= 0 else ''}", fontsize=11)
 plt.savefig(a.out, dpi=72); print("saved", a.out)

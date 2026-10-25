@@ -234,3 +234,24 @@ def test_kappa_log_concentrations_are_alive_and_bounded():
     assert float(k.min()) > 0.006 and float(k.max()) < 150 and 0.3 < float(k.median()) < 3.0
     k.sum().backward()
     assert float(net.ent.dir[-1].weight.grad.abs().sum()) > 0
+
+
+def test_cluster_floor_keeps_the_background_out_of_the_entities():
+    """A lobe on a uniform floor whose directions vote at random (the background's votes are not trained): with
+    ``floor`` the floor is the background's mass and one entity of mass 0.3 forms on the lobe; without, the floor's
+    directions join the lobe's entity, which takes the whole mass."""
+    from shapetensor.learn import bingham as BG
+    torch.manual_seed(0)
+    dirs = EI.sphere_dirs(300); D = dirs.shape[0]
+    RA = torch.eye(3); k = torch.tensor([17.0, 17.0]); pA = BG.pdf(dirs, RA, k)
+    f = (0.3 * pA + 0.7)[None]
+    lobe = (dirs @ RA[:, 2]).abs() > 0.9
+    Rv = torch.linalg.qr(torch.randn(D, 3, 3))[0]; Rv = Rv * torch.sign(torch.linalg.det(Rv))[:, None, None]
+    Rv[lobe] = RA; Kv = torch.where(lobe[:, None], k, torch.full((D, 2), 10.0))
+    r = {"f": f, "m": torch.tensor([1.0]), "z": torch.zeros(1, D, 4), "R": Rv[None], "kappa": Kv[None], "desc": torch.zeros(1, D, 5)}
+    e = EI.cluster(r, dirs, floor=0.05)
+    live = torch.nonzero(e["live"][0])[:, 0]
+    assert live.numel() == 1 and abs(float(e["floor_mass"][0]) - 0.7) < 0.05 and abs(float(e["mass"][0, live[0]]) - 0.3) < 0.05
+    assert float((e["R"][0, live[0], :, 2] @ RA[:, 2]).abs()) > 0.99
+    e0 = EI.cluster(r, dirs)
+    assert float((e0["mass"][0] * e0["live"][0]).max()) > 0.9

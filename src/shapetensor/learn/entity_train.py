@@ -42,10 +42,11 @@ DENS_EPS = 1e-3                     # ... and at least this (empty queries: push
 DENS_KAPPA_MAX = 40.0               # the density target's lobes no sharper than the direction basis can draw (order 16); votes keep kappa
 MASS_EPS = 0.01                     # the mass output's floor (1 % of the window): empty windows need not reach zero exactly
 OWN_REL = 0.25                      # owned directions: density above this share of the query's mean (any mass)
-#: the vote's frame and descriptors only where an oriented entity owns the direction: the isotropic background's frame is
-#: undefined. Its concentrations (0) are still trained -- untrained, the background's directions voted kappa ~10 in
-#: arbitrary frames and the readout made spurious oriented entities of the floor (with the softplus head, kappa 0 on
-#: most directions collapsed the output: use with ``kappa_log``); the tree keeps every owned direction
+#: votes (frame, concentrations, descriptors) only where an oriented entity owns the direction: the isotropic background's
+#: frame is undefined and its kappa 0 -- owning most directions, it pulls the per-direction concentration to 0 (softplus:
+#: collapsed everywhere; log space: still on a single bundle's lobe, a minority of the directions there). The background's
+#: directions then vote anything; the readout takes the density's floor as the background
+#: (:func:`~shapetensor.learn.entity_infer.cluster` ``floor``). The tree keeps every owned direction.
 VOTE_OBJECTS = False
 VOTE_KAPPA_MIN = 0.5                # an owner with kappa1 below this is isotropic (the background's is 0)
 OVERALL_FLOOR = 0.01                # the overall ODF's relative error: energy floor per lattice cell (~ occupancy 0.03)
@@ -111,10 +112,10 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         R_t = torch.gather(T["e_R"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1, -1), 3, owner[..., None, None, None].expand(-1, -1, -1, 1, 3, 3))[..., 0, :, :]
         k_t = torch.gather(T["e_kappa"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1), 3, owner[..., None, None].expand(-1, -1, -1, 1, 2))[..., 0, :]
         d_t = torch.gather(T["e_desc"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1), 3, owner[..., None, None].expand(-1, -1, -1, 1, 5))[..., 0, :]
-        vm = owned & (k_t[..., 0] >= VOTE_KAPPA_MIN) if VOTE_OBJECTS else owned                        # the directions whose frame votes
-        parts["kappa"] = (torch.log1p(ent["kappa"][owned]) - torch.log1p(k_t[owned])).abs().mean()     # concentrations: every owner
-        total = total + W["kappa"] * parts["kappa"]
+        vm = owned & (k_t[..., 0] >= VOTE_KAPPA_MIN) if VOTE_OBJECTS else owned                        # the directions that vote
         if bool(vm.any()):
+            parts["kappa"] = (torch.log1p(ent["kappa"][vm]) - torch.log1p(k_t[vm])).abs().mean()
+            total = total + W["kappa"] * parts["kappa"]
             fl = BG.frame_loss(ent["R"][vm], R_t[vm], k_t[vm])
             parts["vote"] = fl.mean()
             if "log_s2" in ent:                                                                        # the vote's uncertainty: a readout of its error

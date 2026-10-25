@@ -207,7 +207,8 @@ def _components(adj: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def cluster(r: dict, dirs: torch.Tensor, f_frac: float = 0.25, f_abs: float = 1e-4, vote_tau: float = 0.25, z_link: float = 0.5 * TREE_EDGE,
-            core_frac: float = 0.6, share_min: float = 0.03, k: int = 8, na: int = 128, cmax: int = 12, chunk: int = 256) -> dict:
+            core_frac: float = 0.6, share_min: float = 0.03, k: int = 8, na: int = 128, cmax: int = 12, chunk: int = 256,
+            floor: float | None = None) -> dict:
     """Entities per point from the decoder at the direction grid (:func:`query`).
 
     Directions with density at least ``f_frac`` of the point's mean density (and ``f_abs``) take part -- a cut relative
@@ -219,8 +220,17 @@ def cluster(r: dict, dirs: torch.Tensor, f_frac: float = 0.25, f_abs: float = 1e
     entity wherever they lie on the sphere (a branch's two arms vote for one entity), so entities separate by vote
     (crossings) or by embedding (parallel neighbours). The other living directions join the entity nearest in vote and
     embedding together; cores keep their own. Entities below ``share_min`` of the point's entity density are dropped. Returns padded ``(Q, C)`` arrays
-    (heaviest first) as :func:`_entity_stats`, and ``label (Q, D)`` (each direction's entity, -1 none)."""
+    (heaviest first) as :func:`_entity_stats`, and ``label (Q, D)`` (each direction's entity, -1 none).
+
+    ``floor`` (a quantile, e.g. 0.05): the density's floor -- that quantile over the directions, the isotropic background
+    by definition -- taken off first: entities form only from what rises above it (the background's directions vote
+    nothing to trust) and their mass is the point's mass less the floor's; ``floor_mass (Q,)`` the floor's."""
     f, z = r["f"], r["z"]; Q, D = f.shape; dev = f.device
+    floor_frac = None
+    if floor is not None:
+        f0 = f.float(); fl = torch.quantile(f0, float(floor), dim=1, keepdim=True)
+        floor_frac = (fl[:, 0] / f0.mean(1).clamp_min(1e-12)).clamp(0, 1)
+        f = (f0 - fl).clamp_min(0)
     nb = sym_neighbours(dirs, k).to(dev); nbv = nb >= 0; nbc = nb.clamp_min(0)
     M = BG.moments(r["R"].double(), r["kappa"].double()).float().reshape(Q, D, 9)
     alive = (f >= f_frac * f.mean(1, keepdim=True)) & (f >= f_abs)
@@ -260,7 +270,9 @@ def cluster(r: dict, dirs: torch.Tensor, f_frac: float = 0.25, f_abs: float = 1e
     ent = rank.gather(1, key)
     st = _entity_stats(r, dirs, f, ent, C)
     if "m" in r:                                                                                   # a mass output: the point's mass shared by the entities
-        st["mass"] = r["m"].float()[:, None] * st["share"] * st["live"]
+        st["mass"] = r["m"].float()[:, None] * st["share"] * st["live"] * (1 - floor_frac[:, None] if floor_frac is not None else 1)
+    if floor_frac is not None:                                                                     # (less the floor's)
+        st["floor_mass"] = (r["m"].float() if "m" in r else r["f"].float().mean(1)) * floor_frac
     return st | {"label": ent}
 
 
