@@ -269,8 +269,12 @@ class EntityPairBuffer:
     ``modality``: the same window under another acquisition), their entity targets at the same queries (in the overlap)
     and the tree distances between the two windows' entities; drawn on demand into a small rotating buffer."""
 
-    def __init__(self, n: int, size: int, device, gen: dict, seed0: int = 60_000_000, kinds=("shift", "modality"), n_points: int = 192):
+    def __init__(self, n: int, size: int, device, gen: dict, seed0: int = 60_000_000, kinds=("shift", "modality"), n_points: int = 192,
+                 out_device=None):
+        # ``device``: where the pairs are drawn (the CPU keeps the trainer's GPU free of the draws' many small kernels and
+        # syncs, which stalled it for minutes on a shared GPU); ``out_device``: where batches go (default ``device``)
         self.size, self.device, self.gen, self.next, self.kinds, self.n_points = size, device, dict(gen or {}), seed0, kinds, n_points
+        self.out_device = out_device or device
         self.items = [self._make() for _ in range(n)]
 
     def _make(self):
@@ -307,4 +311,6 @@ class EntityPairBuffer:
         f = lambda k, v: v.float() if k in ("e_mass", "e_vis", "e_T6", "e_desc") else (v.long() if k in ("e_node", "e_anc", "e_gnode") else v)
         st = lambda j: {k: torch.stack([f(k, it[j][k]) for it in sel]) for k in sel[0][j]}
         x1 = torch.stack([it[0].float() / 255 for it in sel])[:, None]; x2 = torch.stack([it[1].float() / 255 for it in sel])[:, None]
-        return x1, x2, st(2), st(3), torch.stack([it[4].float() for it in sel])
+        T1, T2 = st(2), st(3); od = self.out_device
+        mv = lambda T: {k: (v.to(od, non_blocking=True) if torch.is_tensor(v) else v) for k, v in T.items()}
+        return x1.to(od), x2.to(od), mv(T1), mv(T2), torch.stack([it[4].float() for it in sel]).to(od)

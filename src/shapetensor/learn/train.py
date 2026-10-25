@@ -1074,7 +1074,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
         state = {"HEAD": HEAD, "DESC_KEY": DESC_KEY, "SH_EXACT": SH_EXACT, "DESC_LMAX": DESC_LMAX, "QUERY": QUERY, "CACHE": None,
                  "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC, "ENTITY": dict(ENTITY), "READ_KEEP": READ_KEEP}
         cpu = DF.CpuWorkers(cpu_workers, size, buf.next + 90_000_000, cfg, state, threads=cpu_threads)
-    pbuf = ET.EntityPairBuffer(pairs, size, device, LT.difficulty_gen(level["v"], base), seed0=60_000_000 + rank * 1_000_000 + start) if pairs else None
+    pbuf = ET.EntityPairBuffer(pairs, size, "cpu", LT.difficulty_gen(level["v"], base), seed0=60_000_000 + rank * 1_000_000 + start,
+                               out_device=device) if pairs else None                                 # drawn on the CPU (see EntityPairBuffer)
     val = []
     if main and not benchmark:
         val = [augment(*make(10_000_000 + i, size, device, strength1, {"scene": {**LT.difficulty_gen(1.0, base), "crops_per_scene": 1}}), torch.Generator().manual_seed(i))
@@ -1153,7 +1154,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
             l1, _ = ET.entity_loss(P1, T1, dp, W=which_w(step), margin=margin, g=gd); l2, _ = ET.entity_loss(P2, T2, dp, W=which_w(step), margin=margin, g=gd)
             lx = ET.cross_window_loss(P1, P2, T1, T2, X, dp)
             (0.25 * (l1 + l2) + ET.ENT_WEIGHTS["cross"] * ramp(step) * lx).backward(); pa["cross"] = lx.detach()
-            pbuf.refresh(1)
+            if step % (4 * max(1, pair_every)) == 0:                                                  # a new pair now and then (a CPU draw)
+                pbuf.refresh(1)
         if bench is not None:
             tick(); tm = time.perf_counter()
         DF.allreduce_grads(model, world)
