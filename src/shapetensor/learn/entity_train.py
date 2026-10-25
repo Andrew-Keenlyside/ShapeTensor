@@ -274,8 +274,8 @@ class EntityPairBuffer:
         # ``device``: where the pairs are drawn (the CPU keeps the trainer's GPU free of the draws' many small kernels and
         # syncs, which stalled it for minutes on a shared GPU); ``out_device``: where batches go (default ``device``)
         self.size, self.device, self.gen, self.next, self.kinds, self.n_points = size, device, dict(gen or {}), seed0, kinds, n_points
-        self.out_device = out_device or device
-        self.items = [self._make() for _ in range(n)]
+        self.out_device = out_device or device; self.cap = int(n)
+        self.items = [self._make() for _ in range(min(n, 4))]                                     # a few now, the rest as refreshes come
 
     def _make(self):
         from . import train as TR
@@ -304,6 +304,8 @@ class EntityPairBuffer:
 
     def refresh(self, k: int = 1):
         for _ in range(k):
+            if len(self.items) < getattr(self, "cap", len(self.items)):
+                self.items.append(self._make()); continue
             i = self.next % len(self.items); self.items[i] = self._make()
 
     def batch(self, B: int, g: torch.Generator):
