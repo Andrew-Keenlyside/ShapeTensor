@@ -22,7 +22,7 @@ and validation.
   hand-feature probe reaches 0.03-0.27); EP14b (region decoder + interface hard negatives) no longer marks a grey /
   white step as material and is the best model; **the tree embedding does not separate populations** (crossings: two
   density peaks, one entity) -- the main open problem; z-vote + population weighting did not fix it in 900 steps.
-* **Running**: EP14b, resumed at 06:00. Pre-existing test failures (not tonight's): 2, listed in section 7.
+* **Running**: EP14b, resumed at 05:45. Pre-existing test failures (not tonight's): 2, listed in section 7.
 
 ## 1. Why the entity pilots (EP9 / EP10) never learned density, mass or region
 
@@ -258,6 +258,6 @@ Checkpoints: EP10 (step 2000, before the fixes), EP12 (2075), EP13 (2433), EP14b
 * **Real data** (`realcheck.png`): the fixed models give density-peak axes (EP10 none); region maps are still hazy.
 
 **Recommendation for the next run**: EP14b's configuration (all fixes + `--region-dec` + `{"iface": 2}`), longer; the
-tree embedding needs a different formulation (see section 8) before the cluster run. EP14b was resumed at 06:00 and keeps
+tree embedding needs a different formulation (see section 8) before the cluster run. EP14b was resumed at 05:45 and keeps
 training (`pilot_entities/EP14b_64_dec_iface_pl4`); EP13 / EP16 resume with the same command line (`--resume auto`).
 
