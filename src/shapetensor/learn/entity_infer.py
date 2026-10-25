@@ -136,7 +136,8 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
             odf = total_odf(model, feats, p, dirs, offset)
             ev = (odf >= t_rel * odf.amax(1, keepdim=True)) & (odf >= t_abs)
         qi, di = torch.nonzero(ev, as_tuple=True)
-        r = dec.decode(enc[qi], Y[di].to(enc.dtype)) if qi.numel() else None
+        rr = dec.ray_pairs(feats, (p - off)[qi], dirs[di]) if (getattr(dec, "ray", False) and qi.numel()) else None
+        r = dec.decode(enc[qi], Y[di].to(enc.dtype), rr) if qi.numel() else None
         full = {"f": torch.zeros(n, D, device=p.device), "z": torch.zeros(n, D, dec.emb, device=p.device),
                 "R": torch.eye(3, device=p.device).expand(n, D, 3, 3).clone(), "kappa": torch.zeros(n, D, 2, device=p.device),
                 "desc": torch.zeros(n, D, 5, device=p.device)}

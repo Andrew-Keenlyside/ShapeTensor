@@ -113,10 +113,17 @@ class EntityDecoder(nn.Module):
     (kappa1 >= kappa2 >= 0), and its 5 descriptors (log size, relative wall, lumen, flattening, angularity)."""
 
     def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8, unc: bool = False, mass_head: bool = False,
-                 dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0):
+                 dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
+        # the ray probe: per (point, direction), the features along a line through the point in that direction -- short
+        # (full resolution, +-K0 voxels) and long (the lattice, +-K2 x 4 voxels) -- folded axially (u, -u: sum and |diff|):
+        # where two packed bundles cross, the core is featureless but a ray along either bundle runs into it outside
+        self.ray = bool(ray); self.K0, self.K2 = 3, 5
+        if self.ray:
+            self.ray0 = nn.Linear(c0 * self.K0 * 2, 64); self.ray2 = nn.Linear(c2 * self.K2 * 2, 64)
+        rin = 128 if self.ray else 0
         self.mass = nn.Linear(hidden, 1) if mass_head else None                              # where: the material's mass at (x, sigma)
         # the density's shape as harmonics of the point code: log-density c(p) . Y(u), a direct path from where to which
         # way (with only the concatenated MLP, a flat start is a saddle: the shape loss's gradient on the point code
@@ -141,7 +148,7 @@ class EntityDecoder(nn.Module):
         if self.dsh is not None:
             nn.init.zeros_(self.dsh.weight); nn.init.zeros_(self.dsh.bias)
         self.point = nn.Sequential(nn.Linear(c2 + c1 + c0 + 3 + 2, hidden), nn.SiLU(), nn.Linear(hidden, hidden))
-        self.dir = nn.Sequential(nn.Linear(hidden + n_coef(lmax), hidden), nn.SiLU(), nn.Linear(hidden, hidden), nn.SiLU(),
+        self.dir = nn.Sequential(nn.Linear(hidden + n_coef(lmax) + rin, hidden), nn.SiLU(), nn.Linear(hidden, hidden), nn.SiLU(),
                                  nn.Linear(hidden, 1 + emb + 6 + 2 + 5 + int(self.unc)))
         nn.init.constant_(self.dir[-1].bias[0], -2.0)                                             # little density at the start
 
@@ -168,6 +175,28 @@ class EntityDecoder(nn.Module):
             out = out + wgt[..., None] * self.point(torch.cat([z.to(rel.dtype), rel, ls, lc], -1)); wsum = wsum + wgt
         return out / wsum.clamp_min(1e-6)[..., None]                                                # corners clamped at the faces: weights renormalised
 
+    def ray_pairs(self, feats, pts: torch.Tensor, u: torch.Tensor, b: int = 0, chunk: int = 16384) -> torch.Tensor:
+        """The ray features ``(N, 128)`` of volume ``b`` of ``feats`` at pairs of points ``pts (N, 3)`` (input voxels) and unit
+        directions ``u (N, 3)``."""
+        h0, _, h = feats
+        out = []
+        for a in range(0, pts.shape[0], chunk):
+            p_, u_ = pts[a:a + chunk].float(), u[a:a + chunk].float(); n = p_.shape[0]
+            parts = []
+            for F, K, step, lat, lin in ((h0[b:b + 1], self.K0, 1.0, False, self.ray0), (h[b:b + 1], self.K2, 4.0, True, self.ray2)):
+                t = torch.arange(1, K + 1, device=p_.device, dtype=p_.dtype) * step                    # (K,)
+                pos = torch.cat([p_[:, None] + t[None, :, None] * u_[:, None], p_[:, None] - t[None, :, None] * u_[:, None]], 1)   # (n, 2K, 3)
+                if lat:
+                    pos = (pos - 1.5) / 4.0                                                          # lattice coordinates (encode's)
+                size = torch.tensor(F.shape[-3:], device=p_.device, dtype=p_.dtype)
+                g = (pos / (size - 1).clamp_min(1) * 2 - 1).flip(-1).reshape(1, -1, 1, 1, 3)
+                smp = Fn.grid_sample(F.float(), g, mode="bilinear", padding_mode="border", align_corners=True)   # (1, C, n 2K, 1, 1)
+                smp = smp[0, :, :, 0, 0].T.reshape(n, 2, K, -1)                                      # (n, +/-, K, C)
+                fold = torch.cat([smp[:, 0] + smp[:, 1], (smp[:, 0] - smp[:, 1]).abs()], 1)       # (n, 2K, C): axial
+                parts.append(Fn.silu(lin(fold.reshape(n, -1).to(lin.weight.dtype))))
+            out.append(torch.cat(parts, -1))
+        return torch.cat(out)
+
     def forward(self, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.Tensor, context: torch.Tensor | None = None) -> dict:
         """``points (B, Q, 3)`` input voxels, ``sigma (B, Q)`` voxels, ``dirs (B, Q, D, 3)`` unit (z, y, x)."""
         from .bingham import rot6d_to_matrix
@@ -175,7 +204,12 @@ class EntityDecoder(nn.Module):
         p = self.encode(feats, points, sigma, context)
         D = dirs.shape[2]
         Y = real_sh(dirs.reshape(-1, 3).float(), self.lmax).view(*dirs.shape[:3], -1)
-        out = self.decode(p[:, :, None].expand(-1, -1, D, -1), Y)
+        r = None
+        if getattr(self, "ray", False):
+            B, Q = points.shape[:2]
+            r = torch.stack([self.ray_pairs(feats, points[b][:, None].expand(-1, D, -1).reshape(-1, 3), dirs[b].reshape(-1, 3), b).view(Q, D, -1)
+                             for b in range(B)])
+        out = self.decode(p[:, :, None].expand(-1, -1, D, -1), Y, r)
         if self.mass is not None:
             out["m"] = self.mass_of(p)
         return out
@@ -185,11 +219,15 @@ class EntityDecoder(nn.Module):
         a scalar per point, apart from the directional density (which then carries only the angular shape)."""
         return Fn.softplus(self.mass(p)[..., 0].float())
 
-    def decode(self, p: torch.Tensor, Y: torch.Tensor) -> dict:
+    def decode(self, p: torch.Tensor, Y: torch.Tensor, r: torch.Tensor | None = None) -> dict:
         """The outputs from point encodings ``p (..., hidden)`` and direction bases ``Y (..., n_coef)`` (same leading
         shape): any set of (point, direction) pairs -- inference evaluates only where the total ODF has density."""
         from .bingham import rot6d_to_matrix
-        y = self.dir(torch.cat([p, Y.to(p.dtype)], -1)).float()
+        if getattr(self, "ray", False):
+            r = torch.zeros(*p.shape[:-1], 128, device=p.device, dtype=p.dtype) if r is None else r.to(p.dtype)
+            y = self.dir(torch.cat([p, Y.to(p.dtype), r], -1)).float()
+        else:
+            y = self.dir(torch.cat([p, Y.to(p.dtype)], -1)).float()
         if getattr(self, "dsh", None) is not None:
             from .sh import n_coef
             nc = n_coef(self.dir_sh)
@@ -218,7 +256,7 @@ class PopulationNet(nn.Module):
                  context_level: bool = False, voxel_cond: bool = False, identity_dim: int = 0, points: bool = False, nd: int = 5,
                  free_sh: bool = False, dir_lmax: int = 8, vote_unc: bool = False, mass_head: bool = False, region_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False,
-                 dir_sh: int = 0):
+                 dir_sh: int = 0, ray: bool = False):
         super().__init__()
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
         self.head, self.J, self.nd, self.free_sh = head, J, (nd if head == "lobes" else 0), bool(free_sh)
@@ -244,7 +282,7 @@ class PopulationNet(nn.Module):
                 self.points = nn.Conv3d(c2, 2, 1); nn.init.constant_(self.points.bias, -4.0)
             self.ent = EntityDecoder(c0, c1, c2, emb=max(int(embed), 2), hidden=256, lmax=int(dir_lmax), unc=bool(vote_unc),
                                      mass_head=bool(mass_head) and not mass_region, dens_sh=bool(dens_sh), dens_mlp=bool(dens_mlp),
-                                     z_vote=bool(z_vote), dir_sh=int(dir_sh))
+                                     z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             self.region_dec = None
@@ -298,7 +336,7 @@ class PopulationNet(nn.Module):
                    mass_head=bool(args.get("mass_head", False)), region_head=bool(args.get("region_head", False)),
                    dens_sh=bool(args.get("dens_sh", False)), dens_mlp=bool(args.get("dens_mlp", False)),
                    mass_region=bool(args.get("mass_region", False)), region_dec=bool(args.get("region_dec", False)),
-                   z_vote=bool(args.get("z_vote", False)), dir_sh=int(args.get("dir_sh", 0) or 0)) \
+                   z_vote=bool(args.get("z_vote", False)), dir_sh=int(args.get("dir_sh", 0) or 0), ray=bool(args.get("ray", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
