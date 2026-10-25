@@ -49,6 +49,14 @@ OWN_REL = 0.25                      # owned directions: density above this share
 #: (:func:`~shapetensor.learn.entity_infer.cluster` ``floor``). The tree keeps every owned direction.
 VOTE_OBJECTS = False
 VOTE_KAPPA_MIN = 0.5                # an owner with kappa1 below this is isotropic (the background's is 0)
+#: the density's shape loss weighted toward the lobes: each direction by 1 + this x its target density relative to the
+#: sphere mean (a kappa-17 lobe's tip ~10, the floor < 1). Unweighted, every sampled direction counts alike and few land
+#: on a lobe's tip: the lobes came out blunted (peak 7 for 10, ~20 % of their mass spread over the sphere)
+DENS_LOBE_WEIGHT = 0.0
+#: the target's shape normalised by its mean over the same uniform directions as the prediction's (``fbar``), not by its
+#: exact sphere mean: 16 uniform directions miss a kappa-17 lobe (~3 % of the sphere) in over half the batches, so
+#: ``fbar`` is usually ~25 % low -- against an exact target mean that trained lobes ~20 % low and the floor high
+DENS_SAME_NORM = False
 OVERALL_FLOOR = 0.01                # the overall ODF's relative error: energy floor per lattice cell (~ occupancy 0.03)
 
 
@@ -83,6 +91,24 @@ def tree_distance(anc: torch.Tensor, i: torch.Tensor, j: torch.Tensor) -> torch.
     return (di + dj - 2 * (di - k)).float()
 
 
+def density_shape_loss(f: torch.Tensor, rho: torch.Tensor, m_t: torch.Tensor, n_uni: int) -> torch.Tensor:
+    """The density's shape loss (its mass is the mass output's): ``f (B, Q, D)`` predicted and ``rho`` target densities
+    at the sampled directions (the first ``n_uni`` uniform), ``m_t (B, Q)`` the target masses. Log L1 of the densities
+    over their sphere means -- the prediction's estimated on its uniform directions, the target's exactly (its mass) or,
+    with :data:`DENS_SAME_NORM`, on the same directions; weighted toward the lobes with :data:`DENS_LOBE_WEIGHT`."""
+    fbar = f[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-6) if n_uni > 0 else f.mean(-1, keepdim=True).clamp_min(1e-6)
+    has = (m_t > MASS_EPS)[..., None].expand_as(f)
+    tbar = rho[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-9) if (DENS_SAME_NORM and n_uni > 0) else m_t.clamp_min(1e-9)[..., None]
+    rel = rho / tbar
+    sh_p = torch.log(f / fbar + DENS_FLOOR); sh_t = torch.log(rel + DENS_FLOOR)
+    if not bool(has.any()):
+        return f.sum() * 0.0
+    if DENS_LOBE_WEIGHT > 0:
+        wd = (1 + DENS_LOBE_WEIGHT * rel).detach()
+        return ((sh_p - sh_t).abs() * wd)[has].sum() / wd[has].sum()
+    return (sh_p - sh_t).abs()[has].mean()
+
+
 def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, margin: int = 4, g: torch.Generator | None = None):
     """The entity losses for one batch: ``P`` the model's outputs (``P["ent"]`` at ``dirs``), ``T`` the targets."""
     W = {**ENT_WEIGHTS, **(W or {})}
@@ -95,10 +121,7 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
     m_t = mass.sum(-1)
     if "m" in ent:                                                                                 # where and which way apart: the mass from its own
         parts["mass"] = (torch.log(ent["m"].float() + MASS_EPS) - torch.log(m_t + MASS_EPS)).abs().mean()   # output; the density only its shape
-        f = ent["f"].float(); fbar = f[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-6) if n_uni > 0 else f.mean(-1, keepdim=True).clamp_min(1e-6)
-        has = (m_t > MASS_EPS)[..., None].expand_as(f)
-        sh_p = torch.log(f / fbar + DENS_FLOOR); sh_t = torch.log(rho / m_t.clamp_min(1e-9)[..., None] + DENS_FLOOR)   # the target's exact sphere mean: its mass
-        parts["density"] = (sh_p - sh_t).abs()[has].mean() if bool(has.any()) else f.sum() * 0.0
+        parts["density"] = density_shape_loss(ent["f"].float(), rho, m_t, n_uni)
     else:
         eps = (DENS_FLOOR * rm).clamp_min(DENS_EPS)
         parts["density"] = (torch.log(ent["f"].float() + eps) - torch.log(rho + eps)).abs().mean()  # scale-free: shape at any mass

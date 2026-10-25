@@ -255,3 +255,61 @@ def test_cluster_floor_keeps_the_background_out_of_the_entities():
     assert float((e["R"][0, live[0], :, 2] @ RA[:, 2]).abs()) > 0.99
     e0 = EI.cluster(r, dirs)
     assert float((e0["mass"][0] * e0["live"][0]).max()) > 0.9
+
+
+def _tiny_args(**kw):
+    return dict(head="entities", widths=[8, 8, 8], sh_lmax=8, embed=4, context_level=True, voxel_cond=True, points=True, dir_lmax=4,
+                mass_head=True, region_head=True, dens_sh=True, dens_mlp=True, mass_region=True, lcn=3.0, **kw)
+
+
+def test_oprobe_warm_start_computes_what_the_old_decoder_did():
+    """A model with the oriented probe, loaded from one without (load_partial: the decoder's grown input zero, the
+    probe's density path zero-initialised), gives the old outputs."""
+    from shapetensor.learn import dataflow as DF
+    torch.manual_seed(0)
+    old = PopulationNet.from_args(_tiny_args()).eval()
+    new = PopulationNet.from_args(_tiny_args(oprobe=True)).eval()
+    DF.load_partial(new, old.state_dict(), lambda m: None)
+    x = torch.rand(1, 1, 32, 32, 32); pts = 4 + torch.rand(1, 12, 3) * 23; sig = torch.full((1, 12), 2.0)
+    dirs = torch.nn.functional.normalize(torch.randn(1, 12, 6, 3), dim=-1)
+    with torch.no_grad():
+        a = old(x, e_points=pts, e_sigma=sig, e_dirs=dirs)["ent"]; b = new(x, e_points=pts, e_sigma=sig, e_dirs=dirs)["ent"]
+    assert torch.allclose(a["f"], b["f"], atol=1e-5) and torch.allclose(a["kappa"], b["kappa"], atol=1e-5)
+
+
+def test_oprobe_code_turns_with_the_volume():
+    """The oriented probe reads the material along u: rotating the volume by a quarter turn and the point and direction
+    with it leaves its code (nearly) unchanged -- the rings' angular magnitudes do not depend on the roll about u."""
+    from shapetensor.learn.model import with_scal
+    torch.manual_seed(0)
+    net = PopulationNet.from_args(_tiny_args(oprobe=True)).eval()
+    n = 33; c = (n - 1) / 2
+    z, y, x_ = torch.meshgrid(*(torch.arange(n, dtype=torch.float32),) * 3, indexing="ij")
+    vol = torch.exp(-((y - c) ** 2 + (z - c) ** 2) / 8)[None, None] + 0.2 * torch.exp(-((x_ - 10) ** 2 + (y - 20) ** 2 + (z - 12) ** 2) / 20)[None, None]
+    rot = lambda v: v.transpose(-1, -3).flip(-1)                                                    # a quarter turn about y: (z, y, x) -> (x, y, -z)
+    S0, S1 = net.scalar_fields(vol), net.scalar_fields(rot(vol))
+    p = torch.tensor([[c, c, 9.0], [12.0, 20.0, 14.0]]); u = torch.nn.functional.normalize(torch.tensor([[0.0, 0.3, 1.0], [0.6, 0.5, 0.6]]), dim=-1)
+    mp = lambda q: torch.stack([q[:, 2], q[:, 1], (n - 1) - q[:, 0]], 1); mu = lambda q: torch.stack([q[:, 2], q[:, 1], -q[:, 0]], 1)
+    with torch.no_grad():
+        a = net.ent.oprobe_feats(with_scal((None, None, None), S0), p, u); b = net.ent.oprobe_feats(with_scal((None, None, None), S1), mp(p), mu(u))
+    assert float((a - b).abs().max()) < 0.05 * float(a.abs().max())
+
+
+def test_density_shape_loss_same_norm_is_zero_for_the_right_shape():
+    """A prediction proportional to the target: with the target normalised over the same uniform directions the shape
+    loss is 0 whichever directions were drawn; against its exact sphere mean it is not when the uniform draws miss the
+    lobe (the bias that trained lobes low)."""
+    from shapetensor.learn import entity_train as ET, bingham as BG
+    torch.manual_seed(0)
+    D, nu = 32, 16
+    dirs = torch.nn.functional.normalize(torch.randn(1, 50, D, 3), dim=-1)
+    ax = torch.tensor([0.0, 0.0, 1.0]); dirs[:, :, nu:] = torch.nn.functional.normalize(ax + 0.15 * torch.randn(1, 50, D - nu, 3), dim=-1)
+    rho = 0.3 * BG.pdf(dirs, torch.eye(3), torch.tensor([17.0, 17.0])) + 0.7
+    m_t = torch.ones(1, 50); f = 3.7 * rho
+    old = ET.DENS_SAME_NORM
+    try:
+        ET.DENS_SAME_NORM = True; same = float(ET.density_shape_loss(f, rho, m_t, nu))
+        ET.DENS_SAME_NORM = False; exact = float(ET.density_shape_loss(f, rho, m_t, nu))
+    finally:
+        ET.DENS_SAME_NORM = old
+    assert same < 1e-5 and exact > 0.05

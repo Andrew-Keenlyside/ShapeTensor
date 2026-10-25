@@ -105,6 +105,16 @@ def window_mean(r: torch.Tensor, points: torch.Tensor, sigma: torch.Tensor) -> t
     return (1 - a) * S.gather(0, i0[None])[0] + a * S.gather(0, (i0 + 1)[None])[0]
 
 
+class Feats(tuple):
+    """The trunk's levels ``(h0, h1, h)`` and, for the oriented probe, ``scal``: the image's rotation-invariant scalar
+    fields (:meth:`PopulationNet.scalar_fields`) -- a tuple, so ``h0, h1, h = feats`` keeps working."""
+    scal = None
+
+
+def with_scal(feats, scal) -> Feats:
+    f = Feats(tuple(feats)); f.scal = scal; return f
+
+
 class EntityDecoder(nn.Module):
     """The entity field at any point x, scale sigma and direction u: from the trunk's three levels at x (trilinear over
     the lattice corners, as :class:`~shapetensor.learn.query.QueryDecoder`), log sigma and the visible context, a point
@@ -114,7 +124,7 @@ class EntityDecoder(nn.Module):
 
     def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8, unc: bool = False, mass_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False,
-                 kappa_log: bool = False):
+                 kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -122,6 +132,10 @@ class EntityDecoder(nn.Module):
         # owned directions are the isotropic background's (kappa 0), the softplus saturates there and the lobes' own
         # directions cannot pull it back; with kappa ~1 votes 90 deg apart are the same vote to the readout
         self.kappa_log = bool(kappa_log)
+        # the density as exp of the output (its log), not its softplus: softplus is linear above ~2, so a sharp lobe on a
+        # floor had to be drawn in the output itself (angular detail the decoder under-draws: tips came out blunted);
+        # in log space a lobe on a floor is a smooth bump
+        self.dens_log = bool(dens_log)
         # the ray probe: per (point, direction), the features along a line through the point in that direction -- short
         # (full resolution, +-K0 voxels) and long (the lattice, +-K2 x 4 voxels) -- folded axially (u, -u: sum and |diff|):
         # where two packed bundles cross, the core is featureless but a ray along either bundle runs into it outside
@@ -129,6 +143,17 @@ class EntityDecoder(nn.Module):
         if self.ray:
             self.ray0 = nn.Linear(c0 * self.K0 * 2, 64); self.ray2 = nn.Linear(c2 * self.K2 * 2, 64)
         rin = 128 if self.ray else 0
+        # the oriented probe: per (point, direction), the image's rotation-invariant scalar fields (local contrast at three
+        # scales) sampled on a cylinder along the direction -- axial positions, rings around the axis reduced to their
+        # angular-frequency magnitudes (the same whatever the roll about u), folded axially: what the material looks like
+        # *along u*, the same input at every orientation (the trunk's features are not rotation-aware: each orientation
+        # was learned apart, a crossing fitted in ~100 steps at one orientation took thousands over all of them)
+        self.oprobe = bool(oprobe); self.o_t = (2.0, 4.0, 6.0); self.o_r = (1.5, 3.0); self.o_m = 8; self.o_c = 3
+        if self.oprobe:
+            nf = self.o_c * (1 + 3 * len(self.o_r)) * (1 + 2 * len(self.o_t))
+            self.o_net = nn.Sequential(nn.Linear(nf, 128), nn.SiLU(), nn.Linear(128, 64))
+            self.odens = nn.Linear(64, 1); nn.init.zeros_(self.odens.weight); nn.init.zeros_(self.odens.bias)   # a direct path to the density
+        rin += 64 if self.oprobe else 0
         self.mass = nn.Linear(hidden, 1) if mass_head else None                              # where: the material's mass at (x, sigma)
         # the density's shape as harmonics of the point code: log-density c(p) . Y(u), a direct path from where to which
         # way (with only the concatenated MLP, a flat start is a saddle: the shape loss's gradient on the point code
@@ -202,6 +227,31 @@ class EntityDecoder(nn.Module):
             out.append(torch.cat(parts, -1))
         return torch.cat(out)
 
+    def oprobe_feats(self, feats, pts: torch.Tensor, u: torch.Tensor, b: int = 0, chunk: int = 16384) -> torch.Tensor:
+        """The oriented probe's code ``(N, 64)`` for item ``b`` at points ``pts (N, 3)`` and directions ``u (N, 3)``: the
+        scalar fields at the axis positions 0, +-t (``o_t``) and on rings of ``o_m`` points at radii ``o_r`` around the
+        axis; per ring its mean and the magnitudes of its first two angular frequencies; +-t folded (sum, |difference|)."""
+        S = feats.scal[b:b + 1].float(); C = S.shape[1]
+        size = torch.tensor(S.shape[-3:], device=pts.device, dtype=torch.float32)
+        nT = len(self.o_t); T = torch.tensor((0.0,) + tuple(self.o_t) + tuple(-t for t in self.o_t), device=pts.device)
+        ang = torch.arange(self.o_m, device=pts.device, dtype=torch.float32) * (2 * math.pi / self.o_m)
+        ring = torch.cat([torch.zeros(1, 2, device=pts.device)] + [torch.stack([r * torch.cos(ang), r * torch.sin(ang)], -1) for r in self.o_r])   # (1 + R M, 2)
+        R_ = len(self.o_r); out = []
+        for a in range(0, pts.shape[0], chunk):
+            p_, u_ = pts[a:a + chunk].float(), Fn.normalize(u[a:a + chunk].float(), dim=-1); n = p_.shape[0]
+            ref = torch.where(u_[:, :1].abs() < 0.9, torch.tensor([1.0, 0.0, 0.0], device=p_.device).expand(n, 3), torch.tensor([0.0, 1.0, 0.0], device=p_.device).expand(n, 3))
+            e1 = Fn.normalize(torch.cross(u_, ref, dim=-1), dim=-1); e2 = torch.cross(u_, e1, dim=-1)
+            pos = (p_[:, None, None] + T[None, :, None, None] * u_[:, None, None]
+                   + ring[None, None, :, :1] * e1[:, None, None] + ring[None, None, :, 1:] * e2[:, None, None])   # (n, nt, 1 + R M, 3)
+            g = (pos / (size - 1).clamp_min(1) * 2 - 1).flip(-1).reshape(1, -1, 1, 1, 3)
+            v = Fn.grid_sample(S, g, mode="bilinear", padding_mode="border", align_corners=True)[0, :, :, 0, 0]
+            v = v.view(C, n, T.numel(), -1).permute(1, 0, 2, 3)                                    # (n, C, nt, 1 + R M)
+            c = torch.fft.rfft(v[..., 1:].reshape(n, C, T.numel(), R_, self.o_m), dim=-1) / self.o_m
+            fe = torch.cat([v[..., :1], torch.stack([c[..., 0].real, c[..., 1].abs(), c[..., 2].abs()], -1).flatten(-2)], -1)   # (n, C, nt, 1 + 3R)
+            fold = torch.cat([fe[:, :, :1], fe[:, :, 1:1 + nT] + fe[:, :, 1 + nT:], (fe[:, :, 1:1 + nT] - fe[:, :, 1 + nT:]).abs()], 2)
+            out.append(Fn.silu(self.o_net(fold.flatten(1).to(self.o_net[0].weight.dtype))))
+        return torch.cat(out)
+
     def forward(self, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.Tensor, context: torch.Tensor | None = None) -> dict:
         """``points (B, Q, 3)`` input voxels, ``sigma (B, Q)`` voxels, ``dirs (B, Q, D, 3)`` unit (z, y, x)."""
         from .bingham import rot6d_to_matrix
@@ -214,7 +264,12 @@ class EntityDecoder(nn.Module):
             B, Q = points.shape[:2]
             r = torch.stack([self.ray_pairs(feats, points[b][:, None].expand(-1, D, -1).reshape(-1, 3), dirs[b].reshape(-1, 3), b).view(Q, D, -1)
                              for b in range(B)])
-        out = self.decode(p[:, :, None].expand(-1, -1, D, -1), Y, r)
+        o = None
+        if getattr(self, "oprobe", False):
+            B, Q = points.shape[:2]
+            o = torch.stack([self.oprobe_feats(feats, points[b][:, None].expand(-1, D, -1).reshape(-1, 3), dirs[b].reshape(-1, 3), b).view(Q, D, -1)
+                             for b in range(B)])
+        out = self.decode(p[:, :, None].expand(-1, -1, D, -1), Y, r, o)
         if self.mass is not None:
             out["m"] = self.mass_of(p)
         return out
@@ -234,15 +289,17 @@ class EntityDecoder(nn.Module):
         a scalar per point, apart from the directional density (which then carries only the angular shape)."""
         return Fn.softplus(self.mass(p)[..., 0].float())
 
-    def decode(self, p: torch.Tensor, Y: torch.Tensor, r: torch.Tensor | None = None) -> dict:
+    def decode(self, p: torch.Tensor, Y: torch.Tensor, r: torch.Tensor | None = None, o: torch.Tensor | None = None) -> dict:
         """The outputs from point encodings ``p (..., hidden)`` and direction bases ``Y (..., n_coef)`` (same leading
         shape): any set of (point, direction) pairs -- inference evaluates only where the total ODF has density."""
         from .bingham import rot6d_to_matrix
+        parts = [p, Y.to(p.dtype)]
         if getattr(self, "ray", False):
-            r = torch.zeros(*p.shape[:-1], 128, device=p.device, dtype=p.dtype) if r is None else r.to(p.dtype)
-            y = self.dir(torch.cat([p, Y.to(p.dtype), r], -1)).float()
-        else:
-            y = self.dir(torch.cat([p, Y.to(p.dtype)], -1)).float()
+            parts.append(torch.zeros(*p.shape[:-1], 128, device=p.device, dtype=p.dtype) if r is None else r.to(p.dtype))
+        if getattr(self, "oprobe", False):
+            o = torch.zeros(*p.shape[:-1], 64, device=p.device, dtype=p.dtype) if o is None else o.to(p.dtype)
+            parts.append(o)
+        y = self.dir(torch.cat(parts, -1)).float()
         if getattr(self, "dsh", None) is not None:
             from .sh import n_coef
             nc = n_coef(self.dir_sh)
@@ -252,12 +309,15 @@ class EntityDecoder(nn.Module):
         k = torch.exp(5.0 * torch.tanh(y[..., 7 + e:9 + e] / 5.0)) if getattr(self, "kappa_log", False) else Fn.softplus(y[..., 7 + e:9 + e]) * 10.0
         k = torch.stack([k.amax(-1), k.amin(-1)], -1)
         y0 = y[..., 0] + (self.dens(p).float() * Y.float()).sum(-1) if self.dens is not None else y[..., 0]
+        if getattr(self, "oprobe", False):
+            y0 = y0 + self.odens(o).float()[..., 0]
         R = rot6d_to_matrix(y[..., 1 + e:7 + e]); zr = y[..., 1:1 + e]
         if getattr(self, "zv", None) is not None:
             a, c = R[..., :, 0].detach(), R[..., :, 2].detach()
             ax6 = lambda v: torch.stack([v[..., 0] ** 2, v[..., 1] ** 2, v[..., 2] ** 2, v[..., 0] * v[..., 1], v[..., 0] * v[..., 2], v[..., 1] * v[..., 2]], -1)
             zr = zr + self.zv(torch.cat([ax6(c), ax6(a)], -1) * 3.0)
-        out = {"f": Fn.softplus(y0), "z": poincare(zr), "R": R, "kappa": k, "desc": y[..., 9 + e:14 + e]}
+        f = torch.exp(y0.clamp(-20.0, 12.0)) if getattr(self, "dens_log", False) else Fn.softplus(y0)
+        out = {"f": f, "z": poincare(zr), "R": R, "kappa": k, "desc": y[..., 9 + e:14 + e]}
         if self.unc:                                                                              # the vote's uncertainty: log variance of its error
             out["log_s2"] = y[..., 14 + e].clamp(-8.0, 8.0)
         return out
@@ -271,7 +331,8 @@ class PopulationNet(nn.Module):
                  context_level: bool = False, voxel_cond: bool = False, identity_dim: int = 0, points: bool = False, nd: int = 5,
                  free_sh: bool = False, dir_lmax: int = 8, vote_unc: bool = False, mass_head: bool = False, region_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False,
-                 dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False):
+                 dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False, oprobe: bool = False,
+                 dens_log: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -298,7 +359,8 @@ class PopulationNet(nn.Module):
                 self.points = nn.Conv3d(c2, 2, 1); nn.init.constant_(self.points.bias, -4.0)
             self.ent = EntityDecoder(c0, c1, c2, emb=max(int(embed), 2), hidden=256, lmax=int(dir_lmax), unc=bool(vote_unc),
                                      mass_head=bool(mass_head) and not mass_region, dens_sh=bool(dens_sh), dens_mlp=bool(dens_mlp),
-                                     z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log))
+                                     z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
+                                     oprobe=bool(oprobe), dens_log=bool(dens_log))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             self.region_dec = None
@@ -353,11 +415,19 @@ class PopulationNet(nn.Module):
                    dens_sh=bool(args.get("dens_sh", False)), dens_mlp=bool(args.get("dens_mlp", False)),
                    mass_region=bool(args.get("mass_region", False)), region_dec=bool(args.get("region_dec", False)),
                    z_vote=bool(args.get("z_vote", False)), dir_sh=int(args.get("dir_sh", 0) or 0), ray=bool(args.get("ray", False)),
-                   region_density=bool(args.get("region_density", False)), kappa_log=bool(args.get("kappa_log", False))) \
+                   region_density=bool(args.get("region_density", False)), kappa_log=bool(args.get("kappa_log", False)),
+                   oprobe=bool(args.get("oprobe", False)), dens_log=bool(args.get("dens_log", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
         self._args = dict(args); return self
+
+    def scalar_fields(self, x: torch.Tensor) -> torch.Tensor:
+        """The image's rotation-invariant scalar fields for the oriented probe: its local contrast (the image itself
+        without ``lcn``) and that blurred at sigma 1 and 2 (isotropic windows: rotating the image rotates the fields)."""
+        from ..filters import gaussian
+        lc = (self.local_contrast(x) if self.lcn else x).float()
+        return torch.cat([lc, gaussian(lc, 1.0), gaussian(lc, 2.0)], 1)
 
     def local_contrast(self, x: torch.Tensor) -> torch.Tensor:
         """``(x - mean) / sd`` in a Gaussian window of sigma ``lcn`` voxels (sd floored at 0.01 of the 0-1 range), /3:
@@ -422,7 +492,8 @@ class PopulationNet(nn.Module):
             if self.has_points:
                 out["points"] = Fn.softplus(self.points(h))
             if e_points is not None:
-                out["ent"] = self.ent((h0, h1, h), e_points.float(), e_sigma.float(), e_dirs, None if context is None else context.float())
+                fe = with_scal((h0, h1, h), self.scalar_fields(x)) if getattr(self.ent, "oprobe", False) else (h0, h1, h)
+                out["ent"] = self.ent(fe, e_points.float(), e_sigma.float(), e_dirs, None if context is None else context.float())
             if self.region is not None:                                                         # the population region, every voxel
                 out["region_logit"] = self.region_map(h0, h1, h); out["region"] = self.region_value(out["region_logit"])
                 if e_points is not None and getattr(self, "mass_region", False):                 # where, once: the mass is the region's
