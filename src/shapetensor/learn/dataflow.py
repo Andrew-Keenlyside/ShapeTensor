@@ -110,11 +110,15 @@ def _cpu_worker(rank: int, n: int, size: int, seed0: int, cfg, q, state: dict, t
             setattr(L, k[2:], v)
         else:
             setattr(TR, k, v)
-    seed = seed0 + rank
+    k = 0
     while True:
+        # whole scenes per worker: blocks of ``crops_per_scene`` consecutive seeds (one scene each, rendered once and
+        # cropped from the cache); the workers' blocks interleave -- every seed still drawn once
+        cps = max(1, int(((cfg["gen"] or {}).get("scene") or {}).get("crops_per_scene", 1) or 1))
+        seed = (seed0 // cps + (k // cps) * n + rank) * cps + k % cps; k += 1
         try:
             img, t = TR._make_pair(seed, size, "cpu", float(cfg["strength"]), dict(cfg["gen"]))
-            q.put((img, t)); seed += n
+            q.put((img, t))
         except Exception as e:
             q.put(("error", repr(e))); return
 
