@@ -236,3 +236,18 @@ def test_window_mean_is_the_gaussian_average():
         k1 = lambda n: torch.exp(-0.5 * (torch.arange(-int(math.ceil(3 * s)), int(math.ceil(3 * s)) + 1.0) / s) ** 2).sum()
         ref = float((w * r[0]).sum() / (k1(0) ** 3))                                               # normalised over the infinite grid: zero beyond
         assert abs(float(m[0, q]) - ref) < 0.02 * max(ref, 0.05), (q, float(m[0, q]), ref)
+
+
+def test_z_vote_starts_as_the_plain_embedding():
+    """--z-vote is zero-initialised: the same embeddings as without it until trained."""
+    import torch
+    from shapetensor.learn.model import PopulationNet
+    args = dict(head="entities", widths=[8, 8, 8], sh_lmax=8, embed=4, context_level=True, voxel_cond=True, points=True,
+                dir_lmax=4, mass_head=True, region_head=True, dens_sh=True, dens_mlp=True, mass_region=True)
+    torch.manual_seed(0); a = PopulationNet.from_args(args).eval()
+    torch.manual_seed(0); b = PopulationNet.from_args({**args, "z_vote": True}).eval()
+    b.load_state_dict(a.state_dict(), strict=False)
+    x = torch.rand(1, 1, 32, 32, 32); pts = torch.rand(1, 6, 3) * 31; sig = torch.full((1, 6), 2.0); d = torch.nn.functional.normalize(torch.randn(1, 6, 5, 3), dim=-1)
+    with torch.no_grad():
+        za = a(x, e_points=pts, e_sigma=sig, e_dirs=d)["ent"]["z"]; zb = b(x, e_points=pts, e_sigma=sig, e_dirs=d)["ent"]["z"]
+    assert torch.allclose(za, zb, atol=1e-6)
