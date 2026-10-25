@@ -44,70 +44,12 @@ if a.curves:
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None
 L.DESC_K = 5; L.DESC_NC = 0; TR.REGION_DENSITY = True; ET.REGION_DENSITY = True; TR.set_background_entity(True)
 
-# ---- the phantom -----------------------------------------------------------------------------------------------
-th = math.radians(a.angle)
-AX = {"A": torch.tensor([0.0, 0.0, 1.0], device=dev), "B": torch.tensor([0.0, math.sin(th), math.cos(th)], device=dev)}   # (z, y, x)
-zz, yy, xx = torch.meshgrid(*(torch.arange(N, dtype=torch.float32, device=dev),) * 3, indexing="ij")
-
-
-def bundle(u, z0):
-    """Occupancy of a bundle along unit ``u`` in the x-y plane: fibres on a ``SPACING`` grid across it (in-plane offset
-    and z, z layers from ``z0``), within ``HALF`` of the centre line in both cross directions."""
-    p = torch.stack([zz - C, yy - C, xx - C], -1)
-    w = torch.stack([torch.zeros_like(u[0]), -u[2], u[1]])                                          # in-plane, across the bundle
-    q1 = (p * w).sum(-1); q2 = p[..., 0]
-    d1 = q1 - SPACING * torch.round(q1 / SPACING); d2 = q2 - z0 - SPACING * torch.round((q2 - z0) / SPACING)
-    inside = (q1.abs() <= HALF) & (q2.abs() <= HALF)
-    return ((RADIUS + 0.5 - torch.sqrt(d1 ** 2 + d2 ** 2)).clamp(0, 1) * inside).float()
-
-
-occ = {"A": bundle(AX["A"], 0.0), "B": bundle(AX["B"], SPACING / 2)}                            # interleaved z layers
-occ["bg"] = (1 - (occ["A"] + occ["B"]).clamp(max=1.0))
-gn = torch.Generator(device=dev).manual_seed(0)
-image = (0.1 + 0.8 * (occ["A"] + occ["B"]).clamp(max=1.0) + a.noise * torch.randn(N, N, N, generator=gn, device=dev)).clamp(0, 1)
-image = (image * 255).round() / 255                                                                 # 8-bit, as the generator's
-core = ((xx - C).abs() <= HALF) & ((yy - C).abs() <= HALF) & ((zz - C).abs() <= HALF)
-
-
-def frame(u, conc):
-    """``(T6, R, kappa)`` of a line along ``u`` with second moment ``conc`` on the axis (``None``: isotropic)."""
-    T = torch.eye(3, device=dev) / 3 if u is None else conc * torch.outer(u, u) + (1 - conc) / 2 * (torch.eye(3, device=dev) - torch.outer(u, u))
-    R, k = BG.fit(T.double()); T6 = torch.stack([T[0, 0], T[1, 1], T[2, 2], T[0, 1], T[0, 2], T[1, 2]])
-    return T6.float(), R.float(), k.float()
-
-
-ENT = [frame(AX["A"], 0.94), frame(AX["B"], 0.94), frame(None, 0)]                                 # nodes 1, 2, 3 under the root 0
-
-
-def targets(pts, sig):
-    """The entity targets at ``pts (Q, 3)``, ``sig (Q,)``: per query A, B, background (window means of their
-    occupancy, all visible), padded to 8."""
-    Q = pts.shape[0]; E = 8
-    vol = torch.stack([occ["A"], occ["B"], occ["bg"]])
-    m = window_mean(vol, pts[None].expand(3, -1, -1).contiguous(), sig[None].expand(3, -1).contiguous()).T   # (Q, 3)
-    live = m > 1e-4
-    node = torch.full((Q, E), -1, dtype=torch.int32, device=dev); node[:, :3] = torch.where(live, torch.arange(1, 4, device=dev, dtype=torch.int32), -1)
-    mass = torch.zeros(Q, E, device=dev); mass[:, :3] = m * live
-    T6 = torch.zeros(Q, E, 6, device=dev); R = torch.eye(3, device=dev).expand(Q, E, 3, 3).clone(); K = torch.zeros(Q, E, 2, device=dev)
-    for j, (t6, r, k) in enumerate(ENT):
-        T6[:, j], R[:, j], K[:, j] = t6, r, k
-    anc = torch.full((1536, 16), -1, dtype=torch.int32, device=dev); anc[0, 0] = 0
-    for i in (1, 2, 3):
-        anc[i, 0], anc[i, 1] = i, 0
-    return {"e_points": pts, "e_sigma": sig, "e_node": node.long(), "e_mass": mass, "e_vis": (node >= 0).float(), "e_T6": T6,
-            "e_desc": torch.zeros(Q, E, 5, device=dev), "e_anc": anc.long(), "e_n": torch.tensor(4, device=dev), "e_R": R, "e_kappa": K,
-            "e_gnode": node.long(), "region_t": occ["A"] + occ["B"] + occ["bg"], "iface_t": torch.zeros(N, N, N, device=dev),
-            "voxel": torch.tensor(float("nan"), device=dev)}
-
-
-def draw_queries(g, n):
-    """Most on the fibres, a share in the crossing core, the rest anywhere (2 voxels from the faces); sigma 1-6."""
-    pts = 2 + torch.rand(n, 3, generator=g, device=dev) * (N - 5)
-    for frac, sel in ((0.5, (occ["A"] + occ["B"]) > 0.05), (0.25, core)):
-        cand = torch.nonzero(sel).float(); k = int(frac * n); o = 0 if frac == 0.5 else int(0.5 * n)
-        pts[o:o + k] = (cand[torch.randint(0, cand.shape[0], (k,), generator=g, device=dev)] + torch.rand(k, 3, generator=g, device=dev) - 0.5).clamp(2, N - 3)
-    sig = torch.exp(math.log(1.0) + torch.rand(n, generator=g, device=dev) * math.log(6.0))
-    return pts, sig
+# ---- the phantom (learn/simple_phantom.py) ---------------------------------------------------------------------
+from shapetensor.learn import simple_phantom as SP
+PH = SP.make(angle=a.angle, noise=a.noise, n=N, half=HALF, spacing=SPACING, radius=RADIUS, device=dev)
+image, occ, AX, ENT, core = PH["image"], PH["occ"], PH["axes"], PH["ent"], PH["core"]
+targets = lambda pts, sig: SP.targets(PH, pts, sig)
+draw_queries = lambda g, n: SP.draw_queries(PH, g, n)
 
 
 batch = lambda t: {k: v[None] for k, v in t.items()}
