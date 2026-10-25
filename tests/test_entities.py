@@ -198,3 +198,17 @@ def test_entity_targets_on_a_scene_without_populations():
     t = entity_targets(ren["entries"], tree, sc.shape, (0, 0, 0), 1, sc.shape, p, torch.tensor([2.0], device=DEV),
                        vis=torch.ones(1, 32, 32, 32, device=DEV), group_layer=[], ovis=torch.ones(1, 32, 32, 32, device=DEV))
     assert bool((t["node"] == -1).all())
+
+
+def test_voxel_density_leaves_out_roles():
+    """The lattice's exact density counts only the roles it is asked to: the entity model leaves interfaces out."""
+    from types import SimpleNamespace
+    from shapetensor.learn.query import voxel_density
+    occ = torch.zeros(2, 8, 8, 8); occ[0, :, :, :4] = 1.0; occ[1, :, :, 4:] = 1.0
+    T = torch.zeros(2, 6, 8, 8, 8); T[:, 0] = 1.0                                                   # line tensors along z
+    s = SimpleNamespace(layers=[SimpleNamespace(role="interface"), SimpleNamespace(role="shape")])
+    d = {"occupancy": occ, "tensors": T, "visibility": torch.ones(2)}
+    F_all = voxel_density(s, d, 4, roles_out=("isotropic",))
+    F_ent = voxel_density(s, d, 4, roles_out=("isotropic", "interface"))
+    assert float(F_all[0, :, :, :4].abs().sum()) > 0 and float(F_ent[0, :, :, :4].abs().sum()) == 0.0
+    assert torch.allclose(F_all[:, :, :, 4:], F_ent[:, :, :, 4:])

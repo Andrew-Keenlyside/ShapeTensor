@@ -306,7 +306,9 @@ def _single_object(qi: torch.Tensor, node: torch.Tensor, leaf: torch.Tensor, m: 
     if not bool(merged.any()):
         return node
     gk = qi * (n_nodes + 1) + node                                                               # (query, node) groups
-    trip, inv = torch.unique(torch.stack([gk[merged], leaf[merged]], 1), dim=0, return_inverse=True)
+    L = int(leaf[merged].max()) + 1                                                              # (group, leaf) pairs as one key: a 1-D
+    u, inv = torch.unique(gk[merged].long() * L + leaf[merged].long(), return_inverse=True)       # unique (unique over rows is slow on CPU)
+    trip = torch.stack([u // L, u % L], 1)
     tm = torch.zeros(trip.shape[0], device=m.device).index_add_(0, inv, m[merged])                # each leaf's mass in the window
     trip = trip[tm >= m_min]                                                                     # distinct significant leaves per group
     if trip.shape[0] == 0:

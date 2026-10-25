@@ -39,7 +39,8 @@ def _sample(field: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
     return Fn.grid_sample(field[None].float(), grid, mode="bilinear", align_corners=True)[0, :, 0, 0]
 
 
-def layer_density(s, drawn: dict, points: torch.Tensor, sigmas: torch.Tensor, lmax: int, kappa: float = 20.0, n: int = 600) -> torch.Tensor:
+def layer_density(s, drawn: dict, points: torch.Tensor, sigmas: torch.Tensor, lmax: int, kappa: float = 20.0, n: int = 600,
+                  roles_out=("isotropic",)) -> torch.Tensor:
     """The populations' density in SH at ``points (Q, 3)`` (voxel coordinates) and per-query ``sigmas (Q,)`` (a few
     distinct levels): ``(Q, n_coef)``. ``s`` the sample, ``drawn`` its acquisition (occupancy, tensors, visibility)."""
     occ, T, vis = drawn["occupancy"], drawn["tensors"], drawn["visibility"]
@@ -116,7 +117,7 @@ def voxel_density(s, drawn: dict, lmax: int, kappa: float = 20.0, n: int = 600, 
     ``desc_key``: the drawn descriptors to use (``descriptors``: 3 per layer; ``descriptors5``: the scenes' 5)."""
     occ, T, vis = drawn["occupancy"], drawn["tensors"], drawn["visibility"]
     dev = occ.device
-    shapes = [k for k, L in enumerate(s.layers) if L.role != "isotropic"]
+    shapes = [k for k, L in enumerate(s.layers) if L.role not in roles_out]                         # (the entity model leaves interfaces out too)
     vis = vis.view(-1, 1, 1, 1) if vis.dim() == 1 else vis
     D = drawn.get(desc_key) if desc_lmax else None
     nd = n_coef(desc_lmax) if desc_lmax else 0
