@@ -410,6 +410,20 @@ Later instructions (2026-10-24, verbatim):
 - "Is there a current model you can quickly run in a phantom for me to sense check ?" and "Phantoms don't look quite
   right, also show separated image layers" (scripts/learn/phantom_layers_entities.py: generator crossing phantoms
   with ground-truth layers beside the model's separated layers).
+- "Mass is train tracking either side of the main populations (either side of bundle), I don't think this looks right";
+  "it seems previous version was learning to pull edge out, like structure tensor FA, not the actual population region"
+  (visibility ladder; mass output + shape-only density + region head; interfaces removed from the targets).
+- "so boundary does not need to be a specific object type, but we must still be able to pull out fibres that pass between
+  grey white boundaries" (interfaces are not material; fibres crossing a boundary stay entities; step phantom).
+- "i do want to be clear that we arent explicitly training the model on "fibre" or "sheet" but these are post hoc
+  selection from model outputs?" (yes: no class targets; all outputs continuous).
+- "before pushing this, do one more scoping lit review on AI models designed to detect fibre orientation and ODFs ... are
+  there any downstream applications we are missing?" (notes/lit_review_orientation_models.md).
+- "im imaginging a purely synthetic multistage approach - so composition (the operators you describe above), then
+  modality, then augmentation and warps and noise, then loss and artifacts ... not to be followed exactly, but there
+  should be a more combinatorial approach to get proper diversity of objects and mixing. I really want to push the
+  robustness." (2026-10-25; overnight to 07:00 ET: compositional generator, test each stage, then speed, local retrain,
+  wider phantoms and validation.)
 
 ### Conflicts between instructions (for you to settle)
 
