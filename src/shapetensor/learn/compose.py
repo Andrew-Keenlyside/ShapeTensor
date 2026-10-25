@@ -629,7 +629,12 @@ def sheet_population(sc, field: Field, rel: str, base, dense: bool = False):
     c = torch.tensor([n / 2 for n in shape], device=dev)
     phi0 = float(phi_fn(c[None])[0]) + r.u(0, T)
     u = (phi - phi0) / T; k = torch.floor(u); dist = (u - k - 0.5).abs() * T / gn.clamp_min(0.2)
-    occ = ((t / 2 - dist) + 0.5).clamp(0, 1) * (gn > 0.2).float()
+    tf = t * (1 + r.u(0.2, 0.5) * _smooth_noise(shape, r.u(0.2, 0.6) * Z, r)).clamp(0.4, 1.6) if r.p(0.2) else torch.full_like(phi, t)   # thickness along the sheet
+    occ = ((tf / 2 - dist) + 0.5).clamp(0, 1) * (gn > 0.2).float()
+    wall = None
+    if r.p(0.25) and t >= 2.0:                                                                   # hollow: two walls (a membrane pair, a lumen between)
+        wall = max(0.5, t * r.u(0.15, 0.35))
+        occ = occ * (((dist - (tf / 2 - wall)) + 0.5).clamp(0, 1)); rec["walls"] = round(wall, 2)
     if not r.p(0.4):                                                                             # a finite stack: n sheets about the middle
         n_s = r.i(1, 8 if not dense else 16); kc = int(r.i(-2, 2))
         keep = (k >= kc - n_s // 2) & (k < kc - n_s // 2 + n_s); occ = occ * keep.float(); rec["n"] = n_s
@@ -647,9 +652,13 @@ def sheet_population(sc, field: Field, rel: str, base, dense: bool = False):
         sc.parents[o_] = pid
     obj_map = oid[(k - kmin).clamp(0, ns - 1).long()]
     tens = sheet_tensor(nrm).movedim(-1, 0).contiguous()
-    desc = torch.zeros((5,) + tuple(shape), device=dev); desc[0] = t / 2
-    contrast = sc.contrast()
-    g = Group("compose", "sheet", float(t / 2), contrast, dense=[(occ, tens, desc, contrast, obj_map)])
+    desc = torch.zeros((5,) + tuple(shape), device=dev); desc[0] = tf / 2
+    if wall is not None:
+        desc[1] = wall
+    contrast = sc.contrast(); con = contrast
+    if r.p(0.3):                                                                                 # patchy stain along the sheets
+        con = contrast * (1 + r.u(0.2, 0.6) * _smooth_noise(shape, r.u(0.1, 0.4) * Z, r)).clamp(0.2, 1.8); rec["patchy"] = True
+    g = Group("compose", "sheet", float(t / 2), contrast, dense=[(occ, tens, desc, con, obj_map)])
     g.centre_P = None; g.sdf = (lambda x, f=phi_fn, p0=phi0 + 0.5 * T: f(x) - p0); g.centre_pt = c
     sc.record.setdefault("compose", []).append(rec)
     return [g]
@@ -731,6 +740,9 @@ def blob_population(sc, field: Field, rel: str, base, around, dense: bool = Fals
         A = Rm @ torch.diag_embed(ax)
         exps = (r.u(1.0, 4.0), r.u(1.0, 4.0)) if shp == "superquadric" else (2.0, 2.0)
         gs = [sc._solids(C, A, "compose", oid, shape="superquadric" if shp == "superquadric" else "ellipsoid", exps=exps)]
+        if r.p(0.35):                                                                            # each blob its own stain
+            Q_, W_, V_, o_ = gs[0].points[0]; fac = torch.exp(r.u(0.15, 0.5) * r.randn(m))
+            V_ = V_.clone(); V_[:, -1] = V_[:, -1] * fac[torch.searchsorted(oid.contiguous(), o_.contiguous())]; gs[0].points[0] = (Q_, W_, V_, o_); rec["stain_var"] = True
         if chains is not None and getattr(sc, "deep", False):                                    # beads: each chain an object between
             cid = sc.ids(int(chains.max()) + 1, rc)                                              # the blobs and the population
             for o_, j in zip(oid.tolist(), chains[keep].long().tolist()):
