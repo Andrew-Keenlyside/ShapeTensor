@@ -106,3 +106,12 @@ Options (for discussion): weight the population level first (pairs from differen
 before instance pairs); an explicit spatial-embedding form (each direction's offset to its entity's centreline, plus
 the population's orientation / appearance code) instead of a free embedding; much longer / larger-batch training
 (the cluster run).
+
+## 9. Robustness
+
+* a cell blob's frame was singular where the field has a singular point (a source, an axis): `linalg.inv` raised in a
+  CPU worker -- and a worker error stopped the whole run. Fixed (random direction there), and workers now report and
+  skip a failed draw (stopping only after five in a row).
+* sweep after the fix: 300 compositional scenes at 128^3 (1-5 populations, every 7th dense) + 60 training draws at random
+  levels and strengths: 0 errors.
+* a watchdog resumed any pilot that died (none did after the fix).
