@@ -5,6 +5,23 @@ augmentation / warps / noise, then loss and artefacts -- combinatorial, for dive
 running pilots test the mass; then the generator; retrain locally; test every output and stage; then speed; phantoms
 and validation.
 
+## Summary (for the morning)
+
+* **Why mass/density/region did not learn**: three causes, all fixed -- a saddle in the density head (direction only
+  concatenated), mass and region hedging on a stream that was ~40-60 % unreadable crops, and a bug that left interfaces
+  (edges) in the overall-ODF target. Mass is now the region map's window mean (consistent by construction).
+* **Generator**: the compositional generator now composes the *element* too (lines, sheets as level sets of a field's
+  phase, blobs aligned to the field) with relations and appearance operators; every operator tested; entity targets
+  hold the total on every element; 0 failures in a 300-scene sweep after one singular-frame fix.
+* **Speed**: data pipeline ~2x fresh pairs per step (workers drew a new scene per crop), steps +37 % without the
+  producer thread, start-up 13 min -> 36 s; trainer stalls traced to per-candidate GPU syncs in blob placement (fixed).
+* **Validation built**: phantom suite (11 phantoms x 3 imagings, axis truth checked to 0.7 deg), held-out skill at three
+  levels, crossing benchmark, separated layers (tree or vote grouping), presence calibration, label-free real-data check.
+* **State of the model** (see sections 7-8 and the final table): the density now has shape and the vote is ~14-18 deg;
+  the region is learning slowly (it is a hard target: a hand-feature probe reaches only 0.03-0.27); step edges still
+  light up as material; **the tree embedding is not learning** (populations are not separated in crossings) -- the main
+  open problem; EP15 tests giving the embedding the vote's axes.
+
 ## 1. Why the entity pilots (EP9 / EP10) never learned density, mass or region
 
 | symptom | cause | fix |
