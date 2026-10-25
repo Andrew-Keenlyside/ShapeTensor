@@ -142,3 +142,15 @@ the population's orientation / appearance code) instead of a free embedding; muc
 * sweep after the fix: 300 compositional scenes at 128^3 (1-5 populations, every 7th dense) + 60 training draws at random
   levels and strengths: 0 errors.
 * a watchdog resumed any pilot that died (none did after the fix).
+
+## 10. Readability by element (compositional populations only, level 0.6, before the cap's redraws)
+
+| element | visible material (median) | crops < 1 % |
+|---|---|---|
+| lines | 0.030 | 38 % |
+| sheets | 0.060 | 25 % |
+| blobs | 0.009 | 54 % |
+
+Blob populations are often a few small blobs: the cap redraws those crops, at a generation cost. A denser blob prior
+(more or larger blobs per population) would be a cheap generator change -- not made mid-run.
+
