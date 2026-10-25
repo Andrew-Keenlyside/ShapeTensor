@@ -138,13 +138,13 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
     if gen and "scene" in gen:                                                                         # the object-scene generator
         from .scene import draw_scene
         s, d = draw_scene((size,) * 3, seed=seed, device=device, strength=strength, entity_ctx=(HEAD == "entities"), **(gen["scene"] or {}))
-        if HEAD == "entities" and READ_KEEP < 1.0:                                                     # the readability cap: most crops with
-            for k in range(1, 4):                                                                      # (almost) no visible material are drawn
-                vm = visible_material(s, d)                                                            # again; READ_KEEP of them stay (empty and
-                u = ((seed * 2654435761 + 97 * k) % 4294967296) / 4294967296.0                         # unreadable crops teach "nothing here")
-                if vm >= READ_MIN or u < READ_KEEP:
-                    break
-                s, d = draw_scene((size,) * 3, seed=seed + k * 1_000_003, device=device, strength=strength, entity_ctx=True, **(gen["scene"] or {}))
+        if HEAD == "entities" and READ_KEEP < 1.0:                                                     # the readability cap: a crop with (almost)
+            keep = ((seed * 2654435761) % 4294967296) / 4294967296.0 < READ_KEEP                       # no visible material stays at READ_KEEP
+            k = 0                                                                                      # (decided once: empty and unreadable crops
+            while not keep and k < 4 and visible_material(s, d) < READ_MIN:                            # teach "nothing here"), else is drawn again:
+                k += 1; cps = max(1, int((gen["scene"] or {}).get("crops_per_scene", 1) or 1))         # another crop of the same (cached) scene
+                s, d = draw_scene((size,) * 3, seed=seed + k * 1_000_003, device=device, strength=strength, entity_ctx=True,   # first, then
+                                  scene_seed=seed // cps if k == 1 else None, **(gen["scene"] or {}))                         # new scenes
                 d.setdefault("record", {})["redrawn"] = k
     else:
         s, d = draw((size,) * 3, seed=seed, device=device, strength=strength, **(gen or {}))

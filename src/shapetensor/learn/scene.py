@@ -2212,7 +2212,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
                crop: tuple | None = None, identity_min_r: float = 1.5, p_blend: float = 0.35, p_aniso: float = 0.25, p_scramble: float = 0.3,
                p_texture: float = 0.5, p_merge: float = 0.25, p_boundary: float = 0.2, p_affine: float = 0.3, p_grain: float = 0.8,
                underlay_p: float = 0.4, p_sparse: float = 0.12, p_cutout: float = 0.15, entity_ctx: bool = False, cross_p: float = 0.0,
-               p_centre: float = 0.0, deep_tree: bool = False, dense_p: float = 0.0):
+               p_centre: float = 0.0, deep_tree: bool = False, dense_p: float = 0.0, scene_seed: int | None = None):
     """A training pair from an object scene, in the format of :func:`~shapetensor.learn.generator.draw`: ``(Sample,
     drawn)``. Scenes are rendered on a ``canvas``³ grid and ``crops_per_scene`` consecutive seeds share one (cut at
     different places), so a scene's cost is spread over its crops.
@@ -2244,7 +2244,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     the resolution separates: smaller than ``identity_min_r`` voxels -> its parent), ``descriptors5`` (per layer:
     log2(1 + size), relative wall, lumen fraction, flattening, angularity), ``desc_um``, ``points`` (branch points,
     endpoints), ``recoverability``, ``parents``, the voxel size and the physics."""
-    sid = seed // max(1, crops_per_scene)
+    sid = seed // max(1, crops_per_scene) if scene_seed is None else int(scene_seed)            # ``scene_seed``: another crop of that scene
     sc, ren, bgp, st = render_scene((canvas,) * 3, 7_000_000 + sid, device, voxel_um, families, n_groups, layout_p, content, style, underlay_p, cross_p, deep_tree, dense_p)
     r = Rng(seed, device); ra = Rng(acq_seed if acq_seed is not None else seed + 31337, device)
     from .generator import MODALITIES
