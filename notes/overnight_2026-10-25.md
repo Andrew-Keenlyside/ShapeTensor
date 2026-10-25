@@ -168,3 +168,94 @@ Blob scenes are often near-empty after acquisition: the cap redraws those crops,
 population (log-uniform 20-400 instead of 6-300) barely changed it (median 0.009 -> 0.012, 54 -> 50 %): small blobs are
 lost to the acquisition (visibility), not missing -- left as it was.
 
+## 11. Final evaluation (05:35, pilots stopped; `pilot_entities/eval_FINAL/`)
+
+Checkpoints: EP10 (step 2000, before the fixes), EP12 (2075), EP13 (2433), EP14b (2193), EP16 (897, from EP13's 1250).
+
+### Held-out skill (12 crops per cell; region corr / mass skill / density corr / mode axis deg)
+
+| checkpoint | compose L0.3 | compose L0.6 | compose L1.0 | families L0.3 | families L0.6 | families L1.0 |
+|---|---|---|---|---|---|---|
+| EP10_noif_s2000 | 0.27 / -0.69 / 0.03 / 15 | 0.25 / -0.62 / 0.12 / 12 | 0.16 / -0.18 / -0.04 / 20 | 0.35 / -0.32 / 0.01 / 15 | 0.40 / -0.03 / 0.04 / 13 | 0.20 / -0.22 / 0.06 / 13 |
+| EP12_final | 0.21 / -0.04 / 0.61 / 15 | 0.16 / -0.12 / 0.40 / 14 | 0.29 / -0.27 / 0.27 / 21 | 0.24 / -0.02 / 0.30 / 15 | 0.38 / 0.07 / 0.40 / 13 | 0.26 / -0.10 / 0.46 / 16 |
+| EP13_massregion | 0.38 / -0.04 / 0.59 / 16 | 0.25 / -0.04 / 0.52 / 15 | 0.23 / -0.22 / 0.40 / 18 | 0.27 / -0.02 / 0.41 / 14 | 0.31 / -0.01 / 0.38 / 15 | 0.28 / -0.08 / 0.55 / 15 |
+| EP14b_dec_iface | 0.38 / 0.00 / 0.61 / 16 | 0.29 / -0.03 / 0.56 / 13 | 0.15 / -0.21 / 0.40 / 19 | 0.25 / -0.03 / 0.49 / 14 | 0.32 / 0.05 / 0.51 / 14 | 0.19 / -0.06 / 0.56 / 12 |
+| EP16_zvote_treepop_from13 | 0.26 / -0.04 / 0.63 / 17 | 0.19 / -0.18 / 0.55 / 18 | 0.17 / -0.22 / 0.51 / 20 | 0.28 / -0.07 / 0.34 / 15 | 0.32 / 0.06 / 0.43 / 19 | 0.18 / -0.10 / 0.49 / 18 |
+
+### Phantom suite, easy imaging (region corr / density axis / vote axis deg; crossings: two-peak share, error)
+
+| phantom | EP10_noif_s2000 | EP12_final | EP13_massregion | EP14b_dec_iface | EP16_zvote_treepop_from13 |
+|---|---|---|---|---|---|
+| planes | 0.29 / 30.3 / 6.5 | 0.405 / 12.7 / 11.7 | -0.071 / 6.5 / 5.4 | 0.785 / 12.4 / 2.4 | 0.863 / 11.9 / 26.6 |
+| shells | 0.153 / 37.8 / 18.2 | 0.008 / 20.7 / 33.5 | 0.227 / 15.2 / 13.9 | 0.138 / 17.8 / 23.3 | 0.24 / 13.3 / 15.9 |
+| helical_wall | 0.366 / 74.1 / 33.3 | 0.381 / 32.7 / 45.3 | 0.283 / 12.9 / 21.8 | 0.383 / 11.0 / 23.1 | 0.341 / 18.0 / 26.8 |
+| laminar_rotation | 0.195 / 29.3 / 56.2 | 0.211 / 19.5 / 31.1 | 0.294 / 15.0 / 21.3 | 0.165 / 7.8 / 15.5 | 0.275 / 9.1 / 20.7 |
+| fanning | 0.378 / 77.1 / 55.7 | 0.355 / 20.9 / 15.8 | 0.409 / 19.5 / 25.2 | 0.401 / 20.2 / 18.7 | 0.408 / 24.3 / 9.3 |
+| spindles | 0.541 / 51.1 / 39.0 | 0.59 / 6.1 / 18.7 | 0.75 / 18.8 / 20.6 | 0.648 / 8.5 / 10.7 | 0.74 / 14.1 / 14.0 |
+| fibres_through_sheet | 0.604 / 89.4 / 52.6 | 0.684 / 26.2 / 42.1 | 0.673 / 11.9 / 14.9 | 0.623 / 8.6 / 17.5 | 0.588 / 23.7 / 37.3 |
+| bundle_through_step | 0.597 / 80.6 / 49.3 | 0.537 / 21.9 / 19.3 | 0.381 / 20.3 / 19.2 | 0.503 / 23.0 / 25.8 | 0.335 / 26.7 / 30.7 |
+| crossing_90 | 0.319 / 46.1 / 43.0; 0.528, 72.3 | 0.353 / 8.1 / 25.3; 0.826, 57.4 | 0.338 / 11.5 / 16.4; 0.988, 74.5 | 0.382 / 4.6 / 15.7; 0.947, 61.5 | 0.25 / 10.5 / 40.9; 0.851, 57.4 |
+| crossing_45 | 0.392 / 25.4 / 62.9; 0.68, 78.0 | 0.403 / 28.8 / 43.9; 0.848, 62.4 | 0.361 / 20.3 / 20.9; 0.833, 45.4 | 0.433 / 10.1 / 9.7; 0.99, 32.4 | 0.246 / 18.4 / 34.1; 0.963, 46.0 |
+| tubes | 0.521 / 36.5 / 58.3 | 0.513 / 15.5 / 32.0 | 0.584 / 11.5 / 8.4 | 0.499 / 7.4 / 9.5 | 0.566 / 10.8 / 12.8 |
+
+### Phantom suite, hard imaging (region corr / density axis / vote axis deg; crossings: two-peak share, error)
+
+| phantom | EP10_noif_s2000 | EP12_final | EP13_massregion | EP14b_dec_iface | EP16_zvote_treepop_from13 |
+|---|---|---|---|---|---|
+| planes | 0.237 / 30.6 / 6.0 | 0.225 / 10.7 / 17.9 | 0.158 / 9.5 / 56.4 | 0.672 / 12.5 / 2.4 | 0.63 / 17.7 / 33.7 |
+| shells | 0.143 / 39.4 / 22.5 | 0.034 / 18.4 / 36.2 | 0.144 / 15.9 / 11.4 | 0.101 / 15.7 / 28.8 | 0.131 / 14.3 / 17.1 |
+| helical_wall | 0.35 / 74.8 / 29.4 | 0.365 / 42.0 / 59.2 | 0.282 / 18.7 / 24.2 | 0.355 / 16.7 / 28.3 | 0.298 / 20.3 / 25.5 |
+| laminar_rotation | 0.192 / 31.3 / 71.2 | 0.23 / 26.9 / 41.6 | 0.318 / 37.2 / 29.1 | 0.22 / 8.5 / 13.1 | 0.344 / 12.8 / 30.6 |
+| fanning | 0.397 / 78.6 / 64.4 | 0.391 / 21.0 / 18.3 | 0.438 / 35.5 / 33.7 | 0.445 / 22.3 / 18.8 | 0.477 / 29.5 / 18.0 |
+| spindles | 0.446 / 53.6 / 45.7 | 0.534 / 11.6 / 26.3 | 0.744 / 37.1 / 34.2 | 0.68 / 12.9 / 9.9 | 0.706 / 16.7 / 17.3 |
+| fibres_through_sheet | 0.553 / 88.0 / 21.2 | 0.623 / 26.2 / 41.7 | 0.413 / 19.9 / 14.1 | 0.557 / 6.4 / 11.8 | 0.048 / 15.9 / 9.4 |
+| bundle_through_step | 0.484 / 80.6 / 56.3 | 0.284 / 18.0 / 18.1 | 0.09 / 26.7 / 25.2 | 0.215 / 42.0 / 41.3 | 0.037 / 35.5 / 41.0 |
+| crossing_90 | 0.368 / 48.8 / 44.7; 0.505, 58.5 | 0.353 / 16.6 / 43.4; 0.826, 56.4 | 0.331 / 26.7 / 24.1; 0.99, 74.5 | 0.366 / 8.8 / 14.6; 0.992, 64.1 | 0.285 / 19.4 / 66.0; 0.9, 57.4 |
+| crossing_45 | 0.435 / 26.5 / 67.1; 0.765, 78.0 | 0.412 / 41.3 / 63.2; 0.818, 67.0 | 0.363 / 31.1 / 39.8; 0.951, 53.0 | 0.409 / 12.1 / 12.5; 0.995, 35.7 | 0.268 / 25.1 / 67.0; 0.928, 49.6 |
+| tubes | 0.482 / 38.8 / 64.9 | 0.528 / 20.7 / 38.3 | 0.554 / 28.0 / 23.1 | 0.529 / 8.7 / 9.5 | 0.561 / 13.9 / 6.7 |
+
+### Phantom suite, inverted imaging (region corr / density axis / vote axis deg; crossings: two-peak share, error)
+
+| phantom | EP10_noif_s2000 | EP12_final | EP13_massregion | EP14b_dec_iface | EP16_zvote_treepop_from13 |
+|---|---|---|---|---|---|
+| planes | -0.301 / 30.0 / 6.2 | -0.325 / 12.6 / 12.9 | 0.249 / 6.8 / 5.3 | -0.699 / 12.6 / 2.4 | -0.723 / 13.7 / 27.8 |
+| shells | 0.101 / 37.6 / 18.2 | 0.306 / 20.6 / 34.0 | -0.022 / 15.2 / 13.8 | 0.109 / 17.7 / 23.6 | 0.027 / 13.4 / 15.8 |
+| helical_wall | 0.358 / 74.0 / 37.6 | 0.401 / 33.3 / 45.3 | 0.333 / 13.0 / 21.5 | 0.39 / 10.7 / 23.6 | 0.327 / 18.5 / 27.1 |
+| laminar_rotation | 0.127 / 29.0 / 60.2 | 0.318 / 19.7 / 32.3 | 0.198 / 15.6 / 21.0 | 0.119 / 8.7 / 14.8 | 0.123 / 10.5 / 20.1 |
+| fanning | 0.334 / 77.8 / 55.9 | 0.461 / 20.1 / 16.5 | 0.337 / 18.3 / 27.3 | 0.365 / 20.8 / 19.1 | 0.353 / 25.0 / 9.7 |
+| spindles | 0.483 / 51.6 / 38.6 | 0.683 / 9.2 / 21.3 | 0.75 / 18.6 / 22.6 | 0.685 / 15.0 / 11.9 | 0.687 / 13.7 / 14.6 |
+| fibres_through_sheet | 0.595 / 89.5 / 48.6 | 0.553 / 25.9 / 39.3 | 0.529 / 12.6 / 14.6 | 0.585 / 8.3 / 17.9 | 0.596 / 21.4 / 35.3 |
+| bundle_through_step | 0.591 / 80.5 / 48.2 | 0.509 / 22.8 / 20.1 | 0.475 / 20.3 / 20.1 | 0.429 / 24.2 / 27.1 | 0.455 / 26.3 / 33.5 |
+| crossing_90 | 0.305 / 45.4 / 43.7; 0.53, 72.3 | 0.373 / 7.3 / 24.8; 0.826, 56.4 | 0.42 / 10.2 / 16.9; 0.963, 74.5 | 0.367 / 5.2 / 14.4; 0.951, 61.5 | 0.184 / 9.8 / 34.6; 0.873, 57.4 |
+| crossing_45 | 0.355 / 24.7 / 64.0; 0.632, 78.0 | 0.426 / 27.1 / 42.3; 0.802, 60.6 | 0.452 / 18.4 / 20.5; 0.833, 41.5 | 0.42 / 9.3 / 9.2; 0.991, 31.5 | 0.214 / 17.4 / 26.5; 0.974, 46.0 |
+| tubes | 0.492 / 36.1 / 59.5 | 0.578 / 16.6 / 32.9 | 0.55 / 11.9 / 7.9 | 0.512 / 5.8 / 10.2 | 0.526 / 10.8 / 13.1 |
+
+### Crossing benchmark (eval_entities, 40 crops): second-entity recall (axis error) per angle; false second; tree Spearman
+
+| checkpoint | 0-10 | 10-20 | 20-30 | 30-45 | 45-60 | 60-91 | false 2nd | tree rho |
+|---|---|---|---|---|---|---|---|---|
+| EP12_final.json | 0.0 (None) | 0.0 (None) | 0.0 (None) | 0.0 (None) | 0.0 (None) | 0.0 (None) | 0.28 | 0.09 |
+| EP13_massregion.json | 0.0 (None) | 0.0 (None) | 0.0 (None) | 0.0 (None) | 0.0 (None) | 0.01 (14) | 0.43 | 0.08 |
+| EP14b_dec_iface.json | 0.0 (None) | 0.0 (None) | 0.0 (None) | 0.0 (None) | 0.0 (None) | 0.0 (None) | 0.02 | 0.04 |
+| EP16_zvote_treepop_from13.json | 0.0 (None) | 0.0 (None) | 0.0 (None) | 0.0 (None) | 0.0 (None) | 0.0 (None) | 0.0 | 0.08 |
+
+
+**Reading.**
+* **Density (which way)**: learned in every fixed model -- held-out density corr 0.27-0.63 (EP10 ~0); on the phantoms
+  the density axis is 5-20 deg where EP10's was 30-89 deg. EP14b is the most accurate (density axis 4.6-12 deg on most
+  phantoms, vote axis 2.4-25 deg).
+* **Region / mass (where)**: no clear held-out gain over EP10 yet (region corr 0.15-0.40 for all); mass now ~ a constant
+  (skill ~0) instead of worse than one (EP10 -0.3 to -0.7). On phantoms the mass fills resolved bundles (no tram-
+  tracking); sub-voxel bands are still edge-dominated.
+* **Boundaries**: EP14b (interface hard negatives + region decoder) no longer marks the grey / white step as material
+  (`layersvote_EP14b...png`: the step layer nearly gone; EP12 showed it strongly).
+* **Crossings / populations**: the density shows two peaks at crossings (EP14b: 0.95-0.99 of shared windows, 45 deg
+  crossing error 32 deg -- the best), but clustering finds no second entity (benchmark recall ~0) and the tree embedding
+  does not separate populations (Spearman 0.04-0.09) -- grouping by the votes' axes separates crossing bundles outside
+  the crossing core. EP16 (z-vote + population weight) did not fix the embedding in 900 steps.
+* **Real data** (`realcheck.png`): the fixed models give density-peak axes (EP10 none); region maps are still hazy.
+
+**Recommendation for the next run**: EP14b's configuration (all fixes + `--region-dec` + `{"iface": 2}`), longer; the
+tree embedding needs a different formulation (see section 8) before the cluster run. EP14b was resumed at 06:00 and keeps
+training (`pilot_entities/EP14b_64_dec_iface_pl4`); EP13 / EP16 resume with the same command line (`--resume auto`).
+
