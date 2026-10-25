@@ -42,7 +42,7 @@ for mix, fw in mixes.items():
                     acc[name].setdefault(k, []).append(v)
                 if i == 0 and lv == a.levels[-1]:
                     fig_cases.append((mix, name, x[0, 0, 32].float().cpu(), T["region_t"][0].float().cpu()[32],
-                                      torch.sigmoid(P["region_logit"][0].float()).cpu().reshape(64, 64, 64)[32] if "region_logit" in P else None))
+                                      (P["region"][0].float() if "region" in P else torch.sigmoid(P["region_logit"][0].float())).cpu().reshape(64, 64, 64)[32] if "region_logit" in P else None))
         for name, _ in nets:
             r = {"ckpt": name, "mix": mix, "level": lv, **{k: round(float(np.nanmean(v)), 3) for k, v in acc[name].items()}}
             rows.append(r); print(json.dumps(r), flush=True)

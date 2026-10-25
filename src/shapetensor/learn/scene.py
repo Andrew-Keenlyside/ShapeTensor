@@ -2318,9 +2318,12 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
         lab = torch.where(M > 0.5, lab, torch.full_like(lab, int(lab.max()) + 1))
         rec["boundary"] = (round(float(1 - M.mean()), 2), kind)
     pre = [L.occupancy.clone() for L in layers] if entity_ctx else None
-    img = _composite(bg, R, shapes_, device)                                 # normalises the occupancies, adds the interface and isotropic states
-    comp = (torch.stack([torch.where(p_ > 1e-6, L.occupancy / p_.clamp_min(1e-6), torch.ones_like(p_)) for p_, L in zip(pre, layers)])
-            if (entity_ctx and layers) else None)                            # occlusion and the volume budget, per population
+    cstore = {}
+    img = _composite(bg, R, shapes_, device, store=cstore)                   # normalises the occupancies, adds the interface and isotropic states
+    from . import generator as _gn
+    after = [cstore["occluded"][i] for i in range(len(layers))] if (entity_ctx and layers and not _gn.TARGETS_BUDGET) else [L.occupancy for L in layers]
+    comp = (torch.stack([torch.where(p_ > 1e-6, a_ / p_.clamp_min(1e-6), torch.ones_like(p_)) for p_, a_ in zip(pre, after)])
+            if (entity_ctx and layers) else None)                            # occlusion (and the volume budget if TARGETS_BUDGET), per population
     mode = physics or (ra.np.choice(PHYS_BY_MODALITY[modality]) if ra.p(p_physics) else "additive")
     n_sh = len(layers) + len(extra)
     filled = sum((L.occupancy for L in shapes_[:n_sh]), torch.zeros(shape, device=device))
@@ -2391,7 +2394,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
         img = M * g0 + (1 - M) * fill
     rec["physics"] = mode; rec["routes"] = routes
     img = _extra_acquisition(img, layers, ra, modality, rec, strength)
-    s = Sample(img, shapes_, bg, lab, st, 1.0, content, rec, R)
+    s = Sample(img, shapes_, bg, lab, st, 1.0, content, rec, R, budget=cstore.get("over") if entity_ctx else None)
     d = nuisance(s, seed=acq_seed if acq_seed is not None else seed, device=device, strength=strength, modality=modality, warp=ra.p(p_warp), fast=True, hp_max=12.0,
                  vis_opts={"per_layer_hp": True, "local_corr": True, "ladder": VIS_LADDER, "window_ladder": VIS_WINDOWS}, affine=ra.p(p_affine))
     if medium is not None and ra.p(0.5):                                                       # the tissue's range stretched to the display, the medium

@@ -177,7 +177,8 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
         K = d["occupancy"].shape[0]                                                                    # the population region: the visible
         vis = d["visibility"].float(); vis = vis.view(-1, 1, 1, 1).expand(K, *d["occupancy"].shape[1:]) if vis.dim() == 1 else vis   # occupancy of
         keep = [k for k, L in enumerate(s.layers) if L.role not in NOT_ENTITY]                         # every population layer, each voxel
-        out["region_t"] = ((d["occupancy"][keep].float() * vis[keep]).sum(0).clamp(0, 1) if keep else torch.zeros_like(d["occupancy"][0]).float()).half()
+        rsum = (d["occupancy"][keep].float() * vis[keep]).sum(0) if keep else torch.zeros_like(d["occupancy"][0]).float()
+        out["region_t"] = (rsum if REGION_DENSITY else rsum.clamp(0, 1)).half()                       # a density: crossings count both
         ifc = [k for k, L in enumerate(s.layers) if L.role == "interface"]                           # boundaries between background regions:
         out["iface_t"] = (d["occupancy"][ifc].float().sum(0).clamp(0, 1) if ifc else torch.zeros_like(d["occupancy"][0]).float()).half()   # hard negatives
         out["voxel"] = torch.tensor(math.log2(d["voxel_um"]) if d.get("voxel_um") else float("nan"), device=device)
@@ -195,6 +196,9 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
 NOT_ENTITY = ("interface",)
 #: roles that are not objects: what the readability cap and the query placement do not count as material
 NOT_OBJECT = ("isotropic", "interface")
+#: the region target a density (the sum of the populations' visible occupancies, crossings counting both) rather than
+#: their union clipped at one -- with the targets' populations no longer sharing the voxel (generator.TARGETS_BUDGET)
+REGION_DENSITY = True
 
 
 def set_background_entity(on: bool = True):
@@ -242,6 +246,14 @@ def entity_queries(s, d: dict, size: int, seed: int, device, points: torch.Tenso
         if cand.shape[0] > 0 and k > 0:
             pick = torch.randint(0, cand.shape[0], (k,), generator=g, device=device)
             pts[:k] = cand[pick] + torch.rand(k, 3, generator=g, device=device) - 0.5
+        kc = int(E.get("p_cross", 0.0) * n)                                                         # a share in crossing cores: where two
+        if kc > 0 and len(obj_layers) >= 2:                                                         # objects' populations overlap
+            oc = d["occupancy"][obj_layers].float()[:, m:size - m, m:size - m, m:size - m]
+            second = oc.topk(2, dim=0).values[1]
+            cc = torch.nonzero(second > 0.2).float() + m
+            if cc.shape[0] > 0:
+                pick = torch.randint(0, cc.shape[0], (kc,), generator=g, device=device)
+                pts[k:k + kc] = cc[pick] + torch.rand(kc, 3, generator=g, device=device) - 0.5
     lo, hi = E["sigma"]; sig = torch.exp(math.log(lo) + torch.rand(n, generator=g, device=device) * math.log(hi / lo))
     if points is not None:
         pts, sig = points.float(), sigma.float(); n = pts.shape[0]
@@ -752,6 +764,8 @@ def train_lobes(out: str, steps: int = 6000, size: int = 128, batch: int = 4, ac
     from . import losses as _losses
     global HEAD, DESC_KEY, SH_EXACT, DESC_LMAX, QUERY, CACHE, ROUTES, VIEWS, READ_KEEP
     READ_KEEP = float(read_keep); set_background_entity(background_entity)
+    global REGION_DENSITY
+    REGION_DENSITY = bool(region_density); ET.REGION_DENSITY = REGION_DENSITY
     rank, world, local = DF.init_distributed(device)
     if str(device).startswith("cuda"):
         device = f"cuda:{local}"
@@ -1004,7 +1018,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    dir_lmax: int = 8, vote_unc: bool = False, e_sigma: tuple | None = None, deep_tree: bool = False, lcn: float = 0.0,
                    dens_sh: bool = True, read_keep: float = READ_KEEP, dens_mlp: bool = True, mass_region: bool = True,
                    region_dec: bool = False, where_first: int = 0, z_vote: bool = False, dir_sh: int = 0, background_entity: bool = True,
-                   ray: bool = False):
+                   ray: bool = False, e_cross: float = 0.0, region_density: bool = True):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -1041,6 +1055,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     base.setdefault("deep_tree", bool(deep_tree))
     if e_sigma:
         ENTITY["sigma"] = (float(e_sigma[0]), float(e_sigma[1]))
+    ENTITY["p_cross"] = float(e_cross)                                                                # queries in crossing cores
     level = {"v": level0}
     cur_gen = lambda: {"scene": LT.difficulty_gen(level["v"], base)}
     def set_routes():
@@ -1060,7 +1075,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 channels_last=channels_last, compile_model=compile_model, entity=dict(ENTITY), pairs=pairs, pair_every=pair_every,
                 dir_lmax=dir_lmax, vote_unc=vote_unc, lcn=lcn, mass_head=True, region_head=True, dens_sh=bool(dens_sh), read_keep=READ_KEEP,
                 dens_mlp=bool(dens_mlp), mass_region=bool(mass_region), region_dec=bool(region_dec), where_first=int(where_first),
-                z_vote=bool(z_vote), dir_sh=int(dir_sh), background_entity=bool(background_entity), ray=bool(ray))
+                z_vote=bool(z_vote), dir_sh=int(dir_sh), background_entity=bool(background_entity), ray=bool(ray),
+                region_density=bool(region_density))
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)
@@ -1090,7 +1106,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     cpu = None
     if cpu_workers > 0:
         state = {"HEAD": HEAD, "DESC_KEY": DESC_KEY, "SH_EXACT": SH_EXACT, "DESC_LMAX": DESC_LMAX, "QUERY": QUERY, "CACHE": None,
-                 "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC, "ENTITY": dict(ENTITY), "READ_KEEP": READ_KEEP, "NOT_ENTITY": NOT_ENTITY}
+                 "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC, "ENTITY": dict(ENTITY), "READ_KEEP": READ_KEEP, "NOT_ENTITY": NOT_ENTITY, "REGION_DENSITY": REGION_DENSITY}
         cpu = DF.CpuWorkers(cpu_workers, size, buf.next + 90_000_000, cfg, state, threads=cpu_threads)
     pbuf = ET.EntityPairBuffer(pairs, size, "cpu", LT.difficulty_gen(level["v"], base), seed0=60_000_000 + rank * 1_000_000 + start,
                                out_device=device, n0=4) if pairs else None                           # drawn on the CPU (see EntityPairBuffer)
@@ -1284,6 +1300,8 @@ def main():
     ap.add_argument("--no-dens-sh", action="store_true", help="entities: the density from the direction MLP only (no harmonics of the point code)")
     ap.add_argument("--read-keep", type=float, default=READ_KEEP, help="entities: the share of (almost) unreadable crops kept (1: no cap)")
     ap.add_argument("--where-first", type=int, default=0, help="entities: steps of the where-losses alone (region, mass, overall), the which-way losses then ramped in over as many")
+    ap.add_argument("--no-region-density", action="store_true", help="entities: the region map the populations' union (a probability), not their density")
+    ap.add_argument("--e-cross", type=float, default=0.0, help="entities: the share of query points placed in crossing cores (two objects' populations overlapping)")
     ap.add_argument("--ray", action="store_true", help="entities: the decoder reads the features along each queried direction (the ray probe)")
     ap.add_argument("--dir-sh", type=int, default=0, help="entities: the per-direction outputs also as harmonics of the point code to this order (0: off; e.g. 6)")
     ap.add_argument("--no-background-entity", action="store_true", help="entities: the isotropic background not a population (before)")
@@ -1329,7 +1347,7 @@ def main():
                        dir_lmax=a.dir_lmax, vote_unc=a.vote_unc, e_sigma=a.e_sigma, deep_tree=a.deep_tree, lcn=a.lcn, dens_sh=not a.no_dens_sh,
                        read_keep=a.read_keep, level_steps=a.level_steps, dens_mlp=not a.no_dens_mlp, mass_region=not a.no_mass_region,
                        region_dec=a.region_dec, where_first=a.where_first, z_vote=a.z_vote, dir_sh=a.dir_sh,
-                       background_entity=not a.no_background_entity, ray=a.ray)
+                       background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, region_density=not a.no_region_density)
         return
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,

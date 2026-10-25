@@ -166,7 +166,7 @@ for ph in PHANTOMS:
                 q = EI.query(model, feats, pts, torch.full((pts.shape[0],), SIG, device=dev), dirs)
             row = {"ckpt": name, "phantom": ph, "hard": hard}
             if "region_logit" in P:
-                rp = torch.sigmoid(P["region_logit"].float()).reshape(N, N, N); mv = 12
+                rp = (P["region"].float() if "region" in P else torch.sigmoid(P["region_logit"].float())).reshape(N, N, N); mv = 12
                 a_, b_ = rp[mv:-mv, mv:-mv, mv:-mv].flatten(), tot[mv:-mv, mv:-mv, mv:-mv].flatten()
                 row["region_corr"] = round(float(torch.corrcoef(torch.stack([a_, b_]))[0, 1]), 3)
                 fr["pred"].append((name, rp[N // 2].cpu()))

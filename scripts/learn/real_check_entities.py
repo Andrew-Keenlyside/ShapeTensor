@@ -38,7 +38,7 @@ for i, f in enumerate(files):
             P = m(x[None, None], voxel=torch.tensor([math.log2(vu) if vu == vu else float("nan")], device=dev))
             feats = EI.features(m, x, voxel_um=vu if vu == vu else None)
             q = EI.query(m, feats, pts, torch.full((pts.shape[0],), 2.0, device=dev), dirs)
-        rp = torch.sigmoid(P["region_logit"].float())[0, zc].cpu()
+        rp = (P["region"].float() if "region" in P else torch.sigmoid(P["region_logit"].float()))[0, zc].cpu()
         axs[i, 1 + 2 * j].imshow(rp, cmap="magma", vmin=0, vmax=1); axs[i, 1 + 2 * j].set_title(f"{name[:18]} region", fontsize=6)
         f_ = q["f"].float(); pk = dirs[f_.argmax(1)]; sharp = (f_.amax(1) / f_.mean(1).clamp_min(1e-9)).cpu()
         w = (q["m"].float().cpu() if "m" in q else torch.ones(pts.shape[0]))

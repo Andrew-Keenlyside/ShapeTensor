@@ -122,7 +122,7 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
     if getattr(model, "mass_region", False) and getattr(model, "region", None) is not None:     # the mass: the region map's window mean
         from .model import window_mean
         tsz = [int(min(n, v - o)) for n, v, o in zip(feats[0].shape[-3:], vs.tolist(), off.tolist())]   # the tile (no far-face padding)
-        reg = torch.sigmoid(model.region_map(*feats).float())[:, :tsz[0], :tsz[1], :tsz[2]]
+        reg = model.region_value(model.region_map(*feats))[:, :tsz[0], :tsz[1], :tsz[2]]
     for a in range(0, points.shape[0], chunk):
         p = points[a:a + chunk].float(); s = sigma[a:a + chunk].float(); n = p.shape[0]; D = dirs.shape[0]
         ctx = torch.minimum(p, vs - 1 - p).amin(-1)

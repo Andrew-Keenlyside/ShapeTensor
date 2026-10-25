@@ -632,6 +632,7 @@ class Sample:
     content: str = "general"       # the content prior (general / mri / histology)
     record: dict = field(default_factory=dict)
     regions: torch.Tensor | None = None     # (Z, Y, X) the background's region means (no texture): what the interface is a step of
+    budget: torch.Tensor | None = None      # (Z, Y, X) the volume budget's divisor (>= 1): the targets undo it (TARGETS_BUDGET)
 
 
 BACKGROUNDS = ("regions", "tissue", "cells")
@@ -688,7 +689,15 @@ def background(shape, style: str, g: torch.Generator, device, scale: float = 1.0
     return img, lab, R, extra
 
 
-def _composite(bg: torch.Tensor, R: torch.Tensor, layers: list, device):
+#: the volume budget in the targets: where populations overlap past one voxel of material, the image shares the voxel
+#: between them (each scaled by the overlap) -- the targets need not. False: each population keeps its own occupancy in
+#: the targets (occlusion kept: a solid displaces what it covers), so crossing populations run unbroken through each
+#: other and the mass of a crossing is the sum of both; True: the targets share the voxel as the image does (before:
+#: each population carved out of the other -- a hole in A in B's shape, B faint inside A -- the crossing removed)
+TARGETS_BUDGET = False
+
+
+def _composite(bg: torch.Tensor, R: torch.Tensor, layers: list, device, store: dict | None = None):
     """Composite the shape layers over the background as volume fractions, in drawing order: an occluder hides what is
     under it (those layers' occupancies are attenuated by ``1 - o``), then any voxel holding more than one voxel of
     shapes is scaled back to one. Appends the interface and the isotropic states; returns the image."""
@@ -700,6 +709,8 @@ def _composite(bg: torch.Tensor, R: torch.Tensor, layers: list, device):
             vis = vis * (1 - L.occupancy)
     tot = torch.stack([L.occupancy for L in layers]).sum(0) if layers else torch.zeros(shape, device=device)
     over = tot.clamp_min(1.0)
+    if store is not None:
+        store["over"] = over; store["occluded"] = [L.occupancy.clone() for L in layers]               # occlusion only (no budget)
     for L in layers:
         L.occupancy = L.occupancy / over
     occl = sum((L.occupancy for L in layers if L.occluding), torch.zeros(shape, device=device))
@@ -1103,6 +1114,12 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
         stretch = torch.linalg.det(J).clamp_min(1e-3) ** (-1.0 / 3.0)                            # shapes appear this much larger in the warped image
         Dsc = _resample(Dsc.reshape(K * 3, Z, Y, X), grid, padding=pad).reshape(K, 3, Z, Y, X)
         Dsc[:, 0] = Dsc[:, 0] * stretch[None]
+    if getattr(s, "budget", None) is not None and not TARGETS_BUDGET:                           # each population its own occupancy
+        bw = s.budget[None]                                                                      # in the targets (the image keeps the
+        if do_warp or affine:                                                                    # shared voxel)
+            bw = _resample(bw, grid, padding=pad)
+        obj = torch.tensor([L.role == "shape" for L in s.layers], device=device).view(-1, 1, 1, 1)
+        occ = torch.where(obj, (occ * bw.clamp_min(1.0)).clamp(max=1.0), occ)
     # ---- the acquisition frame: the acquisition axis becomes dim 0 for every photometric nuisance
     ax = _int(0, 3); rec["axis"] = ax
     img = img.movedim(ax, 0).contiguous(); A, B, C = img.shape

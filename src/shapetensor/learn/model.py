@@ -256,8 +256,9 @@ class PopulationNet(nn.Module):
                  context_level: bool = False, voxel_cond: bool = False, identity_dim: int = 0, points: bool = False, nd: int = 5,
                  free_sh: bool = False, dir_lmax: int = 8, vote_unc: bool = False, mass_head: bool = False, region_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False,
-                 dir_sh: int = 0, ray: bool = False):
+                 dir_sh: int = 0, ray: bool = False, region_density: bool = False):
         super().__init__()
+        self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
         self.head, self.J, self.nd, self.free_sh = head, J, (nd if head == "lobes" else 0), bool(free_sh)
         self.context_level, self.voxel_cond, self.identity_dim, self.has_points = bool(context_level), bool(voxel_cond), int(identity_dim), bool(points)
@@ -336,7 +337,8 @@ class PopulationNet(nn.Module):
                    mass_head=bool(args.get("mass_head", False)), region_head=bool(args.get("region_head", False)),
                    dens_sh=bool(args.get("dens_sh", False)), dens_mlp=bool(args.get("dens_mlp", False)),
                    mass_region=bool(args.get("mass_region", False)), region_dec=bool(args.get("region_dec", False)),
-                   z_vote=bool(args.get("z_vote", False)), dir_sh=int(args.get("dir_sh", 0) or 0), ray=bool(args.get("ray", False))) \
+                   z_vote=bool(args.get("z_vote", False)), dir_sh=int(args.get("dir_sh", 0) or 0), ray=bool(args.get("ray", False)),
+                   region_density=bool(args.get("region_density", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
@@ -362,6 +364,11 @@ class PopulationNet(nn.Module):
             cat.append(Fn.interpolate(h3, size=h2.shape[2:], mode="trilinear", align_corners=False))
         h = Fn.silu(self.mix(torch.cat(cat, 1)))
         return h0, h1, h
+
+    def region_value(self, logit: torch.Tensor) -> torch.Tensor:
+        """The region map from its logits: a probability (the union of the populations), or with ``region_density`` a
+        density (the sum of the populations' occupancies: two crossing populations count twice)."""
+        return Fn.softplus(logit.float()) if getattr(self, "region_density", False) else torch.sigmoid(logit.float())
 
     def region_map(self, h0, h1, h) -> torch.Tensor:
         """Logits ``(B, Z, Y, X)`` of the visible occupancy of oriented material (the populations' union) at every voxel,
@@ -402,9 +409,9 @@ class PopulationNet(nn.Module):
             if e_points is not None:
                 out["ent"] = self.ent((h0, h1, h), e_points.float(), e_sigma.float(), e_dirs, None if context is None else context.float())
             if self.region is not None:                                                         # the population region, every voxel
-                out["region_logit"] = self.region_map(h0, h1, h)
+                out["region_logit"] = self.region_map(h0, h1, h); out["region"] = self.region_value(out["region_logit"])
                 if e_points is not None and getattr(self, "mass_region", False):                 # where, once: the mass is the region's
-                    out["ent"]["m"] = window_mean(torch.sigmoid(out["region_logit"].float()), e_points.float(), e_sigma.float())   # window mean
+                    out["ent"]["m"] = window_mean(out["region"], e_points.float(), e_sigma.float())   # window mean
             out["_feats"] = (h0, h1, h)
             return out
         if self.head == "lobes":

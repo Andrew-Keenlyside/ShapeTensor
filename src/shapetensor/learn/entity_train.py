@@ -30,6 +30,8 @@ import torch.nn.functional as Fn
 
 from . import bingham as BG
 
+#: the region map a density (the sum of the populations' occupancies; crossings count each population): set by the trainer
+REGION_DENSITY = False
 ENT_WEIGHTS = {"density": 1.0, "mass": 1.0, "region": 1.0, "vote": 1.0, "kappa": 0.2, "desc": 0.2, "tree": 0.5, "overall": 1.0, "fraction": 0.2, "points": 0.5, "contrast": 0.5, "cross": 0.5}
 N_DIRS = 32
 TREE_PAIRS = 4096
@@ -152,7 +154,12 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         cr = lambda x: x[..., mv:x.shape[-3] - mv, mv:x.shape[-2] - mv, mv:x.shape[-1] - mv]
         wr = 1.0 + W.get("iface", 0.0) * cr(T["iface_t"].float()) * (1 - cr(rt)) if "iface_t" in T and W.get("iface", 0.0) > 0 else None   # steps
         # between background regions where there is no material: hard negatives (the trunk was taught edges before)
-        parts["region"] = Fn.binary_cross_entropy_with_logits(cr(rl), cr(rt), weight=wr); total = total + W.get("region", 1.0) * parts["region"]
+        if REGION_DENSITY and "region" in P:                                                      # a density: log L1 (scale-free, as the mass)
+            rv = cr(P["region"].float()); lr_ = (torch.log(rv + 0.05) - torch.log(cr(rt) + 0.05)).abs()
+            parts["region"] = (lr_ * wr).sum() / wr.sum() if wr is not None else lr_.mean()
+        else:
+            parts["region"] = Fn.binary_cross_entropy_with_logits(cr(rl), cr(rt), weight=wr)
+        total = total + W.get("region", 1.0) * parts["region"]
     if "fraction" in T and "fraction_logit" in P and lat_ok:
         parts["fraction"] = Fn.binary_cross_entropy_with_logits(c(P["fraction_logit"].float()), c(T["fraction"].float())); total = total + W["fraction"] * parts["fraction"]
     if "points" in P and "points_t" in T and lat_ok:
@@ -195,7 +202,7 @@ def where_skill(P: dict, T: dict, dirs: torch.Tensor, margin: int = 4) -> dict:
     out = {}
     if "region_logit" in P and "region_t" in T:
         mv = 2 * margin; cr = lambda x: x[..., mv:x.shape[-3] - mv, mv:x.shape[-2] - mv, mv:x.shape[-1] - mv]
-        a = torch.sigmoid(cr(P["region_logit"].float())).flatten(); b = cr(T["region_t"].float()).flatten()
+        a = cr(P["region"].float() if "region" in P else torch.sigmoid(P["region_logit"].float())).flatten(); b = cr(T["region_t"].float()).flatten()
         if float(b.std()) > 1e-6:
             out["region_corr"] = float(torch.corrcoef(torch.stack([a, b]))[0, 1])
     ent = P["ent"]
