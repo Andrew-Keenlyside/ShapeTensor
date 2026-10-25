@@ -30,7 +30,7 @@ model = PopulationNet.from_args(ck["args"]).to(dev).eval(); model.load_state_dic
 N = 96; VOX = 2.0
 
 
-def phantom(theta, resolved, seed=3):
+def phantom(theta, resolved, seed=3, step_bg=False):
     """Two bundles crossing at ``theta`` degrees through the volume's centre (theta None: one bundle), axes in the z-x
     plane; returns the image (0-1), the ground-truth layers (occupancy per population) and the axes."""
     sc = Scene((N,) * 3, seed, dev, VOX); c = torch.full((3,), (N - 1) / 2, device=dev)
@@ -45,7 +45,13 @@ def phantom(theta, resolved, seed=3):
     tot = occ.sum(0); occ = occ / tot.clamp_min(1.0)[None]                            # the volume budget, as the generator composites
     rng = torch.Generator(device=dev).manual_seed(seed)
     con = [-0.55, -0.4][:occ.shape[0]]
-    img = 0.75 + sum(cc * o for cc, o in zip(con, occ))
+    if step_bg:                                                                          # a grey / white-like step through the centre, oblique to
+        co = torch.stack(torch.meshgrid(*[torch.arange(N, device=dev, dtype=torch.float32)] * 3, indexing="ij"))   # the bundle; partial volume:
+        side = ((co[0] - c[0]) * 0.8 + (co[2] - c[2]) * 0.6) > 0                           # the fibre's contrast follows the local background and
+        bgv = torch.where(side, torch.tensor(0.75, device=dev), torch.tensor(0.35, device=dev))   # flips sign across the step
+        img = bgv * (1 - occ.sum(0)) + 0.55 * occ.sum(0)
+    else:
+        img = 0.75 + sum(cc * o for cc, o in zip(con, occ))
     img = gaussian(img, 1.0) + 0.03 * torch.randn(img.shape, generator=rng, device=dev)
     return img.clamp(0, 1), occ, axes
 
@@ -90,11 +96,12 @@ def ang(a, b):
     return float(torch.rad2deg(torch.acos((a * b).sum(-1).abs().clamp(max=1))))
 
 
-cases = [("single bundle, resolved", None, True), ("30 deg, resolved", 30, True), ("60 deg, resolved", 60, True), ("90 deg, resolved", 90, True),
-         ("45 deg, sub-voxel fibres", 45, False), ("90 deg, sub-voxel fibres", 90, False)]
+cases = [("single bundle, resolved", None, True, False), ("30 deg, resolved", 30, True, False), ("60 deg, resolved", 60, True, False),
+         ("90 deg, resolved", 90, True, False), ("45 deg, sub-voxel fibres", 45, False, False), ("90 deg, sub-voxel fibres", 90, False, False),
+         ("bundle across a grey/white-like step (contrast flips)", None, True, True)]
 rows = []
-for name, th, res in cases:
-    img, occ, axes = phantom(th, res)
+for name, th, res, stp in cases:
+    img, occ, axes = phantom(th, res, step_bg=stp)
     rows.append((name, img, occ, axes, VOX))
 if with_p4:
     P = "/home/andrew/bridge_wmcov/shapetensor/phantoms/"

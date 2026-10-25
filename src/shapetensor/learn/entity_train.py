@@ -251,7 +251,7 @@ class EntityPairBuffer:
         lo = torch.clamp(sh, min=0) + m; hi = torch.clamp(sh + self.size, max=self.size) - 1 - m           # the overlap, crop 1's voxels
         g = torch.Generator(device=dev).manual_seed(seed + 77)
         pts = lo + torch.rand(4 * n, 3, generator=g, device=dev) * (hi - lo)
-        kl = [k for k, L in enumerate(s1.layers) if L.role != "isotropic"]                               # most queries on the entities' material
+        kl = [k for k, L in enumerate(s1.layers) if L.role not in TR.NOT_ENTITY]                          # most queries on the entities' material
         occ = d1["occupancy"][kl].float().sum(0) if kl else torch.zeros_like(d1["occupancy"][0]).float()
         on = _vis_at(occ[None], pts)[:, 0] > 0.05
         pts = torch.cat([pts[on], pts[~on]])[:n]

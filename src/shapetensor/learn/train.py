@@ -129,7 +129,8 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
     F = None
     if SH_EXACT or (QUERY and QUERY.get("exact")):                                                     # the exact per-voxel density
         from .query import voxel_density
-        F = voxel_density(s, d, SH_EXACT or QUERY["lmax"], desc_lmax=DESC_LMAX, desc_key=DESC_KEY if DESC_KEY in d else "descriptors")
+        F = voxel_density(s, d, SH_EXACT or QUERY["lmax"], desc_lmax=DESC_LMAX, desc_key=DESC_KEY if DESC_KEY in d else "descriptors",
+                          roles_out=NOT_ENTITY if HEAD == "entities" else ("isotropic",))
     if HEAD == "lobes":                                                                                # identities (stride 2), points (lattice), voxel size
         if "identity" in d:
             out["identity_t"] = d["identity"][::2, ::2, ::2].to(torch.int32)
@@ -151,12 +152,18 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
             out["points_t"] = Fn.avg_pool3d(d["points"][None].float(), 4)[0].half()
         K = d["occupancy"].shape[0]                                                                    # the population region: the visible
         vis = d["visibility"].float(); vis = vis.view(-1, 1, 1, 1).expand(K, *d["occupancy"].shape[1:]) if vis.dim() == 1 else vis   # occupancy of
-        keep = [k for k, L in enumerate(s.layers) if L.role != "isotropic"]                            # every oriented layer, each voxel
+        keep = [k for k, L in enumerate(s.layers) if L.role not in NOT_ENTITY]                         # every population layer, each voxel
         out["region_t"] = ((d["occupancy"][keep].float() * vis[keep]).sum(0).clamp(0, 1) if keep else torch.zeros_like(d["occupancy"][0]).float()).half()
         out["voxel"] = torch.tensor(math.log2(d["voxel_um"]) if d.get("voxel_um") else float("nan"), device=device)
     out["kind"] = out["kind"].to(torch.int8); out["layer"] = out["layer"].to(torch.int16)
     return d["image"].to(torch.uint8), out
 
+
+#: layer roles that are not material of any population for the entity model: the isotropic remainder, and the
+#: interfaces between background regions (a boundary is not an object: as targets they taught the network that every
+#: intensity step is oriented material -- 63 % of the target mass, edges traced like a structure tensor; fibres crossing
+#: a boundary stay entities, the step is only context)
+NOT_ENTITY = ("isotropic", "interface")
 
 #: the entity targets' sampling: query points per crop, scales (crop voxels, log-uniform), entities kept per query, the
 #: resolution rule (an object is its own entity when its radius >= max(r_min, c_sig * sigma)), padded tree sizes
@@ -187,7 +194,7 @@ def entity_queries(s, d: dict, size: int, seed: int, device, points: torch.Tenso
     E = ENTITY; ctx = d["entity_ctx"]; g = torch.Generator(device=device).manual_seed(seed + 4243)
     n = E["n_points"]; m = E["margin"]; emax = E["emax"]
     gl_ = [k for k in ctx["group_layer"] if k >= 0]
-    dense = [k for k, L in enumerate(s.layers) if L.role != "isotropic" and k not in gl_]
+    dense = [k for k, L in enumerate(s.layers) if L.role not in NOT_ENTITY and k not in gl_]
     ent_layers = gl_ + dense
     pts = m + torch.rand(n, 3, generator=g, device=device) * (size - 1 - 2 * m)
     if ent_layers:                                                                                  # most queries on the entities' material

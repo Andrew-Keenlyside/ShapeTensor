@@ -29,15 +29,20 @@ def test_entities_hold_the_total(style):
     from shapetensor.learn.scene import draw_scene
     TR.HEAD = "entities"
     try:
-        for seed in range(40):
+        found = False
+        for seed in range(120):
             s, d = draw_scene((48,) * 3, seed=seed, device=DEV, strength=0.0, canvas=96, style=style, n_groups=(1, 2), underlay_p=0.0,
                               entity_ctx=True, p_warp=0.0, p_affine=0.0, p_cutout=0.0, p_sparse=0.0, p_boundary=0.0, zoom=1)
-            if len([L for L in s.layers if L.role != "isotropic"]) >= 2:
+            occ_e = sum((d["occupancy"][k].float() for k, L in enumerate(s.layers) if L.role not in TR.NOT_ENTITY), torch.zeros((48,) * 3, device=DEV))
+            if len([L for L in s.layers if L.role not in TR.NOT_ENTITY]) >= 2 and float((occ_e[14:33, 14:33, 14:33] > 0.1).float().mean()) > 0.05:
+                found = True
                 break
+        if not found:
+            pytest.skip("no scene with population material in the window")
         out = TR.entity_queries(s, d, 48, seed, DEV)
     finally:
         TR.HEAD = "slots"
-    keep = [k for k, L in enumerate(s.layers) if L.role != "isotropic"]
+    keep = [k for k, L in enumerate(s.layers) if L.role not in TR.NOT_ENTITY]                       # populations only: no interfaces
     K = d["occupancy"].shape[0]
     full = lambda x: x.float().view(-1, 1, 1, 1).expand(K, 48, 48, 48) if x.dim() == 1 else x.float()
     vis, ov = full(d["visibility"]), full(d["orientation_visibility"]).clamp(0, 1)
@@ -50,9 +55,8 @@ def test_entities_hold_the_total(style):
     S6 = S6.sum(1)                                                                                    # (Q, 6)
     errs = []
     for q in torch.nonzero(inner)[:, 0][:40].tolist():
-        ref = gaussian(M, float(sig[q]))
-        p = pts[q].round().long()
-        r6 = ref[:, p[0], p[1], p[2]]
+        from shapetensor.learn.entities import _vis_at
+        r6 = _vis_at(gaussian(M, float(sig[q])), pts[q][None].float())[0]                         # at the exact point (trilinear), as the targets
         if float(r6[:3].sum()) < 0.02:
             continue
         errs.append(float((S6[q] - r6).abs().sum() / r6[:3].sum()))

@@ -44,7 +44,7 @@ def layer_density(s, drawn: dict, points: torch.Tensor, sigmas: torch.Tensor, lm
     distinct levels): ``(Q, n_coef)``. ``s`` the sample, ``drawn`` its acquisition (occupancy, tensors, visibility)."""
     occ, T, vis = drawn["occupancy"], drawn["tensors"], drawn["visibility"]
     dev = occ.device
-    shapes = [k for k, L in enumerate(s.layers) if L.role != "isotropic"]
+    shapes = [k for k, L in enumerate(s.layers) if L.role not in roles_out]                    # (the entity model leaves interfaces out too)
     vis = vis.view(-1, 1, 1, 1) if vis.dim() == 1 else vis
     w = (occ[shapes] * vis[shapes]).float()                                                           # (S, Z, Y, X)
     T = T[shapes].float()
@@ -105,7 +105,7 @@ def axial_density_sh(S: torch.Tensor, kappa: float, lmax: int, tk: float = 0.05)
 
 
 def voxel_density(s, drawn: dict, lmax: int, kappa: float = 20.0, n: int = 600, chunk: int = 32768, floor: float = 1e-4,
-                  desc_lmax: int = 0, desc_key: str = "descriptors", analytic: bool = False) -> torch.Tensor:
+                  desc_lmax: int = 0, desc_key: str = "descriptors", analytic: bool = False, roles_out=("isotropic",)) -> torch.Tensor:
     """The exact per-voxel orientation density in SH, ``(n_coef, Z, Y, X)``: at every voxel, the sum over the shape
     layers of its visible occupancy times the angular density of its own label tensor (each lobe normalised over the
     sphere). A Gaussian window of any sigma applied to it is the window-averaged density of the orientations present
