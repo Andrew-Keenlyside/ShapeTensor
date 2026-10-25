@@ -124,7 +124,7 @@ def visible_material(s, d, margin: int = 8) -> float:
     """The visible material of a drawn crop: the population layers' occupancy x visibility, summed and clipped at 1,
     its mean away from the faces -- the population-region target's mean."""
     occ = d["occupancy"]; K = occ.shape[0]
-    keep = [k for k, L in enumerate(s.layers) if L.role not in NOT_ENTITY]
+    keep = [k for k, L in enumerate(s.layers) if L.role not in NOT_OBJECT]
     if not keep:
         return 0.0
     vis = d["visibility"].float(); vis = vis.view(-1, 1, 1, 1).expand(K, *occ.shape[1:]) if vis.dim() == 1 else vis
@@ -185,11 +185,21 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
     return d["image"].to(torch.uint8), out
 
 
-#: layer roles that are not material of any population for the entity model: the isotropic remainder, and the
-#: interfaces between background regions (a boundary is not an object: as targets they taught the network that every
-#: intensity step is oriented material -- 63 % of the target mass, edges traced like a structure tensor; fibres crossing
-#: a boundary stay entities, the step is only context)
-NOT_ENTITY = ("isotropic", "interface")
+#: layer roles that are not a population for the entity model: the interfaces between background regions (a boundary is
+#: not an object: as targets they taught the network that every intensity step is oriented material -- 63 % of the
+#: target mass, edges traced like a structure tensor; fibres crossing a boundary stay entities, the step is only
+#: context). The isotropic remainder -- the background, the space without fibres -- **is** a population (one entity,
+#: isotropic: a uniform floor under the oriented lobes, inferred everywhere and dropped afterwards by its isotropy), so
+#: a region of material whose orientation does not show and a background region are both what they look like, and no
+#: target asks for the edge between them. ``set_background_entity(False)``: the isotropic remainder left out (before).
+NOT_ENTITY = ("interface",)
+#: roles that are not objects: what the readability cap and the query placement do not count as material
+NOT_OBJECT = ("isotropic", "interface")
+
+
+def set_background_entity(on: bool = True):
+    global NOT_ENTITY
+    NOT_ENTITY = ("interface",) if on else ("isotropic", "interface")
 
 #: the entity targets' sampling: query points per crop, scales (crop voxels, log-uniform), entities kept per query, the
 #: resolution rule (an object is its own entity when its radius >= max(r_min, c_sig * sigma)), padded tree sizes
@@ -223,8 +233,9 @@ def entity_queries(s, d: dict, size: int, seed: int, device, points: torch.Tenso
     dense = [k for k, L in enumerate(s.layers) if L.role not in NOT_ENTITY and k not in gl_]
     ent_layers = gl_ + dense
     pts = m + torch.rand(n, 3, generator=g, device=device) * (size - 1 - 2 * m)
-    if ent_layers:                                                                                  # most queries on the entities' material
-        occ = d["occupancy"][ent_layers].float().sum(0)
+    obj_layers = [k for k in ent_layers if s.layers[k].role not in NOT_OBJECT]                      # most queries on the objects' material
+    if obj_layers:                                                                                  # (not on the background)
+        occ = d["occupancy"][obj_layers].float().sum(0)
         inner = occ[m:size - m, m:size - m, m:size - m] > 0.05
         cand = torch.nonzero(inner).float() + m
         k = int(E.get("p_tissue", 0.7) * n)
@@ -254,7 +265,11 @@ def entity_queries(s, d: dict, size: int, seed: int, device, points: torch.Tenso
     if nd:                                                                                          # the dense layers' entities, merged by visible mass
         dl = [s.layers[k] for k in dense]
         dd = torch.tensor([[float(getattr(L, "radius", 0.0)), 0.0, 0.0, 1.0, 0.0] for L in dl], device=device)
-        de = dense_entities(d["occupancy"][dense], d["tensors"][dense], pts, sig, vis=full(vis)[dense] if vis is not None else None,
+        Td = d["tensors"][dense]
+        iso_l = [j for j, L in enumerate(dl) if L.role == "isotropic"]                              # the background has no orientation: its
+        if iso_l:                                                                                   # tensor stays I / 3 (a warp's Jacobian
+            Td = Td.clone(); Td[iso_l] = torch.tensor([1, 1, 1, 0, 0, 0.0], device=device, dtype=Td.dtype).view(1, 6, 1, 1, 1) / 3   # would make it a weak line)
+        de = dense_entities(d["occupancy"][dense], Td, pts, sig, vis=full(vis)[dense] if vis is not None else None,
                             ovis=full(ov)[dense] if ov is not None else None, desc=dd)
         ids = U.numel() + torch.arange(nd, device=device)
         e_anc[ids, 0] = ids.int(); e_anc[ids, 1] = int(loc[0])
@@ -1074,7 +1089,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     cpu = None
     if cpu_workers > 0:
         state = {"HEAD": HEAD, "DESC_KEY": DESC_KEY, "SH_EXACT": SH_EXACT, "DESC_LMAX": DESC_LMAX, "QUERY": QUERY, "CACHE": None,
-                 "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC, "ENTITY": dict(ENTITY), "READ_KEEP": READ_KEEP}
+                 "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC, "ENTITY": dict(ENTITY), "READ_KEEP": READ_KEEP, "NOT_ENTITY": NOT_ENTITY}
         cpu = DF.CpuWorkers(cpu_workers, size, buf.next + 90_000_000, cfg, state, threads=cpu_threads)
     pbuf = ET.EntityPairBuffer(pairs, size, "cpu", LT.difficulty_gen(level["v"], base), seed0=60_000_000 + rank * 1_000_000 + start,
                                out_device=device, n0=4) if pairs else None                           # drawn on the CPU (see EntityPairBuffer)
