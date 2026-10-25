@@ -63,8 +63,14 @@ element (median relative error 3.1 % lines, 3.4 % sheets, 2.4 % blobs). Figures:
 
 ## 4. Pilots (64^3, PL4 init, 8000 steps, A6000 shared)
 
-* EP11c: all fixes, the families only (compose off) -- the fixes' effect
-* EP12: all fixes, compositional populations on (about half of all populations) -- the new generator
+* EP11c: all fixes, the families only (compose off) -- the fixes' effect (stopped at ~1000 for EP13)
+* EP12: all fixes, compositional populations on (about half of all populations) -- the new generator (to 2075)
+* EP13: + density harmonics through an MLP, mass = the region map's window mean
+* EP14b: EP13 + region decoder + interface hard negatives (`iface 2`)
+* EP16: from EP13 (step 1250) + `--z-vote` + `tree_pop 2` (the tree embedding)
+* X1 / X2: region-only diagnostics (with / without contrast routes)
+* note: an evaluation process on the shared GPU (~47 of 48 GB in use) stalled the trainers for tens of minutes;
+  so did per-candidate GPU syncs in the trainers' own in-process draws -- both fixed / avoided
 
 ## 5. Phantom suite
 
@@ -118,6 +124,10 @@ target tree distance -- median 0.49-0.53 whether the same fibre (t = 0), sibling
 (2.4-3.0); corr 0.085. `val_tree` 0.68-0.73 from step 750 to 2000 -- about what a collapsed embedding scores. On a
 fixed batch it fits (0.65 -> 0.32 in 100 steps): no bug, slow generalisation of instance embeddings from the stream.
 Consequence: crossings come out as one model layer (populations not separated).
+
+Tried tonight (from EP13's step-1250 weights, level from 0.45): **EP15** `--z-vote` -- the embedding gets the vote's
+axes (detached, zero-initialised linear term); its training tree loss at step 150 was 0.49 (EP13 0.60-0.67), stopped
+at 161 for **EP16** = `--z-vote` + `tree_pop 2` (pairs from two populations weighted, not discounted by their distance).
 
 Options (for discussion): weight the population level first (pairs from different populations vs the same population,
 before instance pairs); an explicit spatial-embedding form (each direction's offset to its entity's centreline, plus
