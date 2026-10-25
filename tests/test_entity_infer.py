@@ -184,3 +184,20 @@ def test_mass_from_region_tiled_equals_whole():
         whole = EI.query(net, EI.features(net, x), pts, sig, dirs, vol_shape=x.shape)
         tiled = EI.query_volume(net, x, pts, sig, dirs, core=16, halo=EI.halo_for(net))
     assert "m" in whole and torch.allclose(whole["m"], tiled["m"], atol=2e-3, rtol=1e-2)
+
+
+def test_cluster_lobes_separates_a_crossing_density():
+    """Entities from the density's lobes: two Watson lobes -> two entities on their axes; one lobe -> one."""
+    import torch
+    from shapetensor.learn import entity_infer as EI
+    dirs = EI.sphere_dirs(200)
+    U = lambda *v: torch.nn.functional.normalize(torch.tensor(v), dim=0)
+    a1, a2 = U(0.25, 0.7, -0.7), U(0.25, 0.7, 0.7)
+    f = torch.stack([torch.exp(20 * (dirs @ a1) ** 2 - 20) + 0.8 * torch.exp(20 * (dirs @ a2) ** 2 - 20), torch.exp(20 * (dirs @ a1) ** 2 - 20)])
+    Q, D = f.shape
+    r = {"f": f, "z": torch.zeros(Q, D, 4), "R": torch.eye(3).expand(Q, D, 3, 3).clone(), "kappa": torch.ones(Q, D, 2), "desc": torch.zeros(Q, D, 5)}
+    e = EI.cluster_lobes(r, dirs)
+    A = lambda u, v: float(torch.rad2deg(torch.acos((u @ v).abs().clamp(max=1))))
+    assert int(e["live"][0].sum()) == 2 and int(e["live"][1].sum()) == 1
+    ax = [e["R_odf"][0, i, :, 2] for i in torch.nonzero(e["live"][0])[:, 0].tolist()]
+    assert min(A(ax[0], a1), A(ax[1], a1)) < 5 and min(A(ax[0], a2), A(ax[1], a2)) < 5

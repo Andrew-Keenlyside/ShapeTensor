@@ -263,6 +263,54 @@ def cluster(r: dict, dirs: torch.Tensor, f_frac: float = 0.25, f_abs: float = 1e
     return st | {"label": ent}
 
 
+def cluster_lobes(r: dict, dirs: torch.Tensor, f_frac: float = 0.25, f_abs: float = 1e-4, merge_deg: float = 25.0,
+                  share_min: float = 0.03, k: int = 8, cmax: int = 12) -> dict:
+    """Entities per point from the density's lobes alone: each living direction (density >= ``f_frac`` of the mean)
+    climbs the density over the direction grid (steepest ascent among its ``k`` nearest neighbours, pointer jumping) to
+    a local maximum; a maximum's basin is an entity; maxima within ``merge_deg`` of a heavier one join it; the
+    ``cmax`` heaviest kept, those below ``share_min`` dropped. Where the votes do not (yet) switch between the lobes
+    of a crossing, the density's own peaks still separate its entities. Returns :func:`cluster`'s fields."""
+    f = r["f"]; Q, D = f.shape; dev = f.device
+    nb = sym_neighbours(dirs, k).to(dev); nbc = nb.clamp_min(0)
+    alive = (f >= f_frac * f.mean(1, keepdim=True)) & (f >= f_abs)
+    cand = torch.cat([torch.arange(D, device=dev)[:, None], nbc], 1)                                # (D, k + 1): itself and its neighbours
+    fc = f[:, cand].masked_fill(~torch.cat([torch.ones(D, 1, dtype=torch.bool, device=dev), nb >= 0], 1)[None], -math.inf)
+    up = cand[torch.arange(D, device=dev)[None], fc.argmax(-1)]                                     # (Q, D) the steepest step
+    for _ in range(int(math.ceil(math.log2(max(D, 2)))) + 2):                                     # pointer jumping to the maxima
+        up = up.gather(1, up)
+    peak = torch.where(alive, up, torch.full_like(up, -1))
+    w = torch.where(alive, f, torch.zeros_like(f)); key = peak.clamp_min(0)
+    pm = torch.zeros(Q, D, device=dev).scatter_add_(1, key, w) * (peak >= 0).any(1, keepdim=True)  # each maximum's basin mass
+    order = pm.argsort(1, descending=True)[:, :cmax]; C = order.shape[1]
+    pk = pm.gather(1, order) > 0
+    cosm = (dirs[order] @ dirs[order].transpose(1, 2)).abs()                                         # (Q, C, C) between the kept maxima
+    close = cosm >= math.cos(math.radians(merge_deg))
+    heavier = torch.arange(C, device=dev)[None, :, None] > torch.arange(C, device=dev)[None, None, :]   # j before i: heavier
+    tgt = torch.where(close & heavier & pk[:, None, :] & pk[:, :, None], torch.arange(C, device=dev)[None, None].expand(Q, C, C), torch.full((Q, C, C), C, device=dev))
+    root = tgt.min(-1).values; root = torch.where(root < C, root, torch.arange(C, device=dev)[None].expand(Q, C))
+    for _ in range(C):                                                                             # chains of merges to their heaviest
+        root = root.gather(1, root)
+    slot = torch.full((Q, D + 1), -1, dtype=torch.long, device=dev)                                # maximum index -> kept slot
+    slot.scatter_(1, order, torch.where(pk, root, torch.full_like(root, -1)))
+    ent0 = torch.where(peak >= 0, slot.gather(1, peak.clamp_min(0)), torch.full_like(peak, -1))
+    # far lobes not kept (beyond cmax): to the nearest kept maximum within merge_deg, else none
+    lost = alive & (ent0 < 0)
+    if bool(lost.any()):
+        pd = dirs[peak.clamp_min(0)]                                                               # (Q, D, 3)
+        cd = (pd @ dirs[order].transpose(1, 2)).abs().masked_fill(~pk[:, None, :], -1.0)          # (Q, D, C)
+        bc, bi = cd.max(-1)
+        ent0 = torch.where(lost & (bc >= math.cos(math.radians(merge_deg))), root.gather(1, bi), ent0)
+    cm = torch.zeros(Q, C + 1, device=dev).scatter_add_(1, torch.where(ent0 >= 0, ent0, torch.full_like(ent0, C)), w)[:, :C]
+    o2 = cm.argsort(1, descending=True); keepc = (cm.gather(1, o2) >= share_min * cm.sum(1, keepdim=True).clamp_min(1e-12)) & (cm.gather(1, o2) > 0)
+    rank = torch.full((Q, C + 1), -1, dtype=torch.long, device=dev)
+    rank.scatter_(1, o2, torch.where(keepc, torch.arange(C, device=dev)[None].expand(Q, C), torch.full((Q, C), -1, dtype=torch.long, device=dev)))
+    ent = rank.gather(1, torch.where(ent0 >= 0, ent0, torch.full_like(ent0, C)))
+    st = _entity_stats(r, dirs, f, ent, C)
+    if "m" in r:
+        st["mass"] = r["m"].float()[:, None] * st["share"] * st["live"]
+    return st | {"label": ent}
+
+
 def _comp_mean(v: torch.Tensor, w: torch.Tensor, ent: torch.Tensor, C: int) -> torch.Tensor:
     Q, D = w.shape; e = torch.where(ent >= 0, ent, torch.full_like(ent, C))
     s = torch.zeros(Q, C + 1, v.shape[-1], device=v.device).scatter_add_(1, e[..., None].expand(-1, -1, v.shape[-1]), w[..., None] * v)

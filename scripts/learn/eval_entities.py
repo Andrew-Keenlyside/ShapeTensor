@@ -41,6 +41,7 @@ def main():
     ap.add_argument("--n-dirs", type=int, default=300); ap.add_argument("--share", type=float, default=0.15)
     ap.add_argument("--match-deg", type=float, default=15.0); ap.add_argument("--out", default=None); ap.add_argument("--device", default="cuda")
     ap.add_argument("--t-rel", type=float, default=None, help="sparse directions from the total ODF (None: every direction)")
+    ap.add_argument("--lobes", action="store_true", help="entities from the density's lobes (entity_infer.cluster_lobes) instead of votes and embeddings")
     a = ap.parse_args()
     import shapetensor.learn.train as TR
     from shapetensor.learn import entity_infer as EI, lobe_train as LT
@@ -74,7 +75,7 @@ def main():
         vox = math.log2(d["voxel_um"]) if d.get("voxel_um") else None
         with torch.no_grad():
             r = EI.query(model, EI.features(model, x, vox), pts, sig, dirs, vol_shape=x.shape, t_rel=a.t_rel)
-            e = EI.cluster(r, dirs)
+            e = EI.cluster_lobes(r, dirs) if a.lobes else EI.cluster(r, dirs)
         T6 = t["e_T6"].float(); live_t = t["e_node"] >= 0
         mt = (t["e_mass"].float() * t["e_vis"].float()) * live_t
         sh_t = mt / mt.sum(1, keepdim=True).clamp_min(1e-9)
@@ -122,7 +123,7 @@ def main():
                 rho_all.append(float(spearmanr(td, zd).correlation))
         if (i + 1) % 20 == 0:
             print(f"{i + 1}/{a.n} crops, {time.time() - t0:.0f} s", flush=True)
-    out = {"ckpt": a.ckpt, "n_crops": a.n, "share": a.share, "match_deg": a.match_deg,
+    out = {"ckpt": a.ckpt, "n_crops": a.n, "share": a.share, "match_deg": a.match_deg, "clustering": "lobes" if a.lobes else "votes",
            "second_entity": {f"{b[0]}-{b[1]}": {"windows": v["n"], "recall": (v["found"] / v["n"]) if v["n"] else None,
                                                 "axis_err_med": float(np.median(v["err"])) if v["err"] else None} for b, v in rec.items()},
            "false_second": {"windows": single["n"], "rate": single["false2"] / single["n"] if single["n"] else None},
