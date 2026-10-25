@@ -129,7 +129,12 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
             # the gauge: each entity's distance from the ball's centre is its depth in the tree (the root at the centre,
             # ancestors toward it) -- depth readable at inference, embeddings comparable across windows and volumes
             dep = TREE_EDGE * ((T["e_anc"][b][nb[idx]] >= 0).sum(1) - 1).float(); r0 = 2 * torch.atanh(zb[idx].norm(dim=-1).clamp(max=1 - 1e-5))
-            lt.append(((dz - t) ** 2 / (1 + t)).mean() + ((r0 - dep) ** 2 / (1 + dep)).mean())
+            wt = 1.0
+            if W.get("tree_pop", 0.0) > 0:                                                          # populations first: a pair from two populations
+                A = T["e_anc"][b]                                                                   # (the ancestors just below the root differ)
+                pop = lambda n_: A[n_].gather(1, ((A[n_] >= 0).sum(1) - 2).clamp(min=0)[:, None])[:, 0]   # weighs tree_pop x (1 + t): its
+                wt = 1.0 + W["tree_pop"] * (pop(nb[pi]) != pop(nb[pj])).float() * (1 + t)           # distance not discounted by its size
+            lt.append((wt * (dz - t) ** 2 / (1 + t)).mean() + ((r0 - dep) ** 2 / (1 + dep)).mean())
         if lt:
             parts["tree"] = torch.stack(lt).mean(); total = total + W["tree"] * parts["tree"]
         parts["owned_share"] = owned.float().mean().detach()
