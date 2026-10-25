@@ -145,7 +145,9 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         rl = P["region_logit"].float(); rt = T["region_t"].float()
         mv = 2 * margin                                                                            # voxels from the faces
         cr = lambda x: x[..., mv:x.shape[-3] - mv, mv:x.shape[-2] - mv, mv:x.shape[-1] - mv]
-        parts["region"] = Fn.binary_cross_entropy_with_logits(cr(rl), cr(rt)); total = total + W.get("region", 1.0) * parts["region"]
+        wr = 1.0 + W.get("iface", 0.0) * cr(T["iface_t"].float()) * (1 - cr(rt)) if "iface_t" in T and W.get("iface", 0.0) > 0 else None   # steps
+        # between background regions where there is no material: hard negatives (the trunk was taught edges before)
+        parts["region"] = Fn.binary_cross_entropy_with_logits(cr(rl), cr(rt), weight=wr); total = total + W.get("region", 1.0) * parts["region"]
     if "fraction" in T and "fraction_logit" in P and lat_ok:
         parts["fraction"] = Fn.binary_cross_entropy_with_logits(c(P["fraction_logit"].float()), c(T["fraction"].float())); total = total + W["fraction"] * parts["fraction"]
     if "points" in P and "points_t" in T and lat_ok:
