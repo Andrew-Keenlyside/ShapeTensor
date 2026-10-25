@@ -42,9 +42,10 @@ DENS_EPS = 1e-3                     # ... and at least this (empty queries: push
 DENS_KAPPA_MAX = 40.0               # the density target's lobes no sharper than the direction basis can draw (order 16); votes keep kappa
 MASS_EPS = 0.01                     # the mass output's floor (1 % of the window): empty windows need not reach zero exactly
 OWN_REL = 0.25                      # owned directions: density above this share of the query's mean (any mass)
-#: votes (frame, concentrations, descriptors) only where an oriented entity owns the direction: the isotropic background's
-#: frame is undefined and its kappa 0 -- owning most directions, it pulled the shared concentration output to 0 (a
-#: collapsed kappa leaves the readout unable to tell votes 90 deg apart); the tree keeps every owned direction
+#: the vote's frame and descriptors only where an oriented entity owns the direction: the isotropic background's frame is
+#: undefined. Its concentrations (0) are still trained -- untrained, the background's directions voted kappa ~10 in
+#: arbitrary frames and the readout made spurious oriented entities of the floor (with the softplus head, kappa 0 on
+#: most directions collapsed the output: use with ``kappa_log``); the tree keeps every owned direction
 VOTE_OBJECTS = False
 VOTE_KAPPA_MIN = 0.5                # an owner with kappa1 below this is isotropic (the background's is 0)
 OVERALL_FLOOR = 0.01                # the overall ODF's relative error: energy floor per lattice cell (~ occupancy 0.03)
@@ -110,7 +111,9 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         R_t = torch.gather(T["e_R"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1, -1), 3, owner[..., None, None, None].expand(-1, -1, -1, 1, 3, 3))[..., 0, :, :]
         k_t = torch.gather(T["e_kappa"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1), 3, owner[..., None, None].expand(-1, -1, -1, 1, 2))[..., 0, :]
         d_t = torch.gather(T["e_desc"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1), 3, owner[..., None, None].expand(-1, -1, -1, 1, 5))[..., 0, :]
-        vm = owned & (k_t[..., 0] >= VOTE_KAPPA_MIN) if VOTE_OBJECTS else owned                        # the directions that vote
+        vm = owned & (k_t[..., 0] >= VOTE_KAPPA_MIN) if VOTE_OBJECTS else owned                        # the directions whose frame votes
+        parts["kappa"] = (torch.log1p(ent["kappa"][owned]) - torch.log1p(k_t[owned])).abs().mean()     # concentrations: every owner
+        total = total + W["kappa"] * parts["kappa"]
         if bool(vm.any()):
             fl = BG.frame_loss(ent["R"][vm], R_t[vm], k_t[vm])
             parts["vote"] = fl.mean()
@@ -118,10 +121,9 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
                 ls = ent["log_s2"][vm]                                                                 # (error / s^2 + log s^2 on the detached error:
                 parts["vote_unc"] = 0.5 * ((fl.detach() + 1e-3) * torch.exp(-ls) + ls).mean()         # the vote itself keeps its plain loss)
                 total = total + W.get("vote_unc", 0.2) * parts["vote_unc"]
-            parts["kappa"] = (torch.log1p(ent["kappa"][vm]) - torch.log1p(k_t[vm])).abs().mean()
             dt = torch.cat([torch.log2(1 + d_t[..., :1].clamp_min(0)), (d_t[..., 1:2] / d_t[..., :1].clamp_min(1e-3)).clamp(0, 1), d_t[..., 2:]], -1)
             parts["desc"] = (ent["desc"][vm] - dt[vm]).abs().mean()
-            total = total + W["vote"] * parts["vote"] + W["kappa"] * parts["kappa"] + W["desc"] * parts["desc"]
+            total = total + W["vote"] * parts["vote"] + W["desc"] * parts["desc"]
         # the tree: pairs of owned directions within each crop
         node = torch.gather(T["e_node"], 2, owner)                                                  # (B, Q, D) local node of the owner
         lt = []

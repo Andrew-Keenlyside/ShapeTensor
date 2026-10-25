@@ -28,12 +28,28 @@ ap = argparse.ArgumentParser(); ap.add_argument("out"); ap.add_argument("--init"
 ap.add_argument("--steps", type=int, default=1500); ap.add_argument("--lr", type=float, default=3e-4); ap.add_argument("--eval-every", type=int, default=100)
 ap.add_argument("--train-angles", type=float, nargs=2, default=[30.0, 90.0]); ap.add_argument("--test-angles", type=float, nargs="+", default=[90.0, 60.0, 45.0, 30.0])
 ap.add_argument("--noise", type=float, default=0.01); ap.add_argument("--n-points", type=int, default=512); ap.add_argument("--plot-only", action="store_true")
-ap.add_argument("--tag", default="")
+ap.add_argument("--tag", default=""); ap.add_argument("--rotate", action="store_true", help="the crossing in a random 3-D orientation (training and held out)")
+ap.add_argument("--vary-look", action="store_true", help="each bundle's fibre spacing / radius, the bundles' width, bright or dark fibres, background, noise drawn")
 a = ap.parse_args(); dev = "cuda"; stem = a.out.rsplit(".", 1)[0]
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None
 L.DESC_K = 5; L.DESC_NC = 0; TR.REGION_DENSITY = True; ET.REGION_DENSITY = True; TR.set_background_entity(True); ET.VOTE_OBJECTS = True
 batch = lambda t: {k: v[None] for k, v in t.items()}
-tests = [SP.make(angle=ang, noise=a.noise, seed=1000 + i, device=dev) for i, ang in enumerate(a.test_angles)]
+rot_of = lambda seed: SP.random_rotation(torch.Generator(device=dev).manual_seed(seed), dev) if a.rotate else None
+
+
+def look(seed):
+    """The phantom's appearance: fixed (``--noise``), or with ``--vary-look`` drawn -- per bundle fibre spacing 3-6 and
+    radius 0.8-1.6 (a gap left), bundle half-width 6-14, bright or dark fibres (contrast 0.3-0.8), background, noise 0-0.05."""
+    if not a.vary_look:
+        return {"noise": a.noise}
+    g_ = torch.Generator().manual_seed(seed); u = lambda lo, hi: lo + float(torch.rand(1, generator=g_)) * (hi - lo)
+    sa, sb = u(3, 6), u(3, 6); ra, rb = u(0.8, min(1.6, sa / 2 - 0.3)), u(0.8, min(1.6, sb / 2 - 0.3))
+    con = u(0.3, 0.8); bright = u(0, 1) < 0.5
+    bg = u(0.05, 0.95 - con) if bright else u(con + 0.05, 0.95)
+    return {"spacing": sa, "spacing_b": sb, "radius": ra, "radius_b": rb, "half": u(6, 14), "contrast": con if bright else -con, "bg": bg, "noise": u(0, 0.05)}
+
+
+tests = [SP.make(angle=ang, seed=1000 + i, rot=rot_of(2000 + i), **look(3000 + i), device=dev) for i, ang in enumerate(a.test_angles)]
 
 if a.plot_only:
     ck = torch.load(stem + ".pt", map_location=dev, weights_only=False)
@@ -70,22 +86,32 @@ else:
         for pg in opt.param_groups:
             pg["lr"] = a.lr * min(1.0, (step + 1) / 30)
         ang = a.train_angles[0] + float(torch.rand(1, generator=gc)) * (a.train_angles[1] - a.train_angles[0])
-        ph = SP.make(angle=ang, noise=a.noise, seed=step, device=dev)
+        ph = SP.make(angle=ang, seed=step, rot=rot_of(10_000 + step), **look(20_000 + step), device=dev)
         T = batch(SP.targets(ph, *SP.draw_queries(ph, g, a.n_points))); dirs = ET.sample_dirs(T, 32, g=g)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             P = net(ph["image"][None, None], voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
         tot, parts = ET.entity_loss(P, T, dirs, W={"desc": 0.0}, g=g)
         opt.zero_grad(set_to_none=True); tot.backward(); torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0); opt.step()
-    torch.save({"model": net.state_dict(), "args": args, "curves": curves, "tag": a.tag, "train_angles": a.train_angles, "init": a.init}, stem + ".pt")
+    torch.save({"model": net.state_dict(), "args": args, "curves": curves, "tag": a.tag, "train_angles": a.train_angles, "init": a.init, "rotate": a.rotate, "vary_look": a.vary_look}, stem + ".pt")
 net.eval()
 sph = EI.sphere_dirs(200, dev); C30 = math.cos(math.radians(30))
 
 
+def plane(ph, off):
+    """World points of the crossing plane (its local z = ``off``), an ``n x n`` grid over its local y (rows), x (cols)."""
+    n, c = ph["n"], ph["c"]
+    gu, gv = torch.meshgrid(torch.arange(n, device=dev, dtype=torch.float32), torch.arange(n, device=dev, dtype=torch.float32), indexing="ij")
+    loc = torch.stack([torch.full_like(gu, float(off)), gu - c, gv - c], -1).view(-1, 3)
+    return c + loc @ ph["rot"].T
+
+
 def maps(ph):
-    """Target and model maps on the plane between an A and a B layer (sigma 2.5)."""
-    n, c = ph["n"], ph["c"]; zq = c + ph["spacing"] / 4
+    """Target and model maps on the crossing plane between an A and a B layer (sigma 2.5); rotated: a disc of radius 28."""
+    n, c = ph["n"], ph["c"]
+    pts = plane(ph, ph["spacing"] / 4); sig = torch.full((n * n,), 2.5, device=dev)
+    rotated = not torch.allclose(ph["rot"], torch.eye(3, device=dev))
     gu, gv = torch.meshgrid(torch.arange(n), torch.arange(n), indexing="ij")
-    pts = torch.stack([torch.full((n * n,), zq), gu.flatten().float(), gv.flatten().float()], 1).to(dev); sig = torch.full((n * n,), 2.5, device=dev)
+    keep = (((gu - c) ** 2 + (gv - c) ** 2) <= 28 ** 2).numpy() if rotated else np.ones((n, n), bool)
     t = SP.targets(ph, pts, sig)
     out = {"tA": t["e_mass"][:, 0], "tB": t["e_mass"][:, 1], "tI": t["e_mass"][:, 2]}
     with torch.no_grad():
@@ -95,8 +121,10 @@ def maps(ph):
     cA = (ax @ ph["axes"]["A"]).abs(); cB = (ax @ ph["axes"]["B"]).abs()
     toA = ~iso & (cA >= C30) & (cA >= cB); toB = ~iso & (cB >= C30) & (cB > cA)
     out.update({"mA": (ms * toA).sum(1), "mB": (ms * toB).sum(1), "mO": (ms * (~iso & ~toA & ~toB)).sum(1), "mI": (ms * iso).sum(1) + sp["floor"]})
-    out = {k: v.view(n, n).float().cpu().numpy() for k, v in out.items()}
-    out["image"] = ph["image"][int(c) - 2:int(c) + 4].mean(0).cpu().numpy()
+    out = {k: np.where(keep, v.view(n, n).float().cpu().numpy(), np.nan) for k, v in out.items()}
+    size = torch.tensor([n - 1.0] * 3, device=dev)
+    smp = lambda q: torch.nn.functional.grid_sample(ph["image"][None, None], (q / size * 2 - 1).flip(-1).view(1, -1, 1, 1, 3), align_corners=True).view(n, n)
+    out["image"] = np.where(keep, torch.stack([smp(plane(ph, k)) for k in range(-2, 4)]).mean(0).cpu().numpy(), np.nan)   # slab mean
     return out
 
 
@@ -111,17 +139,22 @@ norm = PowerNorm(0.5, vmin=0, vmax=1); cmap = matplotlib.colormaps["viridis"].co
 fig, axs = plt.subplots(len(tests), len(cols), figsize=(2.5 * len(cols) + 1.0, 2.5 * len(tests)), squeeze=False, layout="constrained")
 for i, ph in enumerate(tests):
     M = maps(ph)
-    axs[i, 0].imshow(M["image"], cmap="gray", vmin=0, vmax=1); axs[i, 0].set_ylabel(f"{ph['angle']:.0f} deg crossing", fontsize=11)
+    axs[i, 0].imshow(M["image"], cmap="gray", vmin=0, vmax=1)
+    nz = ph["rot"][:, 0].cpu().numpy()                                                            # the crossing plane's normal (z, y, x)
+    lk = look(3000 + i)
+    axs[i, 0].set_ylabel(f"{ph['angle']:.0f} deg crossing" + (f"\nplane normal ({nz[2]:.2f}, {nz[1]:.2f}, {nz[0]:.2f}) xyz" if a.rotate else "")
+                         + (f"\nspacing {lk['spacing']:.1f}/{lk['spacing_b']:.1f}, {'bright' if lk['contrast'] > 0 else 'dark'}, noise {lk['noise']:.2f}" if a.vary_look else ""), fontsize=9)
     for j, k in enumerate(("tA", "mA", "tB", "mB", "mO", "mI")):
-        im = axs[i, 1 + j].imshow(M[k], cmap=cmap, norm=norm); axs[i, 1 + j].text(2, 61, f"sum {M[k].sum():.0f}", color="w", fontsize=8)
+        im = axs[i, 1 + j].imshow(M[k], cmap=cmap, norm=norm); axs[i, 1 + j].text(2, 61, f"sum {np.nansum(M[k]):.0f}", color="k" if a.rotate else "w", fontsize=8)
     for j in range(len(cols) - 1):
         axs[i, j].set_xticks([]); axs[i, j].set_yticks([])
     q = axs[i, -1]; th = math.radians(ph["angle"]); w = ph["half"] / max(math.sin(th), 1e-3)
     q.axvspan(-w, w, color="0.9", lw=0)
-    t_, v = along(M["tA"], ph, ph["axes"]["A"]); q.plot(t_, v, color="k", lw=2, label="target")
-    t_, v = along(M["mA"], ph, ph["axes"]["A"]); q.plot(t_, v, color="darkorange", lw=1.4, label="model A along A")
-    t_, v = along(M["mB"], ph, ph["axes"]["B"]); q.plot(t_, v, color="teal", lw=1.4, ls="--", label="model B along B")
-    q.set_ylim(0, 0.6); q.tick_params(labelsize=7)
+    t_, v = along(M["tA"], ph, ph["axes_local"]["A"]); q.plot(t_, v, color="k", lw=2, label="target A")
+    t_, v = along(M["tB"], ph, ph["axes_local"]["B"]); q.plot(t_, v, color="0.45", lw=2, ls="--", label="target B")
+    t_, v = along(M["mA"], ph, ph["axes_local"]["A"]); q.plot(t_, v, color="darkorange", lw=1.4, label="model A along A")
+    t_, v = along(M["mB"], ph, ph["axes_local"]["B"]); q.plot(t_, v, color="teal", lw=1.4, ls="--", label="model B along B")
+    q.set_ylim(0, max(0.6, 1.25 * float(np.nanmax(M["tA"])), 1.25 * float(np.nanmax(M["tB"])))); q.tick_params(labelsize=7)
     if i == 0:
         q.legend(fontsize=6, loc="upper right")
     if i == len(tests) - 1:
@@ -131,5 +164,5 @@ for j, c_ in enumerate(cols):
 fig.colorbar(im, ax=axs[:, 1:-1].ravel().tolist(), shrink=0.5, label="mass per voxel (square-root scale)", extend="max")
 st = curves[-1]["step"] if curves else 0
 fig.suptitle(f"crossing ladder -- trained on {a.tag}, {st} steps (from {a.init.split('/')[-1]}); "
-             f"held-out phantoms, noise {a.noise}; model mass split by lobe fit", fontsize=11)
+             f"held-out phantoms{' in random 3-D orientations (the crossing plane shown)' if a.rotate else ''}{', varied look' if a.vary_look else f', noise {a.noise}'}; model mass split by lobe fit", fontsize=11)
 plt.savefig(a.out, dpi=72); print("saved", a.out)

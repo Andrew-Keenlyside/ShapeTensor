@@ -11,12 +11,10 @@ from . import bingham as BG
 from .model import window_mean
 
 
-def bundle(grid, c: float, u: torch.Tensor, z0: float, half: float, spacing: float, radius: float) -> torch.Tensor:
-    """Occupancy of a bundle along unit ``u`` in the x-y plane through the centre ``c``: fibres on a ``spacing`` grid
-    across it (in-plane and in z, the z layers from ``z0``), within ``half`` of the centre line in both cross directions,
-    partial volume at the fibres' edges."""
-    zz, yy, xx = grid
-    p = torch.stack([zz - c, yy - c, xx - c], -1)
+def bundle(p: torch.Tensor, u: torch.Tensor, z0: float, half: float, spacing: float, radius: float) -> torch.Tensor:
+    """Occupancy of a bundle along unit ``u`` in the local x-y plane, at the phantom's local coordinates ``p (..., 3)``
+    (z, y, x from the centre): fibres on a ``spacing`` grid across it (in-plane and in local z, the z layers from
+    ``z0``), within ``half`` of the centre line in both cross directions, partial volume at the fibres' edges."""
     w = torch.stack([torch.zeros_like(u[0]), -u[2], u[1]])                                          # in-plane, across the bundle
     q1 = (p * w).sum(-1); q2 = p[..., 0]
     d1 = q1 - spacing * torch.round(q1 / spacing); d2 = q2 - z0 - spacing * torch.round((q2 - z0) / spacing)
@@ -32,25 +30,38 @@ def frame(u: torch.Tensor | None, conc: float, device) -> tuple:
     return T6.float(), R.float(), k.float()
 
 
+def random_rotation(g: torch.Generator, device="cuda") -> torch.Tensor:
+    """A rotation drawn uniformly (QR of a Gaussian matrix, signs fixed, det +1)."""
+    Q, Rr = torch.linalg.qr(torch.randn(3, 3, generator=g, device=device))
+    Q = Q * torch.sign(torch.diagonal(Rr))[None]
+    return Q * torch.sign(torch.linalg.det(Q))
+
+
 def make(angle: float = 90.0, noise: float = 0.01, n: int = 64, half: float = 10.0, spacing: float = 4.0, radius: float = 1.2,
-         contrast: float = 0.8, bg: float = 0.1, seed: int = 0, device="cuda") -> dict:
+         contrast: float = 0.8, bg: float = 0.1, seed: int = 0, rot: torch.Tensor | None = None, spacing_b: float | None = None,
+         radius_b: float | None = None, device="cuda") -> dict:
     """One phantom: ``image (n, n, n)`` (0-1, 8-bit levels), ``occ`` A / B / bg, ``axes`` A / B (z, y, x), ``ent`` the
-    entities' frames (A, B, background), ``core`` the crossing's cube, and its parameters."""
+    entities' frames (A, B, background), ``core`` the crossing's cube, and its parameters. ``rot (3, 3)``: the crossing
+    built in a rotated frame (its local z the crossing plane's normal; ``axes_local`` its bundles there).
+    ``spacing_b`` / ``radius_b``: B's fibres (None: A's); ``contrast`` < 0: dark fibres."""
     c = n / 2.0; th = math.radians(angle)
-    axes = {"A": torch.tensor([0.0, 0.0, 1.0], device=device), "B": torch.tensor([0.0, math.sin(th), math.cos(th)], device=device)}
+    rot = torch.eye(3, device=device) if rot is None else rot.to(device).float()
+    loc = {"A": torch.tensor([0.0, 0.0, 1.0], device=device), "B": torch.tensor([0.0, math.sin(th), math.cos(th)], device=device)}
+    axes = {k: rot @ v for k, v in loc.items()}
     grid = torch.meshgrid(*(torch.arange(n, dtype=torch.float32, device=device),) * 3, indexing="ij")
-    occ = {"A": bundle(grid, c, axes["A"], 0.0, half, spacing, radius), "B": bundle(grid, c, axes["B"], spacing / 2, half, spacing, radius)}
+    p = torch.stack([g_ - c for g_ in grid], -1) @ rot                                              # local coordinates: R^T (x - c)
+    sb = spacing if spacing_b is None else spacing_b; rb = radius if radius_b is None else radius_b
+    occ = {"A": bundle(p, loc["A"], 0.0, half, spacing, radius), "B": bundle(p, loc["B"], spacing / 2, half, sb, rb)}
     occ["bg"] = 1 - (occ["A"] + occ["B"]).clamp(max=1.0)
     g = torch.Generator(device=device).manual_seed(seed)
     img = (bg + contrast * (occ["A"] + occ["B"]).clamp(max=1.0) + noise * torch.randn(n, n, n, generator=g, device=device)).clamp(0, 1)
     img = (img * 255).round() / 255                                                                 # 8-bit, as the generator's
-    zz, yy, xx = grid
-    in_a = (((yy - c) * axes["A"][2] - (xx - c) * axes["A"][1]).abs() <= half)
-    in_b = (((yy - c) * axes["B"][2] - (xx - c) * axes["B"][1]).abs() <= half)
-    core = in_a & in_b & ((zz - c).abs() <= half)
+    in_a = ((p[..., 1] * loc["A"][2] - p[..., 2] * loc["A"][1]).abs() <= half)
+    in_b = ((p[..., 1] * loc["B"][2] - p[..., 2] * loc["B"][1]).abs() <= half)
+    core = in_a & in_b & (p[..., 0].abs() <= half)
     ent = [frame(axes["A"], 0.94, device), frame(axes["B"], 0.94, device), frame(None, 0, device)]   # nodes 1, 2, 3 under the root 0
-    return {"image": img, "occ": occ, "axes": axes, "ent": ent, "core": core, "n": n, "c": c, "half": half, "spacing": spacing,
-            "angle": angle, "noise": noise}
+    return {"image": img, "occ": occ, "axes": axes, "axes_local": loc, "rot": rot, "ent": ent, "core": core, "n": n, "c": c, "half": half,
+            "spacing": spacing, "angle": angle, "noise": noise}
 
 
 def targets(ph: dict, pts: torch.Tensor, sig: torch.Tensor) -> dict:

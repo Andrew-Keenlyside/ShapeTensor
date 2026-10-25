@@ -1018,7 +1018,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    dir_lmax: int = 8, vote_unc: bool = False, e_sigma: tuple | None = None, deep_tree: bool = False, lcn: float = 0.0,
                    dens_sh: bool = True, read_keep: float = READ_KEEP, dens_mlp: bool = True, mass_region: bool = True,
                    region_dec: bool = False, where_first: int = 0, z_vote: bool = False, dir_sh: int = 0, background_entity: bool = True,
-                   ray: bool = False, e_cross: float = 0.0, region_density: bool = True):
+                   ray: bool = False, e_cross: float = 0.0, region_density: bool = True, kappa_log: bool = False, vote_objects: bool = False):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -1056,6 +1056,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     if e_sigma:
         ENTITY["sigma"] = (float(e_sigma[0]), float(e_sigma[1]))
     ENTITY["p_cross"] = float(e_cross)                                                                # queries in crossing cores
+    from . import entity_train as _et
+    _et.VOTE_OBJECTS = bool(vote_objects)                                                              # votes only for oriented owners
     level = {"v": level0}
     cur_gen = lambda: {"scene": LT.difficulty_gen(level["v"], base)}
     def set_routes():
@@ -1076,7 +1078,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 dir_lmax=dir_lmax, vote_unc=vote_unc, lcn=lcn, mass_head=True, region_head=True, dens_sh=bool(dens_sh), read_keep=READ_KEEP,
                 dens_mlp=bool(dens_mlp), mass_region=bool(mass_region), region_dec=bool(region_dec), where_first=int(where_first),
                 z_vote=bool(z_vote), dir_sh=int(dir_sh), background_entity=bool(background_entity), ray=bool(ray),
-                region_density=bool(region_density))
+                region_density=bool(region_density), kappa_log=bool(kappa_log), vote_objects=bool(vote_objects))
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)
@@ -1086,7 +1088,10 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     if resume == "auto":
         resume = str(outd / "model.pt") if (outd / "model.pt").exists() else None
     if init and not resume:
-        DF.load_partial(model, torch.load(init, map_location=device)["model"], log)
+        ick = torch.load(init, map_location=device, weights_only=False)
+        DF.load_partial(model, ick["model"], log)
+        if kappa_log and not (ick.get("args") or {}).get("kappa_log"):                               # a softplus checkpoint's kappa rows
+            model.ent.reset_kappa(); log("kappa outputs restarted in log space")
     if resume:
         ck = torch.load(resume, map_location=device)
         model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); start = ck["step"]; level["v"] = ck.get("level", level["v"])
@@ -1303,6 +1308,8 @@ def main():
     ap.add_argument("--no-region-density", action="store_true", help="entities: the region map the populations' union (a probability), not their density")
     ap.add_argument("--e-cross", type=float, default=0.0, help="entities: the share of query points placed in crossing cores (two objects' populations overlapping)")
     ap.add_argument("--ray", action="store_true", help="entities: the decoder reads the features along each queried direction (the ray probe)")
+    ap.add_argument("--kappa-log", action="store_true", help="entities: the vote's concentrations in log space (the softplus head collapses)")
+    ap.add_argument("--vote-objects", action="store_true", help="entities: vote / kappa / descriptor losses only where an oriented entity owns the direction")
     ap.add_argument("--dir-sh", type=int, default=0, help="entities: the per-direction outputs also as harmonics of the point code to this order (0: off; e.g. 6)")
     ap.add_argument("--no-background-entity", action="store_true", help="entities: the isotropic background not a population (before)")
     ap.add_argument("--z-vote", action="store_true", help="entities: the tree embedding sees the vote's axes (detached)")
@@ -1310,7 +1317,7 @@ def main():
     ap.add_argument("--no-dens-mlp", action="store_true", help="entities: the density's harmonics linear in the point code")
     ap.add_argument("--no-mass-region", action="store_true", help="entities: the mass from its own output on the point code, not the region map's window")
     ap.add_argument("--level-steps", type=float, default=0.5, help="entities: the share of the run over which the difficulty widens to 1")
-    ap.add_argument("--lobes-J", type=int, default=6, help="lobes per cell (6: direct fits recover two crossing axes ~90 % of the time from random starts, 4: ~75 %)")
+    ap.add_argument("--lobes-J", type=int, default=6, help="lobes per cell (6: direct fits recover two crossing axes ~90 %% of the time from random starts, 4: ~75 %%)")
     ap.add_argument("--no-context-level", action="store_true", help="lobes: no stride-8 trunk level")
     ap.add_argument("--no-voxel-cond", action="store_true", help="lobes: no voxel-size conditioning")
     ap.add_argument("--identity-dim", type=int, default=8, help="lobes: identity embedding size (0: none)")
@@ -1347,7 +1354,8 @@ def main():
                        dir_lmax=a.dir_lmax, vote_unc=a.vote_unc, e_sigma=a.e_sigma, deep_tree=a.deep_tree, lcn=a.lcn, dens_sh=not a.no_dens_sh,
                        read_keep=a.read_keep, level_steps=a.level_steps, dens_mlp=not a.no_dens_mlp, mass_region=not a.no_mass_region,
                        region_dec=a.region_dec, where_first=a.where_first, z_vote=a.z_vote, dir_sh=a.dir_sh,
-                       background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, region_density=not a.no_region_density)
+                       background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, region_density=not a.no_region_density,
+                       kappa_log=a.kappa_log, vote_objects=a.vote_objects)
         return
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,
