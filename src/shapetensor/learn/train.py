@@ -1075,7 +1075,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                  "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC, "ENTITY": dict(ENTITY), "READ_KEEP": READ_KEEP}
         cpu = DF.CpuWorkers(cpu_workers, size, buf.next + 90_000_000, cfg, state, threads=cpu_threads)
     pbuf = ET.EntityPairBuffer(pairs, size, "cpu", LT.difficulty_gen(level["v"], base), seed0=60_000_000 + rank * 1_000_000 + start,
-                               out_device=device) if pairs else None                                 # drawn on the CPU (see EntityPairBuffer)
+                               out_device=device, n0=4) if pairs else None                           # drawn on the CPU (see EntityPairBuffer)
     val = []
     if main and not benchmark:
         val = [augment(*make(10_000_000 + i, size, device, strength1, {"scene": {**LT.difficulty_gen(1.0, base), "crops_per_scene": 1}}), torch.Generator().manual_seed(i))

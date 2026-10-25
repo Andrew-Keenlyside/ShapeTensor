@@ -270,12 +270,12 @@ class EntityPairBuffer:
     and the tree distances between the two windows' entities; drawn on demand into a small rotating buffer."""
 
     def __init__(self, n: int, size: int, device, gen: dict, seed0: int = 60_000_000, kinds=("shift", "modality"), n_points: int = 192,
-                 out_device=None):
+                 out_device=None, n0: int | None = None):
         # ``device``: where the pairs are drawn (the CPU keeps the trainer's GPU free of the draws' many small kernels and
         # syncs, which stalled it for minutes on a shared GPU); ``out_device``: where batches go (default ``device``)
         self.size, self.device, self.gen, self.next, self.kinds, self.n_points = size, device, dict(gen or {}), seed0, kinds, n_points
         self.out_device = out_device or device; self.cap = int(n)
-        self.items = [self._make() for _ in range(min(n, 4))]                                     # a few now, the rest as refreshes come
+        self.items = [self._make() for _ in range(min(n, n0 or n))]                               # ``n0``: a few now, the rest as refreshes come
 
     def _make(self):
         from . import train as TR
