@@ -72,3 +72,20 @@ The region map stayed a near-uniform haze for ~1000 steps in every run. Checks, 
 
 Options left for the region: a small decoder (`--region-dec`, EP14), a where-first curriculum (`--where-first`,
 implemented, no evidence yet that it helps: X1 learned no faster alone).
+
+## 7. EP12 at step 2000 (compose generator, all fixes): what the outputs look like
+
+`pilot_entities/phantom_layers_EP12_s2000.png` (crossing phantoms, separated layers):
+* a single resolved bundle: the mass now **fills the bundle** (no tram-tracking either side), axis 14 deg;
+* uniform bands of sub-voxel fibres: the mass still runs along the band **edges** (interiors under-filled);
+* a bundle across a grey / white-like step: the **step edge** lights up as material (a false positive -- interfaces
+  are no longer in any target, so this is the trunk's inheritance from the PL4 init, which was trained with them);
+* crossings: one model layer only (the populations are not yet separated in the tree), the second bundle's axis
+  poor (27-88 deg); phantom suite crossings: two density peaks found but 62-69 deg off.
+
+The phantom suite (step ~1300): density axis 11-37 deg on every phantom (EP10: 30-89 deg, flat density), region
+0.81 on planes (0.29). Inverted planes give -0.91: a periodic stack's sheet vs gap is ambiguous under inversion.
+
+Two pre-existing test failures (they fail identically at 411e99e, before tonight): `test_learn::test_no_falloff_at_the_faces`
+(the old voxel generator's fibres, face / centre occupancy 0.75) and `test_model::test_lattice_cells_centred_on_the_target_cells`
+(0.33 > 0.25). Everything touched tonight passes (346 passed).
