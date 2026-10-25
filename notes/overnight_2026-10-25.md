@@ -257,6 +257,13 @@ Checkpoints: EP10 (step 2000, before the fixes), EP12 (2075), EP13 (2433), EP14b
   the crossing core. EP16 (z-vote + population weight) did not fix the embedding in 900 steps.
 * **Real data** (`realcheck.png`): the fixed models give density-peak axes (EP10 none); region maps are still hazy.
 
+**Why crossings stay one entity -- and the next architectural step**: the decoder sees the direction only by
+concatenating Y(u) with the point code before an MLP. The density got a direct path (harmonics of the point code)
+and learned; the per-direction *vote* and *embedding* -- which must switch owner between a crossing's lobes -- still
+need p x u interactions the MLP finds slowly (the same saddle). Next: a multiplicative direction path for the vote and
+the embedding too (FiLM of the decoder's hidden layer by Y(u), or vote / embedding harmonics of the point code like the
+density's), tested on the crossing benchmark and the tree check.
+
 **Recommendation for the next run**: EP14b's configuration (all fixes + `--region-dec` + `{"iface": 2}`), longer; the
 tree embedding needs a different formulation (see section 8) before the cluster run. EP14b was resumed at 05:45 and keeps
 training (`pilot_entities/EP14b_64_dec_iface_pl4`); EP13 / EP16 resume with the same command line (`--resume auto`).
