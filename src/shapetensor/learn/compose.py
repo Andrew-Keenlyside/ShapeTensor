@@ -720,11 +720,11 @@ def blob_population(sc, field: Field, rel: str, base, around, dense: bool = Fals
     S_ = torch.tensor(shape, device=dev, dtype=torch.float32)
     ok = ((X > -amax) & (X < S_ + amax)).all(1); X = X[ok]; chains = chains[ok] if chains is not None else None
     dmin = 2 * amax * f if place != "beads" else 0.0
-    keep = []
-    for i in range(X.shape[0]):                                                                  # greedy minimum spacing
-        if len(keep) >= n:
+    keep = []; Xc = X.detach().cpu()                                                             # greedy minimum spacing (on the CPU:
+    for i in range(Xc.shape[0]):                                                                 # one GPU sync per candidate stalled the
+        if len(keep) >= n:                                                                       # trainer's own draws on a busy GPU)
             break
-        if not keep or dmin <= 0 or float((X[keep] - X[i]).norm(dim=1).min()) >= dmin:
+        if not keep or dmin <= 0 or float((Xc[keep] - Xc[i]).norm(dim=1).min()) >= dmin:
             keep.append(i)
     if not keep:
         return []
