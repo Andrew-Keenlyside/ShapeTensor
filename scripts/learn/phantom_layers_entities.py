@@ -6,7 +6,9 @@ layers are the populations' occupancies. The model's layers: the decoder on a de
 point (:func:`~shapetensor.learn.entity_infer.cluster`), all entities of the slice grouped into populations by their
 tree embeddings (average linkage, cut at one tree edge), each population's mass drawn as an image.
 
-Usage: python scripts/learn/phantom_layers_entities.py CHECKPOINT OUT.png [--p4]
+Usage: python scripts/learn/phantom_layers_entities.py CHECKPOINT OUT.png [--p4] [--group-vote]
+(--group-vote: populations from the votes' mode axes -- average linkage of the axial angle cut at 30 deg -- instead of the
+tree embedding)
 """
 import json, math, sys, time
 import numpy as np
@@ -24,6 +26,7 @@ from shapetensor.learn.model import PopulationNet, poincare_dist
 from shapetensor.learn.scene import Scene
 
 ck_path, out_png = sys.argv[1], sys.argv[2]; with_p4 = "--p4" in sys.argv
+GROUP = "vote" if "--group-vote" in sys.argv else "tree"                          # populations by the tree embedding, or by the votes' axes
 dev = "cuda"
 ck = torch.load(ck_path, map_location=dev, weights_only=False)
 model = PopulationNet.from_args(ck["args"]).to(dev).eval(); model.load_state_dict(ck["model"])
@@ -75,11 +78,21 @@ def model_layers(x, voxel_um, step=2, sigma=2.5, n_dirs=300):
     # populations: average linkage of the embeddings (a subsample), cut at one tree edge; the rest to the nearest
     from scipy.cluster.hierarchy import fcluster
     n = z.shape[0]; sub = torch.randperm(n, generator=torch.Generator().manual_seed(0))[:min(n, 2500)].to(dev)
-    lab_s = fcluster(EI.hierarchy(z[sub]), TREE_EDGE, "distance") - 1
-    lab_s = torch.as_tensor(lab_s, device=dev)
-    K = int(lab_s.max()) + 1
-    cent = torch.stack([z[sub][lab_s == k].mean(0) for k in range(K)])
-    lab = poincare_dist(z[:, None], cent[None]).argmin(1)
+    if GROUP == "vote":                                                                 # the votes' mode axes: average linkage of the
+        from scipy.cluster.hierarchy import linkage                                     # axial angle, cut at 30 deg (the rest: nearest axis)
+        a_all = e["R"][qi, ci, :, 2].float(); a = a_all[sub]
+        D = torch.rad2deg(torch.acos((a @ a.T).abs().clamp(max=1))).cpu().numpy()
+        iu = np.triu_indices(D.shape[0], 1)
+        lab_s = torch.as_tensor(fcluster(linkage(D[iu], "average"), 30.0, "distance") - 1, device=dev)
+        K = int(lab_s.max()) + 1
+        cent = torch.stack([torch.linalg.eigh((a[lab_s == k][:, :, None] * a[lab_s == k][:, None, :]).sum(0))[1][:, -1] for k in range(K)])
+        lab = (a_all @ cent.T).abs().argmax(1)
+    else:
+        lab_s = fcluster(EI.hierarchy(z[sub]), TREE_EDGE, "distance") - 1
+        lab_s = torch.as_tensor(lab_s, device=dev)
+        K = int(lab_s.max()) + 1
+        cent = torch.stack([z[sub][lab_s == k].mean(0) for k in range(K)])
+        lab = poincare_dist(z[:, None], cent[None]).argmin(1)
     msum = torch.zeros(K, device=dev).index_add_(0, lab, m); order = msum.argsort(descending=True)
     rank = torch.empty_like(order); rank[order] = torch.arange(K, device=dev); lab = rank[lab]
     H, Wd = gz.shape
