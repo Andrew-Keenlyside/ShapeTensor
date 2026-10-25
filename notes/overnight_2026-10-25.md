@@ -151,6 +151,7 @@ the population's orientation / appearance code) instead of a free embedding; muc
 | sheets | 0.060 | 25 % |
 | blobs | 0.009 | 54 % |
 
-Blob populations are often a few small blobs: the cap redraws those crops, at a generation cost. A denser blob prior
-(more or larger blobs per population) would be a cheap generator change -- not made mid-run.
+Blob scenes are often near-empty after acquisition: the cap redraws those crops, at a generation cost. More blobs per
+population (log-uniform 20-400 instead of 6-300) barely changed it (median 0.009 -> 0.012, 54 -> 50 %): small blobs are
+lost to the acquisition (visibility), not missing -- left as it was.
 
