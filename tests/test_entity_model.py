@@ -186,3 +186,20 @@ def test_decoder_options_dir_order_and_vote_uncertainty():
     tot.backward()
     if "vote" in parts:
         assert "vote_unc" in parts and net.ent.dir[-1].weight.grad is not None
+
+
+def test_mass_and_region_heads():
+    """Where apart from which way: a scalar mass per query and a full-resolution region map, both trained."""
+    from shapetensor.learn.model import PopulationNet
+    from shapetensor.learn import entity_train as ET
+    net = PopulationNet.from_args(dict(head="entities", widths=[8, 16, 32], sh_lmax=8, embed=4, context_level=True, voxel_cond=True, points=True,
+                                       mass_head=True, region_head=True)).to(DEV)
+    x, T = _one_crop_batch()
+    dirs = ET.sample_dirs(T, 8)
+    P = net(x, voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
+    assert P["ent"]["m"].shape == T["e_points"].shape[:2] and bool((P["ent"]["m"] >= 0).all())
+    assert P["region_logit"].shape == x.shape[:1] + x.shape[2:] and "region_t" in T and T["region_t"].shape == P["region_logit"].shape
+    tot, parts = ET.entity_loss(P, T, dirs)
+    assert "mass" in parts and "region" in parts and torch.isfinite(tot)
+    tot.backward()
+    assert net.ent.mass.weight.grad is not None and net.region[0].weight.grad is not None

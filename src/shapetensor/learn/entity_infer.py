@@ -122,6 +122,7 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
         p = points[a:a + chunk].float(); s = sigma[a:a + chunk].float(); n = p.shape[0]; D = dirs.shape[0]
         ctx = torch.minimum(p, vs - 1 - p).amin(-1)
         enc = dec.encode(feats, (p - off)[None], s[None], ctx[None])[0]                            # (n, hidden): once per point
+        mq = dec.mass_of(enc) if getattr(dec, "mass", None) is not None else None                  # the mass output (where), if the model has one
         if t_rel is None:
             ev = torch.ones(n, D, dtype=torch.bool, device=p.device)
         else:
@@ -136,6 +137,8 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
             for k in full:
                 full[k][qi, di] = r[k].float()
         full["evaluated"] = ev
+        if mq is not None:
+            full["m"] = mq.float()
         for k, v in full.items():
             out.setdefault(k, []).append(v)
     return {k: torch.cat(v) for k, v in out.items()}
@@ -247,7 +250,10 @@ def cluster(r: dict, dirs: torch.Tensor, f_frac: float = 0.25, f_abs: float = 1e
     rank.scatter_(1, order, torch.where(keepc, torch.arange(C, device=dev)[None].expand(Q, C), torch.full((Q, C), -1, device=dev, dtype=torch.long)))
     rank[:, D] = -1
     ent = rank.gather(1, key)
-    return _entity_stats(r, dirs, f, ent, C) | {"label": ent}
+    st = _entity_stats(r, dirs, f, ent, C)
+    if "m" in r:                                                                                   # a mass output: the point's mass shared by the entities
+        st["mass"] = r["m"].float()[:, None] * st["share"] * st["live"]
+    return st | {"label": ent}
 
 
 def _comp_mean(v: torch.Tensor, w: torch.Tensor, ent: torch.Tensor, C: int) -> torch.Tensor:

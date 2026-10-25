@@ -43,7 +43,7 @@ TKEYS = ("slots", "mass", "kind", "layer", "fraction", "classes", "size", "size_
 HALF = ("slots", "mass", "fraction", "classes", "size")
 QKEYS = ("q_points", "q_sigma", "q_sh", "sh_t")
 LKEYS = ("identity_t", "points_t", "voxel", "fraction")    # the lobe model's extra targets
-EKEYS = ("e_points", "e_sigma", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa", "e_gnode")   # the entity model's
+EKEYS = ("e_points", "e_sigma", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa", "e_gnode", "region_t")   # the entity model's
 HEAD = "slots"                     # "slots" | "lobes" (set by train())
 DESC_KEY = "descriptors"           # the drawn descriptors the descriptor densities use ("descriptors5": the scenes' five)
 SH_EXACT = 0                       # > 0: the SH head's lattice target from the exact per-voxel density to this order
@@ -149,6 +149,10 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
         out.update(entity_queries(s, d, size, seed, device))
         if "points" in d:                                                                              # branch and end points (the points head)
             out["points_t"] = Fn.avg_pool3d(d["points"][None].float(), 4)[0].half()
+        K = d["occupancy"].shape[0]                                                                    # the population region: the visible
+        vis = d["visibility"].float(); vis = vis.view(-1, 1, 1, 1).expand(K, *d["occupancy"].shape[1:]) if vis.dim() == 1 else vis   # occupancy of
+        keep = [k for k, L in enumerate(s.layers) if L.role != "isotropic"]                            # every oriented layer, each voxel
+        out["region_t"] = ((d["occupancy"][keep].float() * vis[keep]).sum(0).clamp(0, 1) if keep else torch.zeros_like(d["occupancy"][0]).float()).half()
         out["voxel"] = torch.tensor(math.log2(d["voxel_um"]) if d.get("voxel_um") else float("nan"), device=device)
     out["kind"] = out["kind"].to(torch.int8); out["layer"] = out["layer"].to(torch.int16)
     return d["image"].to(torch.uint8), out
@@ -255,7 +259,7 @@ def stack(pairs, g=None, aug: bool = True):
     from .augment import contrast_route
     imgs, imgs2, tgts = [], [], []
     for img, t in pairs:
-        t = {k: (v.float() if k in HALF or k in ("q_sh", "sh_t", "points_t", "e_mass", "e_vis", "e_T6", "e_desc") else
+        t = {k: (v.float() if k in HALF or k in ("q_sh", "sh_t", "points_t", "e_mass", "e_vis", "e_T6", "e_desc", "region_t") else
                  v.long() if k in ("kind", "layer", "identity_t", "e_node", "e_anc") else v) for k, v in t.items()}
         x = img.float() / 255.0
         if aug:
@@ -983,7 +987,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 context_level=context_level, voxel_cond=voxel_cond, points=points, level0=level0, level_steps=level_steps, voxel_dropout=voxel_dropout,
                 weights=weights, routes=routes, contrast_views=contrast_views, world=world, contrast_every=contrast_every, n_dirs=n_dirs,
                 channels_last=channels_last, compile_model=compile_model, entity=dict(ENTITY), pairs=pairs, pair_every=pair_every,
-                dir_lmax=dir_lmax, vote_unc=vote_unc, lcn=lcn)
+                dir_lmax=dir_lmax, vote_unc=vote_unc, lcn=lcn, mass_head=True, region_head=True)
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)

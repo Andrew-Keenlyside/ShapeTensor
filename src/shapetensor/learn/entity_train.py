@@ -8,8 +8,11 @@ mass), half uniform -- and the losses compare, per direction:
 * **density**: ``f`` against the target ``rho(u) = sum_e m_e v_e p_e(u)``: L1 of the logs with a floor relative to the
   query's mean density -- scale-free, so the angular shape is learned at any mass (log1p L1 on raw densities of 0.01-0.3
   was nearly linear and left the decoder flat);
-* **mass**: the density's mean over the uniformly drawn directions against the entities' total visible mass (log
-  ratio) -- the density's level, which its shape term alone let drift low;
+* **mass**: with a mass output (``m``), it against the entities' total visible mass (log ratio, floor 1 %), and the
+  density then compared by shape only (each normalised by its mean): where and which way apart -- with the two in one
+  density the decoder learned edge energy (structure-tensor-like) before regions; without one, the density's mean;
+* **region**: the population region (visible occupancy of every oriented layer) at every voxel, binary cross-entropy --
+  a segmentation-like objective teaching the trunk regions, not only their edges;
 * **vote**: on directions one entity owns (its share of rho > 1/2, rho above ``OWN_REL`` of the query's mean): the Bingham frame (axis-invariant, :func:`~shapetensor.
   learn.bingham.frame_loss`), the concentrations (log1p L1) and the descriptors;
 * **tree**: hyperbolic distortion between owned directions' embeddings, ``(d_P(z_i, z_j) - t_ij)^2 / (1 + t_ij)`` with
@@ -27,7 +30,7 @@ import torch.nn.functional as Fn
 
 from . import bingham as BG
 
-ENT_WEIGHTS = {"density": 1.0, "mass": 1.0, "vote": 1.0, "kappa": 0.2, "desc": 0.2, "tree": 0.5, "overall": 1.0, "fraction": 0.2, "points": 0.5, "contrast": 0.5, "cross": 0.5}
+ENT_WEIGHTS = {"density": 1.0, "mass": 1.0, "region": 1.0, "vote": 1.0, "kappa": 0.2, "desc": 0.2, "tree": 0.5, "overall": 1.0, "fraction": 0.2, "points": 0.5, "contrast": 0.5, "cross": 0.5}
 N_DIRS = 32
 TREE_PAIRS = 4096
 TREE_EDGE = 0.6                     # hyperbolic length of a tree edge: depth ~16 fits the ball (radius cap 1e-4 -> 9.9 from the centre)
@@ -35,6 +38,7 @@ DENS_FLOOR = 0.05                   # the density loss's floor: this share of th
                                     # more than its peaks, so the mass term below holds the level (without it: mass 0.2-0.7x)
 DENS_EPS = 1e-3                     # ... and at least this (empty queries: pushed to low density, not to -inf)
 DENS_KAPPA_MAX = 40.0               # the density target's lobes no sharper than the direction basis can draw (order 16); votes keep kappa
+MASS_EPS = 0.01                     # the mass output's floor (1 % of the window): empty windows need not reach zero exactly
 OWN_REL = 0.25                      # owned directions: density above this share of the query's mean (any mass)
 OVERALL_FLOOR = 0.01                # the overall ODF's relative error: energy floor per lattice cell (~ occupancy 0.03)
 
@@ -78,12 +82,20 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
     pe = BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], T["e_kappa"][:, :, None].clamp(max=DENS_KAPPA_MAX))   # (B, Q, D, E)
     contrib = mass[:, :, None] * pe; rho = contrib.sum(-1)
     rm = rho.mean(-1, keepdim=True)                                                                # each query's mean density (its mass)
-    eps = (DENS_FLOOR * rm).clamp_min(DENS_EPS)
-    parts["density"] = (torch.log(ent["f"].float() + eps) - torch.log(rho + eps)).abs().mean()     # scale-free: shape at any mass
     n_uni = dirs.shape[2] - int(round(dirs.shape[2] * 0.5))                                        # sample_dirs: the uniform directions first
-    if n_uni > 0:                                                                                  # the mass: the density's mean over the sphere
-        m_p = ent["f"][:, :, :n_uni].float().mean(-1); m_t = mass.sum(-1)
-        parts["mass"] = (torch.log(m_p + DENS_EPS) - torch.log(m_t + DENS_EPS)).abs().mean()
+    m_t = mass.sum(-1)
+    if "m" in ent:                                                                                 # where and which way apart: the mass from its own
+        parts["mass"] = (torch.log(ent["m"].float() + MASS_EPS) - torch.log(m_t + MASS_EPS)).abs().mean()   # output; the density only its shape
+        f = ent["f"].float(); fbar = f[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-6) if n_uni > 0 else f.mean(-1, keepdim=True).clamp_min(1e-6)
+        has = (m_t > MASS_EPS)[..., None].expand_as(f)
+        sh_p = torch.log(f / fbar + DENS_FLOOR); sh_t = torch.log(rho / m_t.clamp_min(1e-9)[..., None] + DENS_FLOOR)   # the target's exact sphere mean: its mass
+        parts["density"] = (sh_p - sh_t).abs()[has].mean() if bool(has.any()) else f.sum() * 0.0
+    else:
+        eps = (DENS_FLOOR * rm).clamp_min(DENS_EPS)
+        parts["density"] = (torch.log(ent["f"].float() + eps) - torch.log(rho + eps)).abs().mean()  # scale-free: shape at any mass
+        if n_uni > 0:                                                                              # the mass: the density's mean over the sphere
+            m_p = ent["f"][:, :, :n_uni].float().mean(-1)
+            parts["mass"] = (torch.log(m_p + DENS_EPS) - torch.log(m_t + DENS_EPS)).abs().mean()
     share = contrib / rho.clamp_min(1e-9)[..., None]; best, owner = share.max(-1)
     owned = (best > 0.5) & (rho > OWN_REL * rm) & (rm > DENS_EPS)
     total = W["density"] * parts["density"] + W.get("mass", 0.0) * parts.get("mass", 0.0)
@@ -123,13 +135,20 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         parts["owned_share"] = owned.float().mean().detach()
     # the overall ODF, fraction, points on the lattice (cells away from the faces)
     c = lambda x: x[..., margin:x.shape[-3] - margin, margin:x.shape[-2] - margin, margin:x.shape[-1] - margin]
-    if "sh_t" in T and "total_sh" in P:
+    lat = P.get("total_sh", P.get("fraction_logit"))
+    lat_ok = lat is not None and min(lat.shape[-3:]) > 2 * margin                                   # a lattice left inside the margins
+    if "sh_t" in T and "total_sh" in P and lat_ok:
         nsh = P["total_sh"].shape[1]; tt = c(T["sh_t"][:, :nsh].float()); pt = c(P["total_sh"].float())
         floor = OVERALL_FLOOR * tt[:, 0].numel()                                                    # near-empty crops: no blow-up
         parts["overall"] = ((pt - tt) ** 2).sum() / ((tt ** 2).sum() + floor); total = total + W["overall"] * parts["overall"]
-    if "fraction" in T and "fraction_logit" in P:
+    if "region_t" in T and "region_logit" in P:                                                     # the population region, every voxel
+        rl = P["region_logit"].float(); rt = T["region_t"].float()
+        mv = 2 * margin                                                                            # voxels from the faces
+        cr = lambda x: x[..., mv:x.shape[-3] - mv, mv:x.shape[-2] - mv, mv:x.shape[-1] - mv]
+        parts["region"] = Fn.binary_cross_entropy_with_logits(cr(rl), cr(rt)); total = total + W.get("region", 1.0) * parts["region"]
+    if "fraction" in T and "fraction_logit" in P and lat_ok:
         parts["fraction"] = Fn.binary_cross_entropy_with_logits(c(P["fraction_logit"].float()), c(T["fraction"].float())); total = total + W["fraction"] * parts["fraction"]
-    if "points" in P and "points_t" in T:
+    if "points" in P and "points_t" in T and lat_ok:
         from . import lobes as LB
         parts["points"] = LB.points_loss(c(P["points"]), c(T["points_t"])); total = total + W["points"] * parts["points"]
     return total, parts
