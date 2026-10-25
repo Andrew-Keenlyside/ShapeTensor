@@ -729,7 +729,11 @@ def blob_population(sc, field: Field, rel: str, base, around, dense: bool = Fals
     if not keep:
         return []
     C = X[keep]; m = C.shape[0]; rec["n"] = m
-    d = field(C); q = _perp(d); w = torch.linalg.cross(d, q); th = r.rand(m) * 6.283
+    d = field(C)
+    bad = ~torch.isfinite(d).all(-1) | (d.norm(dim=-1) < 0.5)                                     # a field's singular points (a source, an axis)
+    if bool(bad.any()):
+        d = torch.where(bad[:, None], _unit(r.randn(m, 3)), d)
+    q = _perp(d); w = torch.linalg.cross(d, q); th = r.rand(m) * 6.283
     q2 = torch.cos(th)[:, None] * q + torch.sin(th)[:, None] * w; w2 = torch.linalg.cross(d, q2)
     Rm = torch.stack([q2, w2, d], -1)                                                            # columns: the semi-axes' directions
     ax = ax_[None].expand(m, 3) * torch.exp(0.12 * r.randn(m, 1)).clamp(0.75, 1.3)
