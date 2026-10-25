@@ -673,6 +673,7 @@ def blob_population(sc, field: Field, rel: str, base, around, dense: bool = Fals
     r = sc.r; dev = sc.device; shape = sc.shape; Z = float(max(shape))
     rc = sc.size(0.2, 2000, 0.8, Z / 10) or r.u(1.0, 4.0)
     e = r.lu(0.25, 5.0); lat = r.u(0.6, 1.0)
+    e = min(e, max(1.0, Z / 6 / rc))                                                             # objects, not regions: the long axis <= canvas / 6
     ax_ = torch.tensor([rc, rc * lat, rc * e], device=dev); amax = float(ax_.max())
     place = _pick(r, BLOB_PLACE_P); shp = _pick(r, BLOB_SHAPE_P)
     if rel == "embed" and around is not None:
