@@ -21,6 +21,7 @@ the target's support is ±16.5 voxels (σ_w = 5 truncated at 3σ, pooled by 4).
 """
 from __future__ import annotations
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as Fn
@@ -80,6 +81,30 @@ def poincare_dist(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     return torch.acosh((1 + 2 * du / (a * b)).clamp_min(1 + 1e-7))
 
 
+def window_mean(r: torch.Tensor, points: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
+    """The Gaussian-window mean of a map ``r (B, Z, Y, X)`` at ``points (B, Q, 3)`` (voxels) and per-query ``sigma (B, Q)``
+    (voxels): zero beyond the map (as the entity targets count nothing beyond the crop), blurred at sigma steps of sqrt 2
+    over the batch's range, sampled trilinearly and interpolated in log sigma. Differentiable: ``(B, Q)``."""
+    B, Z, Y, X = r.shape
+    s_lo = float(sigma.min().clamp_min(0.5)); s_hi = float(sigma.max().clamp_min(s_lo * 1.0001))
+    n_lv = max(2, int(math.ceil(math.log(s_hi / s_lo) / math.log(math.sqrt(2)))) + 1)
+    lv = torch.exp(torch.linspace(math.log(s_lo), math.log(s_hi), n_lv, device=r.device))
+    size = torch.tensor([Z, Y, X], device=r.device, dtype=torch.float32)
+    g = (points / (size - 1) * 2 - 1).flip(-1).view(B, -1, 1, 1, 3)                                # grid_sample's (x, y, z), align_corners
+    S = []
+    for s_ in lv.tolist():
+        rad = int(math.ceil(3 * s_)); t = torch.arange(-rad, rad + 1.0, device=r.device); k = torch.exp(-0.5 * (t / s_) ** 2); k = k / k.sum()
+        v = r[:, None]
+        for ax in range(3):
+            sh = [1, 1, 1, 1, 1]; sh[2 + ax] = -1
+            v = Fn.conv3d(v, k.view(*sh).to(v.dtype), padding=tuple(rad if a == ax else 0 for a in range(3)))
+        S.append(Fn.grid_sample(v, g, mode="bilinear", align_corners=True).view(B, -1))
+    S = torch.stack(S)                                                                              # (n_lv, B, Q)
+    t = (torch.log(sigma.clamp_min(s_lo)) - math.log(s_lo)) / max(math.log(s_hi / s_lo), 1e-6) * (n_lv - 1)
+    i0 = t.floor().long().clamp(0, n_lv - 2); a = (t - i0.float()).clamp(0, 1)
+    return (1 - a) * S.gather(0, i0[None])[0] + a * S.gather(0, (i0 + 1)[None])[0]
+
+
 class EntityDecoder(nn.Module):
     """The entity field at any point x, scale sigma and direction u: from the trunk's three levels at x (trilinear over
     the lattice corners, as :class:`~shapetensor.learn.query.QueryDecoder`), log sigma and the visible context, a point
@@ -88,7 +113,7 @@ class EntityDecoder(nn.Module):
     (kappa1 >= kappa2 >= 0), and its 5 descriptors (log size, relative wall, lumen, flattening, angularity)."""
 
     def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8, unc: bool = False, mass_head: bool = False,
-                 dens_sh: bool = False):
+                 dens_sh: bool = False, dens_mlp: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -96,9 +121,13 @@ class EntityDecoder(nn.Module):
         # the density's shape as harmonics of the point code: log-density c(p) . Y(u), a direct path from where to which
         # way (with only the concatenated MLP, a flat start is a saddle: the shape loss's gradient on the point code
         # cancels over the sphere until the MLP has found p x u interactions on its own)
-        self.dens = nn.Linear(hidden, n_coef(lmax)) if dens_sh else None
+        if dens_sh and dens_mlp:                                                                  # (the harmonics a nonlinear function of the point
+            self.dens = nn.Sequential(nn.Linear(hidden, hidden), nn.SiLU(), nn.Linear(hidden, n_coef(lmax)))   # code: a lobe's
+        else:                                                                                     # coefficients are polynomials of its axis)
+            self.dens = nn.Linear(hidden, n_coef(lmax)) if dens_sh else None
         if self.dens is not None:
-            nn.init.zeros_(self.dens.weight); nn.init.zeros_(self.dens.bias)
+            last = self.dens[-1] if isinstance(self.dens, nn.Sequential) else self.dens
+            nn.init.zeros_(last.weight); nn.init.zeros_(last.bias)
         self.point = nn.Sequential(nn.Linear(c2 + c1 + c0 + 3 + 2, hidden), nn.SiLU(), nn.Linear(hidden, hidden))
         self.dir = nn.Sequential(nn.Linear(hidden + n_coef(lmax), hidden), nn.SiLU(), nn.Linear(hidden, hidden), nn.SiLU(),
                                  nn.Linear(hidden, 1 + emb + 6 + 2 + 5 + int(self.unc)))
@@ -167,7 +196,7 @@ class PopulationNet(nn.Module):
                  lcn: float = 0.0, query: bool = False, desc_lmax: int = 0, axis_head: bool = False, head: str = "slots", J: int = 4,
                  context_level: bool = False, voxel_cond: bool = False, identity_dim: int = 0, points: bool = False, nd: int = 5,
                  free_sh: bool = False, dir_lmax: int = 8, vote_unc: bool = False, mass_head: bool = False, region_head: bool = False,
-                 dens_sh: bool = False):
+                 dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False):
         super().__init__()
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
         self.head, self.J, self.nd, self.free_sh = head, J, (nd if head == "lobes" else 0), bool(free_sh)
@@ -191,8 +220,9 @@ class PopulationNet(nn.Module):
             self.frac = nn.Conv3d(c2, 1, 1)
             if self.has_points:
                 self.points = nn.Conv3d(c2, 2, 1); nn.init.constant_(self.points.bias, -4.0)
-            self.ent = EntityDecoder(c0, c1, c2, emb=max(int(embed), 2), hidden=256, lmax=int(dir_lmax), unc=bool(vote_unc), mass_head=bool(mass_head),
-                                     dens_sh=bool(dens_sh))
+            self.ent = EntityDecoder(c0, c1, c2, emb=max(int(embed), 2), hidden=256, lmax=int(dir_lmax), unc=bool(vote_unc),
+                                     mass_head=bool(mass_head) and not mass_region, dens_sh=bool(dens_sh), dens_mlp=bool(dens_mlp))
+            self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             return
         if head == "lobes":                                                                      # J lobes per cell (axis, mass, kappa, spare, descriptors)
@@ -237,7 +267,8 @@ class PopulationNet(nn.Module):
                    identity_dim=int(args.get("identity_dim", 0) or 0), points=bool(args.get("points", False)), free_sh=bool(args.get("free_sh", False)),
                    embed=int(args.get("embed", 8) or 8), dir_lmax=int(args.get("dir_lmax", 8) or 8), vote_unc=bool(args.get("vote_unc", False)),
                    mass_head=bool(args.get("mass_head", False)), region_head=bool(args.get("region_head", False)),
-                   dens_sh=bool(args.get("dens_sh", False))) \
+                   dens_sh=bool(args.get("dens_sh", False)), dens_mlp=bool(args.get("dens_mlp", False)),
+                   mass_region=bool(args.get("mass_region", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
@@ -300,6 +331,8 @@ class PopulationNet(nn.Module):
                 out["ent"] = self.ent((h0, h1, h), e_points.float(), e_sigma.float(), e_dirs, None if context is None else context.float())
             if self.region is not None:                                                         # the population region, every voxel
                 out["region_logit"] = self.region_map(h0, h1, h)
+                if e_points is not None and getattr(self, "mass_region", False):                 # where, once: the mass is the region's
+                    out["ent"]["m"] = window_mean(torch.sigmoid(out["region_logit"].float()), e_points.float(), e_sigma.float())   # window mean
             out["_feats"] = (h0, h1, h)
             return out
         if self.head == "lobes":

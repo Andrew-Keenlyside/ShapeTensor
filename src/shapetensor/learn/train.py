@@ -980,7 +980,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    cpu_workers: int = 0, cpu_threads: int = 4, channels_last: bool = False, compile_model: bool = False, ckpt_minutes: float = 20.0,
                    benchmark: int = 0, device: str = "cuda", log_every: int = 25, n_dirs: int = 32, pairs: int = 16, pair_every: int = 4,
                    dir_lmax: int = 8, vote_unc: bool = False, e_sigma: tuple | None = None, deep_tree: bool = False, lcn: float = 0.0,
-                   dens_sh: bool = True, read_keep: float = READ_KEEP):
+                   dens_sh: bool = True, read_keep: float = READ_KEEP, dens_mlp: bool = True, mass_region: bool = True):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -989,7 +989,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     buffer of ``pairs``) trained to agree on their entities' places in the tree. ``dir_lmax``: the decoder's direction
     basis order; ``vote_unc``: a vote uncertainty output; ``e_sigma``: the query scales (voxels); ``deep_tree``:
     fascicles and branches in the generator's hierarchies; ``dens_sh``: the density's shape as harmonics of the point
-    code; ``read_keep``: the share of (almost) unreadable crops kept (:data:`READ_KEEP`). The cluster machinery of :func:`train_lobes`: producer thread, CPU
+    code (``dens_mlp``: through a small MLP); ``read_keep``: the share of (almost) unreadable crops kept (:data:`READ_KEEP`);
+    ``mass_region``: the mass is the region map's mean in the query's window (where, once), not a separate output. The cluster machinery of :func:`train_lobes`: producer thread, CPU
     workers, data parallel, checkpoints and ``--resume auto``, benchmark mode."""
     from . import dataflow as DF
     from . import entity_train as ET
@@ -1029,7 +1030,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 context_level=context_level, voxel_cond=voxel_cond, points=points, level0=level0, level_steps=level_steps, voxel_dropout=voxel_dropout,
                 weights=weights, routes=routes, contrast_views=contrast_views, world=world, contrast_every=contrast_every, n_dirs=n_dirs,
                 channels_last=channels_last, compile_model=compile_model, entity=dict(ENTITY), pairs=pairs, pair_every=pair_every,
-                dir_lmax=dir_lmax, vote_unc=vote_unc, lcn=lcn, mass_head=True, region_head=True, dens_sh=bool(dens_sh), read_keep=READ_KEEP)
+                dir_lmax=dir_lmax, vote_unc=vote_unc, lcn=lcn, mass_head=True, region_head=True, dens_sh=bool(dens_sh), read_keep=READ_KEEP,
+                dens_mlp=bool(dens_mlp), mass_region=bool(mass_region))
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)
@@ -1245,6 +1247,8 @@ def main():
     ap.add_argument("--deep-tree", action="store_true", help="entities: fascicles and branches in the generator's hierarchies")
     ap.add_argument("--no-dens-sh", action="store_true", help="entities: the density from the direction MLP only (no harmonics of the point code)")
     ap.add_argument("--read-keep", type=float, default=READ_KEEP, help="entities: the share of (almost) unreadable crops kept (1: no cap)")
+    ap.add_argument("--no-dens-mlp", action="store_true", help="entities: the density's harmonics linear in the point code")
+    ap.add_argument("--no-mass-region", action="store_true", help="entities: the mass from its own output on the point code, not the region map's window")
     ap.add_argument("--level-steps", type=float, default=0.5, help="entities: the share of the run over which the difficulty widens to 1")
     ap.add_argument("--lobes-J", type=int, default=6, help="lobes per cell (6: direct fits recover two crossing axes ~90 % of the time from random starts, 4: ~75 %)")
     ap.add_argument("--no-context-level", action="store_true", help="lobes: no stride-8 trunk level")
@@ -1281,7 +1285,7 @@ def main():
                        channels_last=a.channels_last, compile_model=a.compile, ckpt_minutes=a.ckpt_minutes, benchmark=a.benchmark, device=a.device,
                        log_every=a.log_every, n_dirs=a.n_dirs, pairs=16 if a.pairs is None else a.pairs, pair_every=a.pair_every,
                        dir_lmax=a.dir_lmax, vote_unc=a.vote_unc, e_sigma=a.e_sigma, deep_tree=a.deep_tree, lcn=a.lcn, dens_sh=not a.no_dens_sh,
-                       read_keep=a.read_keep, level_steps=a.level_steps)
+                       read_keep=a.read_keep, level_steps=a.level_steps, dens_mlp=not a.no_dens_mlp, mass_region=not a.no_mass_region)
         return
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,
