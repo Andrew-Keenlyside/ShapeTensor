@@ -470,6 +470,14 @@ def noise2d(n_u: int, n_v: int, sigma: float, rng: Rng) -> torch.Tensor:
     return (x[0] - x.mean()) / x.std().clamp_min(1e-6)
 
 
+def _solids_budget(amax: float, shape: str = "ellipsoid", points: float = 2.0e6) -> int:
+    """How many solids of largest semi-axis ``amax`` (voxels) the renderer's point budget holds (a filled solid is
+    sampled on a (4 amax)^3 grid; a cell only on its membrane and nucleus)."""
+    ns = max(4, int(math.ceil(2 * amax / H)))
+    per = 0.52 * ns ** 3 if shape != "cell" else 4 * math.pi * (amax / H) ** 2 * 3 + 0.52 * (0.6 * ns) ** 3
+    return int(max(1, min(400, points / max(per, 1.0))))
+
+
 def _fib_sphere(n: int, device) -> torch.Tensor:
     i = torch.arange(n, device=device, dtype=torch.float32) + 0.5
     z = 1 - 2 * i / n; r = torch.sqrt((1 - z * z).clamp_min(0)); ph = i * math.pi * (3 - math.sqrt(5))
@@ -544,7 +552,8 @@ class Scene:
                 "cells": 0.09, "crystals": 0.04, "radial": 0.04, "plywood": 0.04, "fascicles": 0.05, "trabecular": 0.03,
                 "tubules": 0.04, "epithelium": 0.03, "dendrite": 0.02, "gland": 0.02, "neuron": 0.03, "neuropil": 0.03,
                 "organelles": 0.05, "compartments": 0.05, "myelin": 0.04, "nuclei": 0.04, "myofibrils": 0.03, "alveoli": 0.03,
-                "jigsaw": 0.02, "honeycomb": 0.03, "xylem": 0.02, "lattice": 0.03, "organs": 0.05, "granules": 0.04}
+                "jigsaw": 0.02, "honeycomb": 0.03, "xylem": 0.02, "lattice": 0.03, "organs": 0.05, "granules": 0.04,
+                "compose": 1.5}                    # compositional populations (learn/compose.py): about half of all populations
 
     def __init__(self, shape, seed: int, device="cuda", voxel_um: float | None = None, content: str = "general"):
         self.shape = tuple(shape); self.device = device; self.r = Rng(seed, device); self.seed = seed
@@ -1856,7 +1865,7 @@ class Scene:
 
     # ---- the scene
     def build(self, families: dict | None = None, n_groups: tuple = (1, 5), layout_p: float = 0.3, underlay_p: float = 0.4,
-              cross_p: float = 0.0, deep_tree: bool = False):
+              cross_p: float = 0.0, deep_tree: bool = False, dense_p: float = 0.0):
         """The scene's families; with probability ``underlay_p`` a neuropil underlay as well (real tissue is full of it),
         unless the families given exclude neuropil. With probability ``cross_p`` a crossing scene: two or three bundles,
         each crossing (or kissing, or fanning through) the one before, beside the other families drawn. ``deep_tree``:
@@ -1864,6 +1873,9 @@ class Scene:
         branches as objects under the branch they leave (twig -> branch -> ... -> trunk -> tree)."""
         r = self.r
         self.deep = bool(deep_tree)                                            # hierarchies below the population: fascicles, branches
+        self.dense = dense_p > 0 and r.p(dense_p)                               # a dense scene: many interacting populations, heavier packing
+        if self.dense:
+            n_groups = (max(4, n_groups[0]), max(8, n_groups[1])); self.record["dense"] = True
         crossing = cross_p > 0 and r.p(cross_p)
         if r.p(layout_p):
             self.layout()
@@ -1885,6 +1897,7 @@ class Scene:
             self.record["crossing_scene"] = nb + (2 if line_sheet else 0)
         chosen.sort(key=lambda k: order.get(k, 5))
         bundles = []
+        from .compose import population as _compose_population
         for name in chosen:
             if name == "bundle":
                 prev = bundles[-1] if bundles and (crossing or r.p(0.6)) else None
@@ -1899,6 +1912,12 @@ class Scene:
                             g_.curves = [self.deflect(c, extra=[(cl.P[0, ::4], cl.rad[0, ::4])]) for c in g_.curves]
                         g_.curves = [self.deflect(c) for c in g_.curves]
                         bundles.append(g_)
+            elif name == "compose":                                           # related to any earlier population with a centreline
+                prev = [g_ for g_ in self.groups if getattr(g_, "centre_P", None) is not None or getattr(g_, "sdf", None) is not None]
+                for g_ in self.groups:
+                    if getattr(g_, "centre_P", None) is None and getattr(g_, "centreline", None) is not None:
+                        g_.centre_P = g_.centreline.P[0]; prev.append(g_)
+                gs = _compose_population(self, prev, dense=self.dense)
             elif name == "foam":
                 gs = self.foam(False)
             elif name == "porous":
@@ -2012,17 +2031,17 @@ def _compact(ren: dict) -> dict:
 
 
 def render_scene(canvas, scene_seed: int, device, voxel_um=None, families=None, n_groups=(1, 5), layout_p=0.3, content="general", style=None,
-                 underlay_p: float = 0.4, cross_p: float = 0.0, deep_tree: bool = False):
+                 underlay_p: float = 0.4, cross_p: float = 0.0, deep_tree: bool = False, dense_p: float = 0.0):
     """The scene (cached: crops of one scene are drawn in sequence) and its background on the whole canvas -- a
     texture, regions and possibly a cell stain, so crops at any zoom of one scene share them."""
-    key = (tuple(canvas), scene_seed, str(device), voxel_um, str(families), tuple(n_groups), layout_p, content, style, underlay_p, cross_p, deep_tree)
+    key = (tuple(canvas), scene_seed, str(device), voxel_um, str(families), tuple(n_groups), layout_p, content, style, underlay_p, cross_p, deep_tree, dense_p)
     _CACHE = _scene_cache()
     if key in _CACHE:
         _CACHE[key] = _CACHE.pop(key)                                       # most recently used last
     else:
         while len(_CACHE) >= CACHE_SCENES:                                  # a few scenes (training draws and paired renders interleave)
             _CACHE.pop(next(iter(_CACHE)))
-        sc = Scene(canvas, scene_seed, device, voxel_um, content).build(families, n_groups, layout_p, underlay_p, cross_p, deep_tree)
+        sc = Scene(canvas, scene_seed, device, voxel_um, content).build(families, n_groups, layout_p, underlay_p, cross_p, deep_tree, dense_p)
         st = style or ["flat", "regions", "tissue", "cells"][sc.r.i(0, 3)]
         bgp = background(tuple(canvas), st, sc.r.g, device, 1.0, content, nprng=sc.r.np)
         _CACHE[key] = (sc, _compact(sc.render(half=True)), bgp, st)
@@ -2193,7 +2212,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
                crop: tuple | None = None, identity_min_r: float = 1.5, p_blend: float = 0.35, p_aniso: float = 0.25, p_scramble: float = 0.3,
                p_texture: float = 0.5, p_merge: float = 0.25, p_boundary: float = 0.2, p_affine: float = 0.3, p_grain: float = 0.8,
                underlay_p: float = 0.4, p_sparse: float = 0.12, p_cutout: float = 0.15, entity_ctx: bool = False, cross_p: float = 0.0,
-               p_centre: float = 0.0, deep_tree: bool = False):
+               p_centre: float = 0.0, deep_tree: bool = False, dense_p: float = 0.0):
     """A training pair from an object scene, in the format of :func:`~shapetensor.learn.generator.draw`: ``(Sample,
     drawn)``. Scenes are rendered on a ``canvas``³ grid and ``crops_per_scene`` consecutive seeds share one (cut at
     different places), so a scene's cost is spread over its crops.
@@ -2226,7 +2245,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     log2(1 + size), relative wall, lumen fraction, flattening, angularity), ``desc_um``, ``points`` (branch points,
     endpoints), ``recoverability``, ``parents``, the voxel size and the physics."""
     sid = seed // max(1, crops_per_scene)
-    sc, ren, bgp, st = render_scene((canvas,) * 3, 7_000_000 + sid, device, voxel_um, families, n_groups, layout_p, content, style, underlay_p, cross_p, deep_tree)
+    sc, ren, bgp, st = render_scene((canvas,) * 3, 7_000_000 + sid, device, voxel_um, families, n_groups, layout_p, content, style, underlay_p, cross_p, deep_tree, dense_p)
     r = Rng(seed, device); ra = Rng(acq_seed if acq_seed is not None else seed + 31337, device)
     from .generator import MODALITIES
     names = list(MODALITIES); modality = modality or names[ra.i(0, len(names) - 1)]          # X-ray, MRI, histology, EM, fluorescence, cryo-ET, mixed
