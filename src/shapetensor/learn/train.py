@@ -1013,6 +1013,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     if str(device).startswith("cuda"):
         device = f"cuda:{local}"; torch.cuda.set_device(device)
         torch.backends.cudnn.benchmark = True; torch.backends.cuda.matmul.allow_tf32 = True; torch.backends.cudnn.allow_tf32 = True
+        torch.set_num_threads(min(torch.get_num_threads(), 6))                                       # the trainer's own CPU work (pair draws)
+                                                                                                     # beside the CPU workers: not every core
     HEAD, DESC_KEY, SH_EXACT, DESC_LMAX, QUERY = "entities", "descriptors5", 8, 0, None
     VIEWS = 2 if (routes and contrast_views) else 1
     _losses.DESC_K = 5; _losses.DESC_NC = 0
