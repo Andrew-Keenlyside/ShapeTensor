@@ -18,12 +18,17 @@ ground truth fed in as the model (cases the truth fails are dropped and listed).
 |---|---|---|
 | simple crossing, axis-aligned, angles 30-90 | 12/12 PASS | fits that family only: 0/4 on rotated crossings (review) |
 | simple crossing, random 3-D orientation | 0/4 | runs superseded by the families (which include orientation) |
-| phantom families (cross, fan, curve, sheet, blob, mix, empty) | 2/14 (fam_C, fam_D: the two empty volumes) | fam_A 1/14, fam_E 0/14 |
+| phantom families (cross, fan, curve, sheet, blob, mix, empty) | 2/14 (fam_C, fam_D) -- only the two empty volumes | fam_A 1/14, fam_E 0/14; probe (fam_D) no measurable change |
 | generator crossings (difficulty 0.6), 9 scoreable of 12 | 0/9 (EP14b; Z1 at 500/1000/2000; Z2 at 500/1000/2000) | |
 
-Per family (fam_C): sheets pass direction and ODF shape (C6, C8) and are found (C9); blobs are found as isotropic
-objects (C9, C8) but miss level / edges; curves and fans are found with the right direction (C6) but miss level,
-counts and ODF shape; crossings fail almost everything: the two populations merge.
+No phantom with structure passes in any model: every pass is an empty volume (where "other directions" sits near
+the 5 % limit). All family scores are on the selection set (reused for every choice); the final set is scored for
+fam_C below. Lower density loss did not track acceptance (fam_E: lowest loss, 0/14; fine-tuning raised C3 failures from
+2/12 to 7/12 over fam_A and added spurious isotropic mass). Per family (fam_C): sheets pass direction and ODF shape where
+found (C6, C8) and are found (C9); blobs are found as isotropic objects but miss level / edges; curves and fans are
+found with the right direction but miss level, counts and ODF shape; crossings fail almost everything. C1 (level)
+fails on 10-12 of the 12 structured phantoms and C4 (leakage) on 8-12, in every model: mass calibration and leakage
+are failures as broad as the crossings (review 3).
 
 ## 2. What was built tonight
 - `learn/phantom2.py` — composable phantoms: straight / curved / fanning bundles of fibres (per-voxel tangents), sheet
@@ -55,28 +60,32 @@ colliding crossing layers. After the fixes the ground truth passes 42/42.
   would call them background; the background head is the fix (blob phantoms now found).
 
 ### Output resolution and super-resolution (fam_A, `resolution/fam_A.png`)
-- Output scale sigma 1 / 1.5 / 2.5 / 4 / 6: direction (C6) holds at 12/14 at every scale; the population count (C3) is
-  best at the trained scale (12/14 at sigma 2.5; 6/14 at sigma 1, 8/14 at sigma 6); all criteria 1/14 (0 at sigma 6).
-- Sub-voxel output (half-voxel grid, sigma 1, crossing): r = 0.84 / 0.68 with the fibre-scale target, but only from
-  the bundles' extent -- the model's maps are smooth where the target has individual fibres: population fractions, not
-  fibres. No fibre-level super-resolution.
-- Unresolved fibres (spacing 1.6-2.4, radius 0.4-0.7 voxels): 0/6, direction right on 1/6 -- trained only on
-  resolvable fibres (spacing >= 3), the model does not recover sub-voxel orientation. To learn it: unresolved fibres in
-  the families and supervision at sigma < 1 (sub-voxel targets).
+- Output scale sigma 1 / 1.5 / 2.5 / 4 / 6 (fam_A was trained on sigma 1-6; 2.5 is the scale the thresholds were set
+  at): the direction is right where a population is found (C6 12/14 at every scale; but C9, finding it, 7/14 at every
+  scale); the population count (C3) is best at sigma 2.5 (12/14; 6/14 at sigma 1, 8/14 at sigma 6).
+- Sub-voxel output: not a real super-resolution test yet -- the phantom's occupancy and targets live on the 64^3 grid
+  (no sub-voxel truth), the test fibres were resolved (spacing 3.9), and the crossing used is one the model merges
+  (pop 2's map edges are the merge). The model's half-voxel maps are smooth where the sigma-1 target shows fibres.
+- Unresolved fibres (spacing 1.6-2.4, radius 0.4-0.7): fam_A 0/6, but fam_A never saw that family and the images are
+  point-sampled near the 2-voxel Nyquist limit (they may alias); a classical structure-tensor baseline is needed to
+  say whether the orientation is in the image. fam_E/F train on the family; their scores on it are not yet measured.
+- A proper super-resolution test needs phantoms rendered at a finer grid and averaged down (true partial volume),
+  with targets from the fine grid.
 
 ### Crossings in arbitrary orientation: the dominant failure
 At crossing centres (random 3-D orientation) the above-floor density within 12 deg of A / B is 0.04-0.15 for the
 models against 0.24-0.28 in the targets at every angle -- at 90 deg only 0.06 / 0.04 (about 3x uniform; the target
-~10x): the density at the core is broad, the readout then makes one population with an intermediate axis (cross rows:
-population 1 ~2x its level, population 2's overlap 0). The oriented probe (fam_D) and crossings x3 + sub-voxel windows
+~10x): the density at the core is broad. The readout then merges (42 deg row: one entity on the bisector carries 94 %
+of the target mass) or fragments (85 deg row: ~4 entities, the heaviest 39 %, both populations at 0.3-0.4x) (review 3). The oriented probe (fam_D) and crossings x3 + sub-voxel windows
 (fam_E) move this by <= 0.01. With the earlier result -- a single rotated crossing is fitted in ~100 steps -- the
 architecture can represent it; what is missing is generalisation across orientations (data / duration / rotation-aware
 features), not the readout. fam_F (longer, batch 4, crossings x3) tests duration.
 
 ### Generator
 Z1 (all fixes, from EP14b) and Z2 (from the phantom-family model) both 0/9 at 500 / 1000 / 2000 steps; training
-density loss ~0.55-0.69 on generator crops; model mass along A / B ~2-6 % of the targets, the rest isotropic floor: the
-density stays nearly flat on generator images. The phantom-family initialisation does not carry over.
+density loss ~0.55-0.69 on generator crops; model mass along A / B ~2-6 % of the targets even on single arms, the rest
+isotropic floor: a detection failure, not (yet) a separation failure -- the density stays nearly flat on generator
+images. The phantom-family initialisation does not carry over (Z2 starts worse and converges to the same).
 
 ## 5. Open structural questions
 1. Crossings across orientations: the model resolves one rotated crossing quickly but not crossings in general. Options:
