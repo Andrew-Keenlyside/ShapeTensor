@@ -88,15 +88,24 @@ density loss ~0.55-0.69 on generator crops; model mass along A / B ~2-6 % of the
 isotropic floor: a detection failure, not (yet) a separation failure -- the density stays nearly flat on generator
 images. The phantom-family initialisation does not carry over (Z2 starts worse and converges to the same).
 
+Is the orientation in the generator images at all? A classical structure tensor (gradients, sigma 2.5) on single-
+population arms of the held-out generator crossings finds the target axis on only 3 of 10 arms (1, 10, 13 deg; the
+others 30-71 deg; median 47 deg, random would be ~60) -- on the phantom crossings it finds it at 3 deg median. So in
+most generator populations the orientation the targets demand is not visible as local structure in the image (the
+targets' visibility weighting measures contrast, not orientation); the model's flat densities may be the right hedge.
+Caveat: a local tensor can miss orientation carried only by larger-scale shape. Next step: a per-population
+orientation-evidence check, then either gate the density / vote targets by it or make the generator render
+orientation-bearing texture -- before more generator training.
+
 ## 5. Open structural questions
 1. Crossings across orientations: the model resolves one rotated crossing quickly but not crossings in general. Options:
    (a) much longer training / larger batches (fam_F is the first test); (b) a wider full-resolution trunk (32 / 64
    channels at strides 1 / 2 carry the fibre-scale structure; crossings need many oriented filters); (c) rotation-aware
    features beyond the probe (steerable / equivariant layers at strides 1-2); (d) test-time rotation averaging.
-2. The generator: the density does not form lobes there at all (unlike phantoms). Candidates: appearance variety
-   (contrast routes, textures) needing far more training (cluster scale); targets whose orientation is not visible in
-   the image despite the visibility weighting (a per-case check that the target ODF is inferable would separate the
-   two); capacity.
+2. The generator: the density does not form lobes there at all (unlike phantoms). The structure-tensor check points
+   at the targets: in 7 of 10 crossing-population arms the target orientation is not visible locally. First fix the
+   targets / generator so the orientation asked for is in the image (orientation-evidence gating or orientation-
+   bearing texture), then reassess capacity and duration.
 3. Non-fibrous objects: the background head separates blobs from the background by place; level and edges are not yet
    right (C1, C5), and in the generator cells / foams own no directions under OWN_OBJECTS (no tree identity).
 4. Fibre super-resolution: not learned (smooth sub-voxel maps; unresolved fibres 0/6); needs unresolved-fibre training
