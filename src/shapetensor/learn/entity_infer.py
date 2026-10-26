@@ -122,10 +122,11 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
     dec = model.ent; Y = real_sh(dirs.float(), dec.lmax)
     out = {}
     reg = None
+    from .model import window_mean
+    tsz = [int(min(n, v - o)) for n, v, o in zip(feats[0].shape[-3:], vs.tolist(), off.tolist())]       # the tile (no far-face padding)
     if getattr(model, "mass_region", False) and getattr(model, "region", None) is not None:     # the mass: the region map's window mean
-        from .model import window_mean
-        tsz = [int(min(n, v - o)) for n, v, o in zip(feats[0].shape[-3:], vs.tolist(), off.tolist())]   # the tile (no far-face padding)
         reg = model.region_value(model.region_map(*feats))[:, :tsz[0], :tsz[1], :tsz[2]]
+    bgm = model.bg_map(*feats)[:, :tsz[0], :tsz[1], :tsz[2]] if getattr(model, "bgh", None) is not None else None   # the background's
     for a in range(0, points.shape[0], chunk):
         p = points[a:a + chunk].float(); s = sigma[a:a + chunk].float(); n = p.shape[0]; D = dirs.shape[0]
         ctx = torch.minimum(p, vs - 1 - p).amin(-1)
@@ -133,6 +134,7 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
         mq = dec.mass_of(enc) if getattr(dec, "mass", None) is not None else None                  # the mass output (where), if the model has one
         if reg is not None:
             mq = window_mean(reg, (p - off)[None], s[None])[0]
+        bq = window_mean(bgm, (p - off)[None], s[None])[0] if bgm is not None else None
         if t_rel is None:
             ev = torch.ones(n, D, dtype=torch.bool, device=p.device)
         else:
@@ -151,6 +153,8 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
         full["evaluated"] = ev
         if mq is not None:
             full["m"] = mq.float()
+        if bq is not None:
+            full["bgm"] = bq.float()
         for k, v in full.items():
             out.setdefault(k, []).append(v)
     return {k: torch.cat(v) for k, v in out.items()}

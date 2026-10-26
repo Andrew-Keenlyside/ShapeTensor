@@ -1,0 +1,219 @@
+"""Composable phantoms for the separation ladder: populations of coherent or dispersed fibres (straight, curved, fanning
+bundles), sheets (stacks of planes) and blobs (non-fibrous objects) on a background, each in its own region and
+orientation, with a varied look. Each population has an occupancy and a per-voxel orientation tensor (the second moment
+of its material's directions: a fibre ``c uu' + (1 - c)(I - uu')/2``, a sheet ``(I - nn')/2``, a blob ``I/3``); the
+targets at a query are each population's window mean of occupancy (its mass) and of occupancy-weighted tensor (its
+ODF's moment: a fan or a curve broadens with the window, as its directions spread), fitted as a Bingham -- population
+specific ODFs, the isotropic remainder the background entity.
+
+``make(spec, n, seed, device)`` draws a phantom from a list of population specs (dicts: ``kind`` and its parameters);
+``random_spec(family, rng)`` draws a spec for a family ("cross", "fan", "curve", "sheet", "blob", "mix", "empty");
+``targets`` and ``draw_queries`` as :mod:`~shapetensor.learn.simple_phantom`.
+"""
+import math
+
+import torch
+
+from . import bingham as BG
+from .model import window_mean
+
+
+def _frame(u: torch.Tensor):
+    """Two unit vectors completing ``u`` to an orthonormal frame."""
+    ref = torch.tensor([1.0, 0, 0], device=u.device) if abs(float(u[0])) < 0.9 else torch.tensor([0, 1.0, 0], device=u.device)
+    e1 = torch.nn.functional.normalize(torch.cross(u, ref, dim=0), dim=0); e2 = torch.cross(u, e1, dim=0)
+    return e1, e2
+
+
+def _t6(T: torch.Tensor) -> torch.Tensor:
+    """``(..., 3, 3)`` -> ``(6, ...)`` (xx, yy, zz, xy, xz, yz)."""
+    return torch.stack([T[..., 0, 0], T[..., 1, 1], T[..., 2, 2], T[..., 0, 1], T[..., 0, 2], T[..., 1, 2]], 0)
+
+
+def _fibre_tensor(u: torch.Tensor, c: float) -> torch.Tensor:
+    """Per-voxel ``(..., 3, 3)`` moment of fibres along unit ``u (..., 3)`` with concentration ``c`` (1: all along u)."""
+    I = torch.eye(3, device=u.device)
+    uu = u[..., :, None] * u[..., None, :]
+    return c * uu + (1 - c) / 2 * (I - uu)
+
+
+def _ramp(d: torch.Tensor, r: float) -> torch.Tensor:
+    return (r + 0.5 - d).clamp(0, 1)
+
+
+def render(p: dict, X: torch.Tensor, n: int) -> tuple:
+    """One population on the grid ``X (n, n, n, 3)`` (z, y, x): ``(occupancy, tensor6 (6, n, n, n), kind)``."""
+    dev = X.device; kind = p["kind"]
+    c0 = torch.tensor(p.get("centre", (n / 2,) * 3), device=dev, dtype=torch.float32)
+    P = X - c0
+    if kind in ("bundle", "curve", "fan"):
+        nrm = torch.nn.functional.normalize(torch.tensor(p["normal"], device=dev, dtype=torch.float32), dim=0)   # the bundle's plane normal
+        a = torch.nn.functional.normalize(torch.tensor(p["axis"], device=dev, dtype=torch.float32), dim=0)
+        a = torch.nn.functional.normalize(a - (a @ nrm) * nrm, dim=0); b = torch.cross(nrm, a, dim=0)   # in-plane: along a, across b
+        s, r, half, z0, conc = p["spacing"], p["radius"], p["half"], p.get("z0", 0.0), p.get("conc", 0.94)
+        pa, pb, pz = P @ a, P @ b, P @ nrm
+        dz = pz - z0 - s * torch.round((pz - z0) / s)
+        inz = pz.abs() <= p.get("half_z", half)
+        if kind == "bundle":
+            db = pb - s * torch.round(pb / s)
+            occ = _ramp(torch.sqrt(db ** 2 + dz ** 2), r) * (pb.abs() <= half) * inz * (pa.abs() <= p.get("length", 1e9))
+            u = a.expand(*X.shape[:-1], 3)
+        elif kind == "curve":                                                                       # arcs about a centre of curvature
+            Rc = p["curv_radius"]; cc = -Rc                                                         # the arc passes through the centre
+            rho = torch.sqrt(pa ** 2 + (pb - cc) ** 2); phi = torch.atan2(pa, pb - cc)
+            dr = rho - Rc; drr = dr - s * torch.round(dr / s)
+            occ = _ramp(torch.sqrt(drr ** 2 + dz ** 2), r) * (dr.abs() <= half) * inz * (phi.abs() <= p.get("arc", 1.2))
+            t = torch.stack([torch.cos(phi), -torch.sin(phi)], -1)                                  # the tangent in (a, b)
+            u = t[..., :1] * a + t[..., 1:] * b
+        else:                                                                                        # fan: rays from an apex
+            ap = p.get("apex", -n / 2.5); spread = p["spread"]
+            ra = pa - ap; rho = torch.sqrt(ra ** 2 + pb ** 2).clamp_min(1e-3); phi = torch.atan2(pb, ra)
+            dphi = s / max(p.get("rho_ref", n / 2), 1.0)                                             # rays spaced s apart at rho_ref
+            dperp = rho * torch.sin(phi - dphi * torch.round(phi / dphi)).abs()
+            occ = _ramp(torch.sqrt(dperp ** 2 + dz ** 2), r) * (phi.abs() <= spread / 2) * inz * (rho >= p.get("rho_min", 6.0))
+            u = (ra / rho)[..., None] * a + (pb / rho)[..., None] * b
+        T = _fibre_tensor(u, conc)
+    elif kind == "sheet":
+        nrm = torch.nn.functional.normalize(torch.tensor(p["normal"], device=dev, dtype=torch.float32), dim=0)
+        s, th, half = p["spacing"], p["thickness"], p["half"]
+        pn = P @ nrm; d = pn - s * torch.round(pn / s)
+        e1, e2 = _frame(nrm)
+        occ = _ramp(d.abs(), th / 2) * ((P @ e1).abs() <= half) * ((P @ e2).abs() <= half) * (pn.abs() <= p.get("half_n", half))
+        cs = p.get("conc", 0.94)                                                                     # in-plane, a little out of it
+        T = (cs * (torch.eye(3, device=dev) - torch.outer(nrm, nrm)) / 2 + (1 - cs) * torch.outer(nrm, nrm)).expand(*X.shape[:-1], 3, 3)
+    elif kind == "blob":
+        g = torch.Generator(device="cpu").manual_seed(int(p.get("seed", 0)))
+        half, R, k = p["half"], p["blob_radius"], p["count"]
+        cen = (torch.rand(k, 3, generator=g) * 2 - 1) * (half - R)
+        occ = torch.zeros(X.shape[:-1], device=dev)
+        for cc in cen.to(dev):
+            occ = torch.maximum(occ, _ramp((P - cc).norm(dim=-1), R))
+        T = (torch.eye(3, device=dev) / 3).expand(*X.shape[:-1], 3, 3)
+    else:
+        raise ValueError(kind)
+    return occ.float(), _t6(T).float(), kind
+
+
+def make(spec: list, n: int = 64, seed: int = 0, look: dict | None = None, device="cuda") -> dict:
+    """A phantom from population specs: ``image (n, n, n)`` 0-1 (8-bit levels), ``occ (K, n, n, n)``, ``tens (K, 6, ...)``,
+    ``kinds``, ``bg`` (the background's occupancy). ``look``: ``bg`` level, per-population ``contrast`` (sign: bright or
+    dark), ``noise``, ``blur`` (voxels)."""
+    look = {"bg": 0.1, "contrast": [0.8] * len(spec), "noise": 0.01, "blur": 0.0, **(look or {})}
+    X = torch.stack(torch.meshgrid(*(torch.arange(n, dtype=torch.float32, device=device),) * 3, indexing="ij"), -1)
+    occ, tens, kinds = [], [], []
+    for p in spec:
+        o, t, k = render(p, X, n); occ.append(o); tens.append(t); kinds.append(k)
+    occ = torch.stack(occ) if occ else torch.zeros(0, n, n, n, device=device)
+    tens = torch.stack(tens) if tens else torch.zeros(0, 6, n, n, n, device=device)
+    tot = occ.sum(0).clamp(max=1.0) if len(spec) else torch.zeros(n, n, n, device=device)
+    con = torch.tensor(look["contrast"][:len(spec)], device=device, dtype=torch.float32).view(-1, 1, 1, 1)
+    scale = (tot / occ.sum(0).clamp_min(1e-6)) if len(spec) else tot                                # shared voxels: scaled back to one
+    img = torch.full((n, n, n), float(look["bg"]), device=device) + ((con * occ).sum(0) * scale if len(spec) else 0)
+    if look["blur"] > 0:
+        from ..filters import gaussian
+        img = gaussian(img[None, None], float(look["blur"]))[0, 0]
+    g = torch.Generator(device=device).manual_seed(seed)
+    img = (img + look["noise"] * torch.randn(n, n, n, generator=g, device=device)).clamp(0, 1)
+    img = (img * 255).round() / 255
+    return {"image": img, "occ": occ, "tens": tens, "kinds": kinds, "bg": 1 - tot, "spec": spec, "n": n, "look": look}
+
+
+def targets(ph: dict, pts: torch.Tensor, sig: torch.Tensor, emax: int = 8) -> dict:
+    """Entity targets at ``pts (Q, 3)``, ``sig (Q,)``: each population (and the background) its window mass and the
+    Bingham of its window-averaged moment; the crop's tree: root 0, populations 1..K, background K + 1."""
+    dev = pts.device; Q = pts.shape[0]; K = ph["occ"].shape[0]; n = ph["n"]
+    vols = [ph["occ"], ph["bg"][None]]
+    occ = torch.cat(vols)                                                                            # (K + 1, n, n, n)
+    m = window_mean(occ, pts[None].expand(K + 1, -1, -1).contiguous(), sig[None].expand(K + 1, -1).contiguous()).T   # (Q, K + 1)
+    T = torch.zeros(Q, K + 1, 3, 3, device=dev); T[:, K] = torch.eye(3, device=dev) / 3
+    if K:
+        wt = (ph["occ"][:, None] * ph["tens"]).reshape(K * 6, n, n, n)
+        mt = window_mean(wt, pts[None].expand(K * 6, -1, -1).contiguous(), sig[None].expand(K * 6, -1).contiguous()).T.view(Q, K, 6)
+        mt = mt / m[:, :K, None].clamp_min(1e-6)
+        for (i, j), c in zip(((0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2)), range(6)):
+            T[:, :K, i, j] = mt[..., c]; T[:, :K, j, i] = mt[..., c]
+    live = m > 1e-4
+    E = min(emax, K + 1)
+    node = torch.full((Q, emax), -1, dtype=torch.long, device=dev)
+    node[:, :E] = torch.where(live[:, :E], torch.arange(1, E + 1, device=dev), torch.full_like(node[:, :E], -1))
+    mass = torch.zeros(Q, emax, device=dev); mass[:, :E] = m[:, :E] * live[:, :E]
+    T6 = torch.zeros(Q, emax, 6, device=dev); R = torch.eye(3, device=dev).expand(Q, emax, 3, 3).clone(); Kp = torch.zeros(Q, emax, 2, device=dev)
+    Tq = T[:, :E]
+    tr = Tq.diagonal(dim1=-2, dim2=-1).sum(-1).clamp_min(1e-9)
+    Tq = Tq / tr[..., None, None]
+    T6[:, :E] = _t6(Tq).movedim(0, -1)
+    ok = live[:, :E]
+    if bool(ok.any()):
+        Rf, Kf = BG.fit(Tq[ok].double()); R[:, :E][ok], Kp[:, :E][ok] = Rf.float(), Kf.float()
+    anc = torch.full((1536, 16), -1, dtype=torch.long, device=dev); anc[0, 0] = 0
+    for i in range(1, E + 1):
+        anc[i, 0], anc[i, 1] = i, 0
+    return {"e_points": pts, "e_sigma": sig, "e_node": node, "e_mass": mass, "e_vis": (node >= 0).float(), "e_T6": T6,
+            "e_desc": torch.zeros(Q, emax, 5, device=dev), "e_anc": anc, "e_n": torch.tensor(E + 1, device=dev), "e_R": R, "e_kappa": Kp,
+            "e_gnode": node, "region_t": occ.sum(0), "iface_t": torch.zeros(n, n, n, device=dev), "voxel": torch.tensor(float("nan"), device=dev),
+            "bg_t": ph["bg"]}
+
+
+def draw_queries(ph: dict, g: torch.Generator, n_q: int) -> tuple:
+    """Half on the material, a quarter where two populations overlap (if any), the rest anywhere (2 voxels from the
+    faces); sigma 1-6."""
+    n = ph["n"]; dev = ph["image"].device
+    pts = 2 + torch.rand(n_q, 3, generator=g, device=dev) * (n - 5)
+    tot = ph["occ"].sum(0) if ph["occ"].shape[0] else torch.zeros(n, n, n, device=dev)
+    two = (ph["occ"] > 0.05).sum(0) >= 2 if ph["occ"].shape[0] >= 2 else torch.zeros(n, n, n, dtype=torch.bool, device=dev)
+    for frac, off, sel in ((0.5, 0.0, tot > 0.05), (0.25, 0.5, two)):
+        sel = sel.clone(); sel[:2] = sel[-2:] = False; sel[:, :2] = sel[:, -2:] = False; sel[:, :, :2] = sel[:, :, -2:] = False
+        cand = torch.nonzero(sel).float(); k = int(frac * n_q); o = int(off * n_q)
+        if cand.shape[0]:
+            pts[o:o + k] = (cand[torch.randint(0, cand.shape[0], (k,), generator=g, device=dev)] + torch.rand(k, 3, generator=g, device=dev) - 0.5).clamp(2, n - 3)
+    sig = torch.exp(torch.rand(n_q, generator=g, device=dev) * math.log(6.0))
+    return pts, sig
+
+
+# ---- families ------------------------------------------------------------------------------------------------------
+
+def _rand_unit(g):
+    return torch.nn.functional.normalize(torch.randn(3, generator=g), dim=0)
+
+
+def random_spec(family: str, g: torch.Generator, n: int = 64) -> tuple:
+    """A random spec and look for ``family``. Populations crossing share a plane normal (their fibres interleave in z)."""
+    u = lambda lo, hi: lo + float(torch.rand(1, generator=g)) * (hi - lo)
+    nrm = _rand_unit(g); e1, e2 = _frame(nrm)
+    def inplane(theta):
+        return (math.cos(theta) * e1 + math.sin(theta) * e2).tolist()
+    s0 = u(3.0, 5.5); fib = lambda: {"spacing": u(3.0, 5.5), "radius": u(0.8, 1.5), "half": u(7, 13), "conc": u(0.85, 0.97)}
+    spec = []
+    if family == "cross":
+        th = u(0, math.pi); ang = math.radians(u(30, 90)) * (1 if u(0, 1) < 0.5 else -1)
+        spec = [{"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th), **fib(), "z0": 0.0},
+                {"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th + ang), **fib(), "z0": s0 / 2}]
+        if u(0, 1) < 0.25:                                                                           # a third population
+            spec.append({"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th + ang / 2 + math.pi / 2), **fib(), "z0": s0 / 4})
+    elif family == "fan":
+        spec = [{"kind": "fan", "normal": nrm.tolist(), "axis": inplane(u(0, math.pi)), **fib(), "spread": math.radians(u(30, 80)), "half_z": u(6, 12)}]
+    elif family == "curve":
+        spec = [{"kind": "curve", "normal": nrm.tolist(), "axis": inplane(u(0, math.pi)), **fib(), "curv_radius": u(18, 45), "arc": u(0.6, 1.3), "half_z": u(6, 12)}]
+    elif family == "sheet":
+        spec = [{"kind": "sheet", "normal": _rand_unit(g).tolist(), "spacing": u(3.0, 6.0), "thickness": u(1.0, 2.2), "half": u(10, 18), "conc": u(0.85, 0.97)}]
+    elif family == "blob":
+        spec = [{"kind": "blob", "half": u(12, 22), "blob_radius": u(2.0, 4.5), "count": int(u(6, 25)), "seed": int(u(0, 1e6))}]
+    elif family == "mix":                                                                            # a crossing or bundle with blobs or a sheet
+        th = u(0, math.pi)
+        spec = [{"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th), **fib(), "z0": 0.0}]
+        r_ = u(0, 1)
+        if r_ < 0.35:
+            spec.append({"kind": "blob", "half": u(10, 18), "blob_radius": u(2.0, 4.0), "count": int(u(5, 15)), "seed": int(u(0, 1e6))})
+        elif r_ < 0.7:
+            spec.append({"kind": "sheet", "normal": _rand_unit(g).tolist(), "spacing": u(3.5, 6.0), "thickness": u(1.0, 2.0), "half": u(8, 14), "conc": u(0.85, 0.97)})
+        else:
+            spec.append({"kind": "fan", "normal": nrm.tolist(), "axis": inplane(th + math.radians(u(40, 90))), **fib(), "spread": math.radians(u(25, 60)), "z0": s0 / 2, "half_z": u(6, 10)})
+    elif family == "empty":
+        spec = []
+    con = []
+    for _ in spec:
+        cc = u(0.3, 0.8); con.append(cc)
+    bright = u(0, 1) < 0.5
+    bg = u(0.05, 0.9 - max(con, default=0.3)) if bright else u(max(con, default=0.3) + 0.05, 0.95)
+    look = {"bg": bg, "contrast": [c if bright else -c for c in con], "noise": u(0.0, 0.05), "blur": u(0, 0.8)}
+    return spec, look

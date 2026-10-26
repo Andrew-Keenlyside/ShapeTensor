@@ -205,6 +205,11 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         else:
             parts["region"] = Fn.binary_cross_entropy_with_logits(cr(rl), cr(rt), weight=wr)
         total = total + W.get("region", 1.0) * parts["region"]
+    if "bg_t" in T and "bg" in P:                                                                   # the background's occupancy, every voxel
+        mv = 2 * margin
+        cb = lambda x: x[..., mv:x.shape[-3] - mv, mv:x.shape[-2] - mv, mv:x.shape[-1] - mv]
+        parts["bg"] = (torch.log(cb(P["bg"].float()) + 0.05) - torch.log(cb(T["bg_t"].float()) + 0.05)).abs().mean()
+        total = total + W.get("bg", 1.0) * parts["bg"]
     if "fraction" in T and "fraction_logit" in P and lat_ok:
         parts["fraction"] = Fn.binary_cross_entropy_with_logits(c(P["fraction_logit"].float()), c(T["fraction"].float())); total = total + W["fraction"] * parts["fraction"]
     if "points" in P and "points_t" in T and lat_ok:

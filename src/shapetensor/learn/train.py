@@ -43,7 +43,7 @@ TKEYS = ("slots", "mass", "kind", "layer", "fraction", "classes", "size", "size_
 HALF = ("slots", "mass", "fraction", "classes", "size")
 QKEYS = ("q_points", "q_sigma", "q_sh", "sh_t")
 LKEYS = ("identity_t", "points_t", "voxel", "fraction")    # the lobe model's extra targets
-EKEYS = ("e_points", "e_sigma", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa", "e_gnode", "region_t", "iface_t")   # the entity model's
+EKEYS = ("e_points", "e_sigma", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa", "e_gnode", "region_t", "iface_t", "bg_t")   # the entity model's
 HEAD = "slots"                     # "slots" | "lobes" (set by train())
 DESC_KEY = "descriptors"           # the drawn descriptors the descriptor densities use ("descriptors5": the scenes' five)
 SH_EXACT = 0                       # > 0: the SH head's lattice target from the exact per-voxel density to this order
@@ -181,6 +181,8 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
         out["region_t"] = (rsum if REGION_DENSITY else rsum.clamp(0, 1)).half()                       # a density: crossings count both
         ifc = [k for k, L in enumerate(s.layers) if L.role == "interface"]                           # boundaries between background regions:
         out["iface_t"] = (d["occupancy"][ifc].float().sum(0).clamp(0, 1) if ifc else torch.zeros_like(d["occupancy"][0]).float()).half()   # hard negatives
+        bgl = [k for k, L in enumerate(s.layers) if L.role == "isotropic"]                           # the background's occupancy (the bg head)
+        out["bg_t"] = ((d["occupancy"][bgl].float() * vis[bgl]).sum(0).clamp(0, 1) if bgl else torch.zeros_like(d["occupancy"][0]).float()).half()
         out["voxel"] = torch.tensor(math.log2(d["voxel_um"]) if d.get("voxel_um") else float("nan"), device=device)
     out["kind"] = out["kind"].to(torch.int8); out["layer"] = out["layer"].to(torch.int16)
     return d["image"].to(torch.uint8), out
@@ -319,7 +321,7 @@ def stack(pairs, g=None, aug: bool = True):
     from .augment import contrast_route
     imgs, imgs2, tgts = [], [], []
     for img, t in pairs:
-        t = {k: (v.float() if k in HALF or k in ("q_sh", "sh_t", "points_t", "e_mass", "e_vis", "e_T6", "e_desc", "region_t", "iface_t") else
+        t = {k: (v.float() if k in HALF or k in ("q_sh", "sh_t", "points_t", "e_mass", "e_vis", "e_T6", "e_desc", "region_t", "iface_t", "bg_t") else
                  v.long() if k in ("kind", "layer", "identity_t", "e_node", "e_anc") else v) for k, v in t.items()}
         x = img.float() / 255.0
         if aug:

@@ -1,0 +1,164 @@
+"""The separation ladder on composable phantoms (:mod:`~shapetensor.learn.phantom2`): coherent and dispersed fibres
+(straight, curved, fanning bundles, crossings of two or three), sheets, blobs (non-fibrous objects), empty volumes and
+mixtures, in random 3-D orientations with a varied look. Trains on a mixture of families drawn per step and scores a
+fixed held-out set (``--test-per-family`` per family) with the acceptance criteria (crossing_acceptance.evaluate_p2):
+the figure (a row per family: the image on the slice through the structure; each population's target and model mass;
+the isotropic objects' target and model mass; the model's unmatched oriented mass and its background) and the table.
+
+Usage: python scripts/learn/phantom_ladder.py OUT.png [--init CKPT] [--steps 6000] [--families cross fan curve sheet blob mix empty]
+       python scripts/learn/phantom_ladder.py OUT.png --plot-only
+"""
+import argparse, math, sys
+import numpy as np
+import torch
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.colors import PowerNorm
+sys.path.insert(0, "src")
+import shapetensor.learn.train as TR
+from shapetensor.learn import entity_train as ET, losses as L, entity_infer as EI, dataflow as DF, phantom2 as P2, crossing_acceptance as CA
+from shapetensor.learn.model import PopulationNet
+
+R0 = "/home/andrew/bridge_wmcov/shapetensor/results/dev_pipeline/pilot_entities"
+FAMS = ("cross", "fan", "curve", "sheet", "blob", "mix", "empty")
+ap = argparse.ArgumentParser(); ap.add_argument("out"); ap.add_argument("--init", default=f"{R0}/simple/acc_angles_own_b3.pt")
+ap.add_argument("--steps", type=int, default=6000); ap.add_argument("--lr", type=float, default=3e-4); ap.add_argument("--lr-final", type=float, default=3e-6)
+ap.add_argument("--eval-every", type=int, default=500); ap.add_argument("--families", nargs="+", default=list(FAMS))
+ap.add_argument("--test-per-family", type=int, default=2); ap.add_argument("--n-points", type=int, default=512); ap.add_argument("--plot-only", action="store_true")
+ap.add_argument("--bg-head", action="store_true"); ap.add_argument("--oprobe", action="store_true"); ap.add_argument("--tag", default="")
+ap.add_argument("--floor", type=float, default=0.05); ap.add_argument("--batch", type=int, default=1)
+a = ap.parse_args(); dev = "cuda"; stem = a.out.rsplit(".", 1)[0]
+TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None
+L.DESC_K = 5; L.DESC_NC = 0; TR.REGION_DENSITY = True; ET.REGION_DENSITY = True; TR.set_background_entity(True)
+ET.VOTE_OBJECTS = True; ET.OWN_OBJECTS = True; ET.DENS_SAME_NORM = True
+batch = lambda ts: {k: torch.stack([t[k] for t in ts]) for k in ts[0]}
+
+tests = []
+for fi, fam in enumerate(FAMS):
+    for i in range(a.test_per_family):
+        spec, look = P2.random_spec(fam, torch.Generator().manual_seed(900_000 + 100 * fi + i))
+        tests.append((fam, P2.make(spec, seed=950_000 + 100 * fi + i, look=look, device=dev)))
+
+if a.plot_only:
+    ck = torch.load(stem + ".pt", map_location=dev, weights_only=False)
+    net = PopulationNet.from_args(ck["args"]).to(dev); net.load_state_dict(ck["model"]); curves, args, a.tag, a.init = ck["curves"], ck["args"], ck["tag"], ck["init"]
+else:
+    ref = torch.load(a.init, map_location=dev, weights_only=False)
+    args = {**ref["args"], "region_density": True, "kappa_log": True, "vote_objects": True, "own_objects": True, "dens_same_norm": True}
+    args["bg_head"] = bool(args.get("bg_head")) or a.bg_head; args["oprobe"] = bool(args.get("oprobe")) or a.oprobe
+    net = PopulationNet.from_args(args).to(dev); DF.load_partial(net, ref["model"], lambda m: None)
+    if not ref["args"].get("kappa_log"):
+        net.ent.reset_kappa()
+    a.tag = a.tag or f"families {' '.join(a.families)}"
+    curves = []
+    ge = torch.Generator(device=dev); held = []
+    for i, (fam, ph) in enumerate(tests):
+        ge.manual_seed(500 + i); T = batch([P2.targets(ph, *P2.draw_queries(ph, ge, a.n_points))]); held.append((fam, ph, T, ET.sample_dirs(T, 32, g=ge)))
+
+    def evaluate(step):
+        net.eval(); r = {"step": step}
+        for fam, ph, T, d in held:
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+                P = net(ph["image"][None, None], voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=d)
+            tot, parts = ET.entity_loss(P, T, d, W={"desc": 0.0}, g=torch.Generator(device=dev).manual_seed(97))
+            r.setdefault(fam, []).append({"total": float(tot), **{k: float(v) for k, v in parts.items()}})
+        net.train(); curves.append(r)
+        print(f"  step {step}: " + " | ".join(f"{f} dens {np.mean([x['density'] for x in v]):.3f}" for f, v in r.items() if f != "step"), flush=True)
+
+    opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=1e-4); g = torch.Generator(device=dev).manual_seed(0); gc = torch.Generator().manual_seed(0)
+    net.train()
+    for step in range(a.steps + 1):
+        if step % a.eval_every == 0 or step == a.steps:
+            evaluate(step)
+        if step == a.steps:
+            break
+        for pg in opt.param_groups:
+            lr_ = a.lr * min(1.0, (step + 1) / 30)
+            pg["lr"] = a.lr_final + (lr_ - a.lr_final) * 0.5 * (1 + math.cos(math.pi * step / max(a.steps, 1))) if a.lr_final is not None else lr_
+        imgs, ts = [], []
+        for b in range(a.batch):
+            fam = a.families[int(torch.randint(0, len(a.families), (1,), generator=gc))]
+            spec, look = P2.random_spec(fam, torch.Generator().manual_seed(step * 31 + b))
+            ph = P2.make(spec, seed=step * 31 + b, look=look, device=dev)
+            imgs.append(ph["image"]); ts.append(P2.targets(ph, *P2.draw_queries(ph, g, a.n_points)))
+        T = batch(ts); dirs = ET.sample_dirs(T, 32, g=g)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            P = net(torch.stack(imgs)[:, None], voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
+        tot, parts = ET.entity_loss(P, T, dirs, W={"desc": 0.0}, g=g)
+        opt.zero_grad(set_to_none=True); tot.backward(); torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0); opt.step()
+    torch.save({"model": net.state_dict(), "args": args, "curves": curves, "tag": a.tag, "init": a.init, "families": a.families}, stem + ".pt")
+net.eval()
+sph = EI.sphere_dirs(200, dev)
+
+
+def slice_frame(ph):
+    """The slice: through the centre, normal to the first population's plane normal (else z); offset between fibre layers."""
+    n = ph["n"]; spec = ph["spec"]
+    if spec and "normal" in spec[0]:
+        nrm = torch.nn.functional.normalize(torch.tensor(spec[0]["normal"], dtype=torch.float32), dim=0)
+        e1, e2 = P2._frame(nrm); R = torch.stack([nrm, e1, e2], 1)
+        off = spec[0].get("spacing", 0.0) / 4 if spec[0]["kind"] != "sheet" else 0.0
+    else:
+        R = torch.eye(3); off = 0.0
+    return R.to(dev), off
+
+
+def maps(ph):
+    n, c = ph["n"], ph["n"] / 2.0; R, off = slice_frame(ph)
+    gu, gv = torch.meshgrid(torch.arange(n, device=dev, dtype=torch.float32), torch.arange(n, device=dev, dtype=torch.float32), indexing="ij")
+    loc = torch.stack([torch.full_like(gu, off), gu - c, gv - c], -1).view(-1, 3); pts = c + loc @ R.T
+    rotated = not torch.allclose(R, torch.eye(3, device=dev))
+    disc = ((((gu - c) ** 2 + (gv - c) ** 2) <= 28 ** 2) if rotated else torch.ones_like(gu, dtype=torch.bool)).cpu().numpy()
+    sig = torch.full((n * n,), 2.5, device=dev)
+    t = P2.targets(ph, pts, sig); K = ph["occ"].shape[0]
+    tgt = {"mass": t["e_mass"][:, :K].cpu().numpy(), "k": t["e_kappa"][:, :K].cpu().numpy(), "R": t["e_R"][:, :K].cpu().numpy(),
+           "bg": t["e_mass"][:, K].cpu().numpy(), "kinds": ph["kinds"]}
+    with torch.no_grad():
+        f = EI.features(net, ph["image"], voxel_um=None); r = EI.query(net, f, pts, sig, sph, vol_shape=ph["image"].shape)
+        e = EI.cluster(r, sph, floor=a.floor if a.floor >= 0 else None); sp = EI.split_mass(r, sph, e)
+    ms = (sp["mass"] * e["live"]).float(); kv = e["kappa"].float(); isoe = kv[..., 0] < 2.0
+    iso_tot = sp["floor"].float() + (ms * isoe).sum(1)
+    bgm = r["bgm"].float().clamp(0, 1) if "bgm" in r else iso_tot
+    bg = torch.minimum(iso_tot, bgm); iso_obj = (iso_tot - bg).clamp_min(0)
+    mdl = {"mass": (ms * ~isoe).cpu().numpy(), "k": kv.cpu().numpy(), "R": e["R"].float().cpu().numpy(), "iso": iso_obj.cpu().numpy(), "bg": bg.cpu().numpy()}
+    face = torch.minimum(pts, (n - 1) - pts).amin(1).view(n, n).cpu().numpy()
+    size = torch.tensor([n - 1.0] * 3, device=dev)
+    smp = lambda q: torch.nn.functional.grid_sample(ph["image"][None, None], (q / size * 2 - 1).flip(-1).view(1, -1, 1, 1, 3), align_corners=True).view(n, n)
+    img = torch.stack([smp(c + torch.stack([torch.full_like(gu, off + k), gu - c, gv - c], -1).view(-1, 3) @ R.T) for k in (-1, 0, 1)]).mean(0).cpu().numpy()
+    return tgt, mdl, face, disc, img
+
+
+acc = []; rows = []
+for fam, ph in tests:
+    tgt, mdl, face, disc, img = maps(ph); n = ph["n"]
+    res = CA.evaluate_p2(n, tgt, mdl, face, disc); acc.append((f"{fam} ({','.join(k[:5] for k in ph['kinds']) or 'none'})", res))
+    if not any(r_[0] == fam for r_ in rows):
+        rows.append((fam, ph, tgt, mdl, CA.match_p2(tgt, mdl), disc, img, res))
+cols = ["image", "target pop 1", "model pop 1", "target pop 2", "model pop 2", "model: other\ndirections", "model:\nisotropic objects", "target\nbackground", "model\nbackground"]
+norm = PowerNorm(0.5, vmin=0, vmax=1); cmap = matplotlib.colormaps["viridis"].copy(); cmap.set_over("red")
+fig, axs = plt.subplots(len(rows), len(cols), figsize=(2.3 * len(cols) + 1.0, 2.4 * len(rows)), squeeze=False, layout="constrained")
+for i, (fam, ph, tgt, mdl, m, disc, img, res) in enumerate(rows):
+    n = ph["n"]; K = tgt["mass"].shape[1]; sh = lambda v: np.where(disc, v.reshape(n, n), np.nan)
+    axs[i, 0].imshow(np.where(disc, img, np.nan), cmap="gray", vmin=0, vmax=1)
+    axs[i, 0].set_ylabel(f"{fam}: {', '.join(ph['kinds']) or 'empty'}\n{'PASS' if res['PASS'] else 'FAIL'}", fontsize=9, color="darkgreen" if res["PASS"] else "firebrick")
+    panels = []
+    for k in range(2):
+        panels += [(sh(tgt["mass"][:, k]), f"sum {np.nansum(tgt['mass'][:, k] * disc.reshape(-1)):.0f}"), (sh(m["m"][:, k]), f"sum {np.nansum(m['m'][:, k] * disc.reshape(-1)):.0f}")] if k < K else [(None, ""), (None, "")]
+    panels += [(sh(m["other"]), ""), (sh(mdl["iso"]), ""), (sh(tgt["bg"]), ""), (sh(mdl["bg"]), "")]
+    for j, (v, lab) in enumerate(panels):
+        ax_ = axs[i, 1 + j]
+        if v is not None:
+            im = ax_.imshow(v, cmap=cmap, norm=norm); ax_.text(2, 61, lab, color="w", fontsize=7)
+    for ax_ in axs[i]:
+        ax_.set_xticks([]); ax_.set_yticks([])
+for j, t_ in enumerate(cols):
+    axs[0, j].set_title(t_, fontsize=9)
+fig.colorbar(im, ax=axs[:, 1:].ravel().tolist(), shrink=0.5, label="mass per voxel (square-root scale)", extend="max")
+npass = sum(r_["PASS"] for _, r_ in acc); st = curves[-1]["step"] if curves else 0
+fig.suptitle(f"phantom families -- {a.tag}, {st} steps (from {a.init.split('/')[-1]}): {npass}/{len(acc)} held-out phantoms pass every criterion "
+             f"(rows: one per family); model: entities matched by type and axis, background = {'background head' if args.get('bg_head') else 'the density floor'}", fontsize=10)
+plt.savefig(a.out, dpi=70); print("saved", a.out)
+CA.table_figure(acc, stem + "_acceptance.png", f"phantom families -- {a.tag}, {st} steps: {'PASS' if npass == len(acc) else 'FAIL'} ({npass}/{len(acc)})")
+CA.save_json(acc, stem + "_acceptance.json")
+print("acceptance:", f"{npass}/{len(acc)} |", " ; ".join(f"{lab}: " + " ".join(k.split()[0] + ("+" if v[0] else "-") for k, v in r_.items() if k != "PASS") for lab, r_ in acc))
