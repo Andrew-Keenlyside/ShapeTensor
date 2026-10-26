@@ -98,8 +98,13 @@ Caveat: a local tensor can miss orientation carried only by larger-scale shape.
 And the targets on those same arms demand near-perfect orientation: mass-weighted median target kappa1 = 600 (the cap)
 on 6 of 10 arms and 40-221 on 2 more -- including arms where the structure tensor is 60-71 deg off (seeds 6100013 A,
 6100043 B, 6100063 A). The orientation-visibility blending toward isotropic (entities.entity_targets, ``ovis``) is not
-firing there: the generator's orientation visibility follows a contrast t-statistic, not orientation evidence, and the
-entity tensors carry no dispersion (straight objects give kappa -> cap). The generator's targets ask for delta-like
+firing there: in `generator.py` (`nuisance`, ~line 1320) `ovis` is the same contrast t-statistic as the presence
+visibility (`visibility(img, regs, ...)`: the high-passed image regressed on the layers' occupancy), only with a higher
+threshold range (`ORIENTATION_T = (6, 18)`). It measures how strongly a population's *region* explains the image, not
+whether its *oriented internal structure* does -- a high-contrast region filled with orientation-free texture gets
+ovis = 1 and a full-kappa target. Fix: the t-statistic of the image on each layer's fibre-scale texture (occupancy
+minus its own low-pass: the part that carries orientation), regressed jointly with the regions. Also the entity
+tensors carry no dispersion (straight objects give kappa -> cap). The generator's targets ask for delta-like
 lobes the image does not show -- ill-posed, and consistent with the model's flat, hedged densities. This is the first
 thing to fix for complex inputs: (1) orientation visibility from oriented-structure evidence (e.g. a structure-tensor
 or directional-energy coherence of the rendered image per population), (2) realistic dispersion in the entity tensors
