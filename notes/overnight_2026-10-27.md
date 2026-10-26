@@ -19,6 +19,7 @@ ground truth fed in as the model (cases the truth fails are dropped and listed).
 | simple crossing, axis-aligned, angles 30-90 | 12/12 PASS | fits that family only: 0/4 on rotated crossings (review) |
 | simple crossing, random 3-D orientation | 0/4 | runs superseded by the families (which include orientation) |
 | phantom families (cross, fan, curve, sheet, blob, mix, empty) | 2/14 (fam_C, fam_D) -- only the two empty volumes | fam_A 1/14, fam_E 0/14; probe (fam_D) no measurable change |
+| phantom families, final set (4 per family, never used for selection) | fam_C 5/28: 4 empty + 1 blob | first structured pass (a non-fibrous blob phantom); 0/24 fibre / sheet / mix |
 | generator crossings (difficulty 0.6), 9 scoreable of 12 | 0/9 (EP14b; Z1 at 500/1000/2000; Z2 at 500/1000/2000) | |
 
 No phantom with structure passes in any model: every pass is an empty volume (where "other directions" sits near
