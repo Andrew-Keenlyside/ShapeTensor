@@ -23,9 +23,13 @@ from shapetensor.learn.model import PopulationNet
 ap = argparse.ArgumentParser(); ap.add_argument("out"); ap.add_argument("ckpt"); ap.add_argument("--level", type=float, default=0.6)
 ap.add_argument("--n", type=int, default=8); ap.add_argument("--rows", type=int, default=4); ap.add_argument("--seed0", type=int, default=6_100_000)
 ap.add_argument("--floor", type=float, default=0.05); ap.add_argument("--tag", default="")
+ap.add_argument("--orient-from-texture", action="store_true", help="the held-out targets with orientation visibility from oriented texture (as the model was trained)")
 a = ap.parse_args(); dev = "cuda"; stem = a.out.rsplit(".", 1)[0]
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None
 L.DESC_K = 5; L.DESC_NC = 0; TR.READ_KEEP = 1.0; TR.REGION_DENSITY = True; TR.set_background_entity(True)
+if a.orient_from_texture:
+    import shapetensor.learn.generator as GN
+    GN.ORIENT_FROM_TEXTURE = True
 gen = {"scene": {**LT.difficulty_gen(a.level, {"canvas": 128, "crops_per_scene": 1, "cross_p": 1.0, "p_centre": 1.0, "deep_tree": True}), "crops_per_scene": 1}}
 ck = torch.load(a.ckpt, map_location=dev, weights_only=False)
 net = PopulationNet.from_args(ck["args"]).to(dev).eval(); net.load_state_dict(ck["model"])

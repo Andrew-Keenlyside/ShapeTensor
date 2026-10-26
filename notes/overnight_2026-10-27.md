@@ -152,6 +152,15 @@ unscoreable by the ground-truth check (correctly: their orientation is not in th
 Tests after tonight's changes: entity readout 18/18, dataflow 8/8, scene generator 43/43 (the new generator flags
 default off).
 
+### Z3 after 07:00 (addendum, 08:15 ET)
+Scored against the old targets (the scoring script's default generator settings) Z3 was 0/9 at 500 / 1000 / 2000 --
+an inconsistent test; `generator_separation.py --orient-from-texture` now scores against the targets it was trained on.
+At step ~2000 on those: 0/7 scoreable (5 of 12 unscoreable: with orientation-faithful targets more crossings have
+populations that are not oriented in the image, which these criteria assume), but the first generator pilot to find
+oriented mass: seed 6100064 A 127 of 175, seed 6100093 A 131 of 663 (Z1 / Z2: 0-37 on the same arms); B mostly missed;
+total mass ~1.03 per point, most read as isotropic. Training density loss 0.32 vs 0.56-0.69 for Z1 / Z2: with
+inferable targets the density shape is learned. Direction confirmed; not yet a pass.
+
 ## 6. What is still running at 07:00
 - Z3 (generator pilot on orientation-faithful targets, from Z2 step 2750) to step 4000, scored at 500 / 1000 / 2000.
   Z2 was stopped at step 2750 (0/9 at 500 / 1000 / 2000; trained on the ill-posed targets).
