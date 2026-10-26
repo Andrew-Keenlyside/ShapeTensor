@@ -2,8 +2,10 @@
 passes only when every criterion holds on every held-out phantom. Measured on the crossing plane's maps (sigma 2.5
 windows): the targets ``tA, tB, tI`` (A, B, background) and the model's ``mA, mB, mO, mI`` (along A, along B, other
 directions, isotropic: the lobe-fit split with the density floor as background), plus the model's entities per point.
-Scored only at points >= FACE_MARGIN voxels from the volume's faces -- the training queries' domain, where the targets'
-windows are not cut by the edge (agreed with the user 2026-10-26; the thresholds unchanged).
+Scored only at points >= FACE_MARGIN voxels from the volume's faces -- the training queries' domain (agreed with the user
+2026-10-26; the thresholds unchanged; the sigma-2.5 targets are still partly cut by the faces there, as in training).
+C1 also requires each population's whole-plane total (model / target over every scored point) within LEVEL: the zones
+leave a ring around each bundle unscored, where a halo or a spurious entity would otherwise go unseen (review 2026-10-26).
 
 C1 level        median model / target mass of each population on its arm and in the crossing core   0.90-1.10
 C2 flat         model / target at every point along each bundle's centreline (target >= half its peak)  0.85-1.15
@@ -56,15 +58,18 @@ def evaluate(ph, M: dict, ent: dict) -> dict:
     out = {}
     # C1 level
     lv = {f"{p} {z}": _ratio(M["m" + p], M["t" + p], Z[zz]) for p in ("A", "B") for z, zz in (("arm", "arm" + p), ("core", "core"))}
+    for p in ("A", "B"):
+        lv[f"{p} plane"] = float(np.nansum(M["m" + p][valid]) / max(np.nansum(M["t" + p][valid]), 1e-9))
     out["C1 level"] = (all(_inside(v, LEVEL) for v in lv.values()), lv)
     # C2 flat: along each centreline
     fl = {}
     for p in ("A", "B"):
         u = ph["axes_local"][p].cpu().numpy(); t = np.arange(-c + 1, c - 1)
         rows, cols = c + t * u[1], c + t * u[2]
-        tv = map_coordinates(np.nan_to_num(M["t" + p], nan=-1), [rows, cols], order=1); mv = map_coordinates(np.nan_to_num(M["m" + p], nan=-1), [rows, cols], order=1)
+        tv = map_coordinates(np.nan_to_num(M["t" + p], nan=0), [rows, cols], order=1); mv = map_coordinates(np.nan_to_num(M["m" + p], nan=0), [rows, cols], order=1)
         fv = map_coordinates(np.nan_to_num(face, posinf=1e6), [rows, cols], order=1)
-        ok = (tv >= 0.5 * np.nanmax(M["t" + p])) & (mv >= 0) & (fv >= FACE_MARGIN)
+        okm = map_coordinates(np.isfinite(M["t" + p]).astype(float), [rows, cols], order=1) > 0.999   # every bilinear neighbour scored
+        ok = (tv >= 0.5 * np.nanmax(M["t" + p])) & okm & (fv >= FACE_MARGIN)
         ra = mv[ok] / np.maximum(tv[ok], 1e-9)
         fl[p] = (float(ra.min()) if ra.size else float("nan"), float(ra.max()) if ra.size else float("nan"))
     out["C2 flat"] = (all(_inside(lo, FLAT) and _inside(hi, FLAT) for lo, hi in fl.values()), {f"{p} min/max": v for p, v in fl.items()})
@@ -155,10 +160,11 @@ def evaluate_generic(tm: dict, M: dict, ent: dict) -> dict:
     T = {"A": tm["tA"], "B": tm["tB"]}; Mm = {"A": M["mA"], "B": M["mB"]}
     r = {(p, z): _ratio(Mm[p], T[p], Z[z]) for p in ("A", "B") for z in ("arm" + p, "core")}
     out["C1 level"] = (all(_inside(v, LEVEL) for v in r.values()), {f"{p} {'arm' if z != 'core' else 'core'}": v for (p, z), v in r.items()})
-    fl = {p: r[(p, "core")] / max(r[(p, "arm" + p)], 1e-9) for p in ("A", "B")}
+    fl = {p: (r[(p, "core")] / r[(p, "arm" + p)] if r[(p, "arm" + p)] > 0.05 else float("nan")) for p in ("A", "B")}   # (undefined if the arm is empty)
     out["C2 flat"] = (all(_inside(v, FLAT) for v in fl.values()), {f"{p} core/arm": v for p, v in fl.items()})
     lvl = min(np.median(T["A"][Z["armA"]]), np.median(T["B"][Z["armB"]])); thr = max(0.02, lvl / 3)
-    cnt = ((ent["mass"] >= thr) & ~ent["iso"]).sum(1).reshape(n, n)
+    # populations, not entities: a generator population is several resolved entities per point (fascicles, fibres)
+    cnt = (M["mA"] >= thr).astype(int) + (M["mB"] >= thr) + (M["mO"] >= thr)
     cz = {z: float((cnt[Z[z]] == k).mean()) for z, k in (("bg", 0), ("armA", 1), ("armB", 1), ("core", 2))}
     out["C3 count"] = (all(v >= COUNT for v in cz.values()), cz)
     v = Z["valid"]
@@ -182,7 +188,8 @@ def evaluate_generic(tm: dict, M: dict, ent: dict) -> dict:
         sel = (Z["arm" + p] | Z["core"]) & ok
         dr[p] = (float(np.median(ang[sel])), float(np.percentile(ang[sel], 95))) if sel.any() else (float("nan"),) * 2
     out["C6 direction"] = (all(np.isfinite(m) and m <= DIR[0] and q <= DIR[1] for m, q in dr.values()), {f"{p} med/p95": x for p, x in dr.items()})
-    bk = {"background": _ratio(M["mI"], tm["tI"], Z["bg"]), "inside": _ratio(M["mI"], tm["tI"], (Z["inA"] | Z["inB"]) & Z["oabs"])}
+    bk = {"background": _ratio(M["mI"], tm["tI"], Z["bg"] & (tm["tI"] >= 0.05)),
+          "inside": _ratio(M["mI"], tm["tI"], (Z["inA"] | Z["inB"]) & Z["oabs"] & (tm["tI"] >= 0.05))}             # (where there is background)
     out["C7 background"] = (all(_inside(x, BACK) for x in bk.values()), bk)
     out["PASS"] = all(x[0] for k, x in out.items())
     return out
@@ -247,6 +254,7 @@ def evaluate_p2(n: int, tgt: dict, mdl: dict, face: np.ndarray, valid_disc: np.n
         ov = inn[:, k] & np.any(np.delete(inn, k, 1), 1) & valid if K > 1 else np.zeros(n * n, bool)
         rs = _ratio(m["m"][:, k], T[:, k], solo[:, k]); ro = _ratio(m["m"][:, k], T[:, k], ov) if ov.sum() > 20 else float("nan")
         lv[f"{nm} solo"] = rs
+        lv[f"{nm} plane"] = float(m["m"][valid, k].sum() / max(T[valid, k].sum(), 1e-9))
         if np.isfinite(ro):
             lv[f"{nm} overlap"] = ro; fl[nm] = ro / max(rs, 1e-9)
         lk[nm] = float(m["m"][out_[:, k] & valid, k].sum() / max(T[valid, k].sum(), 1e-9))

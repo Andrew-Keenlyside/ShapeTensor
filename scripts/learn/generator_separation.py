@@ -17,7 +17,7 @@ from matplotlib.colors import PowerNorm
 sys.path.insert(0, "src")
 import shapetensor.learn.train as TR
 import shapetensor.learn.scene as SS
-from shapetensor.learn import lobe_train as LT, losses as L, entity_infer as EI, gen_crossings as GC, crossing_acceptance as CA
+from shapetensor.learn import lobe_train as LT, losses as L, entity_infer as EI, gen_crossings as GC, crossing_acceptance as CA, entity_train as ET
 from shapetensor.learn.model import PopulationNet
 
 ap = argparse.ArgumentParser(); ap.add_argument("out"); ap.add_argument("ckpt"); ap.add_argument("--level", type=float, default=0.6)
@@ -32,7 +32,30 @@ net = PopulationNet.from_args(ck["args"]).to(dev).eval(); net.load_state_dict(ck
 name = a.tag or a.ckpt.split("/")[-1].replace(".pt", "") if not a.ckpt.endswith("model.pt") else a.ckpt.split("/")[-2]
 cs, tried = GC.cases(TR, SS, gen, a.seed0, a.n, dev)
 print(f"{len(cs)} held-out generator crossings (level {a.level}) from {tried} scenes", flush=True)
+ET.VOTE_KAPPA_MIN = 0.5                                                                           # the training's oriented threshold (the readout's too)
 sph = EI.sphere_dirs(200, dev); C30 = math.cos(math.radians(30))
+
+
+def name_maps(tm, ms, kv, R_):
+    """The model's (or the truth's) maps from entities ``ms (P, C)``, concentrations ``kv (P, C, 2)`` and frames: named A / B
+    by the nearer local axis within 30 deg; isotropic below the training's oriented threshold (one threshold for both)."""
+    n = tm["tA"].shape[0]
+    iso = kv[..., 0] < ET.VOTE_KAPPA_MIN; ax = R_[..., :, 2]
+    cA = (ax * tm["axes"]["A"][0][:, None]).sum(-1).abs() * tm["axes"]["A"][1][:, None]
+    cB = (ax * tm["axes"]["B"][0][:, None]).sum(-1).abs() * tm["axes"]["B"][1][:, None]
+    toA = ~iso & (cA >= C30) & (cA >= cB); toB = ~iso & (cB >= C30) & (cB > cA)
+    M = {"mA": (ms * toA).sum(1), "mB": (ms * toB).sum(1), "mO": (ms * (~iso & ~toA & ~toB)).sum(1), "mI": (ms * iso).sum(1)}
+    return M, iso, ax
+
+
+def oracle(c):
+    """The ground truth through the same naming and criteria: the targets' own entities as a perfect model's."""
+    et = c["tm"]["ent_t"]; n = c["tm"]["tA"].shape[0]
+    ms, kv, R_ = (torch.as_tensor(et[k], device=dev).float() for k in ("mass", "kappa", "R"))
+    M, iso, ax = name_maps(c["tm"], ms, kv, R_)
+    M["mI"] = M["mI"] + torch.as_tensor(et["iso_mass"], device=dev).float()
+    M = {k: v.view(n, n).cpu().numpy() for k, v in M.items()}
+    return CA.evaluate_generic(c["tm"], M, {"mass": ms.cpu().numpy(), "iso": iso.cpu().numpy(), "axis": ax.cpu().numpy()})
 
 
 def model_maps(c):
@@ -41,17 +64,18 @@ def model_maps(c):
         f = EI.features(net, d["image"].float() / 255.0, voxel_um=d.get("voxel_um"))
         r = EI.query(net, f, tm["pts"], tm["sig"], sph, vol_shape=d["image"].shape)
         e = EI.cluster(r, sph, floor=a.floor if a.floor >= 0 else None); sp = EI.split_mass(r, sph, e)
-    ms = sp["mass"]; iso = e["kappa"][..., 0].float() < 2.0; ax = e["R"][..., :, 2].float()
-    cA = (ax * tm["axes"]["A"][0][:, None]).sum(-1).abs() * tm["axes"]["A"][1][:, None]
-    cB = (ax * tm["axes"]["B"][0][:, None]).sum(-1).abs() * tm["axes"]["B"][1][:, None]
-    toA = ~iso & (cA >= C30) & (cA >= cB); toB = ~iso & (cB >= C30) & (cB > cA)
-    M = {"mA": (ms * toA).sum(1), "mB": (ms * toB).sum(1), "mO": (ms * (~iso & ~toA & ~toB)).sum(1), "mI": (ms * iso).sum(1) + sp["floor"]}
+    ms = (sp["mass"] * e["live"]).float()
+    M, iso, ax = name_maps(tm, ms, e["kappa"].float(), e["R"].float())
+    M["mI"] = M["mI"] + sp["floor"]
     M = {k: v.view(n, n).float().cpu().numpy() for k, v in M.items()}
     return M, {"mass": ms.float().cpu().numpy(), "iso": iso.cpu().numpy(), "axis": ax.cpu().numpy()}
 
 
-acc = []; shown = []
+acc = []; shown = []; dropped = []
 for c in cs:
+    orc = oracle(c)
+    if not orc["PASS"]:                                                                          # the truth fails the measurement: unscoreable
+        dropped.append((c["seed"], [k.split()[0] for k, v in orc.items() if k != "PASS" and not v[0]])); continue
     M, ent = model_maps(c)
     acc.append((f"seed {c['seed']}, {c['lc'][4]:.0f} deg", CA.evaluate_generic(c["tm"], M, ent)))
     if len(shown) < a.rows:
@@ -74,6 +98,7 @@ for j, t in enumerate(cols):
     axs[0, j].set_title(t, fontsize=10)
 fig.colorbar(im, ax=axs[:, 1:].ravel().tolist(), shrink=0.5, label="mass per voxel (square-root scale)", extend="max")
 npass = sum(r["PASS"] for _, r in acc)
+print(f"ground-truth check: {len(dropped)} of {len(cs)} cases unscoreable (the truth fails): {dropped}", flush=True)
 fig.suptitle(f"generator crossings (difficulty {a.level}) -- {name}: {npass}/{len(acc)} pass every criterion. Outlines: A orange, B cyan; "
              f"model mass split by lobe fit, density floor = background", fontsize=11)
 plt.savefig(a.out, dpi=72); print("saved", a.out)

@@ -105,7 +105,8 @@ else:
             P = net(ph["image"][None, None], voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
         tot, parts = ET.entity_loss(P, T, dirs, W={"desc": 0.0}, g=g)
         opt.zero_grad(set_to_none=True); tot.backward(); torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0); opt.step()
-    torch.save({"model": net.state_dict(), "args": args, "curves": curves, "tag": a.tag, "train_angles": a.train_angles, "init": a.init, "rotate": a.rotate, "vary_look": a.vary_look}, stem + ".pt")
+    torch.save({"model": net.state_dict(), "args": args, "curves": curves, "tag": a.tag, "train_angles": a.train_angles, "init": a.init, "rotate": a.rotate, "vary_look": a.vary_look,
+                "flags": {k: getattr(a, k) for k in ("same_norm", "own_objects", "lr", "lr_final", "lobe_weight", "oprobe", "oprobe_only", "dens_log", "fixed", "train_angles", "noise")}}, stem + ".pt")
 net.eval()
 sph = EI.sphere_dirs(200, dev); C30 = math.cos(math.radians(30))
 
@@ -130,7 +131,7 @@ def maps(ph):
     with torch.no_grad():
         f = EI.features(net, ph["image"], voxel_um=None); r = EI.query(net, f, pts, sig, sph, vol_shape=ph["image"].shape)
         e = EI.cluster(r, sph, floor=a.floor if a.floor >= 0 else None); sp = EI.split_mass(r, sph, e)
-    ms = sp["mass"]; iso = e["kappa"][..., 0].float() < 2.0; ax = e["R"][..., :, 2].float()
+    ms = sp["mass"]; iso = e["kappa"][..., 0].float() < ET.VOTE_KAPPA_MIN; ax = e["R"][..., :, 2].float()
     cA = (ax @ ph["axes"]["A"]).abs(); cB = (ax @ ph["axes"]["B"]).abs()
     toA = ~iso & (cA >= C30) & (cA >= cB); toB = ~iso & (cB >= C30) & (cB > cA)
     out.update({"mA": (ms * toA).sum(1), "mB": (ms * toB).sum(1), "mO": (ms * (~iso & ~toA & ~toB)).sum(1), "mI": (ms * iso).sum(1) + sp["floor"]})

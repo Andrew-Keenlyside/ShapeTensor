@@ -85,6 +85,8 @@ def slice_targets(TR, s, d, seed, lc, dev, n=64):
         _, u = principal(torch.as_tensor(Tk).view(-1, 3, 3))
         out["axes"][nm] = (u.to(dev), torch.as_tensor(wb.reshape(-1) > 0.02, device=dev))
     out["tO"] = (w * ((lay >= 0) & (lay != A) & (lay != B) & ~iso_l)).sum(1).view(n, n).cpu().numpy()
+    out["ent_t"] = {"mass": (w * ~iso_l).cpu().numpy(), "kappa": t["e_kappa"].cpu().numpy(), "R": t["e_R"].cpu().numpy(),      # the target entities
+                    "iso_mass": (w * iso_l).sum(1).cpu().numpy()}                                                               # (the ground-truth check)
     out["tI"] = (w * iso_l).sum(1).view(n, n).cpu().numpy()
     out["_face"] = torch.minimum(pts, (n - 1) - pts).amin(1).view(n, n).cpu().numpy()
     return out

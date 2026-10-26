@@ -28,17 +28,18 @@ ap.add_argument("--eval-every", type=int, default=500); ap.add_argument("--famil
 ap.add_argument("--test-per-family", type=int, default=2); ap.add_argument("--n-points", type=int, default=512); ap.add_argument("--plot-only", action="store_true")
 ap.add_argument("--bg-head", action="store_true"); ap.add_argument("--oprobe", action="store_true"); ap.add_argument("--tag", default="")
 ap.add_argument("--floor", type=float, default=0.05); ap.add_argument("--batch", type=int, default=1)
+ap.add_argument("--final", action="store_true", help="score the final test set (seeds never used to choose between variants) instead of the selection set")
 a = ap.parse_args(); dev = "cuda"; stem = a.out.rsplit(".", 1)[0]
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None
 L.DESC_K = 5; L.DESC_NC = 0; TR.REGION_DENSITY = True; ET.REGION_DENSITY = True; TR.set_background_entity(True)
 ET.VOTE_OBJECTS = True; ET.OWN_OBJECTS = True; ET.DENS_SAME_NORM = True
 batch = lambda ts: {k: torch.stack([t[k] for t in ts]) for k in ts[0]}
 
-tests = []
+tests = []; S0 = 1_900_000 if a.final else 900_000                                               # selection set, or the final set
 for fi, fam in enumerate(FAMS):
-    for i in range(a.test_per_family):
-        spec, look = P2.random_spec(fam, torch.Generator().manual_seed(900_000 + 100 * fi + i))
-        tests.append((fam, P2.make(spec, seed=950_000 + 100 * fi + i, look=look, device=dev)))
+    for i in range(a.test_per_family if not a.final else max(a.test_per_family, 4)):
+        spec, look = P2.random_spec(fam, torch.Generator().manual_seed(S0 + 100 * fi + i))
+        tests.append((fam, P2.make(spec, seed=S0 + 50_000 + 100 * fi + i, look=look, device=dev)))
 
 if a.plot_only:
     ck = torch.load(stem + ".pt", map_location=dev, weights_only=False)
@@ -87,7 +88,8 @@ else:
             P = net(torch.stack(imgs)[:, None], voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
         tot, parts = ET.entity_loss(P, T, dirs, W={"desc": 0.0}, g=g)
         opt.zero_grad(set_to_none=True); tot.backward(); torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0); opt.step()
-    torch.save({"model": net.state_dict(), "args": args, "curves": curves, "tag": a.tag, "init": a.init, "families": a.families}, stem + ".pt")
+    torch.save({"model": net.state_dict(), "args": args, "curves": curves, "tag": a.tag, "init": a.init, "families": a.families,
+                "flags": {k: getattr(a, k) for k in ("lr", "lr_final", "batch", "steps", "bg_head", "oprobe", "floor")}}, stem + ".pt")
 net.eval()
 sph = EI.sphere_dirs(200, dev)
 
@@ -117,7 +119,7 @@ def maps(ph):
     with torch.no_grad():
         f = EI.features(net, ph["image"], voxel_um=None); r = EI.query(net, f, pts, sig, sph, vol_shape=ph["image"].shape)
         e = EI.cluster(r, sph, floor=a.floor if a.floor >= 0 else None); sp = EI.split_mass(r, sph, e)
-    ms = (sp["mass"] * e["live"]).float(); kv = e["kappa"].float(); isoe = kv[..., 0] < 2.0
+    ms = (sp["mass"] * e["live"]).float(); kv = e["kappa"].float(); isoe = kv[..., 0] < ET.VOTE_KAPPA_MIN
     iso_tot = sp["floor"].float() + (ms * isoe).sum(1)
     bgm = r["bgm"].float().clamp(0, 1) if "bgm" in r else iso_tot
     bg = torch.minimum(iso_tot, bgm); iso_obj = (iso_tot - bg).clamp_min(0)
@@ -159,6 +161,7 @@ npass = sum(r_["PASS"] for _, r_ in acc); st = curves[-1]["step"] if curves else
 fig.suptitle(f"phantom families -- {a.tag}, {st} steps (from {a.init.split('/')[-1]}): {npass}/{len(acc)} held-out phantoms pass every criterion "
              f"(rows: one per family); model: entities matched by type and axis, background = {'background head' if args.get('bg_head') else 'the density floor'}", fontsize=10)
 plt.savefig(a.out, dpi=70); print("saved", a.out)
+stem = stem + ("_final" if a.final else "")
 CA.table_figure(acc, stem + "_acceptance.png", f"phantom families -- {a.tag}, {st} steps: {'PASS' if npass == len(acc) else 'FAIL'} ({npass}/{len(acc)})")
 CA.save_json(acc, stem + "_acceptance.json")
 print("acceptance:", f"{npass}/{len(acc)} |", " ; ".join(f"{lab}: " + " ".join(k.split()[0] + ("+" if v[0] else "-") for k, v in r_.items() if k != "PASS") for lab, r_ in acc))
