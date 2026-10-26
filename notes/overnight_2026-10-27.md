@@ -80,7 +80,7 @@ models against 0.24-0.28 in the targets at every angle -- at 90 deg only 0.06 / 
 of the target mass) or fragments (85 deg row: ~4 entities, the heaviest 39 %, both populations at 0.3-0.4x) (review 3). The oriented probe (fam_D) and crossings x3 + sub-voxel windows
 (fam_E) move this by <= 0.01. With the earlier result -- a single rotated crossing is fitted in ~100 steps -- the
 architecture can represent it; what is missing is generalisation across orientations (data / duration / rotation-aware
-features), not the readout. fam_F (longer, batch 4, crossings x3) tests duration.
+features), not the readout. fam_F (longer, batch 4, crossings x3) tests duration: cross density 0.172 -> 0.167 after 500 steps (still running).
 
 ### Generator
 Z1 (all fixes, from EP14b) and Z2 (from the phantom-family model) both 0/9 at 500 / 1000 / 2000 steps; training
@@ -93,22 +93,43 @@ population arms of the held-out generator crossings finds the target axis on onl
 others 30-71 deg; median 47 deg, random would be ~60) -- on the phantom crossings it finds it at 3 deg median. So in
 most generator populations the orientation the targets demand is not visible as local structure in the image (the
 targets' visibility weighting measures contrast, not orientation); the model's flat densities may be the right hedge.
-Caveat: a local tensor can miss orientation carried only by larger-scale shape. Next step: a per-population
-orientation-evidence check, then either gate the density / vote targets by it or make the generator render
-orientation-bearing texture -- before more generator training.
+Caveat: a local tensor can miss orientation carried only by larger-scale shape.
+
+And the targets on those same arms demand near-perfect orientation: mass-weighted median target kappa1 = 600 (the cap)
+on 6 of 10 arms and 40-221 on 2 more -- including arms where the structure tensor is 60-71 deg off (seeds 6100013 A,
+6100043 B, 6100063 A). The orientation-visibility blending toward isotropic (entities.entity_targets, ``ovis``) is not
+firing there: the generator's orientation visibility follows a contrast t-statistic, not orientation evidence, and the
+entity tensors carry no dispersion (straight objects give kappa -> cap). The generator's targets ask for delta-like
+lobes the image does not show -- ill-posed, and consistent with the model's flat, hedged densities. This is the first
+thing to fix for complex inputs: (1) orientation visibility from oriented-structure evidence (e.g. a structure-tensor
+or directional-energy coherence of the rendered image per population), (2) realistic dispersion in the entity tensors
+(kappa within what the image and the density basis can express), (3) the structure-tensor baseline as a standing
+check that each generated target orientation is inferable -- before more generator training.
 
 ## 5. Open structural questions
 1. Crossings across orientations: the model resolves one rotated crossing quickly but not crossings in general. Options:
    (a) much longer training / larger batches (fam_F is the first test); (b) a wider full-resolution trunk (32 / 64
    channels at strides 1 / 2 carry the fibre-scale structure; crossings need many oriented filters); (c) rotation-aware
    features beyond the probe (steerable / equivariant layers at strides 1-2); (d) test-time rotation averaging.
-2. The generator: the density does not form lobes there at all (unlike phantoms). The structure-tensor check points
-   at the targets: in 7 of 10 crossing-population arms the target orientation is not visible locally. First fix the
-   targets / generator so the orientation asked for is in the image (orientation-evidence gating or orientation-
-   bearing texture), then reassess capacity and duration.
+2. The generator: the density does not form lobes there at all (unlike phantoms). The targets are the first suspect:
+   in 7 of 10 crossing-population arms the target orientation is not visible locally, yet the targets ask for kappa up
+   to 600 there. Fix the targets (orientation-evidence visibility, realistic dispersion) and keep the structure-tensor
+   inferability check, then reassess capacity and duration.
 3. Non-fibrous objects: the background head separates blobs from the background by place; level and edges are not yet
    right (C1, C5), and in the generator cells / foams own no directions under OWN_OBJECTS (no tree identity).
 4. Fibre super-resolution: not learned (smooth sub-voxel maps; unresolved fibres 0/6); needs unresolved-fibre training
    data and sub-voxel supervision (fam_E/F add both).
 5. Measurement: every criterion now has a ground-truth check; the remaining weakness is the small held-out sets
    (2 per family; a 4-per-family final set exists and has not been used for selection).
+
+## 6. What is still running at 07:00
+- Z2 (generator pilot from the families, all fixes, bg head) to step 4000; checkpoints in `.../pilot_entities/Z2_from_families/`
+  (its targets have the problem above, so expect no change on the generator criteria).
+- fam_F (families, crossings x3, batch 4) to step 2000: `.../simple/fam_F.png` + table when done.
+
+## 7. Suggested order of work
+1. Generator targets: orientation-evidence visibility + dispersion; the structure-tensor inferability check per case.
+2. Crossings across orientations on phantoms: longer / larger-batch training (fam_F) and a wider stride-1/2 trunk; a
+   proper rotation-generalisation test (held-out orientations, the final set).
+3. Mass calibration (C1) and leakage (C4) on phantoms: they fail broadly even where direction is right.
+4. Super-resolution: phantoms rendered on a finer grid and averaged down, with fine-grid targets.
