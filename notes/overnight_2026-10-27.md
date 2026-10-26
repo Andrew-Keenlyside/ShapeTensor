@@ -80,7 +80,9 @@ models against 0.24-0.28 in the targets at every angle -- at 90 deg only 0.06 / 
 of the target mass) or fragments (85 deg row: ~4 entities, the heaviest 39 %, both populations at 0.3-0.4x) (review 3). The oriented probe (fam_D) and crossings x3 + sub-voxel windows
 (fam_E) move this by <= 0.01. With the earlier result -- a single rotated crossing is fitted in ~100 steps -- the
 architecture can represent it; what is missing is generalisation across orientations (data / duration / rotation-aware
-features), not the readout. fam_F (longer, batch 4, crossings x3) tests duration: cross density 0.172 -> 0.167 after 500 steps (still running).
+features), not the readout. fam_F (longer, batch 4, crossings x3) tests duration: cross density 0.172 -> 0.167 -> 0.168 at 500 / 1000 steps --
+flat: more of the same training does not resolve crossings in arbitrary orientation; a structural change (wider
+stride-1/2 trunk, rotation-aware features) is the next thing to try there.
 
 ### Generator
 Z1 (all fixes, from EP14b) and Z2 (from the phantom-family model) both 0/9 at 500 / 1000 / 2000 steps; training
@@ -147,6 +149,9 @@ step-2750 weights, all fixes, bg head, --orient-from-texture) started 06:05 ET; 
 generator criteria assume oriented A / B populations; with orientation-faithful targets some crossings may become
 unscoreable by the ground-truth check (correctly: their orientation is not in the image).
 
+Tests after tonight's changes: entity readout 18/18, dataflow 8/8, scene generator 43/43 (the new generator flags
+default off).
+
 ## 6. What is still running at 07:00
 - Z3 (generator pilot on orientation-faithful targets, from Z2 step 2750) to step 4000, scored at 500 / 1000 / 2000.
   Z2 was stopped at step 2750 (0/9 at 500 / 1000 / 2000; trained on the ill-posed targets).
@@ -155,7 +160,8 @@ unscoreable by the ground-truth check (correctly: their orientation is not in th
 ## 7. Suggested order of work
 1. Generator targets: orientation from oriented texture (done, flag) -- evaluate Z3; add dispersion to the entity tensors;
    keep the structure-tensor inferability check per case.
-2. Crossings across orientations on phantoms: longer / larger-batch training (fam_F) and a wider stride-1/2 trunk; a
-   proper rotation-generalisation test (held-out orientations, the final set).
+2. Crossings across orientations on phantoms: longer / larger-batch training did not move them (fam_F flat) -> a
+   wider stride-1/2 trunk and rotation-aware layers; a proper rotation-generalisation test (held-out orientations,
+   the final set).
 3. Mass calibration (C1) and leakage (C4) on phantoms: they fail broadly even where direction is right.
 4. Super-resolution: phantoms rendered on a finer grid and averaged down, with fine-grid targets.
