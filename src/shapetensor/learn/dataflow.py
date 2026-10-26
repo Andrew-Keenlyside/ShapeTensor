@@ -105,9 +105,12 @@ def _cpu_worker(rank: int, n: int, size: int, seed0: int, cfg, q, state: dict, t
     _t.set_num_threads(threads)
     from . import train as TR
     from . import losses as L
+    from . import generator as GN
     for k, v in state.items():                                                                     # the trainer's target settings
         if k.startswith("L."):
             setattr(L, k[2:], v)
+        elif k.startswith("GN."):                                                                  # the generator's (e.g. its visibility rules)
+            setattr(GN, k[3:], v)
         else:
             setattr(TR, k, v)
     k = 0; fails = 0

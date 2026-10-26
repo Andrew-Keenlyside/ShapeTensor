@@ -136,13 +136,25 @@ off (seeds 6100013 A/B, 6100043 B). Not paired exactly: the extra visibility cal
 downstream (a few structure-tensor errors moved, e.g. 51 -> 29 deg). So: a step, not the fix -- orientation evidence
 from the populations' oriented texture is still needed (section 4).
 
+### The target fix: orientation visibility from oriented texture (`generator.ORIENT_FROM_TEXTURE`, train.py `--orient-from-texture`)
+Each shape layer's fibre-scale texture (occupancy less its blur at 2x its radius) regressed on the image at the single
+scale (window ladder kept) gives the orientation visibility. On the same 5 crossings the targets now follow the
+image's orientation evidence: arms where the structure tensor finds the axis (1, 10, 13 deg) keep sharp targets
+(kappa 600 / 600 / 82); arms where it does not become weak or isotropic (71 deg: 600 -> 5.8; 72 / 59 deg: isotropic;
+29 / 31 deg: 0.7 / 2.1); two arms remain moderately oriented (60 deg: 16, 70 deg: 23; were 144-600). Z3 (from Z2's
+step-2750 weights, all fixes, bg head, --orient-from-texture) started 06:05 ET; its generator scores at 500 / 1000 /
+2000 steps land after 07:00 in `.../pilot_entities/gensep/Z3_texture_targets_s*_L06_acceptance.png`. Caveat: the
+generator criteria assume oriented A / B populations; with orientation-faithful targets some crossings may become
+unscoreable by the ground-truth check (correctly: their orientation is not in the image).
+
 ## 6. What is still running at 07:00
-- Z2 (generator pilot from the families, all fixes, bg head) to step 4000; checkpoints in `.../pilot_entities/Z2_from_families/`
-  (its targets have the problem above, so expect no change on the generator criteria).
+- Z3 (generator pilot on orientation-faithful targets, from Z2 step 2750) to step 4000, scored at 500 / 1000 / 2000.
+  Z2 was stopped at step 2750 (0/9 at 500 / 1000 / 2000; trained on the ill-posed targets).
 - fam_F (families, crossings x3, batch 4) to step 2000: `.../simple/fam_F.png` + table when done.
 
 ## 7. Suggested order of work
-1. Generator targets: orientation-evidence visibility + dispersion; the structure-tensor inferability check per case.
+1. Generator targets: orientation from oriented texture (done, flag) -- evaluate Z3; add dispersion to the entity tensors;
+   keep the structure-tensor inferability check per case.
 2. Crossings across orientations on phantoms: longer / larger-batch training (fam_F) and a wider stride-1/2 trunk; a
    proper rotation-generalisation test (held-out orientations, the final set).
 3. Mass calibration (C1) and leakage (C4) on phantoms: they fail broadly even where direction is right.

@@ -998,6 +998,11 @@ ORIENTATION_T = (6.0, 18.0)        # t range over which their orientation goes f
 #: finds no orientation (generator crossing arms 2026-10-27: 7 of 10 off by 30-71 deg). The window ladder is kept
 #: (orientation visible nearby is context). Off: the shared t (as before).
 ORIENT_SINGLE_SCALE = False
+#: orientation visibility from each shape layer's fibre-scale texture (its occupancy less its own blur at 2x its
+#: radius: the part of a population that carries its objects' orientation; a uniformly filled region has none inside),
+#: regressed on the image at the single scale with the window ladder -- material that shows only as a region is not
+#: credited with a visible orientation. Overrides ORIENT_SINGLE_SCALE. Off: the shared t.
+ORIENT_FROM_TEXTURE = False
                                    # local structure tensor's (8-25; sigma_int 3), which is a lower bound on what a 48-voxel receptive
                                    # field can integrate along a fibre -- to be re-measured with the trained model's own error against t
 
@@ -1327,7 +1332,12 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     iso = torch.tensor([L.role == "isotropic" for L in s.layers], device=device).view(-1, 1, 1, 1)
     vis = torch.where(iso, torch.ones_like(t), ((t - PRESENCE_T[0]) / (PRESENCE_T[1] - PRESENCE_T[0])).clamp(0, 1))
     t_o = t
-    if ORIENT_SINGLE_SCALE and (vis_opts or {}).get("ladder", (1,)) != (1,):                       # orientation: the calibrated single scale
+    if ORIENT_FROM_TEXTURE:                                                                          # orientation: the layers' oriented texture
+        tex = torch.stack([(occ[k] - gaussian(occ[k][None, None], max(1.5, 2.0 * float(L.radius)))[0, 0]) if L.role == "shape" else regs[k]
+                           for k, L in enumerate(s.layers)])
+        t_o = visibility(img, tex, [None if L.role == "isotropic" else 1.0 for L in s.layers], radii=[L.radius if L.role == "shape" else 1.0 for L in s.layers],
+                         return_t=True, s_hp_max=hp_max, **{**(vis_opts or {}), "ladder": (1,)})
+    elif ORIENT_SINGLE_SCALE and (vis_opts or {}).get("ladder", (1,)) != (1,):                     # orientation: the calibrated single scale
         t_o = visibility(img, regs, [None if L.role == "isotropic" else 1.0 for L in s.layers], radii=[L.radius if L.role == "shape" else 1.0 for L in s.layers],
                          return_t=True, s_hp_max=hp_max, **{**(vis_opts or {}), "ladder": (1,)})
     ovis = torch.where(iso, torch.ones_like(t), ((t_o - ORIENTATION_T[0]) / (ORIENTATION_T[1] - ORIENTATION_T[0])).clamp(0, 1))
