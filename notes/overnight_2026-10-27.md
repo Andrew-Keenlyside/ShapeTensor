@@ -127,6 +127,15 @@ check that each generated target orientation is inferable -- before more generat
 5. Measurement: every criterion now has a ground-truth check; the remaining weakness is the small held-out sets
    (2 per family; a 4-per-family final set exists and has not been used for selection).
 
+### First attempt at the target fix (`generator.ORIENT_SINGLE_SCALE`, off by default)
+`ORIENTATION_T` was calibrated on single-scale evidence; the high-pass scale ladder added for crossing cores inflated
+the shared t, so `ovis` saturated. With orientation visibility from the single scale (window ladder kept), 2 of the 5
+checked crossings now get near-isotropic targets where the structure tensor fails (seed 6100063: kappa 600 / 6.9 ->
+0.8 / 0.8; seed 6100074: 4.5 / 40 -> 0.7 / 3.1), but 3 arms still demand kappa 144-600 where the tensor is 60-71 deg
+off (seeds 6100013 A/B, 6100043 B). Not paired exactly: the extra visibility call shifts the generator's random draws
+downstream (a few structure-tensor errors moved, e.g. 51 -> 29 deg). So: a step, not the fix -- orientation evidence
+from the populations' oriented texture is still needed (section 4).
+
 ## 6. What is still running at 07:00
 - Z2 (generator pilot from the families, all fixes, bg head) to step 4000; checkpoints in `.../pilot_entities/Z2_from_families/`
   (its targets have the problem above, so expect no change on the generator criteria).

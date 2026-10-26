@@ -992,6 +992,12 @@ def visibility(img: torch.Tensor, regressors: torch.Tensor, units, radii=None, s
 
 PRESENCE_T = (3.0, 8.0)            # t range over which a layer's shapes go from undetected to detected (its mass)
 ORIENTATION_T = (6.0, 18.0)        # t range over which their orientation goes from unrecoverable to recoverable (its tensor): set below a
+#: orientation visibility from the single-scale evidence (no high-pass ``ladder``) its range was calibrated on: the
+#: ladder credits a uniform band's interior as visible material at coarse scales -- material, not orientation -- and
+#: with it ``ovis`` saturated wherever a region shows at any scale, asking for kappa up to 600 where a structure tensor
+#: finds no orientation (generator crossing arms 2026-10-27: 7 of 10 off by 30-71 deg). The window ladder is kept
+#: (orientation visible nearby is context). Off: the shared t (as before).
+ORIENT_SINGLE_SCALE = False
                                    # local structure tensor's (8-25; sigma_int 3), which is a lower bound on what a 48-voxel receptive
                                    # field can integrate along a fibre -- to be re-measured with the trained model's own error against t
 
@@ -1320,7 +1326,11 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
                    s_hp_max=hp_max, **(vis_opts or {}))
     iso = torch.tensor([L.role == "isotropic" for L in s.layers], device=device).view(-1, 1, 1, 1)
     vis = torch.where(iso, torch.ones_like(t), ((t - PRESENCE_T[0]) / (PRESENCE_T[1] - PRESENCE_T[0])).clamp(0, 1))
-    ovis = torch.where(iso, torch.ones_like(t), ((t - ORIENTATION_T[0]) / (ORIENTATION_T[1] - ORIENTATION_T[0])).clamp(0, 1))
+    t_o = t
+    if ORIENT_SINGLE_SCALE and (vis_opts or {}).get("ladder", (1,)) != (1,):                       # orientation: the calibrated single scale
+        t_o = visibility(img, regs, [None if L.role == "isotropic" else 1.0 for L in s.layers], radii=[L.radius if L.role == "shape" else 1.0 for L in s.layers],
+                         return_t=True, s_hp_max=hp_max, **{**(vis_opts or {}), "ladder": (1,)})
+    ovis = torch.where(iso, torch.ones_like(t), ((t_o - ORIENTATION_T[0]) / (ORIENTATION_T[1] - ORIENTATION_T[0])).clamp(0, 1))
     if bool((present < 1).any()):                                                               # lost sections: the visibility window (sigma 5) would
         pm = gaussian(present.view(A, 1, 1), (1.5, 0.0, 0.0), truncate=3.0).view([-1 if b == ax else 1 for b in range(3)])   # bridge them; a gap of
         vis = torch.where(iso, vis, vis * pm[None]); ovis = torch.where(iso, ovis, ovis * pm[None])                            # 1-2 sections still is
