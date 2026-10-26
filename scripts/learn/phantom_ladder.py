@@ -120,16 +120,22 @@ def maps(ph):
     t = P2.targets(ph, pts, sig); K = ph["occ"].shape[0]
     tgt = {"mass": t["e_mass"][:, :K].cpu().numpy(), "k": t["e_kappa"][:, :K].cpu().numpy(), "R": t["e_R"][:, :K].cpu().numpy(),
            "bg": t["e_mass"][:, K].cpu().numpy(), "kinds": ph["kinds"]}
+    parts = []
     with torch.no_grad():
-        f = EI.features(net, ph["image"], voxel_um=None); r = EI.query(net, f, pts, sig, sph, vol_shape=ph["image"].shape)
-        e = EI.cluster(r, sph, floor=a.floor if a.floor >= 0 else None); sp = EI.split_mass(r, sph, e)
-    ms = (sp["mass"] * e["live"]).float(); kv = e["kappa"].float(); isoe = kv[..., 0] < ET.VOTE_KAPPA_MIN
-    iso_tot = sp["floor"].float() + (ms * isoe).sum(1)
-    bgm = r["bgm"].float().clamp(0, 1) if "bgm" in r else iso_tot
-    bg = torch.minimum(iso_tot, bgm); iso_obj = (iso_tot - bg).clamp_min(0)
-    mdl = {"mass": (ms * ~isoe).cpu().numpy(), "k": kv.cpu().numpy(), "R": e["R"].float().cpu().numpy(), "iso": iso_obj.cpu().numpy(), "bg": bg.cpu().numpy()}
-    if "bgm" in r:
-        mdl["bgm"] = bgm.cpu().numpy()
+        f = EI.features(net, ph["image"], voxel_um=None)
+        for a0 in range(0, pts.shape[0], 1024):                                                      # in chunks: clustering is memory-hungry
+            sl = slice(a0, a0 + 1024)
+            r = EI.query(net, f, pts[sl], sig[sl], sph, vol_shape=ph["image"].shape)
+            e = EI.cluster(r, sph, floor=a.floor if a.floor >= 0 else None); sp = EI.split_mass(r, sph, e)
+            ms = (sp["mass"] * e["live"]).float(); kv = e["kappa"].float(); isoe = kv[..., 0] < ET.VOTE_KAPPA_MIN
+            iso_tot = sp["floor"].float() + (ms * isoe).sum(1)
+            bgm = r["bgm"].float().clamp(0, 1) if "bgm" in r else iso_tot
+            bg = torch.minimum(iso_tot, bgm)
+            parts.append({"mass": (ms * ~isoe).cpu().numpy(), "k": kv.cpu().numpy(), "R": e["R"].float().cpu().numpy(),
+                          "iso": (iso_tot - bg).clamp_min(0).cpu().numpy(), "bg": bg.cpu().numpy(), "bgm": bgm.cpu().numpy()})
+    C = max(p_["mass"].shape[1] for p_ in parts)
+    pad = lambda x: np.concatenate([x, np.zeros((x.shape[0], C - x.shape[1]) + x.shape[2:])], 1) if x.shape[1] < C else x
+    mdl = {k: np.concatenate([pad(p_[k]) if k in ("mass", "k", "R") else p_[k] for p_ in parts]) for k in parts[0]}
     face = torch.minimum(pts, (n - 1) - pts).amin(1).view(n, n).cpu().numpy()
     size = torch.tensor([n - 1.0] * 3, device=dev)
     smp = lambda q: torch.nn.functional.grid_sample(ph["image"][None, None], (q / size * 2 - 1).flip(-1).view(1, -1, 1, 1, 3), align_corners=True).view(n, n)

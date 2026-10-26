@@ -18,10 +18,12 @@ ground truth fed in as the model (cases the truth fails are dropped and listed).
 |---|---|---|
 | simple crossing, axis-aligned, angles 30-90 | 12/12 PASS | fits that family only: 0/4 on rotated crossings (review) |
 | simple crossing, random 3-D orientation | 0/4 | runs superseded by the families (which include orientation) |
-| phantom families (cross, fan, curve, sheet, blob, mix, empty) | 1/14 (fam_A, sound measurement) | fam_C / fam_D running |
-| generator crossings (difficulty 0.6), 9 scoreable of 12 | 0/9 (EP14b, Z1 500/1000) | Z2 (from the families) running |
+| phantom families (cross, fan, curve, sheet, blob, mix, empty) | 2/14 (fam_C, fam_D: the two empty volumes) | fam_A 1/14, fam_E 0/14 |
+| generator crossings (difficulty 0.6), 9 scoreable of 12 | 0/9 (EP14b; Z1 at 500/1000/2000; Z2 at 500/1000/2000) | |
 
-(updated as results land)
+Per family (fam_C): sheets pass direction and ODF shape (C6, C8) and are found (C9); blobs are found as isotropic
+objects (C9, C8) but miss level / edges; curves and fans are found with the right direction (C6) but miss level,
+counts and ODF shape; crossings fail almost everything: the two populations merge.
 
 ## 2. What was built tonight
 - `learn/phantom2.py` — composable phantoms: straight / curved / fanning bundles of fibres (per-voxel tangents), sheet
@@ -62,5 +64,32 @@ colliding crossing layers. After the fixes the ground truth passes 42/42.
   resolvable fibres (spacing >= 3), the model does not recover sub-voxel orientation. To learn it: unresolved fibres in
   the families and supervision at sigma < 1 (sub-voxel targets).
 
+### Crossings in arbitrary orientation: the dominant failure
+At crossing centres (random 3-D orientation) the above-floor density within 12 deg of A / B is 0.04-0.15 for the
+models against 0.24-0.28 in the targets at every angle -- at 90 deg only 0.06 / 0.04 (about 3x uniform; the target
+~10x): the density at the core is broad, the readout then makes one population with an intermediate axis (cross rows:
+population 1 ~2x its level, population 2's overlap 0). The oriented probe (fam_D) and crossings x3 + sub-voxel windows
+(fam_E) move this by <= 0.01. With the earlier result -- a single rotated crossing is fitted in ~100 steps -- the
+architecture can represent it; what is missing is generalisation across orientations (data / duration / rotation-aware
+features), not the readout. fam_F (longer, batch 4, crossings x3) tests duration.
+
+### Generator
+Z1 (all fixes, from EP14b) and Z2 (from the phantom-family model) both 0/9 at 500 / 1000 / 2000 steps; training
+density loss ~0.55-0.69 on generator crops; model mass along A / B ~2-6 % of the targets, the rest isotropic floor: the
+density stays nearly flat on generator images. The phantom-family initialisation does not carry over.
+
 ## 5. Open structural questions
-(to be completed)
+1. Crossings across orientations: the model resolves one rotated crossing quickly but not crossings in general. Options:
+   (a) much longer training / larger batches (fam_F is the first test); (b) a wider full-resolution trunk (32 / 64
+   channels at strides 1 / 2 carry the fibre-scale structure; crossings need many oriented filters); (c) rotation-aware
+   features beyond the probe (steerable / equivariant layers at strides 1-2); (d) test-time rotation averaging.
+2. The generator: the density does not form lobes there at all (unlike phantoms). Candidates: appearance variety
+   (contrast routes, textures) needing far more training (cluster scale); targets whose orientation is not visible in
+   the image despite the visibility weighting (a per-case check that the target ODF is inferable would separate the
+   two); capacity.
+3. Non-fibrous objects: the background head separates blobs from the background by place; level and edges are not yet
+   right (C1, C5), and in the generator cells / foams own no directions under OWN_OBJECTS (no tree identity).
+4. Fibre super-resolution: not learned (smooth sub-voxel maps; unresolved fibres 0/6); needs unresolved-fibre training
+   data and sub-voxel supervision (fam_E/F add both).
+5. Measurement: every criterion now has a ground-truth check; the remaining weakness is the small held-out sets
+   (2 per family; a 4-per-family final set exists and has not been used for selection).
