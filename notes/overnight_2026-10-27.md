@@ -174,3 +174,23 @@ inferable targets the density shape is learned. Direction confirmed; not yet a p
    the final set).
 3. Mass calibration (C1) and leakage (C4) on phantoms: they fail broadly even where direction is right.
 4. Super-resolution: phantoms rendered on a finer grid and averaged down, with fine-grid targets.
+
+## 8. Fixes for the remaining problems (2026-10-27 morning; commit dd36f61 and after)
+
+| # | problem | fix implemented | evidence so far |
+|---|---|---|---|
+| 1 | generator targets demand invisible orientation | orientation visibility from oriented texture, **on by default** (`--orient-from-contrast` for the old rule), passed to the data workers | targets follow the structure tensor on 8 of 10 checked arms |
+| 2 | no dispersion in entity tensors (kappa 600) | `train.ENTITY_DISPERSION = 0.94`: T' = 0.94 T + 0.06 (I - T) / 2 (straight objects cap near kappa 17; isotropic unchanged) | in Z4 (running) |
+| 3 | generator criteria assume two oriented crossing populations | `gen_crossings.population_targets` + `scripts/learn/generator_layers.py`: **every layer** of a generator crop (lines, sheets, blobs, ...) aggregated per population and scored with the family criteria C1-C9, ground-truth check | Z3: 0/6 scoreable (2 unscoreable) -- baseline |
+| 4 | generator detection weak | Z4: all fixes, from Z3's weights, 6000 steps | scored on all layers at 1000 / 3000 / 6000 |
+| 5 | crossings in arbitrary orientation | (a) wider trunk: `phantom_ladder --widths`, famW (64/128/128) vs famN (32/64/128) from scratch; (c) test-time rotation averaging `entity_infer.query_tta` / `readout(tta=)` | (c) no effect (angular resolution within 0.01 of without, 4 rotations); (a) running; (b) the probe was the rotation-aware variant tried (no effect); a full equivariant trunk not attempted |
+| 6 | mass level (small populations from total - background) | an **objects'-occupancy head** (`--obj-head`, window-mean log-L1 on region_t - bg_t); the readout shares it among the oriented populations | diagnosis: total mass exact (1.00), split wrong (thin bundles 1.2-1.37x, sheets 0.47x); in famN/famW and Z4 |
+| 7 | splits / spurious entities | `entity_infer.merge_parallel` in the shared readout (same-type entities within 15 deg joined) | in every new score |
+| 8 | isotropic objects have no identity | ownership among all non-background entities (`e_bg` marker): isotropic objects train the tree (weight `tree_iso` 0.2); `readout` returns `iso_z` | in famN/famW and Z4 |
+| 9 | no real super-resolution test | `phantom2.make(ss=)`: rendered finer and averaged down (true partial volume, no aliasing), fine-grid targets; the `fine` family supersampled in training and tests | in famN/famW (sigma 0.5-6 training, scored at sigma 1 and 2.5) |
+| 10 | counts degrade off sigma 2.5 | `phantom_ladder --sigmas 2.5 1.0` (a table per sigma) | in famN/famW |
+| 11 | weak generalisation evidence | the final set (4 per family, 32 phantoms) scored automatically after every training run | in famN/famW |
+| 12 | small model, slow, crowded GPU | `scripts/cluster/myriad_entity_pilot.sh` (48 h, all fixes) -- **not submitted** (needs the user's go-ahead); shared chunked readout everywhere | -- |
+
+Tests: entity readout 21/21 (merge, cube rotations, supersampling added), dataflow 8/8, scene 43/43 earlier (the
+generator flags' defaults changed since: texture visibility on in the trainer, not in the generator module).
