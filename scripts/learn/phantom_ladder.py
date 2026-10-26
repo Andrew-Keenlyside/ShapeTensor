@@ -99,8 +99,11 @@ def slice_frame(ph):
     n = ph["n"]; spec = ph["spec"]
     if spec and "normal" in spec[0]:
         nrm = torch.nn.functional.normalize(torch.tensor(spec[0]["normal"], dtype=torch.float32), dim=0)
-        e1, e2 = P2._frame(nrm); R = torch.stack([nrm, e1, e2], 1)
-        off = spec[0].get("spacing", 0.0) / 4 if spec[0]["kind"] != "sheet" else 0.0
+        e1, e2 = P2._frame(nrm)
+        if spec[0]["kind"] == "sheet":                                                             # sheets: the slice across the stack
+            R = torch.stack([e1, nrm, e2], 1); off = 0.0
+        else:
+            R = torch.stack([nrm, e1, e2], 1); off = spec[0].get("spacing", 0.0) / 4
     else:
         R = torch.eye(3); off = 0.0
     return R.to(dev), off
@@ -124,6 +127,8 @@ def maps(ph):
     bgm = r["bgm"].float().clamp(0, 1) if "bgm" in r else iso_tot
     bg = torch.minimum(iso_tot, bgm); iso_obj = (iso_tot - bg).clamp_min(0)
     mdl = {"mass": (ms * ~isoe).cpu().numpy(), "k": kv.cpu().numpy(), "R": e["R"].float().cpu().numpy(), "iso": iso_obj.cpu().numpy(), "bg": bg.cpu().numpy()}
+    if "bgm" in r:
+        mdl["bgm"] = bgm.cpu().numpy()
     face = torch.minimum(pts, (n - 1) - pts).amin(1).view(n, n).cpu().numpy()
     size = torch.tensor([n - 1.0] * 3, device=dev)
     smp = lambda q: torch.nn.functional.grid_sample(ph["image"][None, None], (q / size * 2 - 1).flip(-1).view(1, -1, 1, 1, 3), align_corners=True).view(n, n)
@@ -131,10 +136,20 @@ def maps(ph):
     return tgt, mdl, face, disc, img
 
 
-acc = []; rows = []
+def oracle(tgt):
+    """The targets as a perfect model's output: oriented populations as entities, isotropic ones as isotropic-object mass."""
+    iso = CA._types(tgt["k"][..., 0], tgt["k"][..., 1]) == 2
+    return {"mass": np.where(iso, 0.0, tgt["mass"]), "k": tgt["k"], "R": tgt["R"], "iso": (tgt["mass"] * iso).sum(1), "bg": tgt["bg"], "bgm": tgt["bg"]}
+
+
+acc = []; rows = []; dropped = []
 for fam, ph in tests:
     tgt, mdl, face, disc, img = maps(ph); n = ph["n"]
-    res = CA.evaluate_p2(n, tgt, mdl, face, disc); acc.append((f"{fam} ({','.join(k[:5] for k in ph['kinds']) or 'none'})", res))
+    orc = CA.evaluate_p2(n, tgt, oracle(tgt), face, disc)
+    lab = f"{fam} ({','.join(k[:5] for k in ph['kinds']) or 'none'})"
+    if not orc["PASS"]:                                                                          # the truth fails the measurement: unscoreable
+        dropped.append((lab, [k.split()[0] for k, v in orc.items() if k != "PASS" and not v[0]])); continue
+    res = CA.evaluate_p2(n, tgt, mdl, face, disc); acc.append((lab, res))
     if not any(r_[0] == fam for r_ in rows):
         rows.append((fam, ph, tgt, mdl, CA.match_p2(tgt, mdl), disc, img, res))
 cols = ["image", "target pop 1", "model pop 1", "target pop 2", "model pop 2", "model: other\ndirections", "model:\nisotropic objects", "target\nbackground", "model\nbackground"]
@@ -158,6 +173,7 @@ for j, t_ in enumerate(cols):
     axs[0, j].set_title(t_, fontsize=9)
 fig.colorbar(im, ax=axs[:, 1:].ravel().tolist(), shrink=0.5, label="mass per voxel (square-root scale)", extend="max")
 npass = sum(r_["PASS"] for _, r_ in acc); st = curves[-1]["step"] if curves else 0
+print(f"ground-truth check: {len(dropped)} of {len(tests)} phantoms unscoreable: {dropped}", flush=True)
 fig.suptitle(f"phantom families -- {a.tag}, {st} steps (from {a.init.split('/')[-1]}): {npass}/{len(acc)} held-out phantoms pass every criterion "
              f"(rows: one per family); model: entities matched by type and axis, background = {'background head' if args.get('bg_head') else 'the density floor'}", fontsize=10)
 plt.savefig(a.out, dpi=70); print("saved", a.out)

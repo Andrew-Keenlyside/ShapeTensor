@@ -125,7 +125,7 @@ def table_figure(rows: list, out_png: str, title: str):
     colours = [[("#b7e4c7" if (res["PASS"] if k == "PASS" else res[k][0]) else "#f4a6a6") for k in cols] for _, res in rows]
     tb = ax.table(cellText=cell, cellColours=colours, rowLabels=[r[0] for r in rows], colLabels=cols, loc="center", cellLoc="left")
     tb.auto_set_font_size(False); tb.set_fontsize(7); tb.scale(1, 3.6)
-    ax.set_title(title + "\nthresholds: C1 0.90-1.10 | C2 0.85-1.15 | C3 >= 95 % | C4 <= 5 % | C5 0.90-1.10 | C6 med <= 10, p95 <= 20 deg | C7 0.90-1.10 | C8 log-kappa error <= 0.3", fontsize=9)
+    ax.set_title(title + "\nthresholds: C1 0.90-1.10 | C2 0.85-1.15 | C3 >= 95 % | C4 <= 5 % | C5 0.90-1.10 | C6 med <= 10, p95 <= 20 deg | C7 0.90-1.10 | C8 log-kappa error <= 0.3 | C9 >= 95 %", fontsize=9)
     plt.savefig(out_png, dpi=90, bbox_inches="tight"); plt.close(fig)
 
 
@@ -196,17 +196,25 @@ def evaluate_generic(tm: dict, M: dict, ent: dict) -> dict:
 
 
 # ---- composable phantoms (phantom2.py): any number of populations, fibres / fans / curves / sheets / blobs ---------
-# Fixed 2026-10-26 23:30 ET before results, thresholds as above, plus C8 (the population's ODF shape): the matched
+# Fixed 2026-10-26 23:30 ET before results, revised 2026-10-27 after an adversarial review (a perfect model -- the targets
+# fed in as the model -- failed the first version): thresholds as above, plus C8 (the population's ODF shape: the matched
 # entity's concentrations against the target's, median |log((1 + k_model) / (1 + k_target))| <= ODF_TOL for kappa1 and
-# kappa2. Model entities are matched to the target populations present at each point by type (peaked: kappa2 >= 2;
-# girdle: kappa2 < 2 <= kappa1, compared by its normal; isotropic: kappa1 < 2 -- the isotropic-object mass, the
-# density's floor less the background head's) and by angle (<= 30 deg, one-to-one, nearest first).
+# kappa2, on matched points) and C9 (match rate: each population found -- a model entity of its type within 30 deg, or
+# isotropic-object mass above the count threshold -- on >= COUNT of its zone's points). Model entities are matched to
+# the target populations present at each point (target mass > 0.02) by type (peaked: kappa2 >= 2; girdle: kappa2 < 2 <=
+# kappa1, compared by its normal; isotropic: kappa1 < ISO_K, the training's oriented threshold) and angle (<= 30 deg,
+# one-to-one, nearest first); further entities of the type within 30 deg of a matched population are merged into it
+# (its mass; the split rate is reported); isotropic populations share the isotropic-object mass by their target shares.
+# Leakage is the model's excess over the target outside each population, over max(target total, 0.1 per scored point)
+# -- the same for empty phantoms; a zone missing from the slice is n/a, not a fail.
 ODF_TOL = 0.3
-NAMES8 = NAMES + ("C8 ODF shape",)
+ISO_K = 0.5
+NAMES8 = NAMES + ("C8 ODF shape", "C9 match rate")
 
 
-def _types(k1, k2):
-    return np.where(k1 < 2.0, 2, np.where(k2 < 2.0, 1, 0))                                          # 0 peaked, 1 girdle, 2 isotropic
+def _types(k1, k2, present=None):
+    t = np.where(k1 < ISO_K, 2, np.where(k2 < 2.0, 1, 0))                                          # 0 peaked, 1 girdle, 2 isotropic
+    return t if present is None else np.where(present, t, -1)
 
 
 def match_p2(tgt: dict, mdl: dict, max_deg: float = 30.0) -> dict:
@@ -214,76 +222,104 @@ def match_p2(tgt: dict, mdl: dict, max_deg: float = 30.0) -> dict:
     (populations, background excluded), ``k (P, K, 2)``, ``R (P, K, 3, 3)``; ``mdl``: entities ``mass (P, C)``, ``k (P, C, 2)``,
     ``R (P, C, 3, 3)`` and ``iso (P,)`` the isotropic-object mass."""
     P, K = tgt["mass"].shape; C = mdl["mass"].shape[1]
-    tt = _types(tgt["k"][..., 0], tgt["k"][..., 1]); mt = _types(mdl["k"][..., 0], mdl["k"][..., 1])
+    pres = tgt["mass"] > 0.02
+    tt = _types(tgt["k"][..., 0], tgt["k"][..., 1], pres); mt = _types(mdl["k"][..., 0], mdl["k"][..., 1], mdl["mass"] > 0)
     tax = np.where((tt == 1)[..., None], tgt["R"][..., :, 0], tgt["R"][..., :, 2])                  # girdles: the normal (a-axis)
     max_ = np.where((mt == 1)[..., None], mdl["R"][..., :, 0], mdl["R"][..., :, 2])
     cos = np.abs(np.einsum("pkd,pcd->pkc", tax, max_)); ang = np.degrees(np.arccos(np.clip(cos, 0, 1)))
-    ok = (tt[:, :, None] == mt[:, None, :]) & (tt[:, :, None] < 2) & (mdl["mass"][:, None, :] > 0) & (tgt["mass"][:, :, None] > 0.02)
-    cost = np.where(ok, ang, np.inf)
-    out = {"m": np.zeros((P, K)), "ang": np.full((P, K), 90.0), "k": np.zeros((P, K, 2)), "matched": np.zeros((P, K), bool), "used": np.zeros((P, C), bool)}
+    same = (tt[:, :, None] == mt[:, None, :]) & (tt[:, :, None] >= 0) & (tt[:, :, None] < 2)
+    cost = np.where(same, ang, np.inf)
+    out = {"m": np.zeros((P, K)), "ang": np.full((P, K), 90.0), "k": np.zeros((P, K, 2)), "matched": np.zeros((P, K), bool),
+           "split": np.zeros((P, K), bool), "used": np.zeros((P, C), bool)}
+    c2 = cost.copy()
     for _ in range(min(K, C)):                                                                       # greedy one-to-one, nearest first
-        flat = cost.reshape(P, -1); j = flat.argmin(1); v = flat[np.arange(P), j]
+        flat = c2.reshape(P, -1); j = flat.argmin(1); v = flat[np.arange(P), j]
         sel = v <= max_deg
         if not sel.any():
             break
         pk, pc = j // C, j % C; pi = np.nonzero(sel)[0]
         out["m"][pi, pk[pi]] = mdl["mass"][pi, pc[pi]]; out["ang"][pi, pk[pi]] = v[pi]; out["k"][pi, pk[pi]] = mdl["k"][pi, pc[pi]]
         out["matched"][pi, pk[pi]] = True; out["used"][pi, pc[pi]] = True
-        cost[pi, pk[pi], :] = np.inf; cost[pi, :, pc[pi]] = np.inf
-    iso_t = tt == 2
-    out["m"] = np.where(iso_t, mdl["iso"][:, None] * iso_t / np.maximum(iso_t.sum(1, keepdims=True), 1), out["m"])   # isotropic populations share it
-    out["other"] = (mdl["mass"] * (~out["used"]) * (mt < 2)).sum(1)
+        c2[pi, pk[pi], :] = np.inf; c2[pi, :, pc[pi]] = np.inf
+    extra = (cost <= max_deg) & out["matched"][:, :, None] & ~out["used"][:, None, :]                 # splits: merged into the matched population
+    for kk in range(K):
+        e = extra[:, kk] & ~out["used"]
+        out["m"][:, kk] += (mdl["mass"] * e).sum(1); out["split"][:, kk] |= e.any(1); out["used"] |= e
+    iso_t = tt == 2; share = np.where(iso_t, tgt["mass"], 0.0); tot = share.sum(1, keepdims=True)
+    out["m"] = np.where(iso_t, mdl["iso"][:, None] * share / np.maximum(tot, 1e-9), out["m"])       # isotropic populations by their shares
+    out["iso_spur"] = mdl["iso"] * (tot[:, 0] <= 0)
+    out["other"] = (mdl["mass"] * (~out["used"]) * (mt >= 0) * (mt < 2)).sum(1)
     out["ttype"] = tt
     return out
 
 
+def _nan_ok(vals, lo_hi):
+    f = [v for v in vals if np.isfinite(v)]
+    return bool(f) and all(lo_hi[0] <= v <= lo_hi[1] for v in f)
+
+
 def evaluate_p2(n: int, tgt: dict, mdl: dict, face: np.ndarray, valid_disc: np.ndarray) -> dict:
     """The criteria for one composable phantom on its slice grid (``n x n`` points, row-major). ``tgt`` adds ``bg (P,)``
-    and ``kinds``; ``mdl`` adds ``bg (P,)`` (the model's background mass)."""
+    and ``kinds``; ``mdl`` adds ``bg (P,)`` (the model's background mass) and optionally ``bgm`` (the head's)."""
     from scipy.ndimage import distance_transform_edt
     K = tgt["mass"].shape[1]; m = match_p2(tgt, mdl)
-    valid = (face.reshape(-1) >= FACE_MARGIN) & valid_disc.reshape(-1)
+    valid = (face.reshape(-1) >= FACE_MARGIN) & valid_disc.reshape(-1); nv = max(int(valid.sum()), 1)
     T = tgt["mass"]; pk = np.array([np.percentile(T[valid & (T[:, k] > 0.02), k], 95) if (valid & (T[:, k] > 0.02)).sum() > 10 else 1.0 for k in range(K)])
     inn = T >= 0.5 * pk[None]; out_ = T < np.maximum(0.02, 0.05 * pk[None])
     solo = np.stack([inn[:, k] & np.all(np.delete(out_, k, 1), 1) & valid for k in range(K)], 1) if K else np.zeros((n * n, 0), bool)
-    bgz = np.all(out_, 1) & valid if K else valid
-    res = {}
-    lv, fl, ed, dr, od, lk = {}, {}, {}, {}, {}, {}
+    bgz = (np.all(out_, 1) & valid) if K else valid
+    lvl = [np.median(T[solo[:, k], k]) for k in range(K) if solo[:, k].sum() > 5]
+    thr = max(0.02, min(lvl) / 3) if lvl else 0.05
+    res = {}; lv, fl, ed, dr, od, mr, lk = {}, {}, {}, {}, {}, {}, {}
+    D = max(T[valid].sum(), 0.1 * nv)
     for k in range(K):
         nm = f"{k + 1}{tgt['kinds'][k][0]}"
-        ov = inn[:, k] & np.any(np.delete(inn, k, 1), 1) & valid if K > 1 else np.zeros(n * n, bool)
-        rs = _ratio(m["m"][:, k], T[:, k], solo[:, k]); ro = _ratio(m["m"][:, k], T[:, k], ov) if ov.sum() > 20 else float("nan")
-        lv[f"{nm} solo"] = rs
-        lv[f"{nm} plane"] = float(m["m"][valid, k].sum() / max(T[valid, k].sum(), 1e-9))
-        if np.isfinite(ro):
-            lv[f"{nm} overlap"] = ro; fl[nm] = ro / max(rs, 1e-9)
-        lk[nm] = float(m["m"][out_[:, k] & valid, k].sum() / max(T[valid, k].sum(), 1e-9))
+        ov = (inn[:, k] & np.any(np.delete(inn, k, 1), 1) & valid) if K > 1 else np.zeros(n * n, bool)
+        rs = _ratio(m["m"][:, k], T[:, k], solo[:, k]) if solo[:, k].sum() > 20 else float("nan")
+        ro = _ratio(m["m"][:, k], T[:, k], ov) if ov.sum() > 20 else float("nan")
+        lv[f"{nm} solo"] = rs; lv[f"{nm} overlap"] = ro
+        sup = valid & (T[:, k] > 0.02)                                                              # where the population is present
+        lv[f"{nm} plane"] = float(m["m"][sup, k].sum() / max(T[sup, k].sum(), 1e-9))               # (halos are the leakage terms)
+        if np.isfinite(rs) and np.isfinite(ro):
+            fl[nm] = ro / max(rs, 1e-9)
+        lk[nm] = float(np.maximum(m["m"][out_[:, k] & valid, k] - T[out_[:, k] & valid, k], 0).sum() / max(max(T[valid, k].sum(), 0.1 * nv), 1e-9))
         d = distance_transform_edt((inn[:, k] | ~valid).reshape(n, n)).reshape(-1); arm = solo[:, k]
         if arm.sum() >= 10:
             md = np.median(d[arm]); a_in, a_out = arm & (d > md), arm & (d <= md)
             ed[nm] = float((m["m"][a_out, k].sum() / max(T[a_out, k].sum(), 1e-9)) / max(m["m"][a_in, k].sum() / max(T[a_in, k].sum(), 1e-9), 1e-9))
-        if m["ttype"][solo[:, k], k].size and np.median(m["ttype"][solo[:, k], k]) < 2:              # oriented: direction and ODF shape
-            z = (solo[:, k] | ov)
-            dr[nm] = (float(np.median(m["ang"][z, k])), float(np.percentile(m["ang"][z, k], 95)))
-            e1 = np.abs(np.log1p(m["k"][z, k, 0]) - np.log1p(tgt["k"][z, k, 0])); e2 = np.abs(np.log1p(m["k"][z, k, 1]) - np.log1p(tgt["k"][z, k, 1]))
-            od[nm] = (float(np.median(e1)), float(np.median(e2)))
-    tot = T[valid].sum() if K else 1.0
-    lk["other dirs"] = float(m["other"][valid].sum() / max(tot, 1e-9)) if K else float(m["other"][valid].mean() + mdl["iso"][valid].mean())
-    res["C1 level"] = (all(_inside(v, LEVEL) for v in lv.values()), lv) if K else (True, {"(no populations)": float("nan")})
+        z = (solo[:, k] | ov) & (T[:, k] > 0.02)
+        if not z.any():
+            continue
+        oriented = np.median(m["ttype"][z, k]) < 2
+        if oriented:
+            hit = z & m["matched"][:, k]
+            mr[nm] = float(hit.sum() / z.sum())
+            if hit.sum() > 5:
+                dr[nm] = (float(np.median(m["ang"][hit, k])), float(np.percentile(m["ang"][hit, k], 95)))
+                e1 = np.abs(np.log1p(m["k"][hit, k, 0]) - np.log1p(tgt["k"][hit, k, 0])); e2 = np.abs(np.log1p(m["k"][hit, k, 1]) - np.log1p(tgt["k"][hit, k, 1]))
+                od[nm] = (float(np.median(e1)), float(np.median(e2)))
+            lk[f"{nm} split"] = float(m["split"][z, k].mean())                                      # reported, not thresholded
+        else:                                                                                        # isotropic: found where the model has at
+            mr[nm] = float((m["m"][z, k] >= 0.5 * T[z, k]).mean())                                   # least half its target mass
+    lk["other dirs"] = float(m["other"][valid].sum() / D); lk["iso spurious"] = float(m["iso_spur"][valid].sum() / D)
+    res["C1 level"] = (_nan_ok(lv.values(), LEVEL), lv) if K else (True, {"(no populations)": float("nan")})
     res["C2 flat"] = (all(_inside(v, FLAT) for v in fl.values()), fl if fl else {"(no overlap)": float("nan")})
-    thr = max(0.02, (min(np.median(T[solo[:, k], k]) for k in range(K) if solo[:, k].sum() > 5) / 3) if K and any(solo[:, k].sum() > 5 for k in range(K)) else 0.05)
     tc = (T >= thr).sum(1) if K else np.zeros(n * n, int)
     clean = valid & (np.all((T >= 1.5 * thr) | (T <= 0.5 * thr), 1) if K else True)
     mc = ((mdl["mass"] >= thr) & (_types(mdl["k"][..., 0], mdl["k"][..., 1]) < 2)).sum(1) + (mdl["iso"] >= thr)
     agree = float((mc[clean] == tc[clean]).mean()) if clean.sum() else float("nan")
     res["C3 count"] = (np.isfinite(agree) and agree >= COUNT, {"agree": agree, "points": float(clean.sum())})
-    res["C4 leakage"] = (all(v <= LEAK for v in lk.values()), lk)
+    res["C4 leakage"] = (all(v <= LEAK for kk, v in lk.items() if not kk.endswith("split")), lk)
     res["C5 edges"] = (all(_inside(v, EDGE) for v in ed.values()), ed if ed else {"(none)": float("nan")})
     res["C6 direction"] = (all(a <= DIR[0] and b <= DIR[1] for a, b in dr.values()), {f"{k} med/p95": v for k, v in dr.items()} or {"(none)": float("nan")})
-    bgr = {"background": _ratio(mdl["bg"], tgt["bg"], bgz)}
+    bgr = {"background": _ratio(mdl["bg"], tgt["bg"], bgz & (tgt["bg"] >= 0.05))}
     if K:
-        bgr["inside"] = _ratio(mdl["bg"], tgt["bg"], np.any(inn, 1) & valid)
-    res["C7 background"] = (all(_inside(v, BACK) for v in bgr.values()), bgr)
+        bgr["inside"] = _ratio(mdl["bg"], tgt["bg"], np.any(inn, 1) & valid & (tgt["bg"] >= 0.05))
+        isoz = valid & np.any(inn & (m["ttype"] == 2), 1)
+        if "bgm" in mdl and isoz.sum() > 20:
+            bgr["head in objects"] = _ratio(mdl["bgm"], tgt["bg"], isoz & (tgt["bg"] >= 0.05))
+    res["C7 background"] = (_nan_ok(bgr.values(), BACK) or not any(np.isfinite(v) for v in bgr.values()), bgr)
     res["C8 ODF shape"] = (all(a <= ODF_TOL and b <= ODF_TOL for a, b in od.values()), {f"{k} k1/k2 err": v for k, v in od.items()} or {"(none)": float("nan")})
+    res["C9 match rate"] = (all(v >= COUNT for v in mr.values()), mr or {"(none)": float("nan")})
     res["PASS"] = all(v[0] for kk, v in res.items())
     return res

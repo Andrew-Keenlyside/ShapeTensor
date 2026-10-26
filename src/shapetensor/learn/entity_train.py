@@ -205,10 +205,11 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         else:
             parts["region"] = Fn.binary_cross_entropy_with_logits(cr(rl), cr(rt), weight=wr)
         total = total + W.get("region", 1.0) * parts["region"]
-    if "bg_t" in T and "bg" in P:                                                                   # the background's occupancy, every voxel
-        mv = 2 * margin
-        cb = lambda x: x[..., mv:x.shape[-3] - mv, mv:x.shape[-2] - mv, mv:x.shape[-1] - mv]
-        parts["bg"] = (torch.log(cb(P["bg"].float()) + 0.05) - torch.log(cb(T["bg_t"].float()) + 0.05)).abs().mean()
+    if "bg_t" in T and "bg" in P:                                                                   # the background's occupancy: as the readout uses
+        from .model import window_mean                                                              # it, window means at the queries (per voxel, a
+        wb = window_mean(P["bg"].float(), T["e_points"].float(), T["e_sigma"].float())              # log-L1 on a near-binary map fits a median and
+        wt = window_mean(T["bg_t"].float(), T["e_points"].float(), T["e_sigma"].float())            # read high in the window: review 2026-10-27)
+        parts["bg"] = (torch.log(wb + 0.05) - torch.log(wt + 0.05)).abs().mean()
         total = total + W.get("bg", 1.0) * parts["bg"]
     if "fraction" in T and "fraction_logit" in P and lat_ok:
         parts["fraction"] = Fn.binary_cross_entropy_with_logits(c(P["fraction_logit"].float()), c(T["fraction"].float())); total = total + W["fraction"] * parts["fraction"]

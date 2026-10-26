@@ -145,6 +145,9 @@ def targets(ph: dict, pts: torch.Tensor, sig: torch.Tensor, emax: int = 8) -> di
     ok = live[:, :E]
     if bool(ok.any()):
         Rf, Kf = BG.fit(Tq[ok].double()); R[:, :E][ok], Kp[:, :E][ok] = Rf.float(), Kf.float()
+    ev = torch.linalg.eigvalsh(Tq.double())                                                          # (near) isotropic moments: kappa 0 exactly
+    near_iso = (ev - 1.0 / 3).abs().amax(-1) < 0.02                                                  # (a fit there is noise in the window's tails)
+    Kp[:, :E] = torch.where(near_iso[..., None], torch.zeros_like(Kp[:, :E]), Kp[:, :E])
     anc = torch.full((1536, 16), -1, dtype=torch.long, device=dev); anc[0, 0] = 0
     for i in range(1, E + 1):
         anc[i, 0], anc[i, 1] = i, 0
@@ -182,20 +185,25 @@ def random_spec(family: str, g: torch.Generator, n: int = 64) -> tuple:
     nrm = _rand_unit(g); e1, e2 = _frame(nrm)
     def inplane(theta):
         return (math.cos(theta) * e1 + math.sin(theta) * e2).tolist()
-    s0 = u(3.0, 5.5); fib = lambda: {"spacing": u(3.0, 5.5), "radius": u(0.8, 1.5), "half": u(7, 13), "conc": u(0.85, 0.97)}
+    # the within-voxel dispersion is fixed: it only enters the targets' tensor (the image does not show it), so a drawn
+    # value was unobservable (review 2026-10-27); fans and curves still broaden with the window, as their directions spread
+    s0 = u(3.0, 5.5); fib = lambda: {"spacing": u(3.0, 5.5), "radius": u(0.8, 1.5), "half": u(7, 13), "conc": 0.94}
+    xfib = lambda: {"spacing": s0, "radius": u(0.6, s0 / 4), "half": u(7, 13), "conc": 0.94}       # crossings: one z lattice, thin enough
+                                                                                                     # to interleave (layers s0/2 apart)
     spec = []
     if family == "cross":
         th = u(0, math.pi); ang = math.radians(u(30, 90)) * (1 if u(0, 1) < 0.5 else -1)
-        spec = [{"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th), **fib(), "z0": 0.0},
-                {"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th + ang), **fib(), "z0": s0 / 2}]
-        if u(0, 1) < 0.25:                                                                           # a third population
-            spec.append({"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th + ang / 2 + math.pi / 2), **fib(), "z0": s0 / 4})
+        spec = [{"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th), **xfib(), "z0": 0.0},
+                {"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th + ang), **xfib(), "z0": s0 / 2}]
+        if u(0, 1) < 0.25:                                                                           # a third population (between the layers)
+            third = xfib(); third["radius"] = min(third["radius"], s0 / 8 + 0.3)
+            spec.append({"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th + ang / 2 + math.pi / 2), **third, "z0": s0 / 4})
     elif family == "fan":
         spec = [{"kind": "fan", "normal": nrm.tolist(), "axis": inplane(u(0, math.pi)), **fib(), "spread": math.radians(u(30, 80)), "half_z": u(6, 12)}]
     elif family == "curve":
         spec = [{"kind": "curve", "normal": nrm.tolist(), "axis": inplane(u(0, math.pi)), **fib(), "curv_radius": u(18, 45), "arc": u(0.6, 1.3), "half_z": u(6, 12)}]
     elif family == "sheet":
-        spec = [{"kind": "sheet", "normal": _rand_unit(g).tolist(), "spacing": u(3.0, 6.0), "thickness": u(1.0, 2.2), "half": u(10, 18), "conc": u(0.85, 0.97)}]
+        spec = [{"kind": "sheet", "normal": _rand_unit(g).tolist(), "spacing": u(3.0, 6.0), "thickness": u(1.0, 2.2), "half": u(10, 18), "conc": 0.94}]
     elif family == "blob":
         spec = [{"kind": "blob", "half": u(12, 22), "blob_radius": u(2.0, 4.5), "count": int(u(6, 25)), "seed": int(u(0, 1e6))}]
     elif family == "mix":                                                                            # a crossing or bundle with blobs or a sheet
@@ -205,9 +213,11 @@ def random_spec(family: str, g: torch.Generator, n: int = 64) -> tuple:
         if r_ < 0.35:
             spec.append({"kind": "blob", "half": u(10, 18), "blob_radius": u(2.0, 4.0), "count": int(u(5, 15)), "seed": int(u(0, 1e6))})
         elif r_ < 0.7:
-            spec.append({"kind": "sheet", "normal": _rand_unit(g).tolist(), "spacing": u(3.5, 6.0), "thickness": u(1.0, 2.0), "half": u(8, 14), "conc": u(0.85, 0.97)})
+            spec.append({"kind": "sheet", "normal": _rand_unit(g).tolist(), "spacing": u(3.5, 6.0), "thickness": u(1.0, 2.0), "half": u(8, 14), "conc": 0.94})
         else:
-            spec.append({"kind": "fan", "normal": nrm.tolist(), "axis": inplane(th + math.radians(u(40, 90))), **fib(), "spread": math.radians(u(25, 60)), "z0": s0 / 2, "half_z": u(6, 10)})
+            fz = xfib(); fz["spacing"] = s0
+            spec.append({"kind": "fan", "normal": nrm.tolist(), "axis": inplane(th + math.radians(u(40, 90))), **fz, "spread": math.radians(u(25, 60)), "z0": s0 / 2, "half_z": u(6, 10)})
+            spec[0].update({"spacing": s0, "radius": min(spec[0]["radius"], s0 / 4)})
     elif family == "empty":
         spec = []
     con = []
