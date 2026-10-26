@@ -127,3 +127,62 @@ def table_figure(rows: list, out_png: str, title: str):
 def save_json(rows: list, path: str):
     json.dump([{"phantom": lab, **{k: (v if k == "PASS" else {"pass": v[0], **{kk: vv for kk, vv in v[1].items()}}) for k, v in res.items()}} for lab, res in rows],
               open(path, "w"), indent=1, default=float)
+
+
+# ---- the same criteria on generator crossings (gen_crossings.py): zones from the targets, not from a known geometry ----
+# Fixed 2026-10-26 before any generator results. A population's arm: its target >= half its peak there, the other
+# crossing population and every other object population absent (< 5 % of the peaks); the core: both >= half their peaks,
+# no other population; background: none. C2 "flat" becomes the core-over-arm ratio of model / target (no subtraction in
+# the crossing); C5 "edges" splits each arm by the distance to its population's boundary (outer vs inner half). The
+# thresholds are the phantoms'.
+
+def generic_zones(tm: dict) -> dict:
+    face = tm.get("_face", np.full(tm["tA"].shape, np.inf)); valid = face >= FACE_MARGIN
+    pk = {p: float(np.percentile(tm["t" + p][valid & (tm["t" + p] > 0.02)], 95)) if (valid & (tm["t" + p] > 0.02)).sum() > 10 else 1.0 for p in ("A", "B")}
+    lo = max(0.02, 0.05 * min(pk.values()))
+    inn = {p: tm["t" + p] >= 0.5 * pk[p] for p in ("A", "B")}; out = {p: tm["t" + p] < max(0.02, 0.05 * pk[p]) for p in ("A", "B")}
+    oab = tm["tO"] < lo
+    return {"armA": inn["A"] & out["B"] & oab & valid, "armB": inn["B"] & out["A"] & oab & valid, "core": inn["A"] & inn["B"] & oab & valid,
+            "bg": out["A"] & out["B"] & oab & valid, "inA": inn["A"] & valid, "inB": inn["B"] & valid, "outA": out["A"] & valid, "outB": out["B"] & valid,
+            "oabs": oab & valid, "valid": valid}
+
+
+def evaluate_generic(tm: dict, M: dict, ent: dict) -> dict:
+    """The criteria on one generator crossing: ``tm`` the slice targets (gen_crossings.slice_targets), ``M`` the model's
+    maps ``mA, mB, mO, mI`` (n x n), ``ent`` per grid point the entities' ``mass``, ``iso`` and world ``axis``."""
+    from scipy.ndimage import distance_transform_edt
+    n = tm["tA"].shape[0]; Z = generic_zones(tm); out = {}
+    T = {"A": tm["tA"], "B": tm["tB"]}; Mm = {"A": M["mA"], "B": M["mB"]}
+    r = {(p, z): _ratio(Mm[p], T[p], Z[z]) for p in ("A", "B") for z in ("arm" + p, "core")}
+    out["C1 level"] = (all(_inside(v, LEVEL) for v in r.values()), {f"{p} {'arm' if z != 'core' else 'core'}": v for (p, z), v in r.items()})
+    fl = {p: r[(p, "core")] / max(r[(p, "arm" + p)], 1e-9) for p in ("A", "B")}
+    out["C2 flat"] = (all(_inside(v, FLAT) for v in fl.values()), {f"{p} core/arm": v for p, v in fl.items()})
+    lvl = min(np.median(T["A"][Z["armA"]]), np.median(T["B"][Z["armB"]])); thr = max(0.02, lvl / 3)
+    cnt = ((ent["mass"] >= thr) & ~ent["iso"]).sum(1).reshape(n, n)
+    cz = {z: float((cnt[Z[z]] == k).mean()) for z, k in (("bg", 0), ("armA", 1), ("armB", 1), ("core", 2))}
+    out["C3 count"] = (all(v >= COUNT for v in cz.values()), cz)
+    v = Z["valid"]
+    lk = {"A outside": float(Mm["A"][Z["outA"]].sum() / max(T["A"][v].sum(), 1e-9)), "B outside": float(Mm["B"][Z["outB"]].sum() / max(T["B"][v].sum(), 1e-9)),
+          "other dirs": float(M["mO"][Z["oabs"]].sum() / max((T["A"] + T["B"])[Z["oabs"]].sum(), 1e-9))}
+    out["C4 leakage"] = (all(x <= LEAK for x in lk.values()), lk)
+    ed = {}
+    for p in ("A", "B"):
+        d = distance_transform_edt(Z["in" + p] | ~Z["valid"]); arm = Z["arm" + p]
+        if arm.sum() < 10:
+            ed[p] = float("nan"); continue
+        md = np.median(d[arm]); inner, outer = arm & (d > md), arm & (d <= md)
+        ri = Mm[p][inner].sum() / max(T[p][inner].sum(), 1e-9); ro = Mm[p][outer].sum() / max(T[p][outer].sum(), 1e-9)
+        ed[p] = float(ro / max(ri, 1e-9))
+    out["C5 edges"] = (all(_inside(x, EDGE) for x in ed.values()), ed)
+    dr = {}
+    for p in ("A", "B"):
+        u, ok = tm["axes"][p]; u = u.cpu().numpy(); ok = ok.cpu().numpy().reshape(n, n)
+        cos = np.abs((ent["axis"] * u[:, None, :]).sum(-1)) * ((ent["mass"] >= thr) & ~ent["iso"])
+        ang = np.degrees(np.arccos(np.clip(cos.max(1), 0, 1))).reshape(n, n)
+        sel = (Z["arm" + p] | Z["core"]) & ok
+        dr[p] = (float(np.median(ang[sel])), float(np.percentile(ang[sel], 95))) if sel.any() else (float("nan"),) * 2
+    out["C6 direction"] = (all(np.isfinite(m) and m <= DIR[0] and q <= DIR[1] for m, q in dr.values()), {f"{p} med/p95": x for p, x in dr.items()})
+    bk = {"background": _ratio(M["mI"], tm["tI"], Z["bg"]), "inside": _ratio(M["mI"], tm["tI"], (Z["inA"] | Z["inB"]) & Z["oabs"])}
+    out["C7 background"] = (all(_inside(x, BACK) for x in bk.values()), bk)
+    out["PASS"] = all(x[0] for k, x in out.items())
+    return out
