@@ -134,8 +134,9 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         if n_uni > 0:                                                                              # the mass: the density's mean over the sphere
             m_p = ent["f"][:, :, :n_uni].float().mean(-1)
             parts["mass"] = (torch.log(m_p + DENS_EPS) - torch.log(m_t + DENS_EPS)).abs().mean()
-    if OWN_OBJECTS:
-        ori = (T["e_kappa"][..., 0] >= VOTE_KAPPA_MIN)[:, :, None, :]                               # (B, Q, 1, E) oriented entities
+    if OWN_OBJECTS:                                                                                  # (B, Q, 1, E) the owners: every entity but
+        ori = (~T["e_bg"].bool() if "e_bg" in T else (T["e_kappa"][..., 0] >= VOTE_KAPPA_MIN))[:, :, None, :]   # the background (isotropic objects too:
+                                                                                                    # their tree identity; votes stay oriented)
         co = contrib * ori; ro = co.sum(-1)
         share = co / ro.clamp_min(1e-9)[..., None]; best, owner = share.max(-1)
         owned = (best > 0.5) & (ro > OWN_REL * rm) & (rm > DENS_EPS)
@@ -162,7 +163,9 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
             total = total + W["vote"] * parts["vote"] + W["desc"] * parts["desc"]
         # the tree: pairs of owned directions within each crop
         node = torch.gather(T["e_node"], 2, owner)                                                  # (B, Q, D) local node of the owner
-        lt = []
+        iso_own = owned & (k_t[..., 0] < VOTE_KAPPA_MIN)                                            # isotropic objects (OWN_OBJECTS: they own
+        w_iso = W.get("tree_iso", 0.2)                                                              # directions now): their identity at a lower
+        lt = []                                                                                     # weight -- new, untrained and often deep
         for b in range(dirs.shape[0]):
             idx = torch.nonzero(owned[b].flatten())[:, 0]
             if idx.numel() < 2:
@@ -181,7 +184,9 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
                 A = T["e_anc"][b]                                                                   # (the ancestors just below the root differ)
                 pop = lambda n_: A[n_].gather(1, ((A[n_] >= 0).sum(1) - 2).clamp(min=0)[:, None])[:, 0]   # weighs tree_pop x (1 + t): its
                 wt = 1.0 + W["tree_pop"] * (pop(nb[pi]) != pop(nb[pj])).float() * (1 + t)           # distance not discounted by its size
-            lt.append((wt * (dz - t) ** 2 / (1 + t)).mean() + ((r0 - dep) ** 2 / (1 + dep)).mean())
+            io = iso_own[b].flatten()
+            wp = torch.where(io[pi] | io[pj], torch.full_like(t, w_iso), torch.ones_like(t)); wg = torch.where(io[idx], torch.full_like(dep, w_iso), torch.ones_like(dep))
+            lt.append((wp * wt * (dz - t) ** 2 / (1 + t)).mean() + (wg * (r0 - dep) ** 2 / (1 + dep)).mean())
         if lt:
             parts["tree"] = torch.stack(lt).mean(); total = total + W["tree"] * parts["tree"]
         parts["owned_share"] = owned.float().mean().detach()
@@ -211,6 +216,13 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         wt = window_mean(T["bg_t"].float(), T["e_points"].float(), T["e_sigma"].float())            # read high in the window: review 2026-10-27)
         parts["bg"] = (torch.log(wb + 0.05) - torch.log(wt + 0.05)).abs().mean()
         total = total + W.get("bg", 1.0) * parts["bg"]
+    if "obj" in P and "region_t" in T:                                                              # the objects' occupancy: window means at the
+        from .model import window_mean                                                              # queries, log-L1 (relative: a thin bundle's
+        ot = (T["region_t"].float() - (T["bg_t"].float() if "bg_t" in T else 0.0)).clamp_min(0)    # mass as well as a dense one's)
+        wo = window_mean(P["obj"].float(), T["e_points"].float(), T["e_sigma"].float())
+        wt = window_mean(ot, T["e_points"].float(), T["e_sigma"].float())
+        parts["obj"] = (torch.log(wo + 0.01) - torch.log(wt + 0.01)).abs().mean()
+        total = total + W.get("obj", 1.0) * parts["obj"]
     if "fraction" in T and "fraction_logit" in P and lat_ok:
         parts["fraction"] = Fn.binary_cross_entropy_with_logits(c(P["fraction_logit"].float()), c(T["fraction"].float())); total = total + W["fraction"] * parts["fraction"]
     if "points" in P and "points_t" in T and lat_ok:

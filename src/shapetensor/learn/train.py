@@ -43,7 +43,7 @@ TKEYS = ("slots", "mass", "kind", "layer", "fraction", "classes", "size", "size_
 HALF = ("slots", "mass", "fraction", "classes", "size")
 QKEYS = ("q_points", "q_sigma", "q_sh", "sh_t")
 LKEYS = ("identity_t", "points_t", "voxel", "fraction")    # the lobe model's extra targets
-EKEYS = ("e_points", "e_sigma", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa", "e_gnode", "region_t", "iface_t", "bg_t")   # the entity model's
+EKEYS = ("e_points", "e_sigma", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa", "e_gnode", "region_t", "iface_t", "bg_t", "e_bg")   # the entity model's
 HEAD = "slots"                     # "slots" | "lobes" (set by train())
 DESC_KEY = "descriptors"           # the drawn descriptors the descriptor densities use ("descriptors5": the scenes' five)
 SH_EXACT = 0                       # > 0: the SH head's lattice target from the exact per-voxel density to this order
@@ -201,6 +201,10 @@ NOT_OBJECT = ("isotropic", "interface")
 #: the region target a density (the sum of the populations' visible occupancies, crossings counting both) rather than
 #: their union clipped at one -- with the targets' populations no longer sharing the voxel (generator.TARGETS_BUDGET)
 REGION_DENSITY = True
+#: the entity tensors' dispersion floor ``T' = c T + (1 - c)(I - T) / 2`` (trace 1; isotropic unchanged): straight objects
+#: gave kappa at the fit's cap (600) -- delta lobes no image shows and the density basis (order 16) cannot draw; 0.94
+#: caps a line near kappa 17, as the phantoms' fibres. None: off (2026-10-27)
+ENTITY_DISPERSION = 0.94
 
 
 def set_background_entity(on: bool = True):
@@ -298,14 +302,21 @@ def entity_queries(s, d: dict, size: int, seed: int, device, points: torch.Tenso
         T = T.gather(1, o[..., None, None].expand(-1, -1, 3, 3)); desc = desc.gather(1, o[..., None].expand(-1, -1, 5))
         mass = mass * (e_node >= 0); evis = evis * (e_node >= 0)
     live = e_node >= 0
+    if ENTITY_DISPERSION is not None:                                                                # a dispersion floor: no object is drawn
+        c_ = float(ENTITY_DISPERSION); I3 = torch.eye(3, device=device)                              # sharper than the image can show
+        tr_ = T.diagonal(dim1=-2, dim2=-1).sum(-1).clamp_min(1e-9)[..., None, None]
+        Tn = T / tr_
+        T = torch.where(live[..., None, None], c_ * Tn + (1 - c_) * (I3 - Tn) / 2, T)
     T6 = torch.stack([T[..., 0, 0], T[..., 1, 1], T[..., 2, 2], T[..., 0, 1], T[..., 0, 2], T[..., 1, 2]], -1)
     from .bingham import fit as bfit                                                                   # the entities' Bingham ODFs (moment matched)
     R = torch.eye(3, device=device).expand(*e_node.shape, 3, 3).clone(); Kp = torch.zeros(*e_node.shape, 2, device=device)
     if bool(live.any()):
         Rf, Kf = bfit(T[live].double()); R[live], Kp[live] = Rf.float(), Kf.float()
+    bg_g = torch.tensor([tree.n + j for j, k in enumerate(dense) if s.layers[k].role == "isotropic"] or [-2], device=device)
+    e_bg = (gnode[..., None] == bg_g).any(-1) & (e_node >= 0)                                          # the background's entity (no object)
     return {"e_points": pts, "e_sigma": sig, "e_node": e_node.int(), "e_mass": mass.half(), "e_vis": evis.half(),
             "e_T6": T6.half(), "e_desc": desc.half(), "e_anc": e_anc, "e_n": torch.tensor(U.numel() + nd, device=device),
-            "e_R": R.float(), "e_kappa": Kp.float(), "e_gnode": torch.where(e_node >= 0, gnode, torch.full_like(gnode, -1))}
+            "e_R": R.float(), "e_kappa": Kp.float(), "e_gnode": torch.where(e_node >= 0, gnode, torch.full_like(gnode, -1)), "e_bg": e_bg}
 
 
 ROUTES = 0.0                       # > 0: batch-time contrast routes (learn/augment.py) at this strength, a fresh draw each use
@@ -1021,7 +1032,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    dens_sh: bool = True, read_keep: float = READ_KEEP, dens_mlp: bool = True, mass_region: bool = True,
                    region_dec: bool = False, where_first: int = 0, z_vote: bool = False, dir_sh: int = 0, background_entity: bool = True,
                    ray: bool = False, e_cross: float = 0.0, region_density: bool = True, kappa_log: bool = False, vote_objects: bool = False,
-                   dens_same_norm: bool = False, own_objects: bool = False, bg_head: bool = False, orient_from_texture: bool = False):
+                   dens_same_norm: bool = False, own_objects: bool = False, bg_head: bool = False, orient_from_texture: bool = True,
+                   obj_head: bool = False):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -1085,7 +1097,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 dir_lmax=dir_lmax, vote_unc=vote_unc, lcn=lcn, mass_head=True, region_head=True, dens_sh=bool(dens_sh), read_keep=READ_KEEP,
                 dens_mlp=bool(dens_mlp), mass_region=bool(mass_region), region_dec=bool(region_dec), where_first=int(where_first),
                 z_vote=bool(z_vote), dir_sh=int(dir_sh), background_entity=bool(background_entity), ray=bool(ray),
-                region_density=bool(region_density), kappa_log=bool(kappa_log), vote_objects=bool(vote_objects), dens_same_norm=bool(dens_same_norm), own_objects=bool(own_objects), bg_head=bool(bg_head), orient_from_texture=bool(orient_from_texture))
+                region_density=bool(region_density), kappa_log=bool(kappa_log), vote_objects=bool(vote_objects), dens_same_norm=bool(dens_same_norm), own_objects=bool(own_objects), bg_head=bool(bg_head), orient_from_texture=bool(orient_from_texture), obj_head=bool(obj_head))
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)
@@ -1119,7 +1131,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     if cpu_workers > 0:
         state = {"HEAD": HEAD, "DESC_KEY": DESC_KEY, "SH_EXACT": SH_EXACT, "DESC_LMAX": DESC_LMAX, "QUERY": QUERY, "CACHE": None,
                  "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC, "ENTITY": dict(ENTITY), "READ_KEEP": READ_KEEP, "NOT_ENTITY": NOT_ENTITY, "REGION_DENSITY": REGION_DENSITY,
-                 "GN.ORIENT_FROM_TEXTURE": bool(orient_from_texture)}
+                 "GN.ORIENT_FROM_TEXTURE": bool(orient_from_texture), "ENTITY_DISPERSION": ENTITY_DISPERSION}
         cpu = DF.CpuWorkers(cpu_workers, size, buf.next + 90_000_000, cfg, state, threads=cpu_threads)
     pbuf = ET.EntityPairBuffer(pairs, size, "cpu", LT.difficulty_gen(level["v"], base), seed0=60_000_000 + rank * 1_000_000 + start,
                                out_device=device, n0=4) if pairs else None                           # drawn on the CPU (see EntityPairBuffer)
@@ -1319,7 +1331,9 @@ def main():
     ap.add_argument("--kappa-log", action="store_true", help="entities: the vote's concentrations in log space (the softplus head collapses)")
     ap.add_argument("--dens-same-norm", action="store_true", help="entities: the density target's shape normalised over the prediction's uniform directions "
                                                                    "(against the exact mean, the lobes were trained ~20 %% low)")
-    ap.add_argument("--orient-from-texture", action="store_true", help="entities: orientation visibility from the layers' oriented texture (generator.ORIENT_FROM_TEXTURE)")
+    ap.add_argument("--orient-from-texture", action="store_true", help="(the default now) entities: orientation visibility from the layers' oriented texture")
+    ap.add_argument("--orient-from-contrast", action="store_true", help="entities: orientation visibility from the regions' contrast t (before 2026-10-27)")
+    ap.add_argument("--obj-head", action="store_true", help="entities: an objects'-occupancy head (populations' mass predicted directly, relative loss)")
     ap.add_argument("--bg-head", action="store_true", help="entities: a background-occupancy head (isotropic objects told from the background by place)")
     ap.add_argument("--own-objects", action="store_true", help="entities: directions owned among the oriented entities only (the background owns none)")
     ap.add_argument("--vote-objects", action="store_true", help="entities: vote / kappa / descriptor losses only where an oriented entity owns the direction")
@@ -1368,7 +1382,7 @@ def main():
                        read_keep=a.read_keep, level_steps=a.level_steps, dens_mlp=not a.no_dens_mlp, mass_region=not a.no_mass_region,
                        region_dec=a.region_dec, where_first=a.where_first, z_vote=a.z_vote, dir_sh=a.dir_sh,
                        background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, region_density=not a.no_region_density,
-                       kappa_log=a.kappa_log, vote_objects=a.vote_objects, dens_same_norm=a.dens_same_norm, own_objects=a.own_objects, bg_head=a.bg_head, orient_from_texture=a.orient_from_texture)
+                       kappa_log=a.kappa_log, vote_objects=a.vote_objects, dens_same_norm=a.dens_same_norm, own_objects=a.own_objects, bg_head=a.bg_head, orient_from_texture=not a.orient_from_contrast, obj_head=a.obj_head)
         return
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,

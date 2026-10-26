@@ -83,7 +83,7 @@ def targets(ph: dict, pts: torch.Tensor, sig: torch.Tensor) -> dict:
     return {"e_points": pts, "e_sigma": sig, "e_node": node, "e_mass": mass, "e_vis": (node >= 0).float(), "e_T6": T6,
             "e_desc": torch.zeros(Q, E, 5, device=dev), "e_anc": anc, "e_n": torch.tensor(4, device=dev), "e_R": R, "e_kappa": K,
             "e_gnode": node, "region_t": ph["occ"]["A"] + ph["occ"]["B"] + ph["occ"]["bg"], "iface_t": torch.zeros(n, n, n, device=dev),
-            "voxel": torch.tensor(float("nan"), device=dev)}
+            "voxel": torch.tensor(float("nan"), device=dev), "e_bg": node == 3}
 
 
 def draw_queries(ph: dict, g: torch.Generator, n_q: int) -> tuple:

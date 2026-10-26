@@ -127,6 +127,7 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
     if getattr(model, "mass_region", False) and getattr(model, "region", None) is not None:     # the mass: the region map's window mean
         reg = model.region_value(model.region_map(*feats))[:, :tsz[0], :tsz[1], :tsz[2]]
     bgm = model.bg_map(*feats)[:, :tsz[0], :tsz[1], :tsz[2]] if getattr(model, "bgh", None) is not None else None   # the background's
+    objm = model.obj_map(*feats)[:, :tsz[0], :tsz[1], :tsz[2]] if getattr(model, "objh", None) is not None else None  # the objects'
     for a in range(0, points.shape[0], chunk):
         p = points[a:a + chunk].float(); s = sigma[a:a + chunk].float(); n = p.shape[0]; D = dirs.shape[0]
         ctx = torch.minimum(p, vs - 1 - p).amin(-1)
@@ -135,6 +136,7 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
         if reg is not None:
             mq = window_mean(reg, (p - off)[None], s[None])[0]
         bq = window_mean(bgm, (p - off)[None], s[None])[0] if bgm is not None else None
+        oq = window_mean(objm, (p - off)[None], s[None])[0] if objm is not None else None
         if t_rel is None:
             ev = torch.ones(n, D, dtype=torch.bool, device=p.device)
         else:
@@ -155,6 +157,8 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
             full["m"] = mq.float()
         if bq is not None:
             full["bgm"] = bq.float()
+        if oq is not None:
+            full["objm"] = oq.float()
         for k, v in full.items():
             out.setdefault(k, []).append(v)
     return {k: torch.cat(v) for k, v in out.items()}
@@ -480,3 +484,114 @@ def follow(model, x: torch.Tensor, seed, direction, voxel: float | None = None, 
         a_ = e["R"][0, c, :, 2]; ac = a_ if float(a_ @ ac) >= 0 else -a_; zc = e["z"][0, c]
         pts.append(p); axes.append(ac); zs.append(zc); ms.append(e["mass"][0, c])
     return {"points": torch.stack(pts[:len(axes)]), "axes": torch.stack(axes), "z": torch.stack(zs), "mass": torch.stack(ms)}
+
+
+def merge_parallel(e: dict, mass: torch.Tensor, deg: float = 15.0, iso_k: float = 0.5) -> tuple:
+    """Entities of one type (peaked: kappa2 >= 2; girdle: kappa2 < 2 <= kappa1, by its normal) within ``deg`` of a
+    heavier one at the same point are one population: their masses join the heavier one's (its frame kept). At a point
+    two lobes along one axis cannot be told apart by the density -- a split there is the readout's, not the material's
+    (85 deg phantom crossing: ~4 entities, the heaviest 39 %). Returns ``(mass, live)``."""
+    k = e["kappa"].float(); R = e["R"].float(); live = e["live"] & (mass > 0)
+    typ = torch.where(k[..., 0] < iso_k, 2, torch.where(k[..., 1] < 2.0, 1, 0))
+    ax = torch.where((typ == 1)[..., None], R[..., :, 0], R[..., :, 2])
+    m = mass.clone(); lv = live.clone(); C = m.shape[1]
+    order = torch.argsort(m, 1, descending=True)
+    cosd = math.cos(math.radians(deg))
+    for a_ in range(C):                                                                              # heaviest first: absorb the lighter
+        i = order[:, a_]
+        ai = ax.gather(1, i[:, None, None].expand(-1, 1, 3))[:, 0]; ti = typ.gather(1, i[:, None])[:, 0]
+        li = lv.gather(1, i[:, None])[:, 0]
+        near = ((ax * ai[:, None]).sum(-1).abs() >= cosd) & (typ == ti[:, None]) & (ti[:, None] < 2) & lv & li[:, None]
+        near.scatter_(1, i[:, None], False)
+        add = (m * near).sum(1)
+        m.scatter_add_(1, i[:, None], add[:, None]); m = torch.where(near, torch.zeros_like(m), m); lv = lv & ~near
+    return m, lv
+
+
+@torch.no_grad()
+def readout(model, image: torch.Tensor, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.Tensor, voxel_um=None, floor: float = 0.05,
+            iso_k: float = 0.5, merge_deg: float | None = 15.0, chunk: int = 1024, feats=None, tta: int = 0) -> dict:
+    """The entity readout at ``points``: the density's floor (``floor`` quantile) the background plus isotropic objects
+    (told apart by the background head where the model has one), entities from what rises above it (:func:`cluster`),
+    their mass split by lobe fit (:func:`split_mass`), near-parallel same-type entities merged (``merge_deg``, None:
+    off), in chunks. Returns numpy-ready tensors: ``mass (P, C)`` (oriented entities; isotropic ones zeroed), ``k``,
+    ``R``, ``iso`` (isotropic-object mass), ``bg`` (background mass), ``bgm`` (the head's window mean), ``iso_z`` (the
+    floor directions' mean embedding: the isotropic material's place in the tree)."""
+    f = feats if (feats is not None or tta > 1) else features(model, image, voxel_um=voxel_um)
+    parts = []
+    for a0 in range(0, points.shape[0], chunk):
+        sl = slice(a0, a0 + chunk)
+        r = (query_tta(model, image, points[sl], sigma[sl], dirs, n_rot=tta, voxel_um=voxel_um) if tta > 1     # ``tta``: rotations averaged
+             else query(model, f, points[sl], sigma[sl], dirs, vol_shape=image.shape))
+        e = cluster(r, dirs, floor=floor); sp = split_mass(r, dirs, e)
+        ms = (sp["mass"] * e["live"]).float(); kv = e["kappa"].float(); isoe = kv[..., 0] < iso_k
+        if merge_deg is not None:
+            ms, lv = merge_parallel({**e, "live": e["live"] & ~isoe}, ms * ~isoe, merge_deg, iso_k)
+            ms = ms + (sp["mass"] * e["live"]).float() * isoe                                       # (isotropic entities kept apart)
+        iso_tot = sp["floor"].float() + (ms * isoe).sum(1)
+        bgm = r["bgm"].float().clamp(0, 1) if "bgm" in r else iso_tot
+        bg = torch.minimum(iso_tot, bgm)
+        if "objm" in r:                                                                              # the objects' mass predicted: the oriented
+            obj = r["objm"].float(); ori = ms * ~isoe; S = ori.sum(1); has = S > 1e-6                # populations and the isotropic objects share
+            iso_o = torch.minimum((iso_tot - bgm).clamp_min(0), obj)                                 # it -- isotropic objects the floor beyond the
+            scale = torch.where(has, (obj - iso_o).clamp_min(0) / S.clamp_min(1e-6), torch.zeros_like(S))   # background (all of it where no lobe
+            ms = torch.where(isoe, ms, ori * scale[:, None])                                         # stands); the background is the head's
+            bg = bgm; iso_tot = bg + torch.where(has, iso_o, obj)
+        un = (e["label"] < 0).float() * r["f"].float()                                              # the floor's directions
+        iso_z = (un[..., None] * r["z"].float()).sum(1) / un.sum(1, keepdim=True).clamp_min(1e-9)
+        parts.append({"mass": ms * ~isoe, "k": kv, "R": e["R"].float(), "iso": (iso_tot - bg).clamp_min(0), "bg": bg, "bgm": bgm, "iso_z": iso_z})
+    C = max(p_["mass"].shape[1] for p_ in parts)
+    pad = lambda x: torch.cat([x, torch.zeros((x.shape[0], C - x.shape[1]) + tuple(x.shape[2:]), device=x.device, dtype=x.dtype)], 1) if x.shape[1] < C else x
+    return {k: torch.cat([pad(p_[k]) if k in ("mass", "k", "R") else p_[k] for p_ in parts]) for k in parts[0]}
+
+
+def cube_rotations(device="cpu") -> list:
+    """The 24 proper rotations of the cube as ``(perm, signs, M)``: ``M[a, perm[a]] = signs[a]`` (z, y, x), identity first,
+    then the quarter turns, then the rest -- a short prefix already spans the axes."""
+    import itertools
+    out = []
+    for perm in itertools.permutations(range(3)):
+        for sg in itertools.product((1, -1), repeat=3):
+            M = torch.zeros(3, 3)
+            for a_ in range(3):
+                M[a_, perm[a_]] = sg[a_]
+            if torch.det(M) > 0:
+                out.append((list(perm), list(sg), M.to(device)))
+    first, rest, seen = [], [], set()                                                                 # the identity, then one per axis permutation,
+    for r in out:                                                                                     # then the rest
+        k_ = tuple(r[0])
+        if r[0] == [0, 1, 2] and r[1] == [1, 1, 1]:
+            first.insert(0, r)
+        elif k_ not in seen and k_ != (0, 1, 2):
+            seen.add(k_); first.append(r)
+        else:
+            rest.append(r)
+    return first + rest
+
+
+@torch.no_grad()
+def query_tta(model, image: torch.Tensor, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.Tensor, n_rot: int = 4, voxel_um=None) -> dict:
+    """:func:`query` averaged over ``n_rot`` exact cube rotations of the volume (points and directions rotated with it):
+    the densities averaged, the votes averaged as Bingham moments (rotated back) and refitted; embeddings, masses from
+    the unrotated pass. A test-time rotation average: an orientation the model handles worse is pulled toward the
+    others' answer."""
+    c = (torch.tensor(image.shape, device=points.device, dtype=torch.float32) - 1) / 2
+    rots = cube_rotations(points.device)[:max(1, n_rot)]
+    base = None; F = 0; Mom = 0
+    for perm, sg, M in rots:
+        vol = image.permute(*perm)
+        for a_ in range(3):
+            if sg[a_] < 0:
+                vol = vol.flip(a_)
+        p_r = (points - c) @ M.T + c; u_r = dirs @ M.T
+        f = features(model, vol.contiguous(), voxel_um=voxel_um)
+        r = query(model, f, p_r, sigma, u_r, vol_shape=vol.shape)
+        if base is None:
+            base = r
+        R_back = M.T @ r["R"].float()                                                                # (Q, D, 3, 3): frames back in the original axes
+        Mom = Mom + BG.moments(R_back.double(), r["kappa"].double())
+        F = F + r["f"].float()
+    Rf, Kf = BG.fit((Mom / len(rots)).reshape(-1, 3, 3))
+    out = dict(base); out["f"] = F / len(rots)
+    out["R"] = Rf.float().reshape(base["R"].shape); out["kappa"] = Kf.float().reshape(base["kappa"].shape)
+    return out

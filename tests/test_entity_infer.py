@@ -313,3 +313,39 @@ def test_density_shape_loss_same_norm_is_zero_for_the_right_shape():
     finally:
         ET.DENS_SAME_NORM = old
     assert same < 1e-5 and exact > 0.05
+
+
+def test_merge_parallel_joins_near_parallel_entities_of_one_type():
+    """Two peaked entities 5 deg apart are one population (masses joined); one at 60 deg stays apart."""
+    def Rx(a):
+        c, s = math.cos(a), math.sin(a)
+        return torch.tensor([[1.0, 0, 0], [0, c, -s], [0, s, c]])
+    R = torch.stack([Rx(0.0), Rx(math.radians(5)), Rx(math.radians(60))])[None]
+    e = {"kappa": torch.tensor([[[17.0, 17.0], [16.0, 16.0], [17.0, 17.0]]]), "R": R, "live": torch.tensor([[True, True, True]])}
+    m, lv = EI.merge_parallel(e, torch.tensor([[0.3, 0.2, 0.25]]))
+    assert torch.allclose(m, torch.tensor([[0.5, 0.0, 0.25]])) and lv.tolist() == [[True, False, True]]
+
+
+def test_cube_rotations_map_volume_points_exactly():
+    """The 24 cube rotations: the image at p equals the rotated image at M (p - c) + c, exactly."""
+    img = torch.rand(9, 9, 9); c = torch.full((3,), 4.0)
+    rots = EI.cube_rotations()
+    assert len(rots) == 24 and rots[0][0] == [0, 1, 2] and rots[0][1] == [1, 1, 1]
+    for perm, sg, M in rots:
+        vol = img.permute(*perm)
+        for a_ in range(3):
+            if sg[a_] < 0:
+                vol = vol.flip(a_)
+        p = torch.randint(0, 9, (20, 3)).float(); pr = ((p - c) @ M.T + c).round().long()
+        assert torch.equal(img[p[:, 0].long(), p[:, 1].long(), p[:, 2].long()], vol[pr[:, 0], pr[:, 1], pr[:, 2]])
+
+
+def test_supersampled_phantom_targets_agree_with_coarse_at_coarse_scale():
+    """phantom2 ss=2 (true partial volume, fine-grid targets): at sigma 2.5 the targets match the coarse rendering's."""
+    from shapetensor.learn import phantom2 as P2
+    spec, look = P2.random_spec("fine", torch.Generator().manual_seed(3))
+    a_ = P2.make(spec, n=32, look=look, device="cpu"); b_ = P2.make(spec, n=32, look=look, device="cpu", ss=2)
+    pts = torch.rand(50, 3) * 24 + 4; sig = torch.full((50,), 2.5)
+    ta, tb = P2.targets(a_, pts, sig), P2.targets(b_, pts, sig)
+    assert float(torch.corrcoef(torch.stack([ta["e_mass"][:, 0], tb["e_mass"][:, 0]]))[0, 1]) > 0.999
+    assert b_["occ_f"].shape[-1] == 64 and b_["image"].shape[-1] == 32

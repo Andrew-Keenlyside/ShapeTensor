@@ -94,17 +94,28 @@ def render(p: dict, X: torch.Tensor, n: int) -> tuple:
     return occ.float(), _t6(T).float(), kind
 
 
-def make(spec: list, n: int = 64, seed: int = 0, look: dict | None = None, device="cuda") -> dict:
+def make(spec: list, n: int = 64, seed: int = 0, look: dict | None = None, device="cuda", ss: int = 1) -> dict:
     """A phantom from population specs: ``image (n, n, n)`` 0-1 (8-bit levels), ``occ (K, n, n, n)``, ``tens (K, 6, ...)``,
     ``kinds``, ``bg`` (the background's occupancy). ``look``: ``bg`` level, per-population ``contrast`` (sign: bright or
-    dark), ``noise``, ``blur`` (voxels)."""
+    dark), ``noise``, ``blur`` (voxels). ``ss`` > 1: rendered on a grid ``ss`` times finer and averaged down -- true
+    partial volume (no aliasing of sub-voxel fibres) -- with the fine volumes kept (``occ_f``, ``tens_f``, ``bg_f``) for
+    sub-voxel targets."""
     look = {"bg": 0.1, "contrast": [0.8] * len(spec), "noise": 0.01, "blur": 0.0, **(look or {})}
-    X = torch.stack(torch.meshgrid(*(torch.arange(n, dtype=torch.float32, device=device),) * 3, indexing="ij"), -1)
+    nf = n * ss
+    ax = (torch.arange(nf, dtype=torch.float32, device=device) + 0.5) / ss - 0.5                    # fine cells in the coarse voxels' units
+    X = torch.stack(torch.meshgrid(ax, ax, ax, indexing="ij"), -1)
     occ, tens, kinds = [], [], []
     for p in spec:
         o, t, k = render(p, X, n); occ.append(o); tens.append(t); kinds.append(k)
-    occ = torch.stack(occ) if occ else torch.zeros(0, n, n, n, device=device)
-    tens = torch.stack(tens) if tens else torch.zeros(0, 6, n, n, n, device=device)
+    occ = torch.stack(occ) if occ else torch.zeros(0, nf, nf, nf, device=device)
+    tens = torch.stack(tens) if tens else torch.zeros(0, 6, nf, nf, nf, device=device)
+    fine = None
+    if ss > 1:                                                                                       # the fine volumes, then the coarse ones
+        fine = {"occ_f": occ, "tens_f": tens}
+        pool = lambda v: torch.nn.functional.avg_pool3d(v.reshape(-1, 1, nf, nf, nf), ss).reshape(*v.shape[:-3], n, n, n)
+        wt = pool(occ[:, None] * tens) if len(spec) else tens[:, :, ::ss, ::ss, ::ss]
+        occ = pool(occ) if len(spec) else torch.zeros(0, n, n, n, device=device)
+        tens = wt / occ[:, None].clamp_min(1e-6) if len(spec) else wt
     tot = occ.sum(0).clamp(max=1.0) if len(spec) else torch.zeros(n, n, n, device=device)
     con = torch.tensor(look["contrast"][:len(spec)], device=device, dtype=torch.float32).view(-1, 1, 1, 1)
     scale = (tot / occ.sum(0).clamp_min(1e-6)) if len(spec) else tot                                # shared voxels: scaled back to one
@@ -115,20 +126,29 @@ def make(spec: list, n: int = 64, seed: int = 0, look: dict | None = None, devic
     g = torch.Generator(device=device).manual_seed(seed)
     img = (img + look["noise"] * torch.randn(n, n, n, generator=g, device=device)).clamp(0, 1)
     img = (img * 255).round() / 255
-    return {"image": img, "occ": occ, "tens": tens, "kinds": kinds, "bg": 1 - tot, "spec": spec, "n": n, "look": look}
+    out = {"image": img, "occ": occ, "tens": tens, "kinds": kinds, "bg": 1 - tot, "spec": spec, "n": n, "look": look, "ss": ss}
+    if fine is not None:
+        fine["bg_f"] = 1 - fine["occ_f"].sum(0).clamp(max=1.0) if len(spec) else torch.ones(nf, nf, nf, device=device)
+        out.update(fine)
+    return out
 
 
 def targets(ph: dict, pts: torch.Tensor, sig: torch.Tensor, emax: int = 8) -> dict:
     """Entity targets at ``pts (Q, 3)``, ``sig (Q,)``: each population (and the background) its window mass and the
     Bingham of its window-averaged moment; the crop's tree: root 0, populations 1..K, background K + 1."""
     dev = pts.device; Q = pts.shape[0]; K = ph["occ"].shape[0]; n = ph["n"]
-    vols = [ph["occ"], ph["bg"][None]]
-    occ = torch.cat(vols)                                                                            # (K + 1, n, n, n)
-    m = window_mean(occ, pts[None].expand(K + 1, -1, -1).contiguous(), sig[None].expand(K + 1, -1).contiguous()).T   # (Q, K + 1)
+    ss = int(ph.get("ss", 1))
+    if ss > 1:                                                                                       # sub-voxel truth: the fine volumes
+        P_occ, P_tens, P_bg = ph["occ_f"], ph["tens_f"], ph["bg_f"]
+        qp, qs = (pts + 0.5) * ss - 0.5, sig * ss; nn_ = n * ss
+    else:
+        P_occ, P_tens, P_bg = ph["occ"], ph["tens"], ph["bg"]; qp, qs = pts, sig; nn_ = n
+    occ = torch.cat([P_occ, P_bg[None]])                                                             # (K + 1, n, n, n)
+    m = window_mean(occ, qp[None].expand(K + 1, -1, -1).contiguous(), qs[None].expand(K + 1, -1).contiguous()).T   # (Q, K + 1)
     T = torch.zeros(Q, K + 1, 3, 3, device=dev); T[:, K] = torch.eye(3, device=dev) / 3
     if K:
-        wt = (ph["occ"][:, None] * ph["tens"]).reshape(K * 6, n, n, n)
-        mt = window_mean(wt, pts[None].expand(K * 6, -1, -1).contiguous(), sig[None].expand(K * 6, -1).contiguous()).T.view(Q, K, 6)
+        wt = (P_occ[:, None] * P_tens).reshape(K * 6, nn_, nn_, nn_)
+        mt = window_mean(wt, qp[None].expand(K * 6, -1, -1).contiguous(), qs[None].expand(K * 6, -1).contiguous()).T.view(Q, K, 6)
         mt = mt / m[:, :K, None].clamp_min(1e-6)
         for (i, j), c in zip(((0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2)), range(6)):
             T[:, :K, i, j] = mt[..., c]; T[:, :K, j, i] = mt[..., c]
@@ -153,8 +173,8 @@ def targets(ph: dict, pts: torch.Tensor, sig: torch.Tensor, emax: int = 8) -> di
         anc[i, 0], anc[i, 1] = i, 0
     return {"e_points": pts, "e_sigma": sig, "e_node": node, "e_mass": mass, "e_vis": (node >= 0).float(), "e_T6": T6,
             "e_desc": torch.zeros(Q, emax, 5, device=dev), "e_anc": anc, "e_n": torch.tensor(E + 1, device=dev), "e_R": R, "e_kappa": Kp,
-            "e_gnode": node, "region_t": occ.sum(0), "iface_t": torch.zeros(n, n, n, device=dev), "voxel": torch.tensor(float("nan"), device=dev),
-            "bg_t": ph["bg"]}
+            "e_gnode": node, "region_t": torch.cat([ph["occ"], ph["bg"][None]]).sum(0), "iface_t": torch.zeros(n, n, n, device=dev),
+            "voxel": torch.tensor(float("nan"), device=dev), "bg_t": ph["bg"], "e_bg": node == K + 1}
 
 
 def draw_queries(ph: dict, g: torch.Generator, n_q: int, sigma=(1.0, 6.0)) -> tuple:

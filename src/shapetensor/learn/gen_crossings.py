@@ -110,3 +110,36 @@ def cases(TR, SS, gen, seed0, n_cases, dev, strength=0.3, max_draws=3000, min_zo
             continue
         out.append({"seed": seed - 1, "s": s, "d": d, "lc": lc, "tm": tm})
     return out, seed - seed0
+
+
+def population_targets(TR, s, d, seed, pts, sig, dev):
+    """Generator targets per population layer at ``pts``: each layer's resolved entities (fascicles, fibres, cells)
+    summed into one mass and one moment (mass-weighted), fitted as a Bingham -- the populations as composable phantoms
+    have them (for crossing_acceptance.evaluate_p2); the background (isotropic layers) apart. Returns the ``tgt`` dict
+    (``mass (P, K)``, ``k``, ``R``, ``bg``, ``kinds``) over the layers present (mass > 0.02 somewhere)."""
+    from . import bingham as BG
+    t = TR.entity_queries(s, d, d["image"].shape[0], seed, dev, points=pts, sigma=sig)
+    lay = entity_layers(s, d, t["e_gnode"], TR.NOT_ENTITY); w = t["e_mass"].float() * t["e_vis"].float() * (t["e_node"] >= 0)
+    iso_l = torch.tensor([L_.role == "isotropic" for L_ in s.layers] + [False], device=dev)[lay]
+    Tt = tensor33(t["e_T6"])
+    layers = [k for k in torch.unique(lay[(lay >= 0) & ~iso_l]).tolist()]
+    mass, kap, Rs, kinds = [], [], [], []
+    for k in layers:
+        wk = w * (lay == k); mk = wk.sum(1)
+        if float(mk.max()) <= 0.02:
+            continue
+        Tk = (wk[..., None, None] * Tt).sum(1) / mk.clamp_min(1e-9)[:, None, None]
+        ok = mk > 1e-4
+        Rk = torch.eye(3, device=dev).expand(mk.shape[0], 3, 3).clone(); Kk = torch.zeros(mk.shape[0], 2, device=dev)
+        if bool(ok.any()):
+            Tn = Tk[ok] / Tk[ok].diagonal(dim1=-2, dim2=-1).sum(-1).clamp_min(1e-9)[:, None, None]
+            a_, b_ = BG.fit(Tn.double()); Rk[ok], Kk[ok] = a_.float(), b_.float()
+            ev = torch.linalg.eigvalsh(Tn.double()); nz = (ev - 1.0 / 3).abs().amax(-1) < 0.02
+            Kk[ok] = torch.where(nz[:, None], torch.zeros_like(Kk[ok]), Kk[ok])
+        mass.append(mk); kap.append(Kk); Rs.append(Rk); kinds.append(str(getattr(s.layers[k], "kind", "pop")))
+    P = pts.shape[0]
+    tgt = {"mass": (torch.stack(mass, 1) if mass else torch.zeros(P, 0, device=dev)).cpu().numpy(),
+           "k": (torch.stack(kap, 1) if kap else torch.zeros(P, 0, 2, device=dev)).cpu().numpy(),
+           "R": (torch.stack(Rs, 1) if Rs else torch.zeros(P, 0, 3, 3, device=dev)).cpu().numpy(),
+           "bg": (w * iso_l).sum(1).cpu().numpy(), "kinds": kinds}
+    return tgt

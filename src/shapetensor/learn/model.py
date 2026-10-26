@@ -339,7 +339,7 @@ class PopulationNet(nn.Module):
                  free_sh: bool = False, dir_lmax: int = 8, vote_unc: bool = False, mass_head: bool = False, region_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False,
                  dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False, oprobe: bool = False,
-                 dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False):
+                 dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -373,6 +373,10 @@ class PopulationNet(nn.Module):
             # the background's occupancy (the isotropic remainder) at every voxel: the density's floor is background plus
             # isotropic objects (blobs, cells); this map tells them apart by place, as the floor cannot by direction
             self.bgh = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if bg_head else None
+            # the objects' occupancy (every population but the background) at every voxel, a density: a population's mass
+            # from total - background is a small difference of large numbers (background ~85 % of the window: 2 % error
+            # there is 12-37 % on a thin bundle's mass); predicted directly, with a relative loss, it is not
+            self.objh = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if obj_head else None
             self.region_dec = None
             if region_head and region_dec:                                                      # a small decoder: lattice -> stride 2 -> full,
                 self.region_dec = nn.ModuleDict({                                                # 3x3x3 convolutions at each (shapes, not only
@@ -427,7 +431,8 @@ class PopulationNet(nn.Module):
                    z_vote=bool(args.get("z_vote", False)), dir_sh=int(args.get("dir_sh", 0) or 0), ray=bool(args.get("ray", False)),
                    region_density=bool(args.get("region_density", False)), kappa_log=bool(args.get("kappa_log", False)),
                    oprobe=bool(args.get("oprobe", False)), dens_log=bool(args.get("dens_log", False)),
-                   oprobe_only=bool(args.get("oprobe_only", False)), bg_head=bool(args.get("bg_head", False))) \
+                   oprobe_only=bool(args.get("oprobe_only", False)), bg_head=bool(args.get("bg_head", False)),
+                   obj_head=bool(args.get("obj_head", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
@@ -478,6 +483,12 @@ class PopulationNet(nn.Module):
             return (d["out"](a) + self.region(torch.cat([h0, up(h1), up(h)], 1)))[:, 0]
         return self.region(torch.cat([h0, up(h1), up(h)], 1))[:, 0]
 
+    def obj_map(self, h0, h1, h) -> torch.Tensor:
+        """The objects' occupancy ``(B, Z, Y, X)`` (a density: crossings count both) (``obj_head``)."""
+        sz = h0.shape[2:]
+        up = lambda t: Fn.interpolate(t, size=sz, mode="trilinear", align_corners=False)
+        return Fn.softplus(self.objh(torch.cat([h0, up(h1), up(h)], 1))[:, 0].float())
+
     def bg_map(self, h0, h1, h) -> torch.Tensor:
         """The background's occupancy ``(B, Z, Y, X)`` in 0-1 (``bg_head``)."""
         sz = h0.shape[2:]
@@ -517,6 +528,8 @@ class PopulationNet(nn.Module):
                     out["ent"]["m"] = window_mean(out["region"], e_points.float(), e_sigma.float())   # window mean
             if getattr(self, "bgh", None) is not None:
                 out["bg"] = self.bg_map(h0, h1, h)
+            if getattr(self, "objh", None) is not None:
+                out["obj"] = self.obj_map(h0, h1, h)
             out["_feats"] = (h0, h1, h)
             return out
         if self.head == "lobes":

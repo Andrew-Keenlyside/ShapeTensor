@@ -21,14 +21,19 @@ from shapetensor.learn import entity_train as ET, losses as L, entity_infer as E
 from shapetensor.learn.model import PopulationNet
 
 R0 = "/home/andrew/bridge_wmcov/shapetensor/results/dev_pipeline/pilot_entities"
-FAMS = ("cross", "fan", "curve", "sheet", "blob", "mix", "empty")
+FAMS = ("cross", "fan", "curve", "sheet", "blob", "mix", "empty", "fine")
 ap = argparse.ArgumentParser(); ap.add_argument("out"); ap.add_argument("--init", default=f"{R0}/simple/acc_angles_own_b3.pt")
 ap.add_argument("--steps", type=int, default=6000); ap.add_argument("--lr", type=float, default=3e-4); ap.add_argument("--lr-final", type=float, default=3e-6)
-ap.add_argument("--eval-every", type=int, default=500); ap.add_argument("--families", nargs="+", default=list(FAMS))
+ap.add_argument("--eval-every", type=int, default=500); ap.add_argument("--families", nargs="+", default=[f for f in FAMS if f != "fine"])
 ap.add_argument("--test-per-family", type=int, default=2); ap.add_argument("--n-points", type=int, default=512); ap.add_argument("--plot-only", action="store_true")
 ap.add_argument("--bg-head", action="store_true"); ap.add_argument("--oprobe", action="store_true"); ap.add_argument("--tag", default="")
 ap.add_argument("--floor", type=float, default=0.05); ap.add_argument("--batch", type=int, default=1)
 ap.add_argument("--sigma-lo", type=float, default=1.0, help="the smallest training query window (below 1: sub-voxel)")
+ap.add_argument("--obj-head", action="store_true", help="an objects'-occupancy head (populations' mass predicted directly)")
+ap.add_argument("--widths", type=int, nargs=3, default=None, help="the trunk's widths (a new model from scratch unless the init's match)")
+ap.add_argument("--scratch", action="store_true", help="no weights from --init (its args only)")
+ap.add_argument("--no-merge", action="store_true", help="readout: keep near-parallel same-type entities apart")
+ap.add_argument("--sigmas", type=float, nargs="+", default=[2.5], help="the query windows to score at (each its own table)")
 ap.add_argument("--final", action="store_true", help="score the final test set (seeds never used to choose between variants) instead of the selection set")
 a = ap.parse_args(); dev = "cuda"; stem = a.out.rsplit(".", 1)[0]
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None
@@ -36,11 +41,17 @@ L.DESC_K = 5; L.DESC_NC = 0; TR.REGION_DENSITY = True; ET.REGION_DENSITY = True;
 ET.VOTE_OBJECTS = True; ET.OWN_OBJECTS = True; ET.DENS_SAME_NORM = True
 batch = lambda ts: {k: torch.stack([t[k] for t in ts]) for k in ts[0]}
 
-tests = []; S0 = 1_900_000 if a.final else 900_000                                               # selection set, or the final set
-for fi, fam in enumerate(FAMS):
-    for i in range(a.test_per_family if not a.final else max(a.test_per_family, 4)):
-        spec, look = P2.random_spec(fam, torch.Generator().manual_seed(S0 + 100 * fi + i))
-        tests.append((fam, P2.make(spec, seed=S0 + 50_000 + 100 * fi + i, look=look, device=dev)))
+def build_tests(S0, k):
+    """Held-out phantoms: ``k`` per family from seeds ``S0`` (900000: the selection set; 1900000: the final set)."""
+    out = []
+    for fi, fam in enumerate(FAMS):
+        for i in range(k):
+            spec, look = P2.random_spec(fam, torch.Generator().manual_seed(S0 + 100 * fi + i))
+            out.append((fam, P2.make(spec, seed=S0 + 50_000 + 100 * fi + i, look=look, device=dev, ss=2 if fam == "fine" else 1)))
+    return out
+
+
+tests = build_tests(1_900_000, max(a.test_per_family, 4)) if a.final else build_tests(900_000, a.test_per_family)
 
 if a.plot_only:
     ck = torch.load(stem + ".pt", map_location=dev, weights_only=False)
@@ -49,8 +60,13 @@ else:
     ref = torch.load(a.init, map_location=dev, weights_only=False)
     args = {**ref["args"], "region_density": True, "kappa_log": True, "vote_objects": True, "own_objects": True, "dens_same_norm": True}
     args["bg_head"] = bool(args.get("bg_head")) or a.bg_head; args["oprobe"] = bool(args.get("oprobe")) or a.oprobe
-    net = PopulationNet.from_args(args).to(dev); DF.load_partial(net, ref["model"], lambda m: None)
-    if not ref["args"].get("kappa_log"):
+    args["obj_head"] = bool(args.get("obj_head")) or a.obj_head
+    if a.widths:
+        args["widths"] = list(a.widths)
+    net = PopulationNet.from_args(args).to(dev)
+    if not a.scratch:
+        DF.load_partial(net, ref["model"], lambda m: None)
+    if not ref["args"].get("kappa_log") and not a.scratch:
         net.ent.reset_kappa()
     a.tag = a.tag or f"families {' '.join(a.families)}"
     curves = []
@@ -82,7 +98,7 @@ else:
         for b in range(a.batch):
             fam = a.families[int(torch.randint(0, len(a.families), (1,), generator=gc))]
             spec, look = P2.random_spec(fam, torch.Generator().manual_seed(step * 31 + b))
-            ph = P2.make(spec, seed=step * 31 + b, look=look, device=dev)
+            ph = P2.make(spec, seed=step * 31 + b, look=look, device=dev, ss=2 if fam == "fine" else 1)
             imgs.append(ph["image"]); ts.append(P2.targets(ph, *P2.draw_queries(ph, g, a.n_points, sigma=(a.sigma_lo, 6.0))))
         T = batch(ts); dirs = ET.sample_dirs(T, 32, g=g)
         with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -90,7 +106,7 @@ else:
         tot, parts = ET.entity_loss(P, T, dirs, W={"desc": 0.0}, g=g)
         opt.zero_grad(set_to_none=True); tot.backward(); torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0); opt.step()
     torch.save({"model": net.state_dict(), "args": args, "curves": curves, "tag": a.tag, "init": a.init, "families": a.families,
-                "flags": {k: getattr(a, k) for k in ("lr", "lr_final", "batch", "steps", "bg_head", "oprobe", "floor")}}, stem + ".pt")
+                "flags": {k: getattr(a, k) for k in ("lr", "lr_final", "batch", "steps", "bg_head", "oprobe", "floor", "obj_head", "widths", "scratch", "sigma_lo")}}, stem + ".pt")
 net.eval()
 sph = EI.sphere_dirs(200, dev)
 
@@ -110,32 +126,19 @@ def slice_frame(ph):
     return R.to(dev), off
 
 
-def maps(ph):
+def maps(ph, sigma=2.5):
     n, c = ph["n"], ph["n"] / 2.0; R, off = slice_frame(ph)
     gu, gv = torch.meshgrid(torch.arange(n, device=dev, dtype=torch.float32), torch.arange(n, device=dev, dtype=torch.float32), indexing="ij")
     loc = torch.stack([torch.full_like(gu, off), gu - c, gv - c], -1).view(-1, 3); pts = c + loc @ R.T
     rotated = not torch.allclose(R, torch.eye(3, device=dev))
     disc = ((((gu - c) ** 2 + (gv - c) ** 2) <= 28 ** 2) if rotated else torch.ones_like(gu, dtype=torch.bool)).cpu().numpy()
-    sig = torch.full((n * n,), 2.5, device=dev)
+    sig = torch.full((n * n,), float(sigma), device=dev)
     t = P2.targets(ph, pts, sig); K = ph["occ"].shape[0]
     tgt = {"mass": t["e_mass"][:, :K].cpu().numpy(), "k": t["e_kappa"][:, :K].cpu().numpy(), "R": t["e_R"][:, :K].cpu().numpy(),
            "bg": t["e_mass"][:, K].cpu().numpy(), "kinds": ph["kinds"]}
-    parts = []
-    with torch.no_grad():
-        f = EI.features(net, ph["image"], voxel_um=None)
-        for a0 in range(0, pts.shape[0], 1024):                                                      # in chunks: clustering is memory-hungry
-            sl = slice(a0, a0 + 1024)
-            r = EI.query(net, f, pts[sl], sig[sl], sph, vol_shape=ph["image"].shape)
-            e = EI.cluster(r, sph, floor=a.floor if a.floor >= 0 else None); sp = EI.split_mass(r, sph, e)
-            ms = (sp["mass"] * e["live"]).float(); kv = e["kappa"].float(); isoe = kv[..., 0] < ET.VOTE_KAPPA_MIN
-            iso_tot = sp["floor"].float() + (ms * isoe).sum(1)
-            bgm = r["bgm"].float().clamp(0, 1) if "bgm" in r else iso_tot
-            bg = torch.minimum(iso_tot, bgm)
-            parts.append({"mass": (ms * ~isoe).cpu().numpy(), "k": kv.cpu().numpy(), "R": e["R"].float().cpu().numpy(),
-                          "iso": (iso_tot - bg).clamp_min(0).cpu().numpy(), "bg": bg.cpu().numpy(), "bgm": bgm.cpu().numpy()})
-    C = max(p_["mass"].shape[1] for p_ in parts)
-    pad = lambda x: np.concatenate([x, np.zeros((x.shape[0], C - x.shape[1]) + x.shape[2:])], 1) if x.shape[1] < C else x
-    mdl = {k: np.concatenate([pad(p_[k]) if k in ("mass", "k", "R") else p_[k] for p_ in parts]) for k in parts[0]}
+    ro = EI.readout(net, ph["image"], pts, sig, sph, floor=a.floor if a.floor >= 0 else None, iso_k=ET.VOTE_KAPPA_MIN,
+                    merge_deg=None if a.no_merge else 15.0)
+    mdl = {k: v.cpu().numpy() for k, v in ro.items()}
     face = torch.minimum(pts, (n - 1) - pts).amin(1).view(n, n).cpu().numpy()
     size = torch.tensor([n - 1.0] * 3, device=dev)
     smp = lambda q: torch.nn.functional.grid_sample(ph["image"][None, None], (q / size * 2 - 1).flip(-1).view(1, -1, 1, 1, 3), align_corners=True).view(n, n)
@@ -149,42 +152,53 @@ def oracle(tgt):
     return {"mass": np.where(iso, 0.0, tgt["mass"]), "k": tgt["k"], "R": tgt["R"], "iso": (tgt["mass"] * iso).sum(1), "bg": tgt["bg"], "bgm": tgt["bg"]}
 
 
-acc = []; rows = []; dropped = []
-for fam, ph in tests:
-    tgt, mdl, face, disc, img = maps(ph); n = ph["n"]
-    orc = CA.evaluate_p2(n, tgt, oracle(tgt), face, disc)
-    lab = f"{fam} ({','.join(k[:5] for k in ph['kinds']) or 'none'})"
-    if not orc["PASS"]:                                                                          # the truth fails the measurement: unscoreable
-        dropped.append((lab, [k.split()[0] for k, v in orc.items() if k != "PASS" and not v[0]])); continue
-    res = CA.evaluate_p2(n, tgt, mdl, face, disc); acc.append((lab, res))
-    if not any(r_[0] == fam for r_ in rows):
-        rows.append((fam, ph, tgt, mdl, CA.match_p2(tgt, mdl), disc, img, res))
-cols = ["image", "target pop 1", "model pop 1", "target pop 2", "model pop 2", "model: other\ndirections", "model:\nisotropic objects", "target\nbackground", "model\nbackground"]
-norm = PowerNorm(0.5, vmin=0, vmax=1); cmap = matplotlib.colormaps["viridis"].copy(); cmap.set_over("red")
-fig, axs = plt.subplots(len(rows), len(cols), figsize=(2.3 * len(cols) + 1.0, 2.4 * len(rows)), squeeze=False, layout="constrained")
-for i, (fam, ph, tgt, mdl, m, disc, img, res) in enumerate(rows):
-    n = ph["n"]; K = tgt["mass"].shape[1]; sh = lambda v: np.where(disc, v.reshape(n, n), np.nan)
-    axs[i, 0].imshow(np.where(disc, img, np.nan), cmap="gray", vmin=0, vmax=1)
-    axs[i, 0].set_ylabel(f"{fam}: {', '.join(ph['kinds']) or 'empty'}\n{'PASS' if res['PASS'] else 'FAIL'}", fontsize=9, color="darkgreen" if res["PASS"] else "firebrick")
-    panels = []
-    for k in range(2):
-        panels += [(sh(tgt["mass"][:, k]), f"sum {np.nansum(tgt['mass'][:, k] * disc.reshape(-1)):.0f}"), (sh(m["m"][:, k]), f"sum {np.nansum(m['m'][:, k] * disc.reshape(-1)):.0f}")] if k < K else [(None, ""), (None, "")]
-    panels += [(sh(m["other"]), ""), (sh(mdl["iso"]), ""), (sh(tgt["bg"]), ""), (sh(mdl["bg"]), "")]
-    for j, (v, lab) in enumerate(panels):
-        ax_ = axs[i, 1 + j]
-        if v is not None:
-            im = ax_.imshow(v, cmap=cmap, norm=norm); ax_.text(2, 61, lab, color="w", fontsize=7)
-    for ax_ in axs[i]:
-        ax_.set_xticks([]); ax_.set_yticks([])
-for j, t_ in enumerate(cols):
-    axs[0, j].set_title(t_, fontsize=9)
-fig.colorbar(im, ax=axs[:, 1:].ravel().tolist(), shrink=0.5, label="mass per voxel (square-root scale)", extend="max")
-npass = sum(r_["PASS"] for _, r_ in acc); st = curves[-1]["step"] if curves else 0
-print(f"ground-truth check: {len(dropped)} of {len(tests)} phantoms unscoreable: {dropped}", flush=True)
-fig.suptitle(f"phantom families -- {a.tag}, {st} steps (from {a.init.split('/')[-1]}): {npass}/{len(acc)} held-out phantoms pass every criterion "
-             f"(rows: one per family); model: entities matched by type and axis, background = {'background head' if args.get('bg_head') else 'the density floor'}", fontsize=10)
-plt.savefig(a.out, dpi=70); print("saved", a.out)
-stem = stem + ("_final" if a.final else "")
-CA.table_figure(acc, stem + "_acceptance.png", f"phantom families -- {a.tag}, {st} steps: {'PASS' if npass == len(acc) else 'FAIL'} ({npass}/{len(acc)})")
-CA.save_json(acc, stem + "_acceptance.json")
-print("acceptance:", f"{npass}/{len(acc)} |", " ; ".join(f"{lab}: " + " ".join(k.split()[0] + ("+" if v[0] else "-") for k, v in r_.items() if k != "PASS") for lab, r_ in acc))
+def score_set(tests_, sigma, suffix, figure=True):
+    """Every held-out phantom the ground truth passes, scored at ``sigma``: the table (OUT{suffix}_acceptance.png / .json)
+    and, with ``figure``, the figure (a row per family)."""
+    acc = []; rows = []; dropped = []
+    for fam, ph in tests_:
+        tgt, mdl, face, disc, img = maps(ph, sigma); n = ph["n"]
+        orc = CA.evaluate_p2(n, tgt, oracle(tgt), face, disc)
+        lab = f"{fam} ({','.join(k[:5] for k in ph['kinds']) or 'none'})"
+        if not orc["PASS"]:                                                                      # the truth fails the measurement: unscoreable
+            dropped.append((lab, [k.split()[0] for k, v in orc.items() if k != "PASS" and not v[0]])); continue
+        res = CA.evaluate_p2(n, tgt, mdl, face, disc); acc.append((lab, res))
+        if not any(r_[0] == fam for r_ in rows):
+            rows.append((fam, ph, tgt, mdl, CA.match_p2(tgt, mdl), disc, img, res))
+    npass = sum(r_["PASS"] for _, r_ in acc); st = curves[-1]["step"] if curves else 0
+    print(f"[{suffix or 'selection'} sigma {sigma}] ground-truth check: {len(dropped)} of {len(tests_)} phantoms unscoreable: {dropped}", flush=True)
+    if figure:
+        cols = ["image", "target pop 1", "model pop 1", "target pop 2", "model pop 2", "model: other\ndirections", "model:\nisotropic objects", "target\nbackground", "model\nbackground"]
+        norm = PowerNorm(0.5, vmin=0, vmax=1); cmap = matplotlib.colormaps["viridis"].copy(); cmap.set_over("red")
+        fig, axs = plt.subplots(len(rows), len(cols), figsize=(2.3 * len(cols) + 1.0, 2.4 * len(rows)), squeeze=False, layout="constrained")
+        for i, (fam, ph, tgt, mdl, m, disc, img, res) in enumerate(rows):
+            n = ph["n"]; K = tgt["mass"].shape[1]; sh = lambda v: np.where(disc, v.reshape(n, n), np.nan)
+            axs[i, 0].imshow(np.where(disc, img, np.nan), cmap="gray", vmin=0, vmax=1)
+            axs[i, 0].set_ylabel(f"{fam}: {', '.join(ph['kinds']) or 'empty'}\n{'PASS' if res['PASS'] else 'FAIL'}", fontsize=9, color="darkgreen" if res["PASS"] else "firebrick")
+            panels = []
+            for k in range(2):
+                panels += [(sh(tgt["mass"][:, k]), f"sum {np.nansum(tgt['mass'][:, k] * disc.reshape(-1)):.0f}"), (sh(m["m"][:, k]), f"sum {np.nansum(m['m'][:, k] * disc.reshape(-1)):.0f}")] if k < K else [(None, ""), (None, "")]
+            panels += [(sh(m["other"]), ""), (sh(mdl["iso"]), ""), (sh(tgt["bg"]), ""), (sh(mdl["bg"]), "")]
+            for j, (v, lab) in enumerate(panels):
+                ax_ = axs[i, 1 + j]
+                if v is not None:
+                    im = ax_.imshow(v, cmap=cmap, norm=norm); ax_.text(2, 61, lab, color="w", fontsize=7)
+            for ax_ in axs[i]:
+                ax_.set_xticks([]); ax_.set_yticks([])
+        for j, t_ in enumerate(cols):
+            axs[0, j].set_title(t_, fontsize=9)
+        fig.colorbar(im, ax=axs[:, 1:].ravel().tolist(), shrink=0.5, label="mass per voxel (square-root scale)", extend="max")
+        fig.suptitle(f"phantom families -- {a.tag}, {st} steps (from {a.init.split('/')[-1]}): {npass}/{len(acc)} held-out phantoms pass every criterion "
+                     f"(rows: one per family; sigma {sigma}{', final set' if 'final' in suffix else ''}); background = {'background head' if args.get('bg_head') else 'the density floor'}", fontsize=10)
+        plt.savefig(stem + suffix + ".png", dpi=70); print("saved", stem + suffix + ".png"); plt.close(fig)
+    CA.table_figure(acc, stem + suffix + "_acceptance.png", f"phantom families -- {a.tag}, {st} steps, sigma {sigma}{' (final set)' if 'final' in suffix else ''}: "
+                    f"{'PASS' if npass == len(acc) else 'FAIL'} ({npass}/{len(acc)})")
+    CA.save_json(acc, stem + suffix + "_acceptance.json")
+    print(f"acceptance [{suffix or 'selection'} sigma {sigma}]:", f"{npass}/{len(acc)} |",
+          " ; ".join(f"{lab}: " + " ".join(k.split()[0] + ("+" if v[0] else "-") for k, v in r_.items() if k != "PASS") for lab, r_ in acc), flush=True)
+
+
+for si, sg in enumerate(a.sigmas):
+    score_set(tests, sg, ("_final" if a.final else "") + ("" if sg == 2.5 else f"_s{sg}"), figure=(si == 0))
+if not a.plot_only and not a.final:                                                              # the final set, once, at the end of training
+    score_set(build_tests(1_900_000, 4), 2.5, "_final", figure=False)
