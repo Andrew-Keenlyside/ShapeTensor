@@ -32,6 +32,8 @@ ap.add_argument("--tag", default=""); ap.add_argument("--rotate", action="store_
 ap.add_argument("--oprobe", action="store_true", help="the decoder's oriented probe (model.EntityDecoder.oprobe)")
 ap.add_argument("--oprobe-only", action="store_true", help="the density from the oriented probe alone (model.EntityDecoder.oprobe_only)")
 ap.add_argument("--dens-log", action="store_true", help="the density as exp of the decoder's output (model.EntityDecoder.dens_log)")
+ap.add_argument("--lr-final", type=float, default=None, help="cosine decay of the learning rate to this by the last step (None: constant)")
+ap.add_argument("--own-objects", action="store_true", help="directions owned among the oriented entities only (entity_train.OWN_OBJECTS)")
 ap.add_argument("--same-norm", action="store_true", help="the density target normalised over the prediction's uniform directions (entity_train.DENS_SAME_NORM)")
 ap.add_argument("--lobe-weight", type=float, default=0.0, help="the density loss weighted toward the lobes (entity_train.DENS_LOBE_WEIGHT)")
 ap.add_argument("--fixed", type=int, default=None, help="train on held-out phantom number FIXED only (fresh queries each step): can it fit that one?")
@@ -39,7 +41,7 @@ ap.add_argument("--floor", type=float, default=0.05, help="readout: the density'
 ap.add_argument("--vary-look", action="store_true", help="each bundle's fibre spacing / radius, the bundles' width, bright or dark fibres, background, noise drawn")
 a = ap.parse_args(); dev = "cuda"; stem = a.out.rsplit(".", 1)[0]
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None
-L.DESC_K = 5; L.DESC_NC = 0; TR.REGION_DENSITY = True; ET.REGION_DENSITY = True; TR.set_background_entity(True); ET.VOTE_OBJECTS = True; ET.DENS_LOBE_WEIGHT = a.lobe_weight; ET.DENS_SAME_NORM = a.same_norm
+L.DESC_K = 5; L.DESC_NC = 0; TR.REGION_DENSITY = True; ET.REGION_DENSITY = True; TR.set_background_entity(True); ET.VOTE_OBJECTS = True; ET.DENS_LOBE_WEIGHT = a.lobe_weight; ET.DENS_SAME_NORM = a.same_norm; ET.OWN_OBJECTS = a.own_objects
 batch = lambda t: {k: v[None] for k, v in t.items()}
 rot_of = lambda seed: SP.random_rotation(torch.Generator(device=dev).manual_seed(seed), dev) if a.rotate else None
 
@@ -94,6 +96,8 @@ else:
             break
         for pg in opt.param_groups:
             pg["lr"] = a.lr * min(1.0, (step + 1) / 30)
+            if a.lr_final is not None:                                                             # settle at the end: cosine to lr_final
+                pg["lr"] = a.lr_final + (pg["lr"] - a.lr_final) * 0.5 * (1 + math.cos(math.pi * step / max(a.steps, 1)))
         ang = a.train_angles[0] + float(torch.rand(1, generator=gc)) * (a.train_angles[1] - a.train_angles[0])
         ph = tests[a.fixed] if a.fixed is not None else SP.make(angle=ang, seed=step, rot=rot_of(10_000 + step), **look(20_000 + step), device=dev)
         T = batch(SP.targets(ph, *SP.draw_queries(ph, g, a.n_points))); dirs = ET.sample_dirs(T, 32, g=g)
@@ -135,6 +139,7 @@ def maps(ph):
     smp = lambda q: torch.nn.functional.grid_sample(ph["image"][None, None], (q / size * 2 - 1).flip(-1).view(1, -1, 1, 1, 3), align_corners=True).view(n, n)
     out["image"] = np.where(keep, torch.stack([smp(plane(ph, k)) for k in range(-2, 4)]).mean(0).cpu().numpy(), np.nan)   # slab mean
     out["_ent"] = {"mass": ms.float().cpu().numpy(), "iso": iso.cpu().numpy(), "axis": ax.cpu().numpy()}       # for the acceptance criteria
+    out["_face"] = torch.minimum(pts, (n - 1) - pts).amin(1).view(n, n).cpu().numpy()                          # distance to the volume's faces
     return out
 
 
@@ -152,6 +157,7 @@ acc = []
 for i, ph in enumerate(tests):
     M = maps(ph)
     acc.append((f"{ph['angle']:.0f} deg" + (" (rotated)" if a.rotate else ""), CA.evaluate(ph, M, M.pop("_ent"))))
+    M.pop("_face", None)
     axs[i, 0].imshow(M["image"], cmap="gray", vmin=0, vmax=1)
     nz = ph["rot"][:, 0].cpu().numpy()                                                            # the crossing plane's normal (z, y, x)
     lk = look(3000 + i)

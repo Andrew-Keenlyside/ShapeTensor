@@ -2,6 +2,8 @@
 passes only when every criterion holds on every held-out phantom. Measured on the crossing plane's maps (sigma 2.5
 windows): the targets ``tA, tB, tI`` (A, B, background) and the model's ``mA, mB, mO, mI`` (along A, along B, other
 directions, isotropic: the lobe-fit split with the density floor as background), plus the model's entities per point.
+Scored only at points >= FACE_MARGIN voxels from the volume's faces -- the training queries' domain, where the targets'
+windows are not cut by the edge (agreed with the user 2026-10-26; the thresholds unchanged).
 
 C1 level        median model / target mass of each population on its arm and in the crossing core   0.90-1.10
 C2 flat         model / target at every point along each bundle's centreline (target >= half its peak)  0.85-1.15
@@ -18,6 +20,7 @@ import numpy as np
 from scipy.ndimage import map_coordinates
 
 LEVEL = (0.90, 1.10); FLAT = (0.85, 1.15); COUNT = 0.95; LEAK = 0.05; EDGE = (0.90, 1.10); DIR = (10.0, 20.0); BACK = (0.90, 1.10)
+FACE_MARGIN = 2.0
 NAMES = ("C1 level", "C2 flat", "C3 count", "C4 leakage", "C5 edges", "C6 direction", "C7 background")
 
 
@@ -46,8 +49,10 @@ def evaluate(ph, M: dict, ent: dict) -> dict:
     per grid point (row-major) the entities' ``mass (P, C)``, ``iso (P, C)`` and world ``axis (P, C, 3)``."""
     n = M["tA"].shape[0]; c, half = ph["c"], ph["half"]
     dA, dB, Z = _zones(ph, M["tA"].shape)
-    valid = np.isfinite(M["tA"])
+    face = M.get("_face", np.full(M["tA"].shape, np.inf))
+    valid = np.isfinite(M["tA"]) & (face >= FACE_MARGIN)
     Z = {k: v & valid for k, v in Z.items()}
+    M = {k: (np.where(valid, v, np.nan) if k[0] in "tm" else v) for k, v in M.items()}
     out = {}
     # C1 level
     lv = {f"{p} {z}": _ratio(M["m" + p], M["t" + p], Z[zz]) for p in ("A", "B") for z, zz in (("arm", "arm" + p), ("core", "core"))}
@@ -58,7 +63,8 @@ def evaluate(ph, M: dict, ent: dict) -> dict:
         u = ph["axes_local"][p].cpu().numpy(); t = np.arange(-c + 1, c - 1)
         rows, cols = c + t * u[1], c + t * u[2]
         tv = map_coordinates(np.nan_to_num(M["t" + p], nan=-1), [rows, cols], order=1); mv = map_coordinates(np.nan_to_num(M["m" + p], nan=-1), [rows, cols], order=1)
-        ok = (tv >= 0.5 * np.nanmax(M["t" + p])) & (mv >= 0)
+        fv = map_coordinates(np.nan_to_num(face, posinf=1e6), [rows, cols], order=1)
+        ok = (tv >= 0.5 * np.nanmax(M["t" + p])) & (mv >= 0) & (fv >= FACE_MARGIN)
         ra = mv[ok] / np.maximum(tv[ok], 1e-9)
         fl[p] = (float(ra.min()) if ra.size else float("nan"), float(ra.max()) if ra.size else float("nan"))
     out["C2 flat"] = (all(_inside(lo, FLAT) and _inside(hi, FLAT) for lo, hi in fl.values()), {f"{p} min/max": v for p, v in fl.items()})

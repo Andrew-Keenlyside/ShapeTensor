@@ -57,6 +57,12 @@ DENS_LOBE_WEIGHT = 0.0
 #: exact sphere mean: 16 uniform directions miss a kappa-17 lobe (~3 % of the sphere) in over half the batches, so
 #: ``fbar`` is usually ~25 % low -- against an exact target mean that trained lobes ~20 % low and the floor high
 DENS_SAME_NORM = False
+#: directions owned among the oriented entities only (an entity with kappa1 >= VOTE_KAPPA_MIN), wherever their density
+#: reaches OWN_REL of the query's mean: the isotropic background owns no direction (votes, concentrations, descriptors
+#: and the tree train on the oriented owners), as the readout takes the density's floor as the background. Owned by
+#: the background, a lobe's flanks (where the floor outweighs it) trained their embedding toward the background's and
+#: the readout split the lobe into two populations along one axis
+OWN_OBJECTS = False
 OVERALL_FLOOR = 0.01                # the overall ODF's relative error: energy floor per lattice cell (~ occupancy 0.03)
 
 
@@ -128,8 +134,14 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         if n_uni > 0:                                                                              # the mass: the density's mean over the sphere
             m_p = ent["f"][:, :, :n_uni].float().mean(-1)
             parts["mass"] = (torch.log(m_p + DENS_EPS) - torch.log(m_t + DENS_EPS)).abs().mean()
-    share = contrib / rho.clamp_min(1e-9)[..., None]; best, owner = share.max(-1)
-    owned = (best > 0.5) & (rho > OWN_REL * rm) & (rm > DENS_EPS)
+    if OWN_OBJECTS:
+        ori = (T["e_kappa"][..., 0] >= VOTE_KAPPA_MIN)[:, :, None, :]                               # (B, Q, 1, E) oriented entities
+        co = contrib * ori; ro = co.sum(-1)
+        share = co / ro.clamp_min(1e-9)[..., None]; best, owner = share.max(-1)
+        owned = (best > 0.5) & (ro > OWN_REL * rm) & (rm > DENS_EPS)
+    else:
+        share = contrib / rho.clamp_min(1e-9)[..., None]; best, owner = share.max(-1)
+        owned = (best > 0.5) & (rho > OWN_REL * rm) & (rm > DENS_EPS)
     total = W["density"] * parts["density"] + W.get("mass", 0.0) * parts.get("mass", 0.0)
     if bool(owned.any()):
         R_t = torch.gather(T["e_R"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1, -1), 3, owner[..., None, None, None].expand(-1, -1, -1, 1, 3, 3))[..., 0, :, :]
