@@ -30,6 +30,7 @@ ap.add_argument("--train-angles", type=float, nargs=2, default=[30.0, 90.0]); ap
 ap.add_argument("--noise", type=float, default=0.01); ap.add_argument("--n-points", type=int, default=512); ap.add_argument("--plot-only", action="store_true")
 ap.add_argument("--tag", default=""); ap.add_argument("--rotate", action="store_true", help="the crossing in a random 3-D orientation (training and held out)")
 ap.add_argument("--oprobe", action="store_true", help="the decoder's oriented probe (model.EntityDecoder.oprobe)")
+ap.add_argument("--oprobe-only", action="store_true", help="the density from the oriented probe alone (model.EntityDecoder.oprobe_only)")
 ap.add_argument("--dens-log", action="store_true", help="the density as exp of the decoder's output (model.EntityDecoder.dens_log)")
 ap.add_argument("--same-norm", action="store_true", help="the density target normalised over the prediction's uniform directions (entity_train.DENS_SAME_NORM)")
 ap.add_argument("--lobe-weight", type=float, default=0.0, help="the density loss weighted toward the lobes (entity_train.DENS_LOBE_WEIGHT)")
@@ -64,6 +65,7 @@ else:
     ref = torch.load(a.init, map_location=dev, weights_only=False)
     args = {**ref["args"], "region_density": True, "kappa_log": True, "vote_objects": True}
     args["oprobe"] = bool(args.get("oprobe")) or a.oprobe; args["dens_log"] = bool(args.get("dens_log")) or a.dens_log
+    args["oprobe_only"] = bool(args.get("oprobe_only")) or a.oprobe_only
     net = PopulationNet.from_args(args).to(dev); DF.load_partial(net, ref["model"], lambda m: None)
     if not ref["args"].get("kappa_log"):
         net.ent.reset_kappa()
@@ -132,6 +134,7 @@ def maps(ph):
     size = torch.tensor([n - 1.0] * 3, device=dev)
     smp = lambda q: torch.nn.functional.grid_sample(ph["image"][None, None], (q / size * 2 - 1).flip(-1).view(1, -1, 1, 1, 3), align_corners=True).view(n, n)
     out["image"] = np.where(keep, torch.stack([smp(plane(ph, k)) for k in range(-2, 4)]).mean(0).cpu().numpy(), np.nan)   # slab mean
+    out["_ent"] = {"mass": ms.float().cpu().numpy(), "iso": iso.cpu().numpy(), "axis": ax.cpu().numpy()}       # for the acceptance criteria
     return out
 
 
@@ -144,8 +147,11 @@ def along(m, ph, u):
 cols = ["image", "target A", "model A", "target B", "model B", "model: other\ndirections", "model: isotropic\n(background)", "mass along each bundle\n(flat = right)"]
 norm = PowerNorm(0.5, vmin=0, vmax=1); cmap = matplotlib.colormaps["viridis"].copy(); cmap.set_over("red")
 fig, axs = plt.subplots(len(tests), len(cols), figsize=(2.5 * len(cols) + 1.0, 2.5 * len(tests)), squeeze=False, layout="constrained")
+from shapetensor.learn import crossing_acceptance as CA
+acc = []
 for i, ph in enumerate(tests):
     M = maps(ph)
+    acc.append((f"{ph['angle']:.0f} deg" + (" (rotated)" if a.rotate else ""), CA.evaluate(ph, M, M.pop("_ent"))))
     axs[i, 0].imshow(M["image"], cmap="gray", vmin=0, vmax=1)
     nz = ph["rot"][:, 0].cpu().numpy()                                                            # the crossing plane's normal (z, y, x)
     lk = look(3000 + i)
@@ -173,3 +179,7 @@ st = curves[-1]["step"] if curves else 0
 fig.suptitle(f"crossing ladder -- trained on {a.tag}, {st} steps (from {a.init.split('/')[-1]}); "
              f"held-out phantoms{' in random 3-D orientations (the crossing plane shown)' if a.rotate else ''}{', varied look' if a.vary_look else f', noise {a.noise}'}; model mass split by lobe fit{f', the density floor (q {a.floor}) the background' if a.floor >= 0 else ''}", fontsize=11)
 plt.savefig(a.out, dpi=72); print("saved", a.out)
+CA.table_figure(acc, stem + "_acceptance.png", f"acceptance -- {a.tag}, {st} steps: {'PASS' if all(r['PASS'] for _, r in acc) else 'FAIL'} "
+                f"({sum(r['PASS'] for _, r in acc)}/{len(acc)} held-out phantoms pass every criterion)")
+CA.save_json(acc, stem + "_acceptance.json")
+print("acceptance:", "PASS" if all(r["PASS"] for _, r in acc) else "FAIL", "|", " ; ".join(f"{lab}: " + " ".join(k.split()[0] + ("+" if v[0] else "-") for k, v in r.items() if k != "PASS") for lab, r in acc))

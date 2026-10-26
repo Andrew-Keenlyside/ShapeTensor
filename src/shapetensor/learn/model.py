@@ -124,7 +124,7 @@ class EntityDecoder(nn.Module):
 
     def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8, unc: bool = False, mass_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False,
-                 kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False):
+                 kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -148,11 +148,16 @@ class EntityDecoder(nn.Module):
         # angular-frequency magnitudes (the same whatever the roll about u), folded axially: what the material looks like
         # *along u*, the same input at every orientation (the trunk's features are not rotation-aware: each orientation
         # was learned apart, a crossing fitted in ~100 steps at one orientation took thousands over all of them)
-        self.oprobe = bool(oprobe); self.o_t = (2.0, 4.0, 6.0); self.o_r = (1.5, 3.0); self.o_m = 8; self.o_c = 3
+        # ``oprobe_only``: the density from the probe alone (rotation-equivariant by construction; the other outputs keep
+        # the point code)
+        self.oprobe = bool(oprobe) or bool(oprobe_only); self.oprobe_only = bool(oprobe_only)
+        self.o_t = (2.0, 4.0, 6.0); self.o_r = (1.5, 3.0); self.o_m = 8; self.o_c = 3
         if self.oprobe:
             nf = self.o_c * (1 + 3 * len(self.o_r)) * (1 + 2 * len(self.o_t))
             self.o_net = nn.Sequential(nn.Linear(nf, 128), nn.SiLU(), nn.Linear(128, 64))
-            self.odens = nn.Linear(64, 1); nn.init.zeros_(self.odens.weight); nn.init.zeros_(self.odens.bias)   # a direct path to the density
+            self.odens = (nn.Sequential(nn.Linear(64, 64), nn.SiLU(), nn.Linear(64, 1)) if self.oprobe_only else nn.Linear(64, 1))   # a direct
+            last = self.odens[-1] if self.oprobe_only else self.odens                                                                # path to the density
+            nn.init.zeros_(last.weight); nn.init.zeros_(last.bias)
         rin += 64 if self.oprobe else 0
         self.mass = nn.Linear(hidden, 1) if mass_head else None                              # where: the material's mass at (x, sigma)
         # the density's shape as harmonics of the point code: log-density c(p) . Y(u), a direct path from where to which
@@ -309,7 +314,9 @@ class EntityDecoder(nn.Module):
         k = torch.exp(5.0 * torch.tanh(y[..., 7 + e:9 + e] / 5.0)) if getattr(self, "kappa_log", False) else Fn.softplus(y[..., 7 + e:9 + e]) * 10.0
         k = torch.stack([k.amax(-1), k.amin(-1)], -1)
         y0 = y[..., 0] + (self.dens(p).float() * Y.float()).sum(-1) if self.dens is not None else y[..., 0]
-        if getattr(self, "oprobe", False):
+        if getattr(self, "oprobe_only", False):
+            y0 = self.odens(o).float()[..., 0]
+        elif getattr(self, "oprobe", False):
             y0 = y0 + self.odens(o).float()[..., 0]
         R = rot6d_to_matrix(y[..., 1 + e:7 + e]); zr = y[..., 1:1 + e]
         if getattr(self, "zv", None) is not None:
@@ -332,7 +339,7 @@ class PopulationNet(nn.Module):
                  free_sh: bool = False, dir_lmax: int = 8, vote_unc: bool = False, mass_head: bool = False, region_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False,
                  dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False, oprobe: bool = False,
-                 dens_log: bool = False):
+                 dens_log: bool = False, oprobe_only: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -360,7 +367,7 @@ class PopulationNet(nn.Module):
             self.ent = EntityDecoder(c0, c1, c2, emb=max(int(embed), 2), hidden=256, lmax=int(dir_lmax), unc=bool(vote_unc),
                                      mass_head=bool(mass_head) and not mass_region, dens_sh=bool(dens_sh), dens_mlp=bool(dens_mlp),
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
-                                     oprobe=bool(oprobe), dens_log=bool(dens_log))
+                                     oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             self.region_dec = None
@@ -416,7 +423,8 @@ class PopulationNet(nn.Module):
                    mass_region=bool(args.get("mass_region", False)), region_dec=bool(args.get("region_dec", False)),
                    z_vote=bool(args.get("z_vote", False)), dir_sh=int(args.get("dir_sh", 0) or 0), ray=bool(args.get("ray", False)),
                    region_density=bool(args.get("region_density", False)), kappa_log=bool(args.get("kappa_log", False)),
-                   oprobe=bool(args.get("oprobe", False)), dens_log=bool(args.get("dens_log", False))) \
+                   oprobe=bool(args.get("oprobe", False)), dens_log=bool(args.get("dens_log", False)),
+                   oprobe_only=bool(args.get("oprobe_only", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
