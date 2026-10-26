@@ -1021,7 +1021,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    dens_sh: bool = True, read_keep: float = READ_KEEP, dens_mlp: bool = True, mass_region: bool = True,
                    region_dec: bool = False, where_first: int = 0, z_vote: bool = False, dir_sh: int = 0, background_entity: bool = True,
                    ray: bool = False, e_cross: float = 0.0, region_density: bool = True, kappa_log: bool = False, vote_objects: bool = False,
-                   dens_same_norm: bool = False, own_objects: bool = False):
+                   dens_same_norm: bool = False, own_objects: bool = False, bg_head: bool = False):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -1083,7 +1083,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 dir_lmax=dir_lmax, vote_unc=vote_unc, lcn=lcn, mass_head=True, region_head=True, dens_sh=bool(dens_sh), read_keep=READ_KEEP,
                 dens_mlp=bool(dens_mlp), mass_region=bool(mass_region), region_dec=bool(region_dec), where_first=int(where_first),
                 z_vote=bool(z_vote), dir_sh=int(dir_sh), background_entity=bool(background_entity), ray=bool(ray),
-                region_density=bool(region_density), kappa_log=bool(kappa_log), vote_objects=bool(vote_objects), dens_same_norm=bool(dens_same_norm), own_objects=bool(own_objects))
+                region_density=bool(region_density), kappa_log=bool(kappa_log), vote_objects=bool(vote_objects), dens_same_norm=bool(dens_same_norm), own_objects=bool(own_objects), bg_head=bool(bg_head))
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)
@@ -1316,6 +1316,7 @@ def main():
     ap.add_argument("--kappa-log", action="store_true", help="entities: the vote's concentrations in log space (the softplus head collapses)")
     ap.add_argument("--dens-same-norm", action="store_true", help="entities: the density target's shape normalised over the prediction's uniform directions "
                                                                    "(against the exact mean, the lobes were trained ~20 %% low)")
+    ap.add_argument("--bg-head", action="store_true", help="entities: a background-occupancy head (isotropic objects told from the background by place)")
     ap.add_argument("--own-objects", action="store_true", help="entities: directions owned among the oriented entities only (the background owns none)")
     ap.add_argument("--vote-objects", action="store_true", help="entities: vote / kappa / descriptor losses only where an oriented entity owns the direction")
     ap.add_argument("--dir-sh", type=int, default=0, help="entities: the per-direction outputs also as harmonics of the point code to this order (0: off; e.g. 6)")
@@ -1363,7 +1364,7 @@ def main():
                        read_keep=a.read_keep, level_steps=a.level_steps, dens_mlp=not a.no_dens_mlp, mass_region=not a.no_mass_region,
                        region_dec=a.region_dec, where_first=a.where_first, z_vote=a.z_vote, dir_sh=a.dir_sh,
                        background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, region_density=not a.no_region_density,
-                       kappa_log=a.kappa_log, vote_objects=a.vote_objects, dens_same_norm=a.dens_same_norm, own_objects=a.own_objects)
+                       kappa_log=a.kappa_log, vote_objects=a.vote_objects, dens_same_norm=a.dens_same_norm, own_objects=a.own_objects, bg_head=a.bg_head)
         return
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,
