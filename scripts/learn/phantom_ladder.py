@@ -28,6 +28,7 @@ ap.add_argument("--eval-every", type=int, default=500); ap.add_argument("--famil
 ap.add_argument("--test-per-family", type=int, default=2); ap.add_argument("--n-points", type=int, default=512); ap.add_argument("--plot-only", action="store_true")
 ap.add_argument("--bg-head", action="store_true"); ap.add_argument("--oprobe", action="store_true"); ap.add_argument("--tag", default="")
 ap.add_argument("--floor", type=float, default=0.05); ap.add_argument("--batch", type=int, default=1)
+ap.add_argument("--sigma-lo", type=float, default=1.0, help="the smallest training query window (below 1: sub-voxel)")
 ap.add_argument("--final", action="store_true", help="score the final test set (seeds never used to choose between variants) instead of the selection set")
 a = ap.parse_args(); dev = "cuda"; stem = a.out.rsplit(".", 1)[0]
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None
@@ -82,7 +83,7 @@ else:
             fam = a.families[int(torch.randint(0, len(a.families), (1,), generator=gc))]
             spec, look = P2.random_spec(fam, torch.Generator().manual_seed(step * 31 + b))
             ph = P2.make(spec, seed=step * 31 + b, look=look, device=dev)
-            imgs.append(ph["image"]); ts.append(P2.targets(ph, *P2.draw_queries(ph, g, a.n_points)))
+            imgs.append(ph["image"]); ts.append(P2.targets(ph, *P2.draw_queries(ph, g, a.n_points, sigma=(a.sigma_lo, 6.0))))
         T = batch(ts); dirs = ET.sample_dirs(T, 32, g=g)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             P = net(torch.stack(imgs)[:, None], voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)

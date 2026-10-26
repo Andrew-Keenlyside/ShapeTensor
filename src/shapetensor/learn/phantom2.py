@@ -157,9 +157,9 @@ def targets(ph: dict, pts: torch.Tensor, sig: torch.Tensor, emax: int = 8) -> di
             "bg_t": ph["bg"]}
 
 
-def draw_queries(ph: dict, g: torch.Generator, n_q: int) -> tuple:
+def draw_queries(ph: dict, g: torch.Generator, n_q: int, sigma=(1.0, 6.0)) -> tuple:
     """Half on the material, a quarter where two populations overlap (if any), the rest anywhere (2 voxels from the
-    faces); sigma 1-6."""
+    faces); sigma log-uniform in ``sigma`` (below 1: sub-voxel windows)."""
     n = ph["n"]; dev = ph["image"].device
     pts = 2 + torch.rand(n_q, 3, generator=g, device=dev) * (n - 5)
     tot = ph["occ"].sum(0) if ph["occ"].shape[0] else torch.zeros(n, n, n, device=dev)
@@ -169,7 +169,8 @@ def draw_queries(ph: dict, g: torch.Generator, n_q: int) -> tuple:
         cand = torch.nonzero(sel).float(); k = int(frac * n_q); o = int(off * n_q)
         if cand.shape[0]:
             pts[o:o + k] = (cand[torch.randint(0, cand.shape[0], (k,), generator=g, device=dev)] + torch.rand(k, 3, generator=g, device=dev) - 0.5).clamp(2, n - 3)
-    sig = torch.exp(torch.rand(n_q, generator=g, device=dev) * math.log(6.0))
+    lo, hi = sigma
+    sig = torch.exp(math.log(lo) + torch.rand(n_q, generator=g, device=dev) * math.log(hi / lo))
     return pts, sig
 
 
@@ -198,6 +199,12 @@ def random_spec(family: str, g: torch.Generator, n: int = 64) -> tuple:
         if u(0, 1) < 0.25:                                                                           # a third population (between the layers)
             third = xfib(); third["radius"] = min(third["radius"], s0 / 8 + 0.3)
             spec.append({"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th + ang / 2 + math.pi / 2), **third, "z0": s0 / 4})
+    elif family == "fine":                                                                          # a crossing of unresolved fibres: finer and
+        sf = u(1.6, 2.4)                                                                             # closer than the grid (partial volume only)
+        th = u(0, math.pi); ang = math.radians(u(30, 90)) * (1 if u(0, 1) < 0.5 else -1)
+        ff = lambda: {"spacing": sf, "radius": u(0.4, min(0.7, sf / 4 + 0.15)), "half": u(7, 13), "conc": 0.94}
+        spec = [{"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th), **ff(), "z0": 0.0},
+                {"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th + ang), **ff(), "z0": sf / 2}]
     elif family == "fan":
         spec = [{"kind": "fan", "normal": nrm.tolist(), "axis": inplane(u(0, math.pi)), **fib(), "spread": math.radians(u(30, 80)), "half_z": u(6, 12)}]
     elif family == "curve":

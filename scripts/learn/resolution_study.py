@@ -50,16 +50,34 @@ def maps(ph, sigma, step=1.0, half=28.0):
     t = P2.targets(ph, pts, sig); K = ph["occ"].shape[0]
     tgt = {"mass": t["e_mass"][:, :K].cpu().numpy(), "k": t["e_kappa"][:, :K].cpu().numpy(), "R": t["e_R"][:, :K].cpu().numpy(),
            "bg": t["e_mass"][:, K].cpu().numpy(), "kinds": ph["kinds"]}
+    parts = []
     with torch.no_grad():
-        f = EI.features(net, ph["image"], voxel_um=None); r = EI.query(net, f, pts, sig, sph, vol_shape=ph["image"].shape)
-        e = EI.cluster(r, sph, floor=a.floor); sp = EI.split_mass(r, sph, e)
-    ms = (sp["mass"] * e["live"]).float(); kv = e["kappa"].float(); isoe = kv[..., 0] < ET.VOTE_KAPPA_MIN
-    iso_tot = sp["floor"].float() + (ms * isoe).sum(1)
-    bgm = r["bgm"].float().clamp(0, 1) if "bgm" in r else iso_tot
-    bg = torch.minimum(iso_tot, bgm)
-    mdl = {"mass": (ms * ~isoe).cpu().numpy(), "k": kv.cpu().numpy(), "R": e["R"].float().cpu().numpy(), "iso": (iso_tot - bg).clamp_min(0).cpu().numpy(), "bg": bg.cpu().numpy()}
+        f = EI.features(net, ph["image"], voxel_um=None)
+        for a0 in range(0, pts.shape[0], 2048):                                                      # in chunks: clustering is memory-hungry
+            sl = slice(a0, a0 + 2048)
+            r = EI.query(net, f, pts[sl], sig[sl], sph, vol_shape=ph["image"].shape)
+            e = EI.cluster(r, sph, floor=a.floor); sp = EI.split_mass(r, sph, e)
+            ms = (sp["mass"] * e["live"]).float(); kv = e["kappa"].float(); isoe = kv[..., 0] < ET.VOTE_KAPPA_MIN
+            iso_tot = sp["floor"].float() + (ms * isoe).sum(1)
+            bgm = r["bgm"].float().clamp(0, 1) if "bgm" in r else iso_tot
+            bg = torch.minimum(iso_tot, bgm)
+            parts.append({"mass": (ms * ~isoe).cpu().numpy(), "k": kv.cpu().numpy(), "R": e["R"].float().cpu().numpy(),
+                          "iso": (iso_tot - bg).clamp_min(0).cpu().numpy(), "bg": bg.cpu().numpy(), "bgm": bgm.cpu().numpy()})
+    C = max(p_["mass"].shape[1] for p_ in parts)
+    pad = lambda x, k: np.concatenate([x, np.zeros((x.shape[0], C - x.shape[1]) + x.shape[2:])], 1) if x.shape[1] < C else x
+    mdl = {k: np.concatenate([pad(p_[k], k) if k in ("mass", "k", "R") else p_[k] for p_ in parts]) for k in parts[0]}
     face = torch.minimum(pts, (n - 1) - pts).amin(1).view(m, m).cpu().numpy()
     return m, tgt, mdl, face, disc
+
+
+def oracle(tgt):
+    iso = CA._types(tgt["k"][..., 0], tgt["k"][..., 1]) == 2
+    return {"mass": np.where(iso, 0.0, tgt["mass"]), "k": tgt["k"], "R": tgt["R"], "iso": (tgt["mass"] * iso).sum(1), "bg": tgt["bg"], "bgm": tgt["bg"]}
+
+
+def score(m, tgt, mdl, face, disc):
+    """The criteria, or None where the ground truth itself fails the measurement (unscoreable)."""
+    return CA.evaluate_p2(m, tgt, mdl, face, disc) if CA.evaluate_p2(m, tgt, oracle(tgt), face, disc)["PASS"] else None
 
 
 tests = []
@@ -74,9 +92,11 @@ for s_ in sigmas:
     rows = []
     for fam, ph in tests:
         m, tgt, mdl, face, disc = maps(ph, s_)
-        rows.append((fam, CA.evaluate_p2(m, tgt, mdl, face, disc)))
+        sc = score(m, tgt, mdl, face, disc)
+        if sc is not None:
+            rows.append((fam, sc))
     tab[s_] = rows
-    print(f"sigma {s_}: {sum(r['PASS'] for _, r in rows)}/{len(rows)} pass | per criterion: " +
+    print(f"sigma {s_}: {sum(r['PASS'] for _, r in rows)}/{len(rows)} pass (of {len(tests)} phantoms, {len(tests) - len(rows)} unscoreable) | per criterion: " +
           " ".join(f"{k.split()[0]} {sum(r[k][0] for _, r in rows)}" for k in CA.NAMES8), flush=True)
 
 # 2. sub-voxel output on a crossing: half-voxel grid at sigma 1
@@ -96,7 +116,9 @@ for i in range(6):
     spec[1]["z0"] = spec[0]["spacing"] / 2
     ph_u = P2.make(spec, seed=991_000 + i, look=look, device=dev)
     mu, tu, md, fu, du = maps(ph_u, 2.5)
-    unres.append((f"unresolved {i}", CA.evaluate_p2(mu, tu, md, fu, du)))
+    sc = score(mu, tu, md, fu, du)
+    if sc is not None:
+        unres.append((f"unresolved {i}", sc))
 print(f"unresolved fibres (spacing 1.6-2.4, radius 0.4-0.7): {sum(r['PASS'] for _, r in unres)}/{len(unres)} pass | " +
       " ".join(f"{k.split()[0]} {sum(r[k][0] for _, r in unres)}" for k in CA.NAMES8), flush=True)
 CA.table_figure(unres, a.out + "_unresolved_acceptance.png", "unresolved fibres (spacing 1.6-2.4, radius 0.4-0.7 voxels), sigma 2.5")
@@ -107,7 +129,7 @@ for k in CA.NAMES8:
     axs[0].plot(sigmas, [sum(r[k][0] for _, r in tab[s_]) for s_ in sigmas], "-o", ms=3, label=k)
 axs[0].plot(sigmas, [sum(r["PASS"] for _, r in tab[s_]) for s_ in sigmas], "k-o", lw=2.5, label="all criteria")
 axs[0].set_xscale("log"); axs[0].set_xticks(sigmas); axs[0].set_xticklabels([str(s_) for s_ in sigmas]); axs[0].set_xlabel("query window sigma (voxels)")
-axs[0].set_ylabel(f"held-out phantoms passing (of {len(tests)})"); axs[0].legend(fontsize=7); axs[0].grid(alpha=0.3); axs[0].set_title("output scale", fontsize=10)
+axs[0].set_ylabel("held-out phantoms passing"); axs[0].legend(fontsize=7); axs[0].grid(alpha=0.3); axs[0].set_title("output scale", fontsize=10)
 for j in range(min(2, tgt["mass"].shape[1])):
     axs[1 + j].imshow(np.where(disc, mm["m"][:, j].reshape(m, m), np.nan), vmin=0, vmax=1); axs[1 + j].set_title(f"model pop {j + 1}, half-voxel grid, sigma 1 (r={cor[j]:.2f})", fontsize=9)
 axs[3].imshow(np.where(disc, tgt["mass"][:, 0].reshape(m, m), np.nan), vmin=0, vmax=1); axs[3].set_title("target pop 1 at sigma 1 (fibre scale)", fontsize=9)
