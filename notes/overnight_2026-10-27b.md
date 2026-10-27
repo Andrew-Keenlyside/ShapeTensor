@@ -287,4 +287,19 @@ the GPU. A step is ~0.8 s.
 **Third launch (01:57): with the block pre-norm**, lr 3e-4 (300-step warm-up, clip 2), the guard kept as a safety net;
 10000 steps, scored on the selection set every 2000.
 
+Healthy: |h| ~0.3-0.9 / 3-4.6 / 1-1.6 throughout, no guard trips, 0.7-0.85 s/step alone. Held-out losses at step 1000:
+density cross 0.34 (start 0.69), fine 0.34, curve 0.15, sheet 0.25, blob 0.02; oriented-mass map 0.13-0.35; mass votes
+0.19-0.34. At step 2000: density cross 0.29, curve 0.135, sheet 0.24; oriented-mass map 0.085-0.23.
+
+**Low training (step 2000), selection set -- where it stands:** 3/16 (blobs and empties). **The maps learn first, the
+orientations later.** The oriented-material map already holds the populations' mass (training loss 0.09-0.23), but the
+density is still nearly flat: read by the density alone, 83-121 % of every oriented phantom's mass is "isotropic".
+Read by the maps, the mass is there but in entities whose axes do not yet match ("other": curves 0.58, mixes 0.40).
+C9 found 4/16, C6 direction passes only vacuously where nothing matched. The same flat start was seen in the framing
+review (the density's per-direction loss is flat-friendly early on).
+
+**A readout bug this showed:** the maps' 2x cap (review 2) starved weak lobes -- oriented totals 0.03-0.12 of the target
+at step 2000 -- now off (`maps_cap`, default None): 0.13-0.70. The pilot's own mid-run scorings use the capped
+readout; its checkpoints are kept (`pilot3_step*.pt`) and rescored with the final readout below.
+
 (results below)
