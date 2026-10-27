@@ -365,7 +365,8 @@ class EntityDecoder(nn.Module):
         if getattr(self, "odirect", 0):
             B, Q = points.shape[:2]
             od = torch.stack([self.od_code(self.od_sample(feats, points[b], b), self.od_weights(dirs[b])) for b in range(B)])   # once per point
-        out = self.decode(p[:, :, None].expand(-1, -1, D, -1), Y, r, o, od)
+        dc = self.dens(p)[:, :, None].expand(-1, -1, D, -1) if self.dens is not None else None      # once per point, not per direction
+        out = self.decode(p[:, :, None].expand(-1, -1, D, -1), Y, r, o, od, dens_c=dc)
         if self.mass is not None:
             out["m"] = self.mass_of(p)
         return out
@@ -423,7 +424,7 @@ class EntityDecoder(nn.Module):
         return self.od_code(self.od_sample(feats, pts, b, chunk), self.od_weights(u)[:, None])[:, 0]
 
     def decode(self, p: torch.Tensor, Y: torch.Tensor, r: torch.Tensor | None = None, o: torch.Tensor | None = None,
-               od: torch.Tensor | None = None) -> dict:
+               od: torch.Tensor | None = None, dens_c: torch.Tensor | None = None) -> dict:
         """The outputs from point encodings ``p (..., hidden)`` and direction bases ``Y (..., n_coef)`` (same leading
         shape): any set of (point, direction) pairs -- inference evaluates only where the total ODF has density."""
         from .bingham import rot6d_to_matrix
@@ -445,7 +446,10 @@ class EntityDecoder(nn.Module):
         e = self.emb
         k = torch.exp(5.0 * torch.tanh(y[..., 7 + e:9 + e] / 5.0)) if getattr(self, "kappa_log", False) else Fn.softplus(y[..., 7 + e:9 + e]) * 10.0
         k = torch.stack([k.amax(-1), k.amin(-1)], -1)
-        y0 = y[..., 0] + (self.dens(p).float() * Y.float()).sum(-1) if self.dens is not None else y[..., 0]
+        if self.dens is not None:                                                                 # (``dens_c``: the harmonics given, computed once
+            y0 = y[..., 0] + ((self.dens(p) if dens_c is None else dens_c).float() * Y.float()).sum(-1)   # per point by the caller)
+        else:
+            y0 = y[..., 0]
         if getattr(self, "oprobe_only", False):
             y0 = self.odens(o).float()[..., 0]
         elif getattr(self, "oprobe", False):
@@ -685,17 +689,21 @@ class PopulationNet(nn.Module):
         strides = tuple(strides) or (1,); strides = (strides + (strides[-1],) * len(sig))[:len(sig)]
         xf = x[:, :1].float(); xf = xf - gaussian(xf, 3.0)                                       # high-passed (as oriented_energy's hp)
         shp = tuple(x.shape[-3:]); F = torch.fft.rfftn(xf, dim=(-3, -2, -1))                    # half the spectrum (real input): the same
-        dirs = self.ent.od_dirs; parts = [[] for _ in strides]                                    # energies as the full FFT's (its filter made
-        for c in range(0, dirs.shape[0], chunk):                                                  # Hermitian on the Nyquist planes: review 3)
-            H = self._od_filters(shp, c, chunk, x.device)
+        from ..filters import filter_matrix, kernel1d
+        dirs = self.ent.od_dirs; Dd = dirs.shape[0]; B = x.shape[0]; Z, Y, X = shp               # energies as the full FFT's (its filter made
+        Ms = [[filter_matrix(kernel1d(float(s), 0, 3.0), n, torch.float32, x.device)[::st].contiguous() for n in shp]   # Hermitian on the Nyquist
+              for s, st in zip(sig, strides)]                                                     # planes: review 3); each level's (= gaussian)
+        out = [torch.empty(B, Dd, *(M.shape[0] for M in Mz_y_x), device=x.device) for Mz_y_x in Ms]   # blur as left-multiplied matrices, the
+        for c in range(0, Dd, chunk):                                                             # strided level by row subsets, written in
+            H = self._od_filters(shp, c, chunk, x.device)                                         # place (review 5: -45 % of the pooling)
             E = torch.fft.irfftn(F * H[None], s=shp, dim=(-3, -2, -1)) ** 2                         # (B, chunk, Z, Y, X)
-            for li, (s, st) in enumerate(zip(sig, strides)):
-                parts[li].append(gaussian_mm(E, s)[..., ::st, ::st, ::st].contiguous())             # (= gaussian, as matrix products)
+            C = E.shape[1]
+            for li, (Mz, My, Mx) in enumerate(Ms):
+                v = My @ (E @ Mx.T)                                                               # x, then y: (B, C, Z, my, mx)
+                out[li][:, c:c + C] = (Mz @ v.reshape(B * C, Z, -1)).view(B, C, Mz.shape[0], My.shape[0], Mx.shape[0])   # z
             del E, H
-        out = []
-        for P_ in parts:
-            Ep = torch.cat(P_, 1)
-            out.append(Ep / (Ep.mean(1, keepdim=True) + 1e-3 * Ep.mean(dim=(1, 2, 3, 4), keepdim=True) + 1e-12))   # (per item)
+        for Ep in out:
+            Ep.div_(Ep.mean(1, keepdim=True) + 1e-3 * Ep.mean(dim=(1, 2, 3, 4), keepdim=True) + 1e-12)   # (per item)
         return Levels(out, strides)
 
     def features(self, x: torch.Tensor):

@@ -163,7 +163,8 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
         od = None
         if getattr(dec, "odirect", 0) and qi.numel():                                             # the bank sampled once per point
             od = dec.od_code(dec.od_sample(feats, p - off), dec.od_weights(dirs), pairs=(qi, di))
-        r = dec.decode(enc[qi], Y[di].to(enc.dtype), rr, oo, od) if qi.numel() else None
+        dc = dec.dens(enc)[qi] if (getattr(dec, "dens", None) is not None and qi.numel()) else None   # (per point, then gathered)
+        r = dec.decode(enc[qi], Y[di].to(enc.dtype), rr, oo, od, dens_c=dc) if qi.numel() else None
         full = {"f": torch.zeros(n, D, device=p.device), "z": torch.zeros(n, D, dec.emb, device=p.device),
                 "R": torch.eye(3, device=p.device).expand(n, D, 3, 3).clone(), "kappa": torch.zeros(n, D, 2, device=p.device),
                 "desc": torch.zeros(n, D, 5, device=p.device)}
@@ -408,7 +409,10 @@ def _entity_stats(r: dict, dirs: torch.Tensor, f: torch.Tensor, ent: torch.Tenso
         a, b = BG.fit(mo[live].double()); Ro[live], Ko[live] = a.float(), b.float()
     ec = e.clamp(max=C - 1)
     Rd = R.gather(1, ec[..., None, None].expand(-1, -1, 3, 3)); Kd = K.gather(1, ec[..., None].expand(-1, -1, 2))
-    p = BG.pdf(dirs[None].expand(Q, -1, -1), Rd, Kd) * (ent >= 0)                                   # unit mean over the sphere
+    lnC = BG.log_normaliser(K)                                                                      # (Q, C): once per entity, gathered
+    a_, b_ = Rd[..., :, 0], Rd[..., :, 1]; u = dirs[None].expand(Q, -1, -1)                         # (= BG.pdf per direction: review 5)
+    q = Kd[..., 0] * (u * a_).sum(-1) ** 2 + Kd[..., 1] * (u * b_).sum(-1) ** 2
+    p = torch.exp(-q - lnC.gather(1, ec).to(q.dtype)) * (ent >= 0)                                  # unit mean over the sphere
     ps = torch.zeros(Q, C + 1, device=dev).scatter_add_(1, e, p)[:, :C]
     mass = torch.where(ps > 1e-6, fs / ps.clamp_min(1e-12), fs / D) * live
     share = mass / mass.sum(1, keepdim=True).clamp_min(1e-12)                                       # identifiable under partial volume

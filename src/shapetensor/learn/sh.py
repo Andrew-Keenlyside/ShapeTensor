@@ -28,7 +28,57 @@ def bands(lmax: int) -> list[slice]:
     return out
 
 
+_SHC: dict = {}
+
+
+def _sh_consts(lmax: int, dev):
+    key = (lmax, str(dev))
+    if key not in _SHC:
+        M = lmax + 1
+        cd = torch.tensor([1.0] + [-math.sqrt((2 * m + 1) / (2 * m)) for m in range(1, M)], dtype=torch.float32)
+        c1 = torch.tensor([math.sqrt(2 * m + 3) for m in range(M)], dtype=torch.float32)
+        A = torch.zeros(M, M); Bc = torch.zeros(M, M)
+        for l in range(2, M):
+            for m in range(0, l - 1):
+                a = math.sqrt((4 * l * l - 1) / (l * l - m * m)); b = a * math.sqrt(((l - 1) ** 2 - m * m) / (4 * (l - 1) ** 2 - 1))
+                A[l, m] = a; Bc[l, m] = b
+        mm = torch.arange(M)
+        rec = mm[None, :] <= (torch.arange(M)[:, None] - 2); sub = mm[None, :] == (torch.arange(M)[:, None] - 1); dia = mm[None, :] == torch.arange(M)[:, None]
+        S = torch.tensor([math.sqrt(2.0) * (-1) ** m for m in range(M)], dtype=torch.float32)
+        ls = list(range(0, lmax + 1, 2)); idx = []
+        for li, l in enumerate(ls):                                                                   # columns: (table, l-row, m) -> flat index
+            for m in range(-l, l + 1):
+                idx.append((0 if m == 0 else (2 if m < 0 else 1), li, abs(m)))
+        flat = torch.tensor([(t * len(ls) + li) * M + m for t, li, m in idx])
+        _SHC[key] = [x.to(dev) for x in (cd, c1, A, Bc, rec, sub, dia, S, torch.arange(M, dtype=torch.float32), flat)] + [ls]
+    return _SHC[key]
+
+
 def real_sh(dirs: torch.Tensor, lmax: int) -> torch.Tensor:
+    """Real even spherical harmonics at unit ``dirs (N, 3)`` in (z, y, x): ``(N, n_coef)``, orthonormal on the sphere.
+    ``m < 0: sqrt2 (-1)^m Im Y_l^|m|``, ``m = 0: Y_l^0``, ``m > 0: sqrt2 (-1)^m Re Y_l^m``; polar axis z, azimuth from x
+    towards y; fully normalised Legendre recurrence -- vectorised over m (each element's float32 arithmetic in the
+    order of :func:`_real_sh_loop`, so bitwise equal; ~3.5x fewer kernel launches at lmax 16: review 5)."""
+    d = dirs.float(); N = d.shape[0]; dev = d.device
+    cd, c1, A, Bc, rec, sub, dia, S, mf, flat, ls = _sh_consts(lmax, dev)
+    cz = d[:, 0].clamp(-1, 1); sz = (1 - cz * cz).clamp_min(0).sqrt(); phi = torch.atan2(d[:, 1], d[:, 2]); M = lmax + 1
+    diag = [torch.full((N,), 1.0 / math.sqrt(4 * math.pi), device=dev)]                            # P[m][m]: a product chain
+    for m in range(1, M):
+        diag.append(cd[m] * sz * diag[-1])
+    Pmm = torch.stack(diag, 1)                                                                      # (N, M)
+    SUB = c1 * cz[:, None] * Pmm                                                                    # P[m+1][m] = c1_m cz P[m][m]
+    zero = torch.zeros((), device=dev)
+    rows = {}; p2 = torch.zeros(N, M, device=dev); p1 = torch.zeros(N, M, device=dev)
+    for l in range(M):
+        cur = torch.where(rec[l], A[l] * cz[:, None] * p1 - Bc[l] * p2, torch.where(sub[l], SUB, torch.where(dia[l], Pmm, zero)))
+        rows[l] = cur; p2, p1 = p1, cur
+    P = torch.stack([rows[l] for l in ls], 1)                                                       # (N, L, M)
+    cosm = torch.cos(mf * phi[:, None])[:, None]; sinm = torch.sin(mf * phi[:, None])[:, None]
+    T = torch.stack([P, S * P * cosm, S * P * sinm], 1)                                             # (N, 3, L, M)
+    return T.reshape(N, -1).index_select(1, flat)
+
+
+def _real_sh_loop(dirs: torch.Tensor, lmax: int) -> torch.Tensor:
     """Real even spherical harmonics at unit ``dirs (N, 3)`` in (z, y, x): ``(N, n_coef)``, orthonormal on the sphere.
     ``m < 0: sqrt2 (-1)^m Im Y_l^|m|``, ``m = 0: Y_l^0``, ``m > 0: sqrt2 (-1)^m Re Y_l^m``; polar axis z, azimuth from x
     towards y; fully normalised Legendre recurrence."""

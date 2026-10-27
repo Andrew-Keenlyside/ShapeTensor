@@ -37,7 +37,8 @@ import torch.nn.functional as Fn
 from .sh import fibonacci_sphere, n_coef, real_sh
 
 KAPPA_MAX = 600.0                     # the table's range (a lobe of half-width ~2.3 deg at 300); beyond it concentrations clamp
-_NT = 384                             # Gauss--Legendre nodes on t in [0, 1] (the integrands are even in t)
+_NT = 96                              # Gauss--Legendre nodes on t in [0, 1] (the integrands are even in t; 96 within 2.2e-11
+                                      # of 384 for every kappa <= 600, 64 fails beyond 150: review 5)
 _GL: dict = {}
 _TAB: dict = {}
 _ROT: dict = {}
