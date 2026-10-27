@@ -603,20 +603,22 @@ def readout(model, image: torch.Tensor, points: torch.Tensor, sigma: torch.Tenso
         parts.append(entities_from_query(r, dirs, floor=floor, iso_k=iso_k, merge_deg=merge_deg, **kw))
     C = max(p_["mass"].shape[1] for p_ in parts)
     pad = lambda x: torch.cat([x, torch.zeros((x.shape[0], C - x.shape[1]) + tuple(x.shape[2:]), device=x.device, dtype=x.dtype)], 1) if x.shape[1] < C else x
-    return {k: torch.cat([pad(p_[k]) if k in ("mass", "k", "R") else p_[k] for p_ in parts]) for k in parts[0]}
+    return {k: torch.cat([pad(p_[k]) if k in ("mass", "k", "R", "cover", "sheet") else p_[k] for p_ in parts]) for k in parts[0]}
 
 
 @torch.no_grad()
 def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05, iso_k: float = 0.5, merge_deg: float | None = 15.0,
-                        entities: str = "lobes", axes: str = "ring", kappa: str = "votes", prune: float = 0.0, mass: str = "maps",
+                        entities: str = "lobes", axes: str = "ring", kappa: str = "votes", prune: float = 0.0, mass: str = "basins",
                         saddle: float | None = 0.8, maps_cap: float | None = None, ring: float = 0.8,
-                        saddle_ring: float | None = None, saddle_peaks: float | None = None) -> dict:
+                        saddle_ring: float | None = None, lobe_frac: float = 0.1, weak_lines: bool = True, saddle_peaks: float | None = None,
+                        ring_soft: float = 0.1) -> dict:
     """The entities from the decoder's outputs ``r`` at the directions ``dirs`` (:func:`query`): the density's floor
     (``floor`` quantile) the background plus isotropic objects (told apart by the background head where the model has
     one), entities from what rises above it, their mass split by lobe fit (:func:`split_mass`), near-parallel same-type
     entities merged (``merge_deg``, None: off). Returns ``mass (P, C)`` (oriented entities; isotropic ones zeroed),
     ``k``, ``R``, ``iso`` (isotropic-object mass), ``bg`` (background mass), ``bgm`` (the head's window mean),
-    ``iso_z`` (the floor directions' mean embedding: the isotropic material's place in the tree).
+    ``iso_z`` (the floor directions' mean embedding: the isotropic material's place in the tree), ``cover`` (``axes="ring"``:
+    each entity's in-plane eigenvalue ratio) and ``sheet`` (each entity's sheet weight in [0, 1], for maps).
 
     ``entities``: "votes" (:func:`cluster`: the directions grouped by their votes and embeddings) or "lobes"
     (:func:`cluster_lobes_floor`: the density's own lobes). ``axes``: "votes" (each entity's frame and type from its
@@ -642,12 +644,19 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
     (the default since 28 Oct): density frames, but a lobe the moment calls a girdle stays one only if its density
     covers most of the great circle (in-plane eigenvalue ratio >= ``ring``) -- a fan's spread lobe is otherwise a
     line: fans found 0.2-0.6 -> 0.7-1.0, sheets kept (1.0), all criteria 2 -> 3 (direct-path pilot) and 3 -> 4
-    (overnight pilot, step 2000) of 16."""
+    (overnight pilot, step 2000) of 16. ``mass="basins"`` (the default since 27 Oct): each oriented entity's share of the
+    oriented-material map is its directions' density above the floor (a basin integral), so masses move continuously with
+    the density -- a lobe is born with ~0 mass and no fitted shapes reassign mass when another appears (the "maps" split
+    jumped where the population count or a lobe's fit changed); the criteria unchanged (7/16, mass level 8 -> 9).
+    ``sheet``: the type as a weight for maps -- ``axes="ring"``: a smoothstep of the cover over ``ring`` +- ``ring_soft``
+    (0.5 at the type boundary; 0: the hard type). The cover is a smooth field on real tissue while the types cut it at
+    ``ring``, so a map drawing lines by their axis and sheets by their normal jumped 90 deg there (27 Oct); the types
+    themselves (``k``) are unchanged."""
     for k_, v_, ok in (("entities", entities, ("votes", "lobes")), ("axes", axes, ("votes", "density", "hybrid", "ring")), ("kappa", kappa, ("moments", "votes", "votes_all")),
-                       ("mass", mass, ("maps", "density", "votes", "maps_votes"))):
+                       ("mass", mass, ("maps", "density", "votes", "maps_votes", "basins"))):
         if v_ not in ok:
             raise ValueError(f"entities_from_query: {k_}={v_!r}, not one of {ok}")
-    e = cluster(r, dirs, floor=floor) if entities == "votes" else cluster_lobes_floor(r, dirs, floor=floor, saddle=saddle, saddle_ring=saddle_ring, saddle_peaks=saddle_peaks)
+    e = cluster(r, dirs, floor=floor) if entities == "votes" else cluster_lobes_floor(r, dirs, floor=floor, saddle=saddle, saddle_ring=saddle_ring, f_frac=lobe_frac, saddle_peaks=saddle_peaks)
     if axes == "hybrid":                                                                          # frames from the density, types (and shapes)
         lab_ = e["label"]; C_ = e["live"].shape[1]                                                 # from the votes' own concentrations
         w_ = torch.where(lab_ >= 0, r["f"].float(), torch.zeros_like(r["f"].float()))
@@ -660,7 +669,9 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
         Ko = e["kappa_odf"]; _, ea, eb = BG._stats(Ko)                                            # covers its great circle: the in-plane eigenvalue
         cover = (eb / (1.0 - ea - eb).clamp_min(1e-12)).to(Ko.dtype)                              # ratio of its moment (its fitted Bingham's, exactly)
         line = (Ko[..., 0] >= iso_k) & (Ko[..., 1] < 2.0) & (cover < ring)                       # a sector of it: peaked (the votes' kappa reported)
-        e = {**e, "R": e["R_odf"], "kappa": torch.where(line[..., None], Ko.clamp_min(2.0), Ko), "kappa_fit": Ko}
+        sw = ((cover - ring + ring_soft) / (2 * ring_soft)).clamp(0, 1) if ring_soft > 0 else (cover >= ring).to(Ko.dtype)
+        sw = sw * sw * (3 - 2 * sw) * (Ko[..., 0] >= iso_k)                                       # (the sheet weight for maps: smooth in the cover)
+        e = {**e, "R": e["R_odf"], "kappa": torch.where(line[..., None], Ko.clamp_min(2.0), Ko), "kappa_fit": Ko, "cover": cover, "sheet": sw}
     k_rep = None
     if kappa in ("votes", "votes_all"):                                                          # the reported shape: the votes' own concentrations
         lab = e["label"]; C = e["live"].shape[1]
@@ -680,6 +691,18 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
         e = {**e, "live": e["live"] & ~weak}
     sp = split_mass(r, dirs, {**e, "kappa": e["kappa_fit"]} if "kappa_fit" in e else e)       # (ring: the lobes fitted with the moment's shape)
     ms = (sp["mass"] * e["live"]).float(); kv = e["kappa"].float(); isoe = kv[..., 0] < iso_k
+    if mass == "basins" and weak_lines:                                                           # lobes too broad to type where the map holds
+        weak = e["live"] & isoe                                                                   # oriented material: lines along their mode axis
+        kv = torch.where(weak[..., None], kv.clamp_min(2.0), kv); isoe = kv[..., 0] < iso_k        # (typed isotropic, they left the oriented mass
+        e = {**e, "kappa": kv}                                                                    # unresolved: a hard edge at bundles' rims)
+    if mass == "basins":                                                                          # each oriented entity's share: its directions'
+        f0 = r["f"].float(); fl = torch.quantile(f0, float(floor if floor is not None else 0.05), dim=1, keepdim=True)   # density above the floor
+        h = (f0 - fl).clamp_min(0); lab = e["label"]; C = e["live"].shape[1]                      # (a basin integral: it moves continuously with
+        bs = torch.zeros(f0.shape[0], C + 1, device=f0.device).scatter_add_(1, torch.where(lab >= 0, lab, torch.full_like(lab, C)), h)[:, :C]   # the
+        ok = e["live"] & ~isoe                                                                     # density, and a lobe is born with ~0 mass --
+        share = bs * ok / (bs * ok).sum(1, keepdim=True).clamp_min(1e-12)                         # no fitted lobe shapes, no reassignment when
+        tot_o = r["orim"].float() if "orim" in r else (ms * ~isoe).sum(1)                         # another lobe appears: the hard edges, 27 Oct)
+        ms = torch.where(ok, tot_o[:, None] * share, torch.zeros_like(ms))
     if merge_deg is not None:
         ms, lv = merge_parallel({**e, "live": e["live"] & ~isoe}, ms * ~isoe, merge_deg, iso_k)
         ms = ms + (sp["mass"] * e["live"]).float() * isoe                                       # (isotropic entities kept apart)
@@ -687,7 +710,11 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
     bgm = r["bgm"].float().clamp(0, 1) if "bgm" in r else iso_tot
     bg = torch.minimum(iso_tot, bgm)
     unres = torch.zeros_like(iso_tot)
-    if mass in ("votes", "maps_votes"):                                                           # the entities' own mass votes (density-weighted
+    if mass == "basins":                                                                          # isotropic objects and background from their
+        if "isom" in r:                                                                           # maps, as the maps readout
+            bg = bgm if "bgm" in r else (iso_tot - r["isom"].float()).clamp_min(0); iso_tot = bg + r["isom"].float()
+            unres = torch.where(((ms * ~isoe).sum(1) > 0), torch.zeros_like(iso_tot), r["orim"].float())
+    elif mass in ("votes", "maps_votes"):                                                           # the entities' own mass votes (density-weighted
         if "mvote" not in r:                                                                     # over their directions; merged pieces: the
             raise ValueError("entities_from_query: mass='votes' needs a model with mass votes")  # survivor's -- a population's pieces vote alike)
         lab = e["label"]; C = e["live"].shape[1]; f0 = r["f"].float()
@@ -734,7 +761,8 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
         typ = lambda k_: torch.where(k_[..., 0] < iso_k, 2, torch.where(k_[..., 1] < 2.0, 1, 0))   # isotropic: its frame was fitted for that type)
         kv = torch.where((typ(kr) == typ(kv))[..., None], kr, kv)
     return {"mass": ms * ~isoe, "k": kv, "R": e["R"].float(), "iso": (iso_tot - bg).clamp_min(0), "bg": bg, "bgm": bgm, "iso_z": iso_z,
-            "ori_unres": unres}
+            "ori_unres": unres, "cover": e["cover"].float() if "cover" in e else torch.zeros_like(ms),
+            "sheet": (e["sheet"].float() if "sheet" in e else (kv[..., 1] < 2.0).float()) * ~isoe}
 
 
 def cube_rotations(device="cpu") -> list:

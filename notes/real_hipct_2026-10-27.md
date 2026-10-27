@@ -138,3 +138,69 @@ window into one dominant oriented population (mass 0.4-0.8, a smooth direction f
 population appears only in scattered patches; isotropic objects are ~0 everywhere (vessels are read as oriented
 populations, not isotropic objects). At 80 um the featureless zones get more background and less oriented mass; at 20 um
 the oriented mass is high almost everywhere -- the over-confidence of a model trained on phantoms only.
+
+## Readout fix: continuous masses and types (27 Oct, afternoon)
+
+The mass images had hard, threshold-like edges. The network's outputs are smooth (the oriented-material map, the
+density's anisotropy); the edges came from the readout's discrete decisions:
+
+1. **Mass split by fitted lobe shapes** ("maps": each lobe's share from its fitted Bingham) jumped wherever the
+   population count or a lobe's fit changed. Now `mass="basins"` (default): each oriented entity's share of the
+   oriented-material map is its directions' density above the floor (a basin integral) -- a new lobe is born with ~0
+   mass, nothing is reassigned when one appears. Weak lobes too broad to type (typed isotropic, they left the oriented
+   mass unresolved: a hard rim at bundles' edges) are read as lines (`weak_lines`); `lobe_frac` 0.25 -> 0.1 lets
+   lobes form lower on the density. Criteria on the selection set unchanged (pilot3x 7/16; mass level 8 -> 9).
+2. **Line / sheet typing** cut a smooth field: the ring cover (the lobe moment's in-plane eigenvalue ratio) varies
+   smoothly over real tissue (26-33 % of points at 0.7-0.9), and the type switches at 0.8 -- a map drawing lines by
+   their axis and sheets by their normal jumped 90 deg there. The readout now also returns `sheet`, a smoothstep of the
+   cover over 0.8 +- 0.1 (`ring_soft`; 0.5 at the type boundary), and the maps split each population into a line part
+   (mass x (1 - sheet), its axis) and a sheet part (mass x sheet, its normal). The types (`k`) and so the criteria are
+   unchanged.
+3. **Display matching**: the synthetic maps used the criteria's hard 30-deg one-to-one matching; now a smooth angular
+   weight (tau 15 deg, an "other" option at 30 deg), line parts to true lines and sheet parts to true sheets.
+
+What remains discrete: **a population splitting in two** -- lobes joined across a saddle >= 0.8 of the lower peak, or
+within 15 deg -- shows as patch edges in the mixing map and the per-direction track maps (total mass stays continuous).
+A soft merge (basins kept apart, joined by a weight smooth in the saddle ratio) would remove it; not done.
+
+Figures (results/.../overnight/real/): `mass_maps_v4_synthetic.png`, `mass_maps_v4_real_x4.png`, `mass_maps_v4_real_x1.png`.
+On synthetic: fine 2 now carries both bundles through the core (392 / 337 against truth 370 / 438); cross 0's dim
+bundle 166 of 579 (was 96: the contrast confound remains); the sheet phantom an hourglass of sheet mass with soft rims.
+
+## The readout across resolution and smoothing (`scripts/learn/real_sweep.py`)
+
+The five specimens, a crop centred on the same point, block-averaged to 20 / 40 / 80 / 160 um voxels (96^3: a 1.9 /
+3.8 / 7.7 / 15.4 mm field), read out on the middle slice at window sigma 1.5 / 2.5 / 4 / 6 voxels (30-960 um). The
+structure tensor at the same window (gradient sigma 1 voxel). Means over the specimens:
+
+| voxels | sigma (vox) | oriented mass | background | sheet share | 2+ populations | lines vs ST (deg) | sheet normals vs ST | WM/GM AUC |
+|---|---|---|---|---|---|---|---|---|
+| 20 um | 1.5 / 2.5 / 4 / 6 | 0.68 -> 0.65 | 0.16-0.17 | 7 -> 10 % | 8 -> 7 % | 27 / 15 / 8 / 5 | 17 / 9 / 5 / 4 | 0.51-0.55 |
+| 40 um | | 0.62 -> 0.60 | 0.24 | 3 -> 5 % | 4 -> 3 % | 19 / 11 / 6 / 4 | 16 / 10 / 6 / 4 | 0.51-0.55 |
+| 80 um | | 0.55 -> 0.53 | 0.30 | 5 -> 7 % | 11 % | 21 / 13 / 8 / 5 | 16 / 9 / 6 / 4 | 0.46-0.48 |
+| 160 um | | 0.42 -> 0.41 | 0.47-0.48 | 19 -> 23 % | 28 -> 21 % | 29 / 18 / 12 / 8 | 20 / 11 / 7 / 5 | 0.38-0.41 |
+
+(Lines vs ST: the line parts' mean direction against the structure tensor's line direction where coherence >= 0.3 and
+lines carry most of the mass; sheet normals: against its normal where sheets do.)
+
+**Reading.**
+1. **Agreement with the structure tensor is set by the window in voxels, not in um**: ~15-30 deg at sigma 1.5 voxels,
+   4-8 deg at 6 voxels, at every resolution -- at small windows both estimates are noisy (the structure tensor's
+   integration over ~1.5 voxels especially), so the small-window disagreement is not evidence against either. 40 um
+   agrees best at each window (block-averaging lowers the noise while the texture is still resolved). Per specimen at
+   sigma 4: 5-10 deg at 20-80 um, 8-15 deg at 160 um.
+2. **Resolution sets how much is oriented**: oriented mass falls 0.67 -> 0.42 and background rises 0.16 -> 0.48 from 20
+   to 160 um, nearly independent of the window. At 20 um the phantom-trained pilot still calls ~2/3 of every window
+   oriented (the over-confidence above); coarser crops take in featureless tissue and the model reports more
+   background there.
+3. **Sheets are rare up to 80 um (3-10 %) and ~20 % at 160 um**, and where reported their normals agree with the
+   structure tensor's normal (4-7 deg at sigma >= 4): plausible planar texture (e.g. the laminated band in
+   AUMC-2025-044), not noise. Before the line / sheet split, sheet normals were compared to the structure tensor's line
+   direction, which inflated the 160 um angles (26 -> 12 deg at sigma 6 on AUMC-116-24).
+4. **Two populations: 3-11 % of points up to 80 um, 21-28 % at 160 um** (windows 240-960 um, where fibre systems
+   meet) -- falling slightly as the window grows at 160 um, where lobes 15 deg apart or across a high saddle merge.
+5. **No white / grey separation** at any scale (AUC 0.38-0.55; inverted at 160 um, where grey nuclei carry visible
+   streaks and compact white matter looks featureless -- see above). Isotropic objects: 0 everywhere.
+
+Figures: `real/sweep_soft/sweep_<specimen>.png` (rows resolution, columns window; lines by direction, sheets grey) and
+`sweep_metrics.png`; numbers in `sweep.json`.

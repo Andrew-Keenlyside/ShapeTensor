@@ -41,7 +41,7 @@ ap.add_argument("--entities", default="lobes", choices=("votes", "lobes"), help=
 ap.add_argument("--axes", default="ring", choices=("votes", "density", "hybrid", "ring"), help="readout: entity frames/types from the votes or the density moment")
 ap.add_argument("--saddle", type=float, default=0.8, help="readout: lobes joined across saddles this high (of the lower peak); <= 0: off")
 ap.add_argument("--kappa", default="votes", choices=("votes", "moments", "votes_all"), help="readout: reported concentrations")
-ap.add_argument("--mass", default="maps", choices=("maps", "density", "votes", "maps_votes"), help="readout: masses from the split head's maps (if any), the density, the mass votes, or votes' shares of the map")
+ap.add_argument("--mass", default="basins", choices=("maps", "density", "votes", "maps_votes", "basins"), help="readout: masses from the split head's maps (if any), the density, the mass votes, or votes' shares of the map")
 ap.add_argument("--mass-vote", action="store_true", help="a per-direction vote for the owner's mass (the decoder)")
 ap.add_argument("--split-head", action="store_true", help="a head for the objects' occupancy by kind (oriented / isotropic)")
 ap.add_argument("--lobe-weight", type=float, default=None, help="entity_train.DENS_LOBE_WEIGHT (the density loss weighted toward lobes)")
