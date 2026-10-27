@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from shapetensor.filters import gaussian
+import torch.nn.functional as Fn
 from shapetensor.learn import generator as G
 from shapetensor.learn import scene as SC
 
@@ -106,3 +107,83 @@ def test_a_heavy_psf_widens_the_blur_and_the_targets_resolution_rule(monkeypatch
     assert all(h >= min(1.5 * p, 6.0) - 0.01 for h, p in zip(heavy["psf"], plain["psf"]))
     from shapetensor.learn.train import acquisition_blur
     assert acquisition_blur(heavy) > acquisition_blur(plain)
+
+
+# ---- packed tissue (Scene.tissue), crop strata, phantom version 2 (27 Oct) ----------------------------------------------
+
+def _tissue(seed, vox, grey=False, shape=(96, 96, 96)):
+    sc = SC.Scene(shape, seed, DEV, vox); gs = sc.tissue(grey=grey); sc.groups = gs
+    ren = sc.render()
+    occ = torch.stack([g["occupancy"].float() for g in ren["groups"]]); kinds = [g["group"].kind for g in ren["groups"]]
+    ori = occ[[i for i, k in enumerate(kinds) if k in ("line", "sheet")]].sum(0)
+    return sc, ren, ori
+
+
+def test_packed_tissue_fills_the_canvas_wall_to_wall_and_keeps_its_packing():
+    for seed, vox in ((0, 4.0), (4, 2.0)):
+        sc, ren, ori = _tissue(seed, vox)
+        rec = sc.record["tissue"]
+        ext = float((gaussian(ori[None, None], 2.0)[0, 0] > 0.15).float().mean())
+        assert ext > 0.75, (seed, ext)                                                       # tissue everywhere, not bundles on a background
+        lines = [g for g in ren["groups"] if g["group"].name == "tract"]
+        for g, phi in zip(lines, rec["packing"]):                                            # each population's fill near its packing where
+            o = g["occupancy"].float(); inside = o > 0                                       # it lies (resolved fibres jam near 0.6)
+            assert float(o[inside].mean()) < 1.0 and float(o.sum()) > 0
+        assert rec["elements"] <= (3000 if rec["resolved"] else 4000) + 50
+
+
+def test_tract_tensors_follow_their_direction_fields():
+    sc, ren, ori = _tissue(2, 20.0)
+    for g in ren["groups"]:
+        if g["group"].name != "tract":
+            continue
+        T = g["tensor"].float(); o = g["occupancy"].float(); m = o > 0.2
+        M = torch.stack([torch.stack([T[0], T[3], T[4]], -1), torch.stack([T[3], T[1], T[5]], -1), torch.stack([T[4], T[5], T[2]], -1)], -2)[m]
+        ev = torch.linalg.eigvalsh(M.double() + 1e-9 * torch.eye(3, device=M.device, dtype=torch.float64))
+        assert float(ev[:, 2].median()) > 0.8                                                # one direction per voxel: line-like
+
+
+def test_a_crossing_zone_holds_populations_at_its_recorded_angle():
+    for seed in range(40):
+        sc = SC.Scene((96, 96, 96), seed, DEV, 8.0); gs = sc.tissue()
+        cz = sc.record["tissue"].get("crossing")
+        zone = [g for g in gs if g.name == "tract" and getattr(g, "centre_pt", None) is not None]
+        zone = [g for g in zone if torch.allclose(g.centre_pt, zone[0].centre_pt)] if zone else []
+        if cz and not cz[0]["planar"] and cz[0]["grain"] == "layers" and len(cz[0]["angles"]) == 1 and len(zone) == 2:
+            break                                                                            # a two-population layered zone, both placed
+    pops = zone
+    assert len(pops) == 2
+    d = []
+    for g in pops[:2]:                                                                       # each population's mean path direction
+        P = g.paths; t = Fn.normalize(P[:, -1] - P[:, 0], dim=-1)
+        Mt = (t[:, :, None] * t[:, None, :]).mean(0).double().cpu(); d.append(torch.linalg.eigh(Mt + 1e-9 * torch.eye(3, dtype=torch.float64))[1][:, -1].float())
+    ang = math.degrees(math.acos(min(1.0, abs(float(d[0] @ d[1])))))
+    assert abs(ang - cz[0]["angles"][0]) < 12, (ang, cz)
+
+
+def test_grey_tissue_is_mostly_without_direction():
+    sc, ren, ori = _tissue(3, 4.0, grey=True)
+    assert float((gaussian(ori[None, None], 2.0)[0, 0] > 0.15).float().mean()) < 0.35
+    assert any(g["group"].name in ("nuclei", "neuropil", "somata", "membranes") for g in ren["groups"])
+
+
+def test_crop_strata_pick_packed_crops_from_packed_scenes(monkeypatch):
+    monkeypatch.setattr(SC, "P_TISSUE", 1.0); monkeypatch.setattr(SC, "P_GREY_TISSUE", 0.0)
+    fills = []
+    for seed in range(3):
+        s, d = SC.draw_scene((48,) * 3, seed=90_000_000 + 8 * seed, device=DEV, canvas=96, crops_per_scene=8, voxel_um=4.0, fill_quota=(1, 0, 0, 0), strength=0.3)
+        fills.append(d["record"]["crop_fill"]); SC._scene_cache().clear()
+    assert all(f["stratum"] == "packed" for f in fills) and sum(f["hit"] for f in fills) >= 2, fills
+
+
+def test_phantom_version_1_is_unchanged_and_version_2_draws_narrow_packed_crossings(monkeypatch):
+    from shapetensor.learn import phantom2 as P2
+    a = P2.random_spec("cross", torch.Generator().manual_seed(900_000))
+    assert [round(s["half"], 3) for s in a[0]] == [9.077, 7.739, 9.333] and a[0][0]["conc"] == 0.94   # the selection set's first crossing
+    monkeypatch.setattr(P2, "VERSION", 2)
+    angs = []
+    for i in range(200):
+        sp, lk = P2.random_spec("cross", torch.Generator().manual_seed(i)); A, B = torch.tensor(sp[0]["axis"]), torch.tensor(sp[1]["axis"])
+        angs.append(math.degrees(math.acos(min(1.0, abs(float(A @ B))))))
+        assert all(s_["conc"] == 1.0 for s_ in sp) and sp[0]["half"] >= 16
+    assert min(angs) < 12 and sum(a_ < 30 for a_ in angs) > 60

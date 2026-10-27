@@ -81,3 +81,77 @@ voxels twice as large (h). Scale bars, 100 um.
   size and sharpness (they need no labels: real HiP-CT too).
 - More directions per query for the density loss (32 now), sampled near lobes and between neighbouring ones.
 - A retrain on this generator, then the crossing-angle tuning set, the selection criteria and DiSCo.
+
+## The rest of the generator list (27 Oct, afternoon; `notes/shortfalls_solutions_2026-10-27.md`)
+
+**Packed tissue (`Scene.tissue`, `P_TISSUE` 0.4 of scenes where the voxel size suits; shortfall 1).** The canvas filled
+wall to wall by domains -- a warped Voronoi partition, each domain stretched 2-6x along its own fibre direction as
+fascicles are, abutting, with thin extracellular bands in 30 % of scenes:
+- tract domains: one population on a smooth direction field, packing 0.3-0.85, contrast drawn apart from it, often
+  3-25 deg from its neighbour (fascicles of one tract);
+- crossing zones (30 % of domains, at least one in half the scenes): 2-3 populations interleaved **fibre by fibre**,
+  **by fascicles** (the first in tubes along itself, the others between) or **in layers** (slabs along the planes'
+  common normal); angles 8-40 deg in half the draws; minority shares 0.1-0.5; contrasts related in 40 %; in 15 %,
+  3-4 line populations in one plane (what a sheet must be told from);
+- packed cell domains (8 %); rows of cells along the fibres (half the scenes); vessels through the tissue (40 %);
+- the grey-matter variant (25 % of tissue scenes): sparse fibres turning in every direction among dense cells and
+  neuropil.
+Elements fill each domain by a coverage grid (half resolution; seeded where free, grown in one batch along per-voxel
+field grids until they leave their domain): fibres >= 0.45 voxel one by one, each an object (<= 3000); finer ones as
+strands (<= 4000) **drawn as a field** -- their centrelines' material and direction splatted and blurred by their
+radius -- over a smooth part: the swept renderer took 2 minutes a scene on a CPU, the field ~1 s. A tissue scene on
+the CPU (the training's workers): 4-9 s to build, 1-4 s to render (ordinary scenes 3-20 s), shared by 8 crops.
+Crops centre on crossing zones (`centre_pt`); the targets' orientation evidence comes from texture in tissue scenes
+(`nuisance(orient_from_texture=True)`: packed tissue has no edges to credit).
+
+**Crop strata** (`draw_scene(fill_quota=...)`, `FILL_QUOTA` (0.3, 0.3, 0.2, 0.2) packed / partial / sparse / none by
+oriented fill; the training passes it): of 8 random crops the first in the drawn stratum, else the nearest. Hit 31 %
+(a stratum the scene cannot supply is missed: packed crops come from packed scenes).
+
+**Crossings and contrasts.** Bundle crossings: 8-40 deg in half the draws (`P_NARROW`); related contrasts in 40 %
+(`P_RELATED_CONTRAST`); fans 25 % (`P_FAN`, was 15 %) and a fan beside 40 % of crossings; `cross_p` 0.5 in training
+(was 0.3); 20 % of training queries at crossing cores (`ENTITY["p_cross"]`, now found at window scale -- interleaved
+fibres of two populations rarely share a voxel). Direction-free scenes 15 % (`ISO_SCENE_P`, was 8 %); sheets weighted
+0.12 (was 0.09).
+
+**Phantom families version 2** (`phantom2.VERSION = 2`; version 1, the default, reproduces the selection and final
+sets exactly -- tested): crossings 10-90 deg with 8-40 in half; a third population in 40 %; packed (slab half-width
+16-30 of 64; fibre fill 0.3-0.6 split with a minority share 0.1-0.5); contrasts related in 40 %; **exact tangents for
+every family** -- one target convention with the scene generator.
+
+**Outcome** (48 training crops each, the training's settings, the same measures; `generator_v2_before_after.png`):
+
+| | before | after |
+|---|---|---|
+| oriented fill of a crop, median | 7 % | 41 % |
+| crops < 10 % oriented | 52 % | 33 % |
+| crops > 70 % oriented | 8 % | 21 % |
+| crossings below 40 deg | 30 % (of 20) | 58 % (of 38) |
+| queries at crossing cores | 3.8 % | 6.2 % |
+| populations per query | 2.30 | 2.67 |
+| largest training window | sigma 6 | sigma 12 |
+| draw time per crop (GPU, median) | 0.65 s | 0.95 s |
+
+Tests: `tests/test_generator_resolution.py` (16: tissue fills the canvas and keeps its packing, tract tensors follow
+their fields, a crossing zone at its recorded angle, grey tissue mostly direction-free, packed strata from packed
+scenes, phantom version 1 unchanged / version 2 narrow and packed, plus the earlier texture, meander and heavy-PSF
+tests). Scene, acquisition, fibre, dataflow, entity, direct-path, augment and readout suites: 178 passed.
+
+**Found on the way, not fixed: the distortion mirrors the crop's edge.** The elastic warp (up to half the crops) and the
+affine (30 %) resample the crop alone; what they pull from beyond it is filled by reflection (affine) or edge
+replication (warp): mirrored V-shaped "crossings" and kinked fibres, or streaks across the face, up to ~20 voxels in.
+The labels follow the image, but the entity targets clamp pulled points to the face -- image and targets disagree
+there. Tapering the displacement to zero at the faces removed the mirrors but bent everything near them (an affine of
+15-20 % undone within a band); a margin crop would cost ~5x the voxels (the affine reaches 15-25 voxels at a 64^3
+crop's corners). **The fix: apply the affine and warp when the crop is cut from the canvas** (which holds the tissue
+beyond the crop): resample the canvas fields through the displacement (tensors by the local Jacobian, identities by
+nearest), and let the targets take entries from beyond the crop face -- a change to `draw_scene`, the crop helpers
+and `entity_targets` together. Until then `p_affine=0` avoids the mirrors (the figures here use it).
+
+**Not done.**
+- Texture spectra and intensity histograms calibrated on real HiP-CT, and label-free losses on real crops: the
+  project's rule is "real data stays checks only" (`plan_full_generator.md`), and the only local HiP-CT is the test
+  crops. A decision for you: a held-out specimen set for calibration would make it legitimate.
+- Training-side items (augmentation by the cube's symmetries, test-time rotations, losses, the sharpness input).
+- A fresh test set: phantom version 2 and tissue crops from unused seeds (4.1M, 4.2M), to be generated once and kept
+  unseen until a candidate is scored.

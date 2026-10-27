@@ -512,12 +512,17 @@ FAMILY_SCALE = {"bundle": (0.005, 200), "tree": (0.5, 3000), "network": (0.3, 10
                 "plywood": (0.01, 20), "fascicles": (0.5, 500), "trabecular": (2, 1000), "tubules": (0.3, 30), "epithelium": (0.1, 15),
                 "dendrite": (0.05, 10), "gland": (0.5, 60), "neuron": (0.2, 10), "neuropil": (0.005, 30), "organelles": (0.002, 0.3),
                 "compartments": (0.002, 0.2), "myelin": (0.003, 1.0), "nuclei": (0.005, 3), "myofibrils": (0.005, 1.0), "alveoli": (1, 500),
-                "jigsaw": (0.1, 5), "honeycomb": (0.05, 30), "xylem": (0.5, 60), "lattice": (0.05, 50), "organs": (100, 5000), "granules": (0.01, 60)}
+                "jigsaw": (0.1, 5), "honeycomb": (0.05, 30), "xylem": (0.5, 60), "lattice": (0.05, 50), "organs": (100, 5000), "granules": (0.01, 60), "tissue": (0.05, 200)}
 SCALE_FALLOFF = 0.6               # decades: the width of the fall-off outside a family's range (a Gaussian in log10 voxel size)
 SCALE_FLOOR = 0.02                # never zero: a family out of its range still turns up now and then (generalisation)
 P_UNRESOLVED_TEXTURE = 0.85       # unresolved bundles drawn with strand texture (the rest a smooth partial-volume tube)
 P_TORTUOUS = 0.25                 # bundles whose path meanders on a short correlation length (5-15 voxels; curvature 0.03-0.08 / voxel)
-ISO_SCENE_P = 0.08                # scenes of isotropic content only (granules, crystals): there, the right answer is no direction
+P_TISSUE = 0.4                    # scenes of packed tissue (Scene.tissue: fibres wall to wall), where the voxel size suits
+P_GREY_TISSUE = 0.25              # of those, grey-matter-like (sparse turning fibres among dense cells and neuropil)
+P_NARROW = 0.5                    # crossing angles drawn at 8-40 deg (else 5-90): narrow crossings oversampled
+P_RELATED_CONTRAST = 0.4          # crossing populations of one material: contrasts within +-10 % of each other
+P_FAN = 0.25                      # bundles fanning past their middle (was 0.15)
+ISO_SCENE_P = 0.15                # scenes of isotropic content only (granules, crystals): there, the right answer is no direction (was 0.08)
 
 
 def scale_weight(family: str, voxel_um: float) -> float:
@@ -552,7 +557,7 @@ class Group:
 class Scene:
     """Draws the objects of one scene in physical units on a ``shape`` canvas (see the module docstring)."""
 
-    FAMILIES = {"bundle": 0.24, "tree": 0.11, "network": 0.05, "helix": 0.04, "sheet": 0.09, "foam": 0.04, "porous": 0.03,
+    FAMILIES = {"bundle": 0.24, "tree": 0.11, "network": 0.05, "helix": 0.04, "sheet": 0.12, "foam": 0.04, "porous": 0.03,
                 "cells": 0.09, "crystals": 0.04, "radial": 0.04, "plywood": 0.04, "fascicles": 0.05, "trabecular": 0.03,
                 "tubules": 0.04, "epithelium": 0.03, "dendrite": 0.02, "gland": 0.02, "neuron": 0.03, "neuropil": 0.03,
                 "organelles": 0.05, "compartments": 0.05, "myelin": 0.04, "nuclei": 0.04, "myofibrils": 0.03, "alveoli": 0.03,
@@ -706,7 +711,8 @@ class Scene:
             kw["flat"] = torch.full_like(rad, rng.lu(0.25, 0.8)); kw["phi"] = smooth1d(rng.randn(N, S), 20) * 0.3
         return rad, con, kw
 
-    def bundle(self, cross_with: Curves | None = None, mode: str = "angled", axis=None, centre=None, radius=None, curv=None, fibre: dict | None = None):
+    def bundle(self, cross_with: Curves | None = None, mode: str = "angled", axis=None, centre=None, radius=None, curv=None, fibre: dict | None = None,
+               contrast: float | None = None, fan: float | None = None):
         """A bundle of fibres (resolved: packed on a jittered hexagonal section; unresolved: the bundle's partial volume).
         ``mode``: ``single``; ``angled`` / ``kissing`` / ``fanning`` (through a point of ``cross_with``); ``split`` (the
         tract divides past a point into two halves diverging by an angle -- returned as two groups, one population each)."""
@@ -730,7 +736,8 @@ class Scene:
                 nrm = Fn.normalize(torch.linalg.cross(d, torch.linalg.cross(t0, d)), dim=0)
                 P0 = P0 + nrm * (float(cross_with.rad[0].mean()) + Rb)
             else:
-                ang = math.radians(r.u(5, 90)); d = math.cos(ang) * t0 + math.sin(ang) * p          # 5-90: below ~30 deg one SH lobe
+                ang = math.radians(r.u(8, 40) if r.p(P_NARROW) else r.u(5, 90))                   # narrow crossings oversampled
+                d = math.cos(ang) * t0 + math.sin(ang) * p
             c = P0; cross = (P0, t0, d)
         else:
             c = centre if centre is not None else self.centre_point(); d = axis if axis is not None else r.unit()
@@ -741,9 +748,9 @@ class Scene:
                            r.lu(5, 15) if tort else r.lu(15, 80), r)                                                         # bundle's (no folding;
                                                                                                                      # DiSCo's ~20 deg per 15 um)
         s = torch.arange(S, device=self.device, dtype=torch.float32) / (S - 1)
-        fan = r.u(0.3, 1.5) if (mode == "fanning" or r.p(0.15)) else 0.0
+        fan = fan if fan is not None else (r.u(0.3, 1.5) if (mode == "fanning" or r.p(P_FAN)) else 0.0)
         Rs = Rb * (1 + fan * torch.relu(s - 0.5) * 2)                       # fanning: the bundle widens past its middle
-        contrast = self.contrast(); bid = int(self.ids(1, Rb)[0])
+        contrast = self.contrast() if contrast is None else float(contrast); bid = int(self.ids(1, Rb)[0])
         side = None
         if rf >= 0.45:                                                      # resolved fibres
             from . import fibres as FB
@@ -1661,6 +1668,296 @@ class Scene:
         self.record["families"].append({"neuron": {"file": fsel.stem, "cell_type": str(z["cell_type"]) if "cell_type" in z else "", "chains": len(curves)}})
         return out
 
+    def tissue(self, grey: bool = False) -> list:
+        """Packed tissue (27 Oct): the canvas filled wall to wall, as white matter is -- not bundles on a background.
+        Domains (a warped Voronoi partition, each stretched along its own fibre direction as fascicles are) abut with
+        no gap, or with a thin extracellular band; a tract domain is one population following a smooth direction field
+        at packing 0.3-0.85 (contrast drawn apart from it), often nearly parallel to its neighbour (fascicles of one
+        tract); a crossing zone holds two or three populations interleaved fibre by fibre, by fascicles or in layers
+        (angles oversampled at 8-40 deg; shares 0.1-0.5; contrasts often related; sometimes three or four in one plane,
+        the line populations a sheet must be told from); a cell domain holds packed cells. Elements fill each domain by a
+        coverage grid (seeded where it is free, grown along the field until they leave their domain): fibres of radius
+        >= 0.45 voxel one by one (each an object), finer ones as strands of their partial volume over a smooth part (as
+        unresolved bundles). Then rows of cells along the fibres and vessels through the tissue, sometimes. ``grey``:
+        grey-matter-like -- sparse fibres turning in every direction among dense cells and neuropil. Returns the groups."""
+        r = self.r; dev = self.device; shp = self.shape; Z = float(max(shp)); vu = self.voxel_um
+        from . import compose as CP
+        g1 = [torch.arange(n, device=dev, dtype=torch.float32) for n in shp]
+        X = torch.stack(torch.meshgrid(*g1, indexing="ij"), -1)                                     # (Z, Y, X, 3)
+        rf = r.lu(0.15, 4.0) / vu                                                                   # the fibres' radius (voxels)
+        rec = {"grey": bool(grey), "fibre_um": round(rf * vu, 3)}
+        pops = []                                                                                   # mask, field grid, packing, contrast, kind
+
+        Xc = X[::2, ::2, ::2]                                                                       # (smooth over >= 13 voxels: evaluated every
+        def dir_grid(d0, amp, L):                                                                   # second voxel, interpolated)
+            f = CP.Smooth(d0, amp, L, r); Xf = Xc.reshape(-1, 3)
+            dc = torch.cat([f.dirs(Xf[i:i + (1 << 20)]) for i in range(0, Xf.shape[0], 1 << 20)]).view(*Xc.shape[:3], 3)
+            d = Fn.interpolate(dc.movedim(-1, 0)[None], size=shp, mode="trilinear", align_corners=False)[0].movedim(0, -1)
+            return Fn.normalize(d, dim=-1)
+
+        def narrow_angle():
+            return r.u(8, 40) if r.p(P_NARROW) else r.u(5, 90)
+
+        def turned(d, deg):
+            p = Fn.normalize(torch.linalg.cross(d, r.unit()), dim=0); t = math.radians(deg)
+            return Fn.normalize(math.cos(t) * d + math.sin(t) * p, dim=0)
+
+        if grey:
+            K = 1; lab = torch.zeros(shp, dtype=torch.long, device=dev); kinds = ["grey"]; gap = torch.zeros(shp, dtype=torch.bool, device=dev)
+        else:
+            K = r.i(2, 6); C = r.rand(K, 3) * torch.tensor(shp, device=dev, dtype=torch.float32)
+            kinds = ["cross" if r.p(0.3) else "cells" if r.p(0.08) else "tract" for _ in range(K)]
+            if "cross" not in kinds and r.p(0.5):
+                kinds[r.i(0, K - 1)] = "cross"
+            dirs, prev = [], None
+            for k in range(K):                                                                      # neighbours often one tract's fascicles
+                d = turned(prev, r.lu(3, 25)) if (prev is not None and r.p(0.5)) else r.unit(); dirs.append(d); prev = d
+            Dk = []
+            for k in range(K):                                                                      # distance stretched along the domain's
+                v = X - C[k]; s_ = 1.0 if kinds[k] == "cross" else r.lu(2.0, 6.0)                 # direction: domains elongated as fascicles
+                along = v @ dirs[k]
+                Dk.append(((v - along[..., None] * dirs[k]).pow(2).sum(-1) + (along / s_) ** 2).sqrt()
+                          + r.u(0.0, 0.2) * Z * smooth_noise(shp, r.lu(8, 30), r.g, dev))
+            Dk = torch.stack(Dk); two = Dk.topk(2, dim=0, largest=False).values; lab = Dk.argmin(0); del Dk
+            gap = (two[1] - two[0]) < (r.u(0.5, 2.0) if r.p(0.3) else 0.0)                          # thin bands between domains
+            rec["gap_band"] = bool(gap.any())
+        for k in range(K):
+            dom = (lab == k) & ~gap
+            if int(dom.sum()) < 200:
+                continue
+            if kinds[k] == "grey":
+                for _ in range(r.i(1, 2)):
+                    pops.append(dict(mask=dom, dg=dir_grid(r.unit(), r.lu(0.8, 2.0), r.lu(0.1, 0.4) * Z), phi=r.u(0.03, 0.15), contrast=self.contrast(), kind="grey"))
+            elif kinds[k] == "tract":
+                pops.append(dict(mask=dom, dg=dir_grid(dirs[k], r.lu(0.02, 0.4), r.lu(0.3, 2.0) * Z), phi=r.u(0.3, 0.85), contrast=self.contrast(), kind="tract"))
+            elif kinds[k] == "cells":
+                pops.append(dict(mask=dom, kind="cells"))
+            else:                                                                                   # a crossing zone
+                planar = r.p(0.15); M = r.i(3, 4) if planar else (3 if r.p(0.35) else 2)
+                A = dirs[k]; n_pl = Fn.normalize(torch.linalg.cross(A, r.unit()), dim=0)
+                if planar:                                                                          # M lines in one plane, spread
+                    th0 = r.u(0, 180); step = r.u(25, 180 / M)
+                    ds = [Fn.normalize(math.cos(math.radians(th0 + j * step)) * A + math.sin(math.radians(th0 + j * step)) * torch.linalg.cross(n_pl, A), dim=0) for j in range(M)]
+                    angs = [round(step, 1)] * (M - 1)
+                else:
+                    a2 = narrow_angle(); ds = [A, turned(A, a2)]; angs = [round(a2, 1)]
+                    if M == 3:
+                        ds.append(r.unit()); angs.append(round(math.degrees(math.acos(min(1.0, abs(float(ds[2] @ A))))), 1))
+                sh = np.array([1.0] + [r.u(0.1, 0.5) / (1 - r.u(0.1, 0.5)) for _ in range(M - 1)]); sh = sh / sh.sum()   # minority shares 0.1-0.5
+                grain = "layers" if planar else ["fibre", "fascicle", "layers"][r.i(0, 2)]
+                phi = r.u(0.3, 0.85); c0 = self.contrast(); related = r.p(P_RELATED_CONTRAST)
+                cons = [c0 * (r.lu(0.9, 1.1) if related else 1.0) if (related or j == 0) else self.contrast() for j in range(M)]
+                if grain == "fibre":                                                                # each population over the whole zone
+                    subs = [dom] * M; phis = [phi * s_ for s_ in sh]
+                elif grain == "layers":                                                             # slabs along the planes' common normal
+                    nrm = Fn.normalize(torch.linalg.cross(ds[0], ds[1]), dim=0); t_ = r.lu(2.0, 12.0) * max(rf, 1.0)
+                    li = ((X @ nrm) / t_).floor().long(); u_ = torch.rand(int(li.max() - li.min()) + 1, generator=r.g, device=dev)
+                    which = torch.searchsorted(torch.tensor(np.cumsum(sh)[:-1], device=dev, dtype=torch.float32), u_[li - li.min()])
+                    subs = [dom & (which == j) for j in range(M)]; phis = [phi] * M
+                else:                                                                               # fascicles: the first population in tubes
+                    e1_ = Fn.normalize(torch.linalg.cross(ds[0], r.unit()), dim=0); e2_ = torch.linalg.cross(ds[0], e1_)   # along its own direction,
+                    g_ = r.lu(3.0, 15.0) * max(rf, 1.0); wq = r.u(0.0, 0.4) * g_                      # the others between them: fascicle
+                    uv = torch.stack([X @ e1_, X @ e2_], -1) / g_ + (wq / g_) * torch.stack([smooth_noise(shp, g_, r.g, dev) for _ in range(2)], -1)
+                    ij = uv.floor().long(); key = ij[..., 0] * 100003 + ij[..., 1]                    # sections on a warped grid across it
+                    uk, inv = torch.unique(key, return_inverse=True)
+                    tube = (torch.rand(uk.shape[0], generator=r.g, device=dev) < float(sh[0]))[inv]
+                    rest = dom & ~tube; subs = [dom & tube] + [rest] * (M - 1)
+                    phis = [phi] + [phi * s_ / max(1 - sh[0], 1e-3) for s_ in sh[1:]]
+                cz = torch.nonzero(dom).float().mean(0)                                              # (crops may centre on the zone)
+                for j in range(M):
+                    pops.append(dict(mask=subs[j], dg=dir_grid(ds[j], r.lu(0.02, 0.3), r.lu(0.3, 2.0) * Z), phi=phis[j], contrast=cons[j], kind="cross", centre=cz))
+                rec.setdefault("crossing", []).append({"angles": angs, "grain": grain, "shares": [round(float(x), 2) for x in sh], "planar": planar,
+                                                       "related_contrast": related})
+        rec["domains"] = K; rec["kinds"] = kinds
+        lines = [p for p in pops if p["kind"] != "cells"]
+        groups = []
+        if lines:                                                                                   # fill: fibres one by one, or strands
+            vol = sum(float(p["mask"].sum()) for p in lines); L_ = min(2.0 * Z, max(20.0, Z * 0.8))
+            cap = 3000 if rf >= 0.45 else 4000                                                    # (resolved: the swept renderer's cost ~
+                                                                                                  # elements x length -- CPU workers)
+            re_min = math.sqrt(0.55 * vol / (math.pi * L_ * cap))
+            fibres = rf >= 0.45 and rf >= re_min
+            re = rf if fibres else max(0.6, rf, re_min, r.lu(0.6, 2.5))
+            P_all, pid_all, cov_frac = self._fill_domains(lines, re, cap, fibres)
+            rec.update({"resolved": bool(fibres), "element_vox": round(re, 2), "elements": int(P_all.shape[0]) if P_all is not None else 0,
+                        "coverage": [round(float(c_), 2) for c_ in cov_frac], "packing": [round(float(p["phi"]), 2) for p in lines]})
+            for j, p in enumerate(lines):
+                P = _trim_paths(P_all[pid_all == j]) if P_all is not None else None
+                pid = int(self.ids(1, float(p["mask"].sum()) ** (1 / 3))[0])
+                g = Group("tract" if p["kind"] != "grey" else "grey fibres", "line", re, p["contrast"])
+                tens = line_tensor(p["dg"]).movedim(-1, 0)                                          # (6, Z, Y, X) along the field
+                if P is not None and P.shape[0]:
+                    N, S = P.shape[:2]
+                    if fibres:                                                                      # resolved: each fibre an object
+                        rad = torch.full((N, S), re, device=dev) * torch.exp(0.12 * r.randn(N, 1)).clamp(0.8, 1.2)
+                        obj = self.ids(N, rad.amin(1))
+                        for o_ in obj.tolist():
+                            self.parents[o_] = pid
+                        g.curves.append(curves_like(P, rad, r, obj=obj, seg=torch.full((N,), pid, device=dev), contrast=p["contrast"]))
+                    else:                                                                           # strands of the partial volume, drawn as a
+                        beta = r.u(0.3, 0.9)                                                        # field: their centrelines' material and
+                        seg = (P[:, 1:] - P[:, :-1]).norm(dim=-1).sum()                              # direction splatted and blurred by their
+                        fill = max(float(seg) * math.pi * re * re / max(float(p["mask"].sum()), 1.0), 0.05)   # radius (soft-edged, as a
+                        xi = torch.exp(r.u(0.15, 0.5) * r.randn(N)); xi = xi / xi.mean()            # group of fine fibres is; the swept
+                        dens = (beta * p["phi"] / fill * xi).clamp(0.02, 1.0)                        # renderer took minutes on a CPU)
+                        occ_s, ten_s = self._strand_field(P, re, dens)
+                        occ_b = p["mask"].float() * p["phi"] * (1 - beta)                           # the smooth part (the rest of the fill)
+                        occ = occ_s + occ_b
+                        tens = torch.where((occ > 1e-6)[None], (ten_s + occ_b[None] * tens) / occ.clamp_min(1e-6)[None], tens)
+                        on = (occ > 1e-4).float()
+                        desc = torch.zeros((5,) + shp, device=dev); desc[0] = rf * on; desc[3] = on
+                        g.dense.append((occ, tens, desc, p["contrast"], torch.full(shp, pid, device=dev, dtype=torch.long)))
+                if P is None or P.shape[0] == 0:                                                    # (nothing placed: no population)
+                    continue
+                g.centre_P = P[P.shape[0] // 2]
+                if "centre" in p:
+                    g.centre_pt = p["centre"]
+                g.paths = P
+                groups.append(g)
+        for p in pops:                                                                              # packed cells
+            if p["kind"] == "cells":
+                rc = max(1.2, (self.size(3, 12, 1.2, 10.0) or 2.0)); idx = torch.nonzero(p["mask"]).float()
+                if idx.shape[0] == 0:
+                    continue
+                Cc = idx[torch.randperm(idx.shape[0], generator=r.g, device=dev)[:4000]] + r.rand(min(4000, idx.shape[0]), 3) - 0.5
+                cell_ = (Cc / (2.2 * rc)).floor().long(); key = (cell_[:, 0] * 4099 + cell_[:, 1]) * 4099 + cell_[:, 2]
+                _, inv = torch.unique(key, return_inverse=True)
+                first = torch.full((int(inv.max()) + 1,), Cc.shape[0], device=dev, dtype=torch.long).scatter_reduce_(0, inv, torch.arange(Cc.shape[0], device=dev), "amin")
+                Cc = Cc[first]; n = Cc.shape[0]
+                A = _rot(r, n) * (rc * torch.exp(0.12 * r.randn(n, 1, 1)).clamp(0.8, 1.15))
+                gc = self._solids(Cc, A, "cells", self.ids(n, rc))
+                if gc is not None:
+                    groups.append(gc); rec["cells_packed"] = rec.get("cells_packed", 0) + n
+        tracts = [g for g in groups if g.name == "tract" and getattr(g, "paths", None) is not None and g.paths.shape[0] >= 4]
+        if tracts and not grey and r.p(0.5):                                                         # rows of cells along the fibres
+            g_ = tracts[r.i(0, len(tracts) - 1)]; P = g_.paths; rc = max(1.0, (self.size(3, 8, 1.0, 6.0) or 1.5))
+            pick = torch.randperm(P.shape[0], generator=r.g, device=dev)[:r.i(5, 40)]; sp = r.lu(2.5, 6.0) * rc
+            Cs, Ts = [], []
+            for q in pick.tolist():
+                Pq = P[q]; seg = (Pq[1:] - Pq[:-1]).norm(dim=-1); s_ = torch.cat([torch.zeros(1, device=dev), seg.cumsum(0)])
+                if float(s_[-1]) < 2 * sp:
+                    continue
+                at = torch.arange(float(r.u(0, sp)), float(s_[-1]), sp, device=dev); i_ = torch.searchsorted(s_, at).clamp(1, len(s_) - 1)
+                Cs.append(Pq[i_]); Ts.append(Fn.normalize(Pq[i_] - Pq[i_ - 1], dim=-1))
+            if Cs:
+                Cc = torch.cat(Cs); Tt = torch.cat(Ts); n = Cc.shape[0]; el = r.lu(1.2, 2.0)
+                e1_ = Fn.normalize(torch.linalg.cross(Tt, r.unit()[None].expand(n, 3)), dim=-1); e2_ = torch.linalg.cross(Tt, e1_)
+                A = torch.stack([e1_ * rc, e2_ * rc, Tt * rc * el], -1)                             # long axis along the fibres
+                gc = self._solids(Cc, A, "cell rows", self.ids(n, rc))
+                if gc is not None:
+                    groups.append(gc); rec["cell_rows"] = n
+        if grey:                                                                                    # among dense cells and neuropil
+            for fam_ in (self.cells, self.neuropil):
+                out_ = fam_()
+                for g_ in (out_ if isinstance(out_, list) else [out_] if out_ is not None else []):
+                    groups.append(g_)
+        elif r.p(0.4):                                                                              # vessels through the tissue
+            out_ = self.tree("vessel")
+            for g_ in (out_ if isinstance(out_, list) else [out_] if out_ is not None else []):
+                groups.append(g_)
+            rec["vessels"] = True
+        self.record["tissue"] = rec
+        return groups
+
+    def _strand_field(self, P: torch.Tensor, re: float, dens: torch.Tensor):
+        """Strands ``P (N, S, 3)`` of radius ``re`` and density ``dens (N,)`` as fields: each segment's material volume
+        (pi re^2 ds dens) and its direction dyad splatted trilinearly at its midpoint, then blurred (sigma 0.6 ``re``) --
+        ``occ (Z, Y, X)`` (mass kept) and the occupancy-weighted tensor ``(6, Z, Y, X)``."""
+        shp = self.shape; dev = self.device
+        sg = P[:, 1:] - P[:, :-1]; ds = sg.norm(dim=-1); keep = ds > 1e-6
+        X = (0.5 * (P[:, 1:] + P[:, :-1]))[keep]; T = (sg / ds.clamp_min(1e-9)[..., None])[keep]
+        W = (math.pi * re * re * ds * dens[:, None])[keep]
+        V = torch.cat([W[:, None], W[:, None] * line_tensor(T)], 1)                                  # (n, 7)
+        G = torch.zeros(int(np.prod(shp)), 7, device=dev); Z_, Y_, X_ = shp
+        p0 = X.floor(); fr = X - p0; i0 = p0.long()
+        for dz in (0, 1):
+            for dy in (0, 1):
+                for dx in (0, 1):
+                    iz, iy, ix = i0[:, 0] + dz, i0[:, 1] + dy, i0[:, 2] + dx
+                    w = (fr[:, 0] if dz else 1 - fr[:, 0]) * (fr[:, 1] if dy else 1 - fr[:, 1]) * (fr[:, 2] if dx else 1 - fr[:, 2])
+                    ok = (iz >= 0) & (iz < Z_) & (iy >= 0) & (iy < Y_) & (ix >= 0) & (ix < X_)
+                    G.index_add_(0, ((iz * Y_ + iy) * X_ + ix)[ok], V[ok] * w[ok, None])
+        G = gaussian(G.T.reshape(7, *shp), max(0.5, 0.6 * re))
+        return G[0], G[1:]
+
+    def _fill_domains(self, pops: list, re: float, cap: int, fibres: bool, rounds: int = 3):
+        """Elements of radius ``re`` filling each population's mask along its field grid (``pops[j]["mask"]``,
+        ``["dg"] (Z, Y, X, 3)``, ``["phi"]``), all grown in one batch: per round, seeds where the shared coverage grid is
+        still free (one per cell of side 2 ``re``, at most ``cap`` in all), each grown both ways along its own field
+        (nearest voxel, axial sign kept) until it leaves its own mask; the grid then marks every voxel within ``re`` of
+        a path. A fibre-grain crossing's populations share their zone's grid, so they do not overlap where seeded.
+        Returns paths ``(N, S, 3)``, each path's population, and each population's covered fraction."""
+        r = self.r; dev = self.device; shp = self.shape; lim = torch.tensor(shp, device=dev)
+        Mk = torch.stack([p["mask"] for p in pops]); DG = torch.stack([p["dg"].half() for p in pops])   # (J, Z, Y, X), (J, Z, Y, X, 3)
+        Mc = Mk[:, ::2, ::2, ::2]; shc = tuple(Mc.shape[1:]); limc = torch.tensor(shc, device=dev)     # the coverage at half resolution
+        vol = Mc.flatten(1).sum(1).float().clamp_min(1)                                                # (enough to choose seeds; 8x cheaper)
+        target = torch.tensor([min(p["phi"], 0.6) if fibres else min(0.6, max(0.1, 2 * p["phi"])) for p in pops], device=dev)   # fibres: their
+        cov = torch.zeros(shc, dtype=torch.bool, device=dev); k = 2 * int(re // 2) + 1                  # packing (random addition jams
+        h = 0.75; n_st = int(min(2.0 * max(shp), 400) / h / 2); paths, pids = [], []                    # ~0.6); strands tile, densities carry it
+        for rnd in range(rounds):
+            frac = (Mc & cov[None]).flatten(1).sum(1).float() / vol
+            need = (target - frac).clamp_min(0)
+            n_have = sum(int(x.shape[0]) for x in paths)
+            if float(need.max()) <= 0.02 or n_have >= cap:
+                break
+            seeds, sp = [], []; left = cap - n_have                                                # one budget for all the populations
+            want = [max(4.0, 1.6 * float(need[j]) * 8 * float(vol[j]) / (math.pi * re * re * 0.6 * max(shp))) if float(need[j]) > 0.02 else 0.0   # (vol: coarse
+                    for j in range(len(pops))]                                                                                                # cells, 8 voxels)
+            scale = min(1.0, left / max(sum(want), 1.0))
+            for j in range(len(pops)):
+                if want[j] <= 0:
+                    continue
+                free = torch.nonzero(Mc[j] & ~cov)
+                if free.shape[0] == 0:
+                    continue
+                n_j = max(1, int(want[j] * scale))
+                pick = 2 * free[torch.randperm(free.shape[0], generator=r.g, device=dev)[:4 * n_j]].float()
+                pick = (pick + 2 * r.rand(pick.shape[0], 3) - 0.5).clamp(max=lim.float() - 1)
+                ii = pick.round().long().clamp_min(0); pick = pick[Mk[j, ii[:, 0], ii[:, 1], ii[:, 2]]]   # (inside the fine mask)
+                if pick.shape[0] == 0:
+                    continue
+                cl = (pick / max(2 * re, 1.0)).floor().long(); key = (cl[:, 0] * 4099 + cl[:, 1]) * 4099 + cl[:, 2]
+                _, inv = torch.unique(key, return_inverse=True)
+                first = torch.full((int(inv.max()) + 1,), pick.shape[0], device=dev, dtype=torch.long).scatter_reduce_(0, inv, torch.arange(pick.shape[0], device=dev), "amin")
+                s_ = pick[first[torch.randperm(first.shape[0], generator=r.g, device=dev)[:n_j]]]
+                seeds.append(s_); sp.append(torch.full((s_.shape[0],), j, device=dev, dtype=torch.long))
+            if not seeds:
+                break
+            x0 = torch.cat(seeds); pj = torch.cat(sp); N = x0.shape[0]
+
+            def look(x):
+                i = torch.minimum(x.round().long().clamp_min(0), lim - 1)
+                inside = ((x >= -0.5) & (x <= lim - 0.5)).all(-1) & Mk[pj, i[:, 0], i[:, 1], i[:, 2]]
+                return DG[pj, i[:, 0], i[:, 1], i[:, 2]].float(), inside
+
+            halves = []
+            for sgn in (1.0, -1.0):                                                                 # both ways from each seed
+                x = x0.clone(); d_prev = look(x)[0] * sgn; alive = torch.ones(N, dtype=torch.bool, device=dev); out = []
+                for _ in range(n_st):
+                    d, _ = look(x); d = d * torch.sign((d * d_prev).sum(-1, keepdim=True) + 1e-9)
+                    xm = x + 0.5 * h * d; dm, _ = look(xm); dm = dm * torch.sign((dm * d).sum(-1, keepdim=True) + 1e-9)
+                    xn = x + h * dm; _, ok = look(xn); ok = ok & alive
+                    x = torch.where(ok[:, None], xn, x); d_prev = torch.where(ok[:, None], dm, d_prev); alive = ok
+                    out.append(x.clone())
+                    if not bool(alive.any()):
+                        break
+                halves.append(torch.stack(out, 1))
+            P = torch.cat([halves[1].flip(1), x0[:, None], halves[0]], 1)
+            moved = (P[:, -1] - P[:, 0]).norm(dim=-1) > 2.0                                         # (seeds stuck at a border: dropped)
+            P, pj = P[moved], pj[moved]
+            if P.shape[0]:
+                for j in torch.unique(pj).tolist():                                                  # each population's coverage only within
+                    Q = (P[pj == j][:, ::2].reshape(-1, 3) / 2).round().long(); okq = ((Q >= 0) & (Q < limc)).all(-1); Q = Q[okq]   # its own mask
+                    hit = torch.zeros(shc, device=dev); hit[Q[:, 0], Q[:, 1], Q[:, 2]] = 1          # (thin layers: a neighbour's spill
+                    cov |= (Fn.max_pool3d(hit[None, None], k, stride=1, padding=k // 2)[0, 0] > 0) & Mc[j]   # must not fill them)
+                paths.append(P); pids.append(pj)
+        if not paths:
+            return None, None, [0.0] * len(pops)
+        S = max(p_.shape[1] for p_ in paths)
+        pad = lambda p_: torch.cat([p_, p_[:, -1:].expand(-1, S - p_.shape[1], -1)], 1) if p_.shape[1] < S else p_   # (repeated ends: no material)
+        frac = ((Mc & cov[None]).flatten(1).sum(1).float() / vol).tolist()
+        return torch.cat([pad(p_) for p_ in paths]), torch.cat(pids), frac
+
     def neuropil(self):
         """Neuropil: dense, short, tortuous thin fibres (axons and dendrites, 0.1-1.5 um radius) in random directions and
         small somata (3-8 um), filling the canvas -- resolvable at a micron or two, partial-volume texture at 20 um;
@@ -1922,6 +2219,10 @@ class Scene:
         if iso:
             names = [k for k in ("granules", "crystals") if fam.get(k, 0) > 0]
             self.record["iso_scene"] = True
+        if not iso and (families is None or families.get("tissue", 0) > 0) and r.p(P_TISSUE * scale_weight("tissue", self.voxel_um)):
+            for g_ in self.tissue(grey=r.p(P_GREY_TISSUE)):                                     # packed tissue (an explicit family list leaves
+                self.groups.append(g_)                                                         # it out unless it names it); its crossings are
+            n_groups = (0, 1); crossing = False; underlay_p = 0.0                              # inside it: one family or none on top
         p = np.array([fam[k] * scale_weight(k, self.voxel_um) for k in names], dtype=float); p /= p.sum()   # what belongs at this voxel size
         n = r.i(*n_groups)
         chosen = [str(c_) for c_ in r.np.choice(names, size=n, p=p)]
@@ -1939,7 +2240,8 @@ class Scene:
             if name == "bundle":
                 prev = bundles[-1] if bundles and (crossing or r.p(0.6)) else None
                 mode = ["angled", "angled", "kissing", "fanning"][r.i(0, 3)] if prev is not None else ("split" if r.p(0.15) else "single")
-                gs = self.bundle(prev.centreline if prev is not None else None, mode)
+                rel_c = prev.contrast * r.lu(0.9, 1.1) if (prev is not None and r.p(P_RELATED_CONTRAST)) else None   # one material, one contrast
+                gs = self.bundle(prev.centreline if prev is not None else None, mode, contrast=rel_c)
                 from . import fibres as FB
                 if gs is not None and FB.RELAX:                                    # fibres interweave in the relaxation (below)
                     bundles.extend(gs if isinstance(gs, list) else [gs])
@@ -1970,6 +2272,11 @@ class Scene:
                 continue
             for g_ in (gs if isinstance(gs, list) else [gs]):
                 self.groups.append(g_)
+        if crossing and r.p(0.4):                                               # a fan beside the crossing: the spread a readout that
+            gf = self.bundle(None, "single", fan=r.u(0.4, 1.5))                 # splits crossings must not split
+            for g_ in (gf if isinstance(gf, list) else [gf] if gf is not None else []):
+                g_.curves = [self.deflect(c) for c in g_.curves]; self.groups.append(g_)
+            self.record["fan_beside_crossing"] = True
         if line_sheet:                                                          # a sheet, and a bundle through it at 5-90 deg to its plane
             c = self.centre_point(); nrm = r.unit()
             sh = self.sheet(normal=nrm, centre=c)
@@ -2010,7 +2317,7 @@ class Scene:
                 desc = torch.stack([d3[0], torch.zeros_like(d3[0]), d3[1], torch.ones_like(d3[0]) * (occ > 0), d3[2]])
                 cv.add_dense(occ, tens, desc, g_.contrast, torch.full(self.shape, int(self.ids(1)[0]), device=self.device, dtype=torch.long))
             for c in g_.curves:
-                render_curves(cv, c)
+                render_curves(cv, c, max_points=2e6 if c.N > 1000 else 8e6)                          # (many objects: smaller chunks, less memory)
             for Q, W, V, obj in g_.points:
                 cv.splat(Q, W, V, obj=obj)
             for occ, tens, desc, con, om in g_.dense:
@@ -2249,6 +2556,44 @@ def _log_desc(d5: torch.Tensor) -> torch.Tensor:
     return torch.stack([torch.log2(1 + d5[0].clamp_min(0)), (d5[1] / d5[0].clamp_min(1e-3)).clamp(0, 1), d5[2], d5[3], d5[4]])
 
 
+def _trim_paths(P: torch.Tensor) -> torch.Tensor:
+    """Paths ``(N, S, 3)`` that froze (repeated points: no material) shifted to start at their first moving sample and cut
+    to the longest moving stretch -- the renderer sweeps every sample, frozen or not."""
+    if P is None or P.shape[0] == 0:
+        return P
+    mv = (P[:, 1:] - P[:, :-1]).norm(dim=-1) > 1e-6                                              # (N, S - 1)
+    if not bool(mv.any()):
+        return P[:, :2]
+    S = P.shape[1]; ar = torch.arange(S - 1, device=P.device)
+    first = torch.where(mv, ar, torch.full_like(ar, S)).amin(1).clamp(max=S - 2)
+    last = torch.where(mv, ar, torch.full_like(ar, -1)).amax(1) + 1
+    L = int((last - first).max()) + 1
+    idx = (first[:, None] + torch.arange(L, device=P.device)[None]).clamp(max=S - 1)
+    idx = torch.minimum(idx, last[:, None].clamp_min(first[:, None]))                            # (repeats past the end: no material)
+    return P.gather(1, idx[..., None].expand(-1, -1, 3))
+
+
+#: crop strata by oriented-tissue fill (the share of the crop within ~2 voxels of oriented material): packed, partial,
+#: sparse, none. ``draw_scene(fill_quota=(0.3, 0.3, 0.2, 0.2))`` draws a stratum per crop and picks, of 8 random crops of
+#: the scene, the first in it (else the nearest) -- white matter is fibres wall to wall, which crops of isolated bundles
+#: never showed (27 Oct: oriented fill median 0 % of a crop, 8 % of crops over 70 %).
+FILL_STRATA = ((0.7, 1.01), (0.3, 0.7), (0.03, 0.3), (0.0, 0.03))
+#: the training's default quota (train.py passes it with the scene generator)
+FILL_QUOTA = (0.3, 0.3, 0.2, 0.2)
+
+
+def _oriented_extent(sc, ren, device) -> torch.Tensor:
+    """Where oriented material lies on the canvas (bool), from the rendered populations of kind line or sheet."""
+    occ = None
+    for res in ren["groups"]:
+        g_ = res["group"]
+        if getattr(g_, "kind", None) in ("line", "sheet"):
+            o_ = res["occupancy"].float(); occ = o_ if occ is None else occ + o_
+    if occ is None:
+        return torch.zeros(sc.shape, dtype=torch.bool, device=device)
+    return gaussian(occ[None, None], 2.0)[0, 0] > 0.15
+
+
 def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str | None = None, strength: float = 1.0,
                canvas: int = 128, crops_per_scene: int = 8, voxel_um: float | None = None, families: dict | None = None,
                n_groups=(1, 5), layout_p: float = 0.3, content: str = "general", style: str | None = None, second_contrast: bool = False,
@@ -2256,7 +2601,8 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
                crop: tuple | None = None, identity_min_r: float = 1.5, p_blend: float = 0.35, p_aniso: float = 0.25, p_scramble: float = 0.3,
                p_texture: float = 0.5, p_merge: float = 0.25, p_boundary: float = 0.2, p_affine: float = 0.3, p_grain: float = 0.8,
                underlay_p: float = 0.4, p_sparse: float = 0.12, p_cutout: float = 0.15, entity_ctx: bool = False, cross_p: float = 0.0,
-               p_centre: float = 0.0, deep_tree: bool = False, dense_p: float = 0.0, scene_seed: int | None = None):
+               p_centre: float = 0.0, deep_tree: bool = False, dense_p: float = 0.0, scene_seed: int | None = None,
+               fill_quota: tuple | None = None):
     """A training pair from an object scene, in the format of :func:`~shapetensor.learn.generator.draw`: ``(Sample,
     drawn)``. Scenes are rendered on a ``canvas``³ grid and ``crops_per_scene`` consecutive seeds share one (cut at
     different places), so a scene's cost is spread over its crops.
@@ -2296,13 +2642,29 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     ext = [s_ * zoom for s_ in shape]
     assert all(e <= canvas for e in ext), "the zoomed crop must fit the canvas"
     o = list(crop) if crop is not None else [r.i(0, canvas - e) for e in ext]
+    centred = False
     if crop is None and p_centre > 0 and r.p(p_centre):                        # centred on a crossing (or a bundle's fan / split / bend)
         cr = [g_.centre_pt for g_ in sc.groups if getattr(g_, "cross", None) is not None]
         ce = [g_.centre_pt for g_ in sc.groups if getattr(g_, "centre_pt", None) is not None]
         pick = cr if (cr and (not ce or r.p(0.75))) else ce
         if pick:
             P0 = pick[r.i(0, len(pick) - 1)]
-            o = [int(min(max(round(float(P0[a]) - e / 2 + r.u(-e / 6, e / 6)), 0), canvas - e)) for a, e in enumerate(ext)]
+            o = [int(min(max(round(float(P0[a]) - e / 2 + r.u(-e / 6, e / 6)), 0), canvas - e)) for a, e in enumerate(ext)]; centred = True
+    fill_rec = None
+    if crop is None and not centred and fill_quota:                            # crops stratified by how much oriented tissue they hold
+        lo_hi = FILL_STRATA; q = np.array(fill_quota, dtype=float); q = q / q.sum()
+        want = int(r.np.choice(len(q), p=q))
+        ext_map = _oriented_extent(sc, ren, device)                             # (canvas) 1 where oriented tissue lies within ~2 voxels
+        best = None
+        for _ in range(8):
+            oc = [r.i(0, canvas - e) for e in ext]
+            f_ = float(ext_map[tuple(slice(a, a + e) for a, e in zip(oc, ext))].float().mean())
+            lo_, hi_ = lo_hi[want]; miss = 0.0 if lo_ <= f_ < hi_ else min(abs(f_ - lo_), abs(f_ - hi_))
+            if best is None or miss < best[0]:
+                best = (miss, oc, f_)
+            if miss == 0.0:
+                break
+        o = best[1]; fill_rec = {"stratum": ["packed", "partial", "sparse", "none"][want], "fill": round(best[2], 3), "hit": best[0] == 0.0}
     sl = [slice(a, a + e) for a, e in zip(o, ext)]
     shape = tuple(shape)
     # the background, cut from the scene's
@@ -2439,7 +2801,10 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     img = _extra_acquisition(img, layers, ra, modality, rec, strength)
     s = Sample(img, shapes_, bg, lab, st, 1.0, content, rec, R, budget=cstore.get("over") if entity_ctx else None)
     d = nuisance(s, seed=acq_seed if acq_seed is not None else seed, device=device, strength=strength, modality=modality, warp=ra.p(p_warp), fast=True, hp_max=12.0,
-                 vis_opts={"per_layer_hp": True, "local_corr": True, "ladder": VIS_LADDER, "window_ladder": VIS_WINDOWS}, affine=ra.p(p_affine))
+                 vis_opts={"per_layer_hp": True, "local_corr": True, "ladder": VIS_LADDER, "window_ladder": VIS_WINDOWS}, affine=ra.p(p_affine),
+                 orient_from_texture=True if "tissue" in sc.record else None)            # packed tissue: evidence from texture, not edges
+    if fill_rec is not None:
+        d["record"]["crop_fill"] = fill_rec
     if medium is not None and ra.p(0.5):                                                       # the tissue's range stretched to the display, the medium
         tis = d["image"].float()[M > 0.5]                                                      # clipped -- as a real crop normalised by its tissue
         if tis.numel() > 100:

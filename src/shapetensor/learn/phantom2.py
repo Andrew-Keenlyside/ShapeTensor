@@ -276,6 +276,14 @@ def _rand_unit(g):
     return torch.nn.functional.normalize(torch.randn(3, generator=g), dim=0)
 
 
+#: the families' version. ``1`` (default): as drawn so far -- the selection and final sets stay what they were. ``2``
+#: (27 Oct; training and fresh test sets): crossings 10-90 deg with 8-40 oversampled (half the draws), a third
+#: population in 40 % of them, packed (the slab most of the box; fibre fill 0.3-0.6 split with a minority share
+#: 0.1-0.5), contrasts related (within +-10 %) in 40 %, and exact tangents for every family (no dispersion floor: the
+#: scene generator's convention, so targets are as sharp as the direction basis allows).
+VERSION = 1
+
+
 def random_spec(family: str, g: torch.Generator, n: int = 64) -> tuple:
     """A random spec and look for ``family``. Populations crossing share a plane normal (their fibres interleave in z)."""
     u = lambda lo, hi: lo + float(torch.rand(1, generator=g)) * (hi - lo)
@@ -288,7 +296,17 @@ def random_spec(family: str, g: torch.Generator, n: int = 64) -> tuple:
     xfib = lambda: {"spacing": s0, "radius": u(0.6, s0 / 4), "half": u(7, 13), "conc": 0.94}       # crossings: one z lattice, thin enough
                                                                                                      # to interleave (layers s0/2 apart)
     spec = []
-    if family in ("cross", "fine"):                                                                 # Monte Carlo fibre crossings
+    if family in ("cross", "fine") and VERSION >= 2:                                               # version 2: narrow, packed, unequal
+        A = _rand_unit(g); q = torch.nn.functional.normalize(torch.linalg.cross(A, _rand_unit(g)), dim=0)
+        ang = math.radians(u(8, 40) if u(0, 1) < 0.5 else u(10, 90)); B = math.cos(ang) * A + math.sin(ang) * q
+        nn_ = torch.linalg.cross(A, B).tolist(); fine = family == "fine"
+        tot = u(0.3, 0.6); s_b = u(0.1, 0.5); half = u(16, 30)
+        mc = lambda ax, fv: {"kind": "fibres", "axis": ax.tolist(), "normal": nn_, "half": half, "radius": u(0.35, 0.6) if fine else u(0.6, 1.4),
+                             "fvf": fv, "wander": u(0.2, 1.0), "conc": 1.0}
+        spec = [mc(A, tot * (1 - s_b)), mc(B, tot * s_b)]
+        if u(0, 1) < 0.4:                                                                            # a third population, any direction
+            s_c = u(0.1, 0.4); spec.append(mc(_rand_unit(g), tot * s_c))
+    elif family in ("cross", "fine"):                                                               # Monte Carlo fibre crossings
         A = _rand_unit(g); q = torch.nn.functional.normalize(torch.linalg.cross(A, _rand_unit(g)), dim=0)
         ang = math.radians(u(30, 90)); B = math.cos(ang) * A + math.sin(ang) * q; nn_ = torch.linalg.cross(A, B).tolist()
         fine = family == "fine"                                                                      # fine: fibres below the grid (partial volume)
@@ -335,6 +353,12 @@ def random_spec(family: str, g: torch.Generator, n: int = 64) -> tuple:
     con = []
     for _ in spec:
         cc = u(0.3, 0.8); con.append(cc)
+    if VERSION >= 2:
+        if len(con) > 1 and u(0, 1) < 0.4:                                                           # one material: related contrasts
+            con = [con[0]] + [min(0.8, con[0] * math.exp(u(-0.1, 0.1))) for _ in con[1:]]
+        for s_ in spec:                                                                              # exact tangents (no dispersion floor)
+            if "conc" in s_:
+                s_["conc"] = 1.0
     bright = u(0, 1) < 0.5
     bg = u(0.05, 0.9 - max(con, default=0.3)) if bright else u(max(con, default=0.3) + 0.05, 0.95)
     look = {"bg": bg, "contrast": [c if bright else -c for c in con], "noise": u(0.0, 0.05), "blur": u(0, 0.8)}

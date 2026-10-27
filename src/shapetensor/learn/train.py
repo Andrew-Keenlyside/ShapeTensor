@@ -213,7 +213,8 @@ def set_background_entity(on: bool = True):
 
 #: the entity targets' sampling: query points per crop, scales (crop voxels, log-uniform), entities kept per query, the
 #: resolution rule (an object is its own entity when its radius >= max(r_min, c_sig * sigma)), padded tree sizes
-ENTITY = {"n_points": 384, "sigma": (1.0, 12.0), "emax": 8, "r_min": 1.5, "c_sig": 0.5, "u_max": 1536, "d_max": 16, "margin": 2, "p_tissue": 0.7}
+ENTITY = {"n_points": 384, "sigma": (1.0, 12.0), "emax": 8, "r_min": 1.5, "c_sig": 0.5, "u_max": 1536, "d_max": 16, "margin": 2, "p_tissue": 0.7,
+          "p_cross": 0.2}
 
 
 def acquisition_blur(rec: dict) -> float:
@@ -254,7 +255,8 @@ def entity_queries(s, d: dict, size: int, seed: int, device, points: torch.Tenso
             pts[:k] = cand[pick] + torch.rand(k, 3, generator=g, device=device) - 0.5
         kc = int(E.get("p_cross", 0.0) * n)                                                         # a share in crossing cores: where two
         if kc > 0 and len(obj_layers) >= 2:                                                         # objects' populations overlap
-            oc = d["occupancy"][obj_layers].float()[:, m:size - m, m:size - m, m:size - m]
+            from ..filters import gaussian as _gauss                                                  # (at window scale: interleaved fibres of
+            oc = _gauss(d["occupancy"][obj_layers].float()[None], 2.0)[0][:, m:size - m, m:size - m, m:size - m]   # two populations rarely share a voxel)
             second = oc.topk(2, dim=0).values[1]
             cc = torch.nonzero(second > 0.2).float() + m
             if cc.shape[0] > 0:
@@ -1066,7 +1068,9 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     if weights:
         ET.ENT_WEIGHTS.update(weights)
     base = dict((gen or {}).get("scene") or {"canvas": 2 * size, "crops_per_scene": 8})
-    base.setdefault("cross_p", 0.3); base.setdefault("p_centre", 0.5)                                 # crossing scenes, crops centred on crossings
+    from .scene import FILL_QUOTA
+    base.setdefault("cross_p", 0.5); base.setdefault("p_centre", 0.5)                                 # crossing scenes, crops centred on crossings
+    base.setdefault("fill_quota", FILL_QUOTA)                                                        # the rest stratified by oriented fill
     base.setdefault("deep_tree", bool(deep_tree))
     if e_sigma:
         ENTITY["sigma"] = (float(e_sigma[0]), float(e_sigma[1]))

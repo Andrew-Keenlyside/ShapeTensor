@@ -1057,7 +1057,8 @@ CROSS_KEY = {"wedge": 0.03, "ctf": 0.03, "lowdose": 0.03, "slabs": 0.03}   # the
 
 
 def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, modality: str | None = None, warp: bool | None = None,
-             fast: bool = False, hp_max: float | None = None, vis_opts: dict | None = None, affine: bool = False) -> dict:
+             fast: bool = False, hp_max: float | None = None, vis_opts: dict | None = None, affine: bool = False,
+             orient_from_texture: bool | None = None) -> dict:
     # ``strength`` (0-1) scales the probability and the magnitude of every nuisance that destroys information (PSF,
     # resolution, thick slices, k-space truncation, noise, artefacts); geometric and monotone remaps are not scaled
     """One draw of a modality's acquisition on a clean sample (``hipct`` / ``ct`` / ``mri`` / ``histology`` / ``em`` /
@@ -1340,7 +1341,9 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     iso = torch.tensor([L.role == "isotropic" for L in s.layers], device=device).view(-1, 1, 1, 1)
     vis = torch.where(iso, torch.ones_like(t), ((t - PRESENCE_T[0]) / (PRESENCE_T[1] - PRESENCE_T[0])).clamp(0, 1))
     t_o = t
-    if ORIENT_FROM_TEXTURE:                                                                          # orientation: the layers' oriented texture
+    if ORIENT_FROM_TEXTURE if orient_from_texture is None else orient_from_texture:                 # orientation: the layers' oriented texture
+                                                                                                     # (``orient_from_texture``: per draw -- packed
+                                                                                                     # tissue has no edges to credit, 27 Oct)
         tex = torch.stack([(occ[k] - gaussian(occ[k][None, None], max(1.5, 2.0 * float(L.radius)))[0, 0]) if L.role == "shape" else regs[k]
                            for k, L in enumerate(s.layers)])
         t_o = visibility(img, tex, [None if L.role == "isotropic" else 1.0 for L in s.layers], radii=[L.radius if L.role == "shape" else 1.0 for L in s.layers],
