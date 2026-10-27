@@ -111,6 +111,9 @@ def _cpu_worker(rank: int, n: int, size: int, seed0: int, cfg, q, state: dict, t
             setattr(L, k[2:], v)
         elif k.startswith("GN."):                                                                  # the generator's (e.g. its visibility rules)
             setattr(GN, k[3:], v)
+        elif k.startswith("FB."):                                                                  # the fibre architecture's (Monte Carlo fibres)
+            from . import fibres as FB
+            setattr(FB, k[3:], v)
         else:
             setattr(TR, k, v)
     k = 0; fails = 0

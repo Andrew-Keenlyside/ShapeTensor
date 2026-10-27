@@ -1033,7 +1033,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    region_dec: bool = False, where_first: int = 0, z_vote: bool = False, dir_sh: int = 0, background_entity: bool = True,
                    ray: bool = False, e_cross: float = 0.0, region_density: bool = True, kappa_log: bool = False, vote_objects: bool = False,
                    dens_same_norm: bool = False, own_objects: bool = False, bg_head: bool = False, orient_from_texture: bool = True,
-                   obj_head: bool = False):
+                   obj_head: bool = False, mc_fibres: bool = False, oriented: int = 0):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -1077,6 +1077,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     _et.OWN_OBJECTS = bool(own_objects)                                                                # directions owned among oriented entities
     from . import generator as _gn
     _gn.ORIENT_FROM_TEXTURE = bool(orient_from_texture)                                                # orientation visibility from oriented texture
+    from . import fibres as _fb
+    _fb.PACKING, _fb.RELAX = ("random", True) if mc_fibres else ("hex", False)                        # Monte Carlo random fibres (collisions resolved)
     level = {"v": level0}
     cur_gen = lambda: {"scene": LT.difficulty_gen(level["v"], base)}
     def set_routes():
@@ -1097,7 +1099,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 dir_lmax=dir_lmax, vote_unc=vote_unc, lcn=lcn, mass_head=True, region_head=True, dens_sh=bool(dens_sh), read_keep=READ_KEEP,
                 dens_mlp=bool(dens_mlp), mass_region=bool(mass_region), region_dec=bool(region_dec), where_first=int(where_first),
                 z_vote=bool(z_vote), dir_sh=int(dir_sh), background_entity=bool(background_entity), ray=bool(ray),
-                region_density=bool(region_density), kappa_log=bool(kappa_log), vote_objects=bool(vote_objects), dens_same_norm=bool(dens_same_norm), own_objects=bool(own_objects), bg_head=bool(bg_head), orient_from_texture=bool(orient_from_texture), obj_head=bool(obj_head))
+                region_density=bool(region_density), kappa_log=bool(kappa_log), vote_objects=bool(vote_objects), dens_same_norm=bool(dens_same_norm), own_objects=bool(own_objects), bg_head=bool(bg_head), orient_from_texture=bool(orient_from_texture), obj_head=bool(obj_head),
+                mc_fibres=bool(mc_fibres), oriented=int(oriented))
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)
@@ -1131,7 +1134,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     if cpu_workers > 0:
         state = {"HEAD": HEAD, "DESC_KEY": DESC_KEY, "SH_EXACT": SH_EXACT, "DESC_LMAX": DESC_LMAX, "QUERY": QUERY, "CACHE": None,
                  "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC, "ENTITY": dict(ENTITY), "READ_KEEP": READ_KEEP, "NOT_ENTITY": NOT_ENTITY, "REGION_DENSITY": REGION_DENSITY,
-                 "GN.ORIENT_FROM_TEXTURE": bool(orient_from_texture), "ENTITY_DISPERSION": ENTITY_DISPERSION}
+                 "GN.ORIENT_FROM_TEXTURE": bool(orient_from_texture), "ENTITY_DISPERSION": ENTITY_DISPERSION,
+                 "FB.PACKING": _fb.PACKING, "FB.RELAX": _fb.RELAX}
         cpu = DF.CpuWorkers(cpu_workers, size, buf.next + 90_000_000, cfg, state, threads=cpu_threads)
     pbuf = ET.EntityPairBuffer(pairs, size, "cpu", LT.difficulty_gen(level["v"], base), seed0=60_000_000 + rank * 1_000_000 + start,
                                out_device=device, n0=4) if pairs else None                           # drawn on the CPU (see EntityPairBuffer)
@@ -1337,6 +1341,8 @@ def main():
     ap.add_argument("--bg-head", action="store_true", help="entities: a background-occupancy head (isotropic objects told from the background by place)")
     ap.add_argument("--own-objects", action="store_true", help="entities: directions owned among the oriented entities only (the background owns none)")
     ap.add_argument("--vote-objects", action="store_true", help="entities: vote / kappa / descriptor losses only where an oriented entity owns the direction")
+    ap.add_argument("--mc-fibres", action="store_true", help="entities: Monte Carlo random fibres in the scene generator (random packing, collision relaxation: learn/fibres.py)")
+    ap.add_argument("--oriented", type=int, default=0, help="entities: oriented line energies along this many directions as extra input channels (0: off; e.g. 24)")
     ap.add_argument("--dir-sh", type=int, default=0, help="entities: the per-direction outputs also as harmonics of the point code to this order (0: off; e.g. 6)")
     ap.add_argument("--no-background-entity", action="store_true", help="entities: the isotropic background not a population (before)")
     ap.add_argument("--z-vote", action="store_true", help="entities: the tree embedding sees the vote's axes (detached)")
@@ -1382,7 +1388,8 @@ def main():
                        read_keep=a.read_keep, level_steps=a.level_steps, dens_mlp=not a.no_dens_mlp, mass_region=not a.no_mass_region,
                        region_dec=a.region_dec, where_first=a.where_first, z_vote=a.z_vote, dir_sh=a.dir_sh,
                        background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, region_density=not a.no_region_density,
-                       kappa_log=a.kappa_log, vote_objects=a.vote_objects, dens_same_norm=a.dens_same_norm, own_objects=a.own_objects, bg_head=a.bg_head, orient_from_texture=not a.orient_from_contrast, obj_head=a.obj_head)
+                       kappa_log=a.kappa_log, vote_objects=a.vote_objects, dens_same_norm=a.dens_same_norm, own_objects=a.own_objects, bg_head=a.bg_head, orient_from_texture=not a.orient_from_contrast, obj_head=a.obj_head,
+                       mc_fibres=a.mc_fibres, oriented=a.oriented)
         return
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,

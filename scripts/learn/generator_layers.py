@@ -5,7 +5,7 @@ match rate): each population layer's resolved entities aggregated into one mass 
 ground truth fails the measurement are dropped and listed. The generator's targets as the models are now trained on:
 orientation visibility from the layers' oriented texture, the entity tensors' dispersion floor.
 
-Usage: python scripts/learn/generator_layers.py OUT.png CKPT [--n 12] [--level 0.6] [--seed0 6300000] [--orient-from-contrast]
+Usage: python scripts/learn/generator_layers.py OUT.png CKPT [--n 12] [--level 0.6] [--seed0 6300000] [--orient-from-contrast] [--mc-fibres]
 """
 import argparse, sys
 import numpy as np
@@ -24,10 +24,14 @@ from shapetensor.learn.model import PopulationNet
 ap = argparse.ArgumentParser(); ap.add_argument("out"); ap.add_argument("ckpt"); ap.add_argument("--n", type=int, default=12)
 ap.add_argument("--level", type=float, default=0.6); ap.add_argument("--seed0", type=int, default=6_300_000); ap.add_argument("--rows", type=int, default=5)
 ap.add_argument("--orient-from-contrast", action="store_true"); ap.add_argument("--tag", default="")
+ap.add_argument("--mc-fibres", action="store_true", help="held-out crops from the generator with Monte Carlo random fibres (learn/fibres.py)")
 a = ap.parse_args(); dev = "cuda"; stem = a.out.rsplit(".", 1)[0]
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None
 L.DESC_K = 5; L.DESC_NC = 0; TR.READ_KEEP = 1.0; TR.REGION_DENSITY = True; TR.set_background_entity(True)
 GN.ORIENT_FROM_TEXTURE = not a.orient_from_contrast
+if a.mc_fibres:
+    from shapetensor.learn import fibres as FB
+    FB.PACKING, FB.RELAX = "random", True
 gen = {"scene": {**LT.difficulty_gen(a.level, {"canvas": 128, "crops_per_scene": 1, "cross_p": 0.6, "p_centre": 0.7, "deep_tree": True}), "crops_per_scene": 1}}
 ck = torch.load(a.ckpt, map_location=dev, weights_only=False)
 net = PopulationNet.from_args(ck["args"]).to(dev).eval(); net.load_state_dict(ck["model"])

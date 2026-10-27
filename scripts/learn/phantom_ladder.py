@@ -34,6 +34,7 @@ ap.add_argument("--widths", type=int, nargs=3, default=None, help="the trunk's w
 ap.add_argument("--scratch", action="store_true", help="no weights from --init (its args only)")
 ap.add_argument("--no-merge", action="store_true", help="readout: keep near-parallel same-type entities apart")
 ap.add_argument("--sigmas", type=float, nargs="+", default=[2.5], help="the query windows to score at (each its own table)")
+ap.add_argument("--odirect", type=int, default=0, help="the decoder's direct oriented path with this many bank directions (0: off; e.g. 48)")
 ap.add_argument("--final", action="store_true", help="score the final test set (seeds never used to choose between variants) instead of the selection set")
 a = ap.parse_args(); dev = "cuda"; stem = a.out.rsplit(".", 1)[0]
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None
@@ -61,6 +62,8 @@ else:
     args = {**ref["args"], "region_density": True, "kappa_log": True, "vote_objects": True, "own_objects": True, "dens_same_norm": True}
     args["bg_head"] = bool(args.get("bg_head")) or a.bg_head; args["oprobe"] = bool(args.get("oprobe")) or a.oprobe
     args["obj_head"] = bool(args.get("obj_head")) or a.obj_head
+    if a.odirect:
+        args["odirect"] = int(a.odirect)
     if a.widths:
         args["widths"] = list(a.widths)
     net = PopulationNet.from_args(args).to(dev)
@@ -106,7 +109,7 @@ else:
         tot, parts = ET.entity_loss(P, T, dirs, W={"desc": 0.0}, g=g)
         opt.zero_grad(set_to_none=True); tot.backward(); torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0); opt.step()
     torch.save({"model": net.state_dict(), "args": args, "curves": curves, "tag": a.tag, "init": a.init, "families": a.families,
-                "flags": {k: getattr(a, k) for k in ("lr", "lr_final", "batch", "steps", "bg_head", "oprobe", "floor", "obj_head", "widths", "scratch", "sigma_lo")}}, stem + ".pt")
+                "flags": {k: getattr(a, k) for k in ("lr", "lr_final", "batch", "steps", "bg_head", "oprobe", "floor", "obj_head", "widths", "scratch", "sigma_lo", "odirect")}}, stem + ".pt")
 net.eval()
 sph = EI.sphere_dirs(200, dev)
 

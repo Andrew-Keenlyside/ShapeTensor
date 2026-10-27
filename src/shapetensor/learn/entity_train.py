@@ -66,6 +66,14 @@ OWN_OBJECTS = False
 OVERALL_FLOOR = 0.01                # the overall ODF's relative error: energy floor per lattice cell (~ occupancy 0.03)
 
 
+#: the density target's angular smoothing (a concentration ``ks``; None: off). The density loss is an L1 per direction,
+#: whose optimum under uncertainty about where a lobe lies is the per-direction median: once that uncertainty exceeds the
+#: lobe's width every direction is a lobe in fewer than half the plausible worlds and the optimum is flat -- the round
+#: plateau and the near-uniform crossing cores (2026-10-27). Lobes broader than the model's uncertainty keep their place
+#: in the median; annealed from broad (ks ~ 2-3, ~35 deg) to sharp, the model first places them, then narrows them.
+DENS_KAPPA_SMOOTH = None
+
+
 def sample_dirs(T: dict, D: int = N_DIRS, frac_entity: float = 0.5, g: torch.Generator | None = None) -> torch.Tensor:
     """``(B, Q, D, 3)`` directions per query: a share drawn near the entities' Bingham ODFs (entity chosen by visible
     mass; mode axis spread by 1/sqrt(2 kappa + 1) along the frame's other axes), the rest uniform."""
@@ -122,15 +130,21 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
     mass = (T["e_mass"] * T["e_vis"]).clamp_min(0) * (T["e_node"] >= 0)                         # (B, Q, E)
     pe = BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], T["e_kappa"][:, :, None].clamp(max=DENS_KAPPA_MAX))   # (B, Q, D, E)
     contrib = mass[:, :, None] * pe; rho = contrib.sum(-1)
+    if DENS_KAPPA_SMOOTH is not None:                                                              # the density's target smoothed on the sphere
+        ks = float(DENS_KAPPA_SMOOTH); kt = T["e_kappa"].clamp(max=DENS_KAPPA_MAX)                # (each lobe's concentration combined with a
+        pe_s = BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], (kt * ks / (kt + ks))[:, :, None])  # kernel's: 1/k' = 1/k + 1/ks)
+        rho_d = (mass[:, :, None] * pe_s).sum(-1)
+    else:
+        rho_d = rho
     rm = rho.mean(-1, keepdim=True)                                                                # each query's mean density (its mass)
     n_uni = dirs.shape[2] - int(round(dirs.shape[2] * 0.5))                                        # sample_dirs: the uniform directions first
     m_t = mass.sum(-1)
     if "m" in ent:                                                                                 # where and which way apart: the mass from its own
         parts["mass"] = (torch.log(ent["m"].float() + MASS_EPS) - torch.log(m_t + MASS_EPS)).abs().mean()   # output; the density only its shape
-        parts["density"] = density_shape_loss(ent["f"].float(), rho, m_t, n_uni)
+        parts["density"] = density_shape_loss(ent["f"].float(), rho_d, m_t, n_uni)
     else:
         eps = (DENS_FLOOR * rm).clamp_min(DENS_EPS)
-        parts["density"] = (torch.log(ent["f"].float() + eps) - torch.log(rho + eps)).abs().mean()  # scale-free: shape at any mass
+        parts["density"] = (torch.log(ent["f"].float() + eps) - torch.log(rho_d + eps)).abs().mean()  # scale-free: shape at any mass
         if n_uni > 0:                                                                              # the mass: the density's mean over the sphere
             m_p = ent["f"][:, :, :n_uni].float().mean(-1)
             parts["mass"] = (torch.log(m_p + DENS_EPS) - torch.log(m_t + DENS_EPS)).abs().mean()

@@ -107,12 +107,19 @@ def window_mean(r: torch.Tensor, points: torch.Tensor, sigma: torch.Tensor) -> t
 
 class Feats(tuple):
     """The trunk's levels ``(h0, h1, h)`` and, for the oriented probe, ``scal``: the image's rotation-invariant scalar
-    fields (:meth:`PopulationNet.scalar_fields`) -- a tuple, so ``h0, h1, h = feats`` keeps working."""
+    fields (:meth:`PopulationNet.scalar_fields`); for the direct oriented path, ``oe``: the line energies along a bank
+    of directions at a few smoothing levels (:meth:`PopulationNet.direct_levels`) -- a tuple, so ``h0, h1, h = feats``
+    keeps working."""
     scal = None
+    oe = None
 
 
 def with_scal(feats, scal) -> Feats:
-    f = Feats(tuple(feats)); f.scal = scal; return f
+    f = Feats(tuple(feats)); f.scal = scal; f.oe = getattr(feats, "oe", None); return f
+
+
+def with_oe(feats, oe) -> Feats:
+    f = Feats(tuple(feats)); f.scal = getattr(feats, "scal", None); f.oe = oe; return f
 
 
 class EntityDecoder(nn.Module):
@@ -124,7 +131,7 @@ class EntityDecoder(nn.Module):
 
     def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8, unc: bool = False, mass_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False,
-                 kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False):
+                 kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -159,6 +166,19 @@ class EntityDecoder(nn.Module):
             last = self.odens[-1] if self.oprobe_only else self.odens                                                                # path to the density
             nn.init.zeros_(last.weight); nn.init.zeros_(last.bias)
         rin += 64 if self.oprobe else 0
+        # the direct oriented path: per (point, direction u), the image's line energy along u at the point (the bank of
+        # ``odirect`` directions interpolated to u; three smoothing levels) -- what the image shows along u, the same input
+        # at every orientation, straight to the decoder: the trunk does not carry directions to it fast enough (even the
+        # true directions given as input channels were not fitted on 64 crossings, 27 Oct)
+        self.odirect = int(odirect); self.od_lv = 3
+        if self.odirect:
+            self.od_net = nn.Sequential(nn.Linear(self.od_lv + 1, 64), nn.SiLU(), nn.Linear(64, 32))
+            self.od_dens = nn.Linear(32, 1); nn.init.zeros_(self.od_dens.weight); nn.init.zeros_(self.od_dens.bias)
+            i = torch.arange(self.odirect, dtype=torch.float64) + 0.5; zc = 1 - i / self.odirect; rc = torch.sqrt(1 - zc ** 2)
+            ph = math.pi * (3 - math.sqrt(5)) * i
+            self.register_buffer("od_dirs", torch.stack([zc, rc * torch.sin(ph), rc * torch.cos(ph)], 1).float(), persistent=False)
+            self.od_k = 1.0 / (1 - math.cos(math.sqrt(2 * math.pi / self.odirect)))           # an interpolation kernel ~ the bank's spacing
+        rin += 32 if self.odirect else 0
         self.mass = nn.Linear(hidden, 1) if mass_head else None                              # where: the material's mass at (x, sigma)
         # the density's shape as harmonics of the point code: log-density c(p) . Y(u), a direct path from where to which
         # way (with only the concatenated MLP, a flat start is a saddle: the shape loss's gradient on the point code
@@ -274,7 +294,12 @@ class EntityDecoder(nn.Module):
             B, Q = points.shape[:2]
             o = torch.stack([self.oprobe_feats(feats, points[b][:, None].expand(-1, D, -1).reshape(-1, 3), dirs[b].reshape(-1, 3), b).view(Q, D, -1)
                              for b in range(B)])
-        out = self.decode(p[:, :, None].expand(-1, -1, D, -1), Y, r, o)
+        od = None
+        if getattr(self, "odirect", 0):
+            B, Q = points.shape[:2]
+            od = torch.stack([self.od_feats(feats, points[b][:, None].expand(-1, D, -1).reshape(-1, 3), dirs[b].reshape(-1, 3), b).view(Q, D, -1)
+                              for b in range(B)])
+        out = self.decode(p[:, :, None].expand(-1, -1, D, -1), Y, r, o, od)
         if self.mass is not None:
             out["m"] = self.mass_of(p)
         return out
@@ -294,7 +319,24 @@ class EntityDecoder(nn.Module):
         a scalar per point, apart from the directional density (which then carries only the angular shape)."""
         return Fn.softplus(self.mass(p)[..., 0].float())
 
-    def decode(self, p: torch.Tensor, Y: torch.Tensor, r: torch.Tensor | None = None, o: torch.Tensor | None = None) -> dict:
+    def od_feats(self, feats, pts: torch.Tensor, u: torch.Tensor, b: int = 0, chunk: int = 65536) -> torch.Tensor:
+        """The direct oriented path's code ``(N, 32)`` for item ``b``: the line energies ``feats.oe`` (levels x bank directions)
+        sampled at ``pts (N, 3)`` and interpolated to the directions ``u (N, 3)`` (an axial kernel over the bank), as logs, with
+        the levels' mean (how much any direction stands out)."""
+        E = feats.oe[b:b + 1].float(); L, Dd = E.shape[1], E.shape[2]; Ef = E.reshape(1, L * Dd, *E.shape[-3:])
+        size = torch.tensor(E.shape[-3:], device=pts.device, dtype=torch.float32); out = []
+        for a in range(0, pts.shape[0], chunk):
+            p_, u_ = pts[a:a + chunk].float(), Fn.normalize(u[a:a + chunk].float(), dim=-1); n = p_.shape[0]
+            g = (p_ / (size - 1).clamp_min(1) * 2 - 1).flip(-1).view(1, -1, 1, 1, 3)
+            v = Fn.grid_sample(Ef, g, mode="bilinear", padding_mode="border", align_corners=True)[0, :, :, 0, 0].T.view(n, L, Dd)
+            w = torch.softmax(self.od_k * (u_ @ self.od_dirs.T).abs(), -1)                    # (n, Dd) interpolation weights
+            e = (v * w[:, None]).sum(-1)                                                       # (n, L) energy along u (relative to the mean)
+            x = torch.cat([torch.log(e.clamp_min(1e-3)), torch.log(v.mean(-1).clamp_min(1e-3)).mean(-1, keepdim=True)], -1)
+            out.append(Fn.silu(self.od_net(x.to(self.od_net[0].weight.dtype))))
+        return torch.cat(out)
+
+    def decode(self, p: torch.Tensor, Y: torch.Tensor, r: torch.Tensor | None = None, o: torch.Tensor | None = None,
+               od: torch.Tensor | None = None) -> dict:
         """The outputs from point encodings ``p (..., hidden)`` and direction bases ``Y (..., n_coef)`` (same leading
         shape): any set of (point, direction) pairs -- inference evaluates only where the total ODF has density."""
         from .bingham import rot6d_to_matrix
@@ -304,6 +346,9 @@ class EntityDecoder(nn.Module):
         if getattr(self, "oprobe", False):
             o = torch.zeros(*p.shape[:-1], 64, device=p.device, dtype=p.dtype) if o is None else o.to(p.dtype)
             parts.append(o)
+        if getattr(self, "odirect", 0):
+            od = torch.zeros(*p.shape[:-1], 32, device=p.device, dtype=p.dtype) if od is None else od.to(p.dtype)
+            parts.append(od)
         y = self.dir(torch.cat(parts, -1)).float()
         if getattr(self, "dsh", None) is not None:
             from .sh import n_coef
@@ -318,6 +363,8 @@ class EntityDecoder(nn.Module):
             y0 = self.odens(o).float()[..., 0]
         elif getattr(self, "oprobe", False):
             y0 = y0 + self.odens(o).float()[..., 0]
+        if getattr(self, "odirect", 0):
+            y0 = y0 + self.od_dens(od).float()[..., 0]                                         # the direct path to the density
         R = rot6d_to_matrix(y[..., 1 + e:7 + e]); zr = y[..., 1:1 + e]
         if getattr(self, "zv", None) is not None:
             a, c = R[..., :, 0].detach(), R[..., :, 2].detach()
@@ -339,7 +386,8 @@ class PopulationNet(nn.Module):
                  free_sh: bool = False, dir_lmax: int = 8, vote_unc: bool = False, mass_head: bool = False, region_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False,
                  dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False, oprobe: bool = False,
-                 dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False):
+                 dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
+                 odirect: int = 0):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -347,7 +395,15 @@ class PopulationNet(nn.Module):
         self.context_level, self.voxel_cond, self.identity_dim, self.has_points = bool(context_level), bool(voxel_cond), int(identity_dim), bool(points)
         c0, c1, c2 = widths
         self.K, self.embed, self.n_kinds = K, embed, n_kinds
-        self.stem = nn.Conv3d(2 if lcn else 1, c0, 3, padding=1)                                  # with ``lcn``: the image and its local contrast
+        # ``oriented``: as input channels as well, the image's line energy along that many directions (a classical oriented
+        # filter bank: the evidence for a direction at a crossing's core, which the trunk otherwise has to discover anew at
+        # every orientation -- X0, 26 Oct)
+        self.oriented = int(oriented)
+        if self.oriented:
+            i = torch.arange(self.oriented, dtype=torch.float64) + 0.5; zc = 1 - i / self.oriented; rc = torch.sqrt(1 - zc ** 2)
+            ph = math.pi * (3 - math.sqrt(5)) * i                                                # a Fibonacci hemisphere (axial directions)
+            self.register_buffer("o_dirs", torch.stack([zc, rc * torch.sin(ph), rc * torch.cos(ph)], 1).float(), persistent=False)
+        self.stem = nn.Conv3d((2 if lcn else 1) + self.oriented, c0, 3, padding=1)              # with ``lcn``: the image and its local contrast
         self.l0 = Block(c0)
         self.d1 = Down(c0, c1); self.l1 = nn.Sequential(Block(c1), Block(c1))
         self.d2 = Down(c1, c2); self.l2 = Block(c2)
@@ -367,7 +423,7 @@ class PopulationNet(nn.Module):
             self.ent = EntityDecoder(c0, c1, c2, emb=max(int(embed), 2), hidden=256, lmax=int(dir_lmax), unc=bool(vote_unc),
                                      mass_head=bool(mass_head) and not mass_region, dens_sh=bool(dens_sh), dens_mlp=bool(dens_mlp),
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
-                                     oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only))
+                                     oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             # the background's occupancy (the isotropic remainder) at every voxel: the density's floor is background plus
@@ -432,7 +488,8 @@ class PopulationNet(nn.Module):
                    region_density=bool(args.get("region_density", False)), kappa_log=bool(args.get("kappa_log", False)),
                    oprobe=bool(args.get("oprobe", False)), dens_log=bool(args.get("dens_log", False)),
                    oprobe_only=bool(args.get("oprobe_only", False)), bg_head=bool(args.get("bg_head", False)),
-                   obj_head=bool(args.get("obj_head", False))) \
+                   obj_head=bool(args.get("obj_head", False)), oriented=int(args.get("oriented", 0) or 0),
+                   odirect=int(args.get("odirect", 0) or 0)) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
@@ -452,10 +509,47 @@ class PopulationNet(nn.Module):
         xf = x.float(); mu = gaussian(xf, self.lcn); var = gaussian((xf - mu) ** 2, self.lcn)
         return ((xf - mu) / (var + 1e-4).sqrt() / 3).to(x.dtype)
 
+    @torch.no_grad()
+    def oriented_energy(self, x: torch.Tensor, sig_par: float = 3.0, sig_perp: float = 0.7, hp: float = 3.0, pool: float = 1.5,
+                        dirs: torch.Tensor | None = None, relative: bool = True) -> torch.Tensor:
+        """``(B, D, Z, Y, X)`` line energies of ``x (B, 1, Z, Y, X)`` along the ``D`` directions ``o_dirs``: the image high-passed
+        (less its blur at ``hp``), smoothed by a Gaussian elongated along each direction (``sig_par`` along, ``sig_perp``
+        across; in the Fourier domain), squared and pooled (``pool``); each voxel's energies divided by their mean over the
+        directions, less one: the directional pattern only (contrast-free), zero where no direction stands out."""
+        from ..filters import gaussian
+        xf = x.float(); xf = xf - gaussian(xf, hp)
+        F = torch.fft.fftn(xf, dim=(-3, -2, -1))
+        k = torch.stack(torch.meshgrid(*[torch.fft.fftfreq(n, device=x.device) * 2 * math.pi for n in x.shape[-3:]], indexing="ij"), -1)
+        dirs = self.o_dirs if dirs is None else dirs
+        kp2 = (k @ dirs.T).movedim(-1, 0) ** 2; k2 = (k ** 2).sum(-1)
+        H = torch.exp(-0.5 * (sig_par ** 2 * kp2 + sig_perp ** 2 * (k2[None] - kp2)))           # (D, Z, Y, X)
+        E = gaussian(torch.fft.ifftn(F * H[None], dim=(-3, -2, -1)).real ** 2, pool)              # (B, D, Z, Y, X)
+        if not relative:                                                                         # the raw energies (``direct_levels``)
+            return E
+        return (E / (E.mean(1, keepdim=True) + 1e-8) - 1).to(x.dtype)
+
+    @torch.no_grad()
+    def direct_levels(self, x: torch.Tensor) -> torch.Tensor:
+        """``(B, 3, D, Z, Y, X)`` the decoder's direct oriented path's input: line energies along the decoder's bank of
+        directions (filters 8 voxels along, 0.6 across), pooled at sigma 2, 4, 6 and *then* divided by their mean over the
+        directions (contrast-free). Pooling before normalising, long filters and a fine bank: at Monte Carlo crossing cores
+        the true axes stand out 1.9x over the median direction and are the two strongest in 7/8 (the true energies: 2.4x,
+        7/8); the first bank (48 directions, 3 along, normalised per voxel) gave 1.1x and 0-2/8 (``bank_check.py``, 27 Oct)."""
+        from ..filters import gaussian
+        E = self.oriented_energy(x[:, :1], sig_par=8.0, sig_perp=0.6, pool=0.0, dirs=self.ent.od_dirs, relative=False).float()
+        out = []
+        for s in (2.0, 4.0, 6.0):
+            Ep = gaussian(E, s)
+            out.append(Ep / (Ep.mean(1, keepdim=True) + 1e-3 * Ep.mean() + 1e-12))
+        return torch.stack(out, 1).half()
+
     def features(self, x: torch.Tensor):
         """The three feature levels: stride 1, stride 2 and the stride-4 lattice."""
+        x0 = x
         if self.lcn:
             x = torch.cat([x, self.local_contrast(x)], 1)
+        if getattr(self, "oriented", 0):
+            x = torch.cat([x, self.oriented_energy(x0)], 1)
         h0 = self.l0(Fn.silu(self.stem(x)))                                                      # nonlinear from the first layer: local energies
         h1 = self.l1(Fn.silu(self.d1(h0)))                                                       # (squared-gradient-like features) need no open branch
         h2 = self.l2(Fn.silu(self.d2(h1)))
@@ -521,6 +615,8 @@ class PopulationNet(nn.Module):
                 out["points"] = Fn.softplus(self.points(h))
             if e_points is not None:
                 fe = with_scal((h0, h1, h), self.scalar_fields(x)) if getattr(self.ent, "oprobe", False) else (h0, h1, h)
+                if getattr(self.ent, "odirect", 0):
+                    fe = with_oe(fe, self.direct_levels(x))
                 out["ent"] = self.ent(fe, e_points.float(), e_sigma.float(), e_dirs, None if context is None else context.float())
             if self.region is not None:                                                         # the population region, every voxel
                 out["region_logit"] = self.region_map(h0, h1, h); out["region"] = self.region_value(out["region_logit"])

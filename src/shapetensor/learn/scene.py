@@ -737,22 +737,30 @@ class Scene:
         Rs = Rb * (1 + fan * torch.relu(s - 0.5) * 2)                       # fanning: the bundle widens past its middle
         contrast = self.contrast(); bid = int(self.ids(1, Rb)[0])
         side = None
-        if rf >= 0.45:                                                      # resolved fibres, packed on a jittered hexagonal section
-            sp = max(2 * rf * 1.15 * r.u(1.05, 1.5), 1.0) / Rb                  # spacing clears the largest fibre (radius jitter capped at 1.15)
-            n_side = int(2 / sp) + 2
-            ii, jj = torch.meshgrid(torch.arange(-n_side, n_side + 1, device=self.device), torch.arange(-n_side, n_side + 1, device=self.device), indexing="ij")
-            o = torch.stack([ii.float() + 0.5 * (jj % 2).float(), jj.float() * math.sqrt(3) / 2], -1).reshape(-1, 2) * sp
-            o = o + fibre.get("jitter", 0.1) * sp * (r.rand(*o.shape) - 0.5) * 2   # jitter, kept below the gap: no overlaps
-            o = o[o.norm(dim=1) <= 1 - rf / Rb]
-            nmax = int(fibre.get("max_fibres", 400))
-            if o.shape[0] > nmax:
-                o = o[torch.randperm(o.shape[0], generator=r.g, device=self.device)[:nmax]]
-            if o.shape[0] == 0:
-                o = torch.zeros(1, 2, device=self.device)
+        if rf >= 0.45:                                                      # resolved fibres
+            from . import fibres as FB
+            nmax = int(fibre.get("max_fibres", 250 if FB.RELAX else 400)); radii = None
+            if FB.PACKING == "random":                                          # Monte Carlo: dart throwing with gamma radii (no lattice)
+                fvf = r.u(0.15, 0.45) if FB.RELAX else r.u(0.35, 0.6)                # with the relaxation: room for a crossing
+                C_, R_ = FB.random_section(fvf, rf, r.u(4, 12), Rb, r.np, max_n=nmax)   # bundle to pass between the fibres
+                o = torch.tensor(C_ / Rb, dtype=torch.float32, device=self.device); radii = torch.tensor(R_, dtype=torch.float32, device=self.device)
+                sp = 2.4 * rf / Rb
+            else:                                                               # packed on a jittered hexagonal section
+                sp = max(2 * rf * 1.15 * r.u(1.05, 1.5), 1.0) / Rb                  # spacing clears the largest fibre (radius jitter capped at 1.15)
+                n_side = int(2 / sp) + 2
+                ii, jj = torch.meshgrid(torch.arange(-n_side, n_side + 1, device=self.device), torch.arange(-n_side, n_side + 1, device=self.device), indexing="ij")
+                o = torch.stack([ii.float() + 0.5 * (jj % 2).float(), jj.float() * math.sqrt(3) / 2], -1).reshape(-1, 2) * sp
+                o = o + fibre.get("jitter", 0.1) * sp * (r.rand(*o.shape) - 0.5) * 2   # jitter, kept below the gap: no overlaps
+                o = o[o.norm(dim=1) <= 1 - rf / Rb]
+                if o.shape[0] > nmax:
+                    o = o[torch.randperm(o.shape[0], generator=r.g, device=self.device)[:nmax]]
+                if o.shape[0] == 0:
+                    o = torch.zeros(1, 2, device=self.device)
             N = o.shape[0]
             T = tangents(Pc); e1, e2 = rmf(Pc, T)
             tau = r.u(-0.03, 0.03); psi = tau * s * Lc
-            disp = fibre.get("disp", 0.25) * sp * smooth1d(r.randn(N, S, 2), 30)   # dispersion within half a spacing: no overlaps
+            amp = fibre.get("disp", r.u(0.3, 1.5) if FB.RELAX else 0.25)        # with the relaxation fibres may wander and intertwine;
+            disp = amp * sp * smooth1d(r.randn(N, S, 2), 30)                    # without it, within half a spacing: no overlaps
             oo = o[:, None] + disp
             ox = oo[..., 0] * torch.cos(psi) - oo[..., 1] * torch.sin(psi); oy = oo[..., 0] * torch.sin(psi) + oo[..., 1] * torch.cos(psi)
             P = Pc + (Rs[None, :, None] * (ox[..., None] * e1 + oy[..., None] * e2))
@@ -763,7 +771,7 @@ class Scene:
                 lat = side[:, None] * math.tan(th / 2) * ramp[None]            # (N, S) voxels
                 P = P + lat[..., None] * (v[0] * e1 + v[1] * e2)
                 self.record.setdefault("split", []).append(round(math.degrees(th), 1))
-            rad = (rf * torch.exp(0.12 * r.randn(N)).clamp(0.8, 1.15))[:, None].expand(N, S).clone()
+            rad = (radii if radii is not None else rf * torch.exp(0.12 * r.randn(N)).clamp(0.8, 1.15))[:, None].expand(N, S).clone()
             rad, con, kw = self._fibre_extras(N, S, rad, r)
             if fibre.get("wall"):                                                       # hollow: a wall and contents
                 kw["wall"] = rad * r.u(*fibre["wall"]); kw["lumen_c"] = torch.full_like(rad, fibre.get("lumen_c", r.u(-40, 40))); kw.pop("lam", None)
@@ -1903,7 +1911,10 @@ class Scene:
                 prev = bundles[-1] if bundles and (crossing or r.p(0.6)) else None
                 mode = ["angled", "angled", "kissing", "fanning"][r.i(0, 3)] if prev is not None else ("split" if r.p(0.15) else "single")
                 gs = self.bundle(prev.centreline if prev is not None else None, mode)
-                if gs is not None:
+                from . import fibres as FB
+                if gs is not None and FB.RELAX:                                    # fibres interweave in the relaxation (below)
+                    bundles.extend(gs if isinstance(gs, list) else [gs])
+                elif gs is not None:
                     for g_ in (gs if isinstance(gs, list) else [gs]):
                         if mode == "angled" and prev is not None and prev.offsets is not None and g_.offsets is not None and r.p(0.7):
                             self.interleave(prev, g_)                              # fascicles interdigitate where the bundles cross
@@ -1951,6 +1962,9 @@ class Scene:
             g_ = self.bundle()
             if g_ is not None:
                 self.groups.append(g_)
+        from . import fibres as FB
+        if FB.RELAX:                                                           # Monte Carlo fibre architecture: collisions resolved
+            FB.relax_scene(self)
         return self
 
     def render(self, half: bool = False) -> dict:

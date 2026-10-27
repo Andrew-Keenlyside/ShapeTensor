@@ -192,6 +192,28 @@ ones where they conflict; the conflicts I know of are listed at the end of part 
 - 2026-10-21: "Once run, run side by side to standard structure tensor only and show in 20um cortex hipct."
 - 2026-10-17: "can you make a phantom with a few fibres taking a 90 degree bend, then show how many and what activation
   populations look like"
+- 2026-10-26 (external fibre simulators and dMRI test sets; plan `notes/plan_full_generator.md`): "maybe only use
+  DISCO as a test dataset" (DiSCo never enters training, the substrate bank, generator / target checks or model
+  selection).
+- 2026-10-26: "i dont need to simulate PLI images, but can we integrate similar styles of generators in our input
+  data (not nessecarily using these packages, just their concepts, to keep integration simple)" (fibre-architecture
+  concepts -- packing, collision relaxation, radial growth, dispersion, crowded growth, connectivity bundles --
+  reimplemented in `learn/fibres.py`; no external simulator installed; no PLI forward model work).
+- 2026-10-26: "make sure there is still non-fiberous or non orientated shape included in the models, so its not training to
+  think everything is fibres" (the Monte Carlo fibre options change bundles only; cells, granules, crystals, blobs,
+  sheets, foams and isotropic-only scenes stay in the mix; `scripts/learn/content_mix.py` measures the kind and
+  non-oriented shares with the options off and on, and any training run with them must keep the default family mix).
+- 2026-10-26/27 (framing): "take a look fundamentally at the overall structure in general terms - are we framing this
+  problem correctly for the model to solve? how are we handling an ill posed model, what are we assuming default
+  morphology is?"; "is this still the same single foundation model that has multiple downstream uses or does it
+  narrow the scope? can you test this new version as long as it remains the same style of foundation model"; "are
+  there any faster tests to check this is going in the right direction? i just think there are smaller tests before we
+  run multiple hours of work (also use USA ET)" (fast tests before long runs; times in US Eastern;
+  notes/framing_review_2026-10-27.md).
+- 2026-10-27: "what is famN or famO, you are using vague and non-descriptive label" (descriptive run names in messages
+  and notes; a lookup table in notes/framing_review_2026-10-27.md §7).
+- 2026-10-27: "these orientations shown for per voxel are terrible - the previous structure was far better" (the
+  voxel-first ownership idea dropped; the per-direction density at the query scale with the direct oriented path kept).
 
 ### Figures
 

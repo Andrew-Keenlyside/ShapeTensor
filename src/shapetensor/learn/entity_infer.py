@@ -90,10 +90,14 @@ def features(model, x: torch.Tensor, voxel: float | None = None, voxel_um: float
     h0, h1, h = model.features(xb)
     v = _voxel(voxel, voxel_um)
     v = torch.tensor([float("nan") if v is None else float(v)], device=x.device)
+    fe = (h0, h1, model.condition(h, v))
     if getattr(getattr(model, "ent", None), "oprobe", False):                                      # the oriented probe's scalar fields
         from .model import with_scal
-        return with_scal((h0, h1, model.condition(h, v)), model.scalar_fields(xb))
-    return h0, h1, model.condition(h, v)
+        fe = with_scal(fe, model.scalar_fields(xb))
+    if getattr(getattr(model, "ent", None), "odirect", 0):                                        # the direct oriented path's energies
+        from .model import with_oe
+        fe = with_oe(fe, model.direct_levels(xb))
+    return fe
 
 
 @torch.no_grad()
@@ -145,7 +149,8 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
         qi, di = torch.nonzero(ev, as_tuple=True)
         rr = dec.ray_pairs(feats, (p - off)[qi], dirs[di]) if (getattr(dec, "ray", False) and qi.numel()) else None
         oo = dec.oprobe_feats(feats, (p - off)[qi], dirs[di]) if (getattr(dec, "oprobe", False) and qi.numel()) else None
-        r = dec.decode(enc[qi], Y[di].to(enc.dtype), rr, oo) if qi.numel() else None
+        od = dec.od_feats(feats, (p - off)[qi], dirs[di]) if (getattr(dec, "odirect", 0) and qi.numel()) else None
+        r = dec.decode(enc[qi], Y[di].to(enc.dtype), rr, oo, od) if qi.numel() else None
         full = {"f": torch.zeros(n, D, device=p.device), "z": torch.zeros(n, D, dec.emb, device=p.device),
                 "R": torch.eye(3, device=p.device).expand(n, D, 3, 3).clone(), "kappa": torch.zeros(n, D, 2, device=p.device),
                 "desc": torch.zeros(n, D, 5, device=p.device)}

@@ -6,6 +6,12 @@ targets at a query are each population's window mean of occupancy (its mass) and
 ODF's moment: a fan or a curve broadens with the window, as its directions spread), fitted as a Bingham -- population
 specific ODFs, the isotropic remainder the background entity.
 
+Crossings (``cross``, ``fine``) are **Monte Carlo random fibre bundles** (kind ``fibres``, :mod:`~shapetensor.learn.fibres`):
+fibres placed by dart throwing with gamma radii, wandering, collision-relaxed jointly so crossing bundles interweave, and
+rendered with the scene generator's renderer (the per-voxel tensor is the fibres' own tangents). The earlier crossings --
+two lattices interleaved in layers -- stacked into columns along the crossing plane's normal, a third orientation the
+targets do not contain (X0, 26 Oct); they remain as ``cross_lattice`` / ``fine_lattice``.
+
 ``make(spec, n, seed, device)`` draws a phantom from a list of population specs (dicts: ``kind`` and its parameters);
 ``random_spec(family, rng)`` draws a spec for a family ("cross", "fan", "curve", "sheet", "blob", "mix", "empty");
 ``targets`` and ``draw_queries`` as :mod:`~shapetensor.learn.simple_phantom`.
@@ -94,6 +100,49 @@ def render(p: dict, X: torch.Tensor, n: int) -> tuple:
     return occ.float(), _t6(T).float(), kind
 
 
+def _fibre_populations(specs: list, n: int, ss: int, seed: int, device) -> list:
+    """Monte Carlo fibre bundles (kind ``fibres``), relaxed jointly and rendered on the ``n * ss`` grid: per spec
+    ``(occupancy, tensor6)``. A spec: ``axis``, ``half`` (bundle radius), ``radius`` (mean fibre radius), ``fvf`` (fibre
+    volume fraction of the section), ``wander`` (lateral wander, in fibre radii), ``conc`` (the dispersion floor), optional
+    ``centre`` and ``k_shape`` (gamma shape of the radii); sizes in coarse voxels. The geometry is drawn and relaxed in
+    coarse voxels whatever ``ss`` -- supersampling changes the rendering only -- then scaled to the fine grid, each curve
+    resampled ``ss`` times more densely (the renderer's 0.5-voxel step on the fine grid)."""
+    if not specs:
+        return []
+    import numpy as np
+    from . import fibres as FB
+    from .scene import Canvas, Rng, curves_like, render_curves, smooth1d
+    nf = n * ss; rng = np.random.default_rng(seed); R = Rng(seed, device); cur = []
+    for i, p in enumerate(specs):
+        A = torch.nn.functional.normalize(torch.tensor(p["axis"], dtype=torch.float32, device=device), dim=0); e1, e2 = _frame(A)
+        c0 = torch.tensor(p.get("centre", (n / 2,) * 3), dtype=torch.float32, device=device)
+        C, Rr = FB.random_section(p["fvf"], p["radius"], p.get("k_shape", 8.0), p["half"], rng, max_n=800)
+        C = torch.tensor(C, dtype=torch.float32, device=device); N = C.shape[0]
+        L = 1.8 * n; S = int(L / 0.5) + 1; sl = torch.linspace(-L / 2, L / 2, S, device=device)
+        w = p.get("wander", 0.5) * p["radius"] * smooth1d(R.randn(N, S, 2), 12.0)                     # lateral wander along each fibre
+        off = (C[:, None, :] + w)
+        P = c0 + sl[None, :, None] * A + off[..., :1] * e1 + off[..., 1:] * e2
+        rad = torch.tensor(Rr, dtype=torch.float32, device=device)[:, None].expand(N, S).contiguous()
+        cur.append(curves_like(P, rad, R, obj=torch.arange(N, device=device) + 1000 * i, seg=torch.zeros(N, device=device), contrast=1.0))
+    FB.relax(cur, box=((0, 0, 0), (n - 1,) * 3))
+    if ss > 1:                                                                                       # to the fine grid: coordinates and radii
+        for c in cur:                                                                                # scaled, samples ss times denser
+            N, S, _ = c.P.shape; Sf = (S - 1) * ss + 1
+            up = lambda x: torch.nn.functional.interpolate(x.movedim(1, -1), size=Sf, mode="linear", align_corners=True).movedim(-1, 1)
+            Pf = (up(c.P) + 0.5) * ss - 0.5; rf = up(c.rad[..., None])[..., 0] * ss
+            c.P, c.rad = Pf, rf
+            for k in ("flat", "wall", "sexp", "contrast", "lumen_c"):
+                setattr(c, k, up(getattr(c, k)[..., None])[..., 0])
+            c.wall = c.wall * ss                                                                     # a length, like the radius
+    out = []
+    for p, c in zip(specs, cur):
+        cv = Canvas((nf,) * 3, device); render_curves(cv, c); f = cv.finish()
+        T6 = f["tensor"]; cs = p.get("conc", 0.94)                                                 # the dispersion floor, as the lattices':
+        eye = torch.tensor([1.0, 1, 1, 0, 0, 0], device=device).view(6, 1, 1, 1)                   # c T + (1 - c) (I - T) / 2
+        out.append((f["occupancy"].float(), (cs * T6 + (1 - cs) * (eye - T6) / 2).float()))
+    return out
+
+
 def make(spec: list, n: int = 64, seed: int = 0, look: dict | None = None, device="cuda", ss: int = 1) -> dict:
     """A phantom from population specs: ``image (n, n, n)`` 0-1 (8-bit levels), ``occ (K, n, n, n)``, ``tens (K, 6, ...)``,
     ``kinds``, ``bg`` (the background's occupancy). ``look``: ``bg`` level, per-population ``contrast`` (sign: bright or
@@ -105,8 +154,13 @@ def make(spec: list, n: int = 64, seed: int = 0, look: dict | None = None, devic
     ax = (torch.arange(nf, dtype=torch.float32, device=device) + 0.5) / ss - 0.5                    # fine cells in the coarse voxels' units
     X = torch.stack(torch.meshgrid(ax, ax, ax, indexing="ij"), -1)
     occ, tens, kinds = [], [], []
+    mc = iter(_fibre_populations([p for p in spec if p["kind"] == "fibres"], n, ss, seed, device))
     for p in spec:
-        o, t, k = render(p, X, n); occ.append(o); tens.append(t); kinds.append(k)
+        if p["kind"] == "fibres":
+            (o, t), k = next(mc), "bundle"
+        else:
+            o, t, k = render(p, X, n)
+        occ.append(o); tens.append(t); kinds.append(k)
     occ = torch.stack(occ) if occ else torch.zeros(0, nf, nf, nf, device=device)
     tens = torch.stack(tens) if tens else torch.zeros(0, 6, nf, nf, nf, device=device)
     fine = None
@@ -212,14 +266,23 @@ def random_spec(family: str, g: torch.Generator, n: int = 64) -> tuple:
     xfib = lambda: {"spacing": s0, "radius": u(0.6, s0 / 4), "half": u(7, 13), "conc": 0.94}       # crossings: one z lattice, thin enough
                                                                                                      # to interleave (layers s0/2 apart)
     spec = []
-    if family == "cross":
+    if family in ("cross", "fine"):                                                                 # Monte Carlo fibre crossings
+        A = _rand_unit(g); q = torch.nn.functional.normalize(torch.linalg.cross(A, _rand_unit(g)), dim=0)
+        ang = math.radians(u(30, 90)); B = math.cos(ang) * A + math.sin(ang) * q; nn_ = torch.linalg.cross(A, B).tolist()
+        fine = family == "fine"                                                                      # fine: fibres below the grid (partial volume)
+        mc = lambda ax: {"kind": "fibres", "axis": ax.tolist(), "normal": nn_, "half": u(7, 13), "radius": u(0.35, 0.6) if fine else u(0.6, 1.4),
+                         "fvf": u(0.2, 0.35), "wander": u(0.2, 1.0), "conc": 0.94}
+        spec = [mc(A), mc(B)]
+        if u(0, 1) < 0.25:                                                                           # a third population, any direction
+            spec.append(mc(_rand_unit(g)))
+    elif family == "cross_lattice":
         th = u(0, math.pi); ang = math.radians(u(30, 90)) * (1 if u(0, 1) < 0.5 else -1)
         spec = [{"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th), **xfib(), "z0": 0.0},
                 {"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th + ang), **xfib(), "z0": s0 / 2}]
         if u(0, 1) < 0.25:                                                                           # a third population (between the layers)
             third = xfib(); third["radius"] = min(third["radius"], s0 / 8 + 0.3)
             spec.append({"kind": "bundle", "normal": nrm.tolist(), "axis": inplane(th + ang / 2 + math.pi / 2), **third, "z0": s0 / 4})
-    elif family == "fine":                                                                          # a crossing of unresolved fibres: finer and
+    elif family == "fine_lattice":                                                                  # a crossing of unresolved fibres: finer and
         sf = u(1.6, 2.4)                                                                             # closer than the grid (partial volume only)
         th = u(0, math.pi); ang = math.radians(u(30, 90)) * (1 if u(0, 1) < 0.5 else -1)
         ff = lambda: {"spacing": sf, "radius": u(0.4, min(0.7, sf / 4 + 0.15)), "half": u(7, 13), "conc": 0.94}
