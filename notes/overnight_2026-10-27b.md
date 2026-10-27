@@ -318,6 +318,31 @@ concentrations) come last. On the long-trained direct-path pilot the density fra
 still supply the reported concentrations (ODF shape). Fans lose some mass to "other" with density frames (their spread
 lobe fits a broader, sometimes girdle-typed Bingham).
 
+**Step 4000, final readout (maps; density frames), selection set:** 3/16; **C6 direction 16/16, C3 count 14/16**, C5 11,
+C2 12, C9 8, C1 4. Single populations' mass 1.0-1.24 of the target (the oriented-mass map ~10-20 % high). Remaining
+failures: crossing cores (two of four crossing phantoms one-sided: overlap 2.84 / 0.0 and 0.0 / 2.17) and fans
+(density frames type a spread fan lobe as a girdle: one fan's solo mass 0.0, with vote frames 0.95 -- but vote frames
+lose the sheets).
+
+**The crossing cores are a contrast confound, not a failure to separate.** Density at each true axis in the final
+set's crossing cores (target in brackets), step 4000:
+
+| | as drawn (contrasts independent, 0.3-0.8) | the same crossings, contrasts equalised |
+|---|---|---|
+| cross 0 (contrast 0.32 / 0.71) | 2.08 (6.45) / 8.04 (5.38) | 5.21 / 4.46 (ratio 1.17; target 1.20) |
+| cross 3 (0.41 / 0.66) | 0.78 (4.67) / 5.27 (6.40) | 2.08 / 4.95 |
+| fine 0 (0.58 / 0.72) | 2.09 (5.19) / 5.56 (6.84) | 3.17 / 4.59 (0.69; 0.76) |
+| fine 1 | 3.57 / 4.94 | 4.95 / 3.63 (1.36; 1.28) |
+| fine 3 (0.76 / 0.60) | 5.73 (5.27) / 2.91 (7.74) | 3.54 / 4.92 (0.72; 0.68) |
+
+With equal contrasts the model splits the cores in about the true mass ratio; with unequal ones the brighter bundle
+takes the core (as in the direct-path pilot, a little less: cross 0's ratio 8.0 -> 3.9, cross 3's 13.7 -> 6.8 -- the
+context level or the longer from-scratch training). In a core, line energy ~ contrast^2 x occupancy, and only context
+(each bundle's arms) tells contrast from occupancy. Whether the phantoms' independent contrasts are realistic for
+crossing tracts (usually both myelinated, similar contrast) is a question for the generator (review item 3): options are
+correlated contrasts in crossings, wider context levels (sigma 12-16), or scoring cores whose populations differ in
+contrast as context-only.
+
 **A readout bug this showed:** the maps' 2x cap (review 2) starved weak lobes -- oriented totals 0.03-0.12 of the target
 at step 2000 -- now off (`maps_cap`, default None): 0.13-0.70. The pilot's own mid-run scorings use the capped
 readout; its checkpoints are kept (`pilot3_step*.pt`) and rescored with the final readout below.
