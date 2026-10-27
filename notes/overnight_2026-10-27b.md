@@ -37,7 +37,19 @@ direct-path pilot:
 - The reported concentrations are the density-weighted mean of the directions' own kappa votes; the mass split still
   uses the moment fit (a lobe as broad as the density's), so masses don't move into the floor.
 - Tried and not kept: frames from the density's moment (sheets lost: a great-circle density has many peaks), pruning
-  weak lobes (no effect once the above was in).
+  weak lobes (no effect once the above was in). A saddle-height merge of lobes (join basins across a saddle >= 0.8 of the
+  lower peak) keeps sheets whole and made density frames usable (direction 12 -> 16/16 on the selection set) but split
+  fans' mass to "other" (fans matched 0.82 -> 0.50): available (`saddle=0.8`), off by default.
+
+**The same direct-path pilot on the final set (32 phantoms), old against new readout:**
+
+| | all | C1 mass | C2 flat | C3 count | C4 leakage | C5 edges | C6 direction | C7 background | C8 ODF shape | C9 found |
+|---|---|---|---|---|---|---|---|---|---|---|
+| old readout (votes) | 4 | 4 | 20 | 10 | 8 | 12 | 24 | 25 | 11 | 19 |
+| new readout (lobes, votes' kappa) | 4 | 5 | 20 | **16** | 9 | 11 | **27** | 25 | **30** | 17 |
+
+The readout alone fixes the ODF shapes and most counts; mass (C1), flatness across overlaps (C2) and leakage (C4) need
+the model -- the crossing cores and the split of mass among lobes.
 
 ## 3. Speed (`scripts/learn/direct_path_speed.py`)
 
