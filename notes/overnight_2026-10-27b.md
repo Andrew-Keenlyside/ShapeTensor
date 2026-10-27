@@ -226,7 +226,23 @@ famN-like configuration against the pilot's showed both stable to step 400 (|h| 
 the blow-up is intermittent and later. The cause is not found; the earlier from-scratch model (famN) trained at
 batch 1 without the direct path.
 
-**Second launch (01:55):**
+**Cause found (01:56).** Tracing the diverged checkpoint layer by layer:
+
+| layer | mean \|h\| in -> out |
+|---|---|
+| l0 | 0.32 -> 12 |
+| l1 (2 blocks) | 6.4 -> 2.3e3 -> 8.8e5 |
+| l2 | 1.1e6 -> 1.9e9 |
+| l3 (2 blocks) | 4.9e9 -> 4.6e12 -> 1.0e16 |
+
+Each residual block amplified 300-400x although its weights stayed small (mean |w| 0.02, max 0.12; gains g ~0.3). The
+3^3 convolutions had grown *coherent* (summing their neighbourhood), and nothing normalises the trunk, so the gain
+compounds over its eight blocks. Every head then saturates (softplus/sigmoid), gradients vanish, and the run is dead
+without a NaN. **Fix: a per-voxel RMS pre-norm in each block** (`--block-norm`, `model.ChannelRMSNorm`: each voxel's
+features over their channels' RMS, a learned scale -- local, so the same at any crop or tile size, unlike a group
+norm). Growth through a block is then additive, not multiplicative. Old checkpoints load unchanged (off by default).
+
+**Second launch (01:55, stopped after 2 minutes for the third):**
 - same model, at lr 2e-4 with a 300-step warm-up and gradient clip 2;
 - **a divergence guard**: if the trunk's mean |feature| exceeds 50 or the loss is non-finite, it rolls back to the last
   healthy snapshot (every 250 steps) and halves the rate;
@@ -234,5 +250,8 @@ batch 1 without the direct path.
 
 The CPU phantom workers did not keep up (fine-crossing phantoms take 7-30 s each on the CPU), so phantoms stay on
 the GPU. A step is ~0.8 s.
+
+**Third launch (01:57): with the block pre-norm**, lr 3e-4 (300-step warm-up, clip 2), the guard kept as a safety net;
+10000 steps, scored on the selection set every 2000.
 
 (results below)
