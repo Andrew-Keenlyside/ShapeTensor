@@ -86,45 +86,45 @@ _WM_CACHE: dict = {}
 
 def _window_matrix(n: int, s_: float, device, dtype) -> torch.Tensor:
     """The ``(n, n)`` matrix of :func:`window_mean`'s 1-D blur along an axis of length ``n``: its normalised Gaussian
-    truncated at ``ceil(3 sigma)``, zero beyond the map -- ``v @ M.T`` equals the zero-padded convolution."""
+    truncated at ``ceil(3 sigma)``, zero beyond the map -- ``M @ v`` along that axis equals the zero-padded convolution.
+    Built on ``device`` (no host copy), cached."""
     key = (n, round(float(s_), 9), str(device), dtype)
     M = _WM_CACHE.get(key)
     if M is None:
         if len(_WM_CACHE) > 512:
             _WM_CACHE.clear()
-        rad = int(math.ceil(3 * s_)); t = torch.arange(-rad, rad + 1.0, dtype=torch.float64); k = torch.exp(-0.5 * (t / s_) ** 2); k = k / k.sum()
-        i = torch.arange(n)[:, None]; j = torch.arange(n)[None]; d = j - i
-        M = _WM_CACHE[key] = torch.where(d.abs() <= rad, k[(d + rad).clamp(0, 2 * rad)], torch.zeros(())).to(device=device, dtype=dtype)
+        rad = int(math.ceil(3 * s_)); t = torch.arange(-rad, rad + 1, device=device, dtype=torch.float64)
+        k = torch.exp(-0.5 * (t / s_) ** 2); k = k / k.sum()
+        d = torch.arange(n, device=device)[None] - torch.arange(n, device=device)[:, None]         # M[i, j] = k[j - i + rad]
+        M = _WM_CACHE[key] = torch.where(d.abs() <= rad, k[(d + rad).clamp(0, 2 * rad)], torch.zeros((), device=device, dtype=torch.float64)).to(dtype)
     return M
 
 
 def _blur3(v: torch.Tensor, s_: float) -> torch.Tensor:
-    """``v (..., Z, Y, X)`` blurred as :func:`window_mean` blurs (separable, zero beyond the map) by matrix products: the
-    single-channel 3-D convolutions were half of a training step's time in the targets (step_profile, 28 Oct)."""
-    Z, Y, X = v.shape[-3:]
-    v = v @ _window_matrix(X, s_, v.device, v.dtype).T
-    v = (v.transpose(-1, -2) @ _window_matrix(Y, s_, v.device, v.dtype).T).transpose(-1, -2)
-    return (v.transpose(-1, -3) @ _window_matrix(Z, s_, v.device, v.dtype).T).transpose(-1, -3)
+    """``v (B, Z, Y, X)`` blurred as :func:`window_mean` blurs (separable, zero beyond the map) by matrix products, without
+    transposes: the single-channel 3-D convolutions were half of a training step's time in the targets (28 Oct)."""
+    B, Z, Y, X = v.shape
+    v = v @ _window_matrix(X, s_, v.device, v.dtype).T                                          # along x
+    v = _window_matrix(Y, s_, v.device, v.dtype) @ v                                            # along y: (Y, Y) @ (B, Z, Y, X)
+    return (_window_matrix(Z, s_, v.device, v.dtype) @ v.reshape(B, Z, Y * X)).view(B, Z, Y, X)  # along z
 
 
 def window_mean(r: torch.Tensor, points: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
     """The Gaussian-window mean of a map ``r (B, Z, Y, X)`` at ``points (B, Q, 3)`` (voxels) and per-query ``sigma (B, Q)``
     (voxels): zero beyond the map (as the entity targets count nothing beyond the crop), blurred at sigma steps of sqrt 2
-    over the batch's range, sampled trilinearly and interpolated in log sigma. Differentiable: ``(B, Q)``."""
-    B, Z, Y, X = r.shape
-    s_lo = float(sigma.min().clamp_min(0.5)); s_hi = float(sigma.max().clamp_min(s_lo * 1.0001))
-    n_lv = max(2, int(math.ceil(math.log(s_hi / s_lo) / math.log(math.sqrt(2)))) + 1)
-    lv = torch.exp(torch.linspace(math.log(s_lo), math.log(s_hi), n_lv, device=r.device))
-    size = torch.tensor([Z, Y, X], device=r.device, dtype=torch.float32)
-    g = (points / (size - 1) * 2 - 1).flip(-1).view(B, -1, 1, 1, 3)                                # grid_sample's (x, y, z), align_corners
-    S = []
-    for s_ in lv.tolist():
-        v = _blur3(r.float() if r.dtype not in (torch.float32, torch.float64) else r, s_)[:, None]
-        S.append(Fn.grid_sample(v, g.to(v.dtype), mode="bilinear", align_corners=True).view(B, -1))
-    S = torch.stack(S)                                                                              # (n_lv, B, Q)
-    t = (torch.log(sigma.clamp_min(s_lo)) - math.log(s_lo)) / max(math.log(s_hi / s_lo), 1e-6) * (n_lv - 1)
-    i0 = t.floor().long().clamp(0, n_lv - 2); a = (t - i0.float()).clamp(0, 1)
-    return (1 - a) * S.gather(0, i0[None])[0] + a * S.gather(0, (i0 + 1)[None])[0]
+    over the batch's range, sampled trilinearly and interpolated in log sigma. Differentiable: ``(B, Q)``. In fp32 under
+    any autocast (bf16 coordinates were up to 0.3 voxel off at n = 288: review 3)."""
+    with torch.autocast(r.device.type, enabled=False):
+        B, Z, Y, X = r.shape; r = r.float(); points = points.float(); sigma = sigma.float()
+        s_lo = float(sigma.min().clamp_min(0.5)); s_hi = float(sigma.max().clamp_min(s_lo * 1.0001))
+        n_lv = max(2, int(math.ceil(math.log(s_hi / s_lo) / math.log(math.sqrt(2)))) + 1)
+        lv = torch.exp(torch.linspace(math.log(s_lo), math.log(s_hi), n_lv)).tolist()
+        size = torch.tensor([Z, Y, X], device=r.device, dtype=torch.float32)
+        g = (points / (size - 1) * 2 - 1).flip(-1).view(B, -1, 1, 1, 3)                            # grid_sample's (x, y, z), align_corners
+        S = torch.stack([Fn.grid_sample(_blur3(r, s_)[:, None], g, mode="bilinear", align_corners=True).view(B, -1) for s_ in lv])   # (n_lv, B, Q)
+        t = (torch.log(sigma.clamp_min(s_lo)) - math.log(s_lo)) / max(math.log(s_hi / s_lo), 1e-6) * (n_lv - 1)
+        i0 = t.floor().long().clamp(0, n_lv - 2); a = (t - i0.float()).clamp(0, 1)
+        return (1 - a) * S.gather(0, i0[None])[0] + a * S.gather(0, (i0 + 1)[None])[0]
 
 
 class Feats(tuple):
@@ -250,6 +250,8 @@ class EntityDecoder(nn.Module):
         # entity's votes -- its mass then does not hang on the density's shape (lobe widths, the floor's ripples, which
         # population's lobe stands out at a crossing core: reviews 27 Oct)
         self.mvote = nn.Sequential(nn.Linear(hidden + n_coef(lmax) + rin, 64), nn.SiLU(), nn.Linear(64, 1)) if mass_vote else None
+        if self.mvote is not None:                                                                # starts near the masses (softplus(-2) ~ 0.13)
+            nn.init.constant_(self.mvote[-1].bias, -2.0)
 
     def encode(self, feats, points: torch.Tensor, sigma: torch.Tensor, context: torch.Tensor | None = None) -> torch.Tensor:
         from .query import _sample
@@ -619,6 +621,37 @@ class PopulationNet(nn.Module):
         with torch.autocast(x.device.type, enabled=False):                                       # fp32 in training as at inference (under the
             return self._direct_levels(x, chunk, strides)                                        # training's bf16 autocast the energies were
 
+    def _od_filters(self, shp, c: int, chunk: int, device) -> torch.Tensor:
+        """The bank's filters ``(chunk, Z, Y, X // 2 + 1)`` on the half spectrum for directions ``c : c + chunk`` (8 voxels
+        along, 0.6 across), symmetrised over the Nyquist planes as the full FFT's real part does (H at the Nyquist
+        frequency -pi and +pi averaged): exactly the energies of the full-spectrum build. Cached for the last shape."""
+        cache = self.__dict__.setdefault("_odf_cache", {})
+        key = (shp, c, chunk, str(device))
+        if key in cache:
+            return cache[key]
+        if cache and next(iter(cache))[0] != shp:
+            cache.clear()
+        ax = [torch.fft.fftfreq(shp[0], device=device), torch.fft.fftfreq(shp[1], device=device), torch.fft.rfftfreq(shp[2], device=device)]
+        ax = [a_ * 2 * math.pi for a_ in ax]
+        isn = []                                                                                  # the Nyquist index of each even axis
+        for i, (a_, n) in enumerate(zip(ax, shp)):
+            m = torch.zeros_like(a_, dtype=torch.bool)
+            if n % 2 == 0:
+                m[n // 2] = True
+                if i == 2:                                                                       # rfftfreq's Nyquist is +pi; fftfreq's -pi
+                    a_[n // 2] = -math.pi
+            isn.append(m)
+        k = torch.stack(torch.meshgrid(*ax, indexing="ij"), -1)
+        nyq = torch.stack(torch.meshgrid(*isn, indexing="ij"), -1)
+        kf = torch.where(nyq, -k, k)                                                              # the Nyquist components at +pi
+        d = self.ent.od_dirs[c:c + chunk]
+        Hs = []
+        for kk in (k, kf):
+            kp2 = (kk @ d.T).movedim(-1, 0) ** 2; k2 = (kk ** 2).sum(-1)
+            Hs.append(torch.exp(-0.5 * (8.0 ** 2 * kp2 + 0.6 ** 2 * (k2[None] - kp2))))
+        H = cache[key] = 0.5 * (Hs[0] + Hs[1])
+        return H
+
     def _direct_levels(self, x: torch.Tensor, chunk: int, strides) -> "Levels":                 # rounding noise in low contrast: review 27 Oct)
         from ..filters import gaussian, gaussian_mm
         sig = self.ent.od_sigmas
@@ -626,13 +659,11 @@ class PopulationNet(nn.Module):
             strides = OD_STRIDES if OD_STRIDES is not None else tuple(1 if s_ < 8 else 2 for s_ in sig)
         strides = tuple(strides) or (1,); strides = (strides + (strides[-1],) * len(sig))[:len(sig)]
         xf = x[:, :1].float(); xf = xf - gaussian(xf, 3.0)                                       # high-passed (as oriented_energy's hp)
-        F = torch.fft.fftn(xf, dim=(-3, -2, -1))
-        k = torch.stack(torch.meshgrid(*[torch.fft.fftfreq(n, device=x.device) * 2 * math.pi for n in x.shape[-3:]], indexing="ij"), -1)
-        k2 = (k ** 2).sum(-1); dirs = self.ent.od_dirs; parts = [[] for _ in strides]
-        for c in range(0, dirs.shape[0], chunk):
-            kp2 = (k @ dirs[c:c + chunk].T).movedim(-1, 0) ** 2
-            H = torch.exp(-0.5 * (8.0 ** 2 * kp2 + 0.6 ** 2 * (k2[None] - kp2)))
-            E = torch.fft.ifftn(F * H[None], dim=(-3, -2, -1)).real ** 2                            # (B, chunk, Z, Y, X)
+        shp = tuple(x.shape[-3:]); F = torch.fft.rfftn(xf, dim=(-3, -2, -1))                    # half the spectrum (real input): the same
+        dirs = self.ent.od_dirs; parts = [[] for _ in strides]                                    # energies as the full FFT's (its filter made
+        for c in range(0, dirs.shape[0], chunk):                                                  # Hermitian on the Nyquist planes: review 3)
+            H = self._od_filters(shp, c, chunk, x.device)
+            E = torch.fft.irfftn(F * H[None], s=shp, dim=(-3, -2, -1)) ** 2                         # (B, chunk, Z, Y, X)
             for li, (s, st) in enumerate(zip(sig, strides)):
                 parts[li].append(gaussian_mm(E, s)[..., ::st, ::st, ::st].contiguous())             # (= gaussian, as matrix products)
             del E, H
@@ -664,6 +695,17 @@ class PopulationNet(nn.Module):
         density (the sum of the populations' occupancies: two crossing populations count twice)."""
         return Fn.softplus(logit.float()) if getattr(self, "region_density", False) else torch.sigmoid(logit.float())
 
+    def _head(self, head: nn.Sequential, h0, h1, h) -> torch.Tensor:
+        """``head`` (a 1x1 convolution first) on the three levels at full resolution, ``head(cat([h0, up(h1), up(h)]))``,
+        computed as ``W0 h0 + up(W1 h1) + up(W2 h)``: a 1x1 convolution commutes with trilinear upsampling, so the
+        224-channel full-resolution concatenation is never built (review 3: ~2.4x faster, far fewer saved activations)."""
+        c = head[0]; W = c.weight; c0, c1 = h0.shape[1], h1.shape[1]; sz = h0.shape[2:]
+        up = lambda t: Fn.interpolate(t, size=sz, mode="trilinear", align_corners=False)
+        y = Fn.conv3d(h0, W[:, :c0], c.bias) + up(Fn.conv3d(h1, W[:, c0:c0 + c1])) + up(Fn.conv3d(h, W[:, c0 + c1:]))
+        for m in list(head)[1:]:
+            y = m(y)
+        return y
+
     def region_map(self, h0, h1, h) -> torch.Tensor:
         """Logits ``(B, Z, Y, X)`` of the visible occupancy of oriented material (the populations' union) at every voxel,
         from the three levels brought to full resolution (trilinear: the stride-2 and lattice centres land where they lie)
@@ -673,27 +715,27 @@ class PopulationNet(nn.Module):
         if getattr(self, "region_dec", None) is not None:
             d = self.region_dec; a = Fn.silu(d["c1"](torch.cat([up(Fn.silu(d["r2"](h)), h1.shape[2:]), Fn.silu(d["r1"](h1))], 1)))
             a = Fn.silu(d["c0"](torch.cat([up(a), Fn.silu(d["r0"](h0))], 1)))
-            return (d["out"](a) + self.region(torch.cat([h0, up(h1), up(h)], 1)))[:, 0]
-        return self.region(torch.cat([h0, up(h1), up(h)], 1))[:, 0]
+            return (d["out"](a) + self._head(self.region, h0, h1, h))[:, 0]
+        return self._head(self.region, h0, h1, h)[:, 0]
 
     def obj_map(self, h0, h1, h) -> torch.Tensor:
         """The objects' occupancy ``(B, Z, Y, X)`` (a density: crossings count both) (``obj_head``)."""
         sz = h0.shape[2:]
         up = lambda t: Fn.interpolate(t, size=sz, mode="trilinear", align_corners=False)
-        return Fn.softplus(self.objh(torch.cat([h0, up(h1), up(h)], 1))[:, 0].float())
+        return Fn.softplus(self._head(self.objh, h0, h1, h)[:, 0].float())
 
     def split_map(self, h0, h1, h) -> torch.Tensor:
         """The objects' occupancy by kind ``(B, 2, Z, Y, X)``: oriented material, isotropic objects (densities: crossings
         count both) (``split_head``)."""
         sz = h0.shape[2:]
         up = lambda t: Fn.interpolate(t, size=sz, mode="trilinear", align_corners=False)
-        return Fn.softplus(self.splith(torch.cat([h0, up(h1), up(h)], 1)).float())
+        return Fn.softplus(self._head(self.splith, h0, h1, h).float())
 
     def bg_map(self, h0, h1, h) -> torch.Tensor:
         """The background's occupancy ``(B, Z, Y, X)`` in 0-1 (``bg_head``)."""
         sz = h0.shape[2:]
         up = lambda t: Fn.interpolate(t, size=sz, mode="trilinear", align_corners=False)
-        return torch.sigmoid(self.bgh(torch.cat([h0, up(h1), up(h)], 1))[:, 0].float())
+        return torch.sigmoid(self._head(self.bgh, h0, h1, h)[:, 0].float())
 
     def condition(self, h: torch.Tensor, voxel: torch.Tensor | None) -> torch.Tensor:
         """FiLM of the lattice features by the voxel size: ``voxel (B,)`` log2 µm, NaN where unknown."""

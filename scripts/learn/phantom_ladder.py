@@ -45,6 +45,7 @@ ap.add_argument("--mass-vote", action="store_true", help="a per-direction vote f
 ap.add_argument("--split-head", action="store_true", help="a head for the objects' occupancy by kind (oriented / isotropic)")
 ap.add_argument("--lobe-weight", type=float, default=None, help="entity_train.DENS_LOBE_WEIGHT (the density loss weighted toward lobes)")
 ap.add_argument("--score-every", type=int, default=0, help="score the held-out set (criteria) every this many steps during training")
+ap.add_argument("--resume", default=None, help="continue from this checkpoint (OUT_last.pt or a final .pt with its step; --steps is the total)")
 ap.add_argument("--cpu-workers", type=int, default=0, help="make the batches (phantoms, targets) in this many CPU processes")
 ap.add_argument("--prefetch", action="store_true", help="make the next step's phantoms and targets in a thread while the step trains")
 ap.add_argument("--sample-oriented", action="store_true", help="entity_train.SAMPLE_ORIENTED: entity directions from the oriented entities only")
@@ -53,6 +54,7 @@ ap.add_argument("--test-families", nargs="+", default=None, help="score only the
 ap.add_argument("--no-final", action="store_true", help="skip the final set at the end of training (short tests)")
 ap.add_argument("--od-sigmas", type=float, nargs="+", default=None, help="the direct path's pooling levels (e.g. 2 4 6 8: a context level)")
 a = ap.parse_args(); dev = "cuda"; stem = a.out.rsplit(".", 1)[0]
+torch.backends.cudnn.benchmark = True                                                            # fixed training shapes (review 3)
 if a.ckpt and not a.plot_only:
     ap.error("--ckpt only with --plot-only (training writes OUT's .pt)")
 if a.test_families and not set(a.test_families) <= {"cross", "fan", "curve", "sheet", "blob", "mix", "empty", "fine"}:
@@ -228,6 +230,7 @@ else:
 
     def save(step):
         torch.save({"model": net.state_dict(), "args": args, "curves": curves, "tag": a.tag, "init": a.init, "families": a.families, "step": step,
+                    "opt": opt.state_dict(),
                     "flags": {k: getattr(a, k) for k in ("lr", "lr_final", "batch", "steps", "bg_head", "oprobe", "floor", "obj_head", "widths", "scratch",
                                                          "sigma_lo", "odirect", "split_head", "lobe_weight", "lobe_mass", "od_sigmas", "sample_oriented", "mass_vote")}},
                    stem + (".pt" if step == a.steps else "_last.pt"))                               # (mid-run: OUT_last.pt, never the final name)
@@ -259,6 +262,7 @@ else:
     import concurrent.futures as cf
     pool = cf.ThreadPoolExecutor(1) if a.prefetch else None; nxt = None
     procs, wdir = [], None
+    start_step = int(torch.load(a.resume, map_location="cpu", weights_only=False).get("step", 0)) if a.resume else 0
     if a.cpu_workers:                                                                            # phantoms and targets made by CPU processes
         import subprocess, tempfile, atexit, shutil                                              # (~0.22 s of a 0.9 s step on the GPU), as files
         wdir = tempfile.mkdtemp(prefix="ladder_", dir="/dev/shm" if os.path.isdir("/dev/shm") else None)
@@ -266,7 +270,7 @@ else:
         for w in range(a.cpu_workers):
             procs.append(subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "phantom_workers.py"), wdir,
                                            "--rank", str(w), "--n", str(a.cpu_workers), "--families", *a.families, "--batch", str(a.batch),
-                                           "--n-points", str(a.n_points), "--sigma-lo", str(a.sigma_lo), "--start", "0", "--stop", str(a.steps)], env=env))
+                                           "--n-points", str(a.n_points), "--sigma-lo", str(a.sigma_lo), "--start", str(start_step), "--stop", str(a.steps)], env=env))
         def _stop_workers():
             for pr in procs:
                 pr.terminate()
@@ -282,9 +286,18 @@ else:
         d = torch.load(f, weights_only=False); os.remove(f)
         return [x.to(dev, non_blocking=True) for x in d["imgs"]], [{k: v.to(dev, non_blocking=True) for k, v in t_.items()} for t_ in d["ts"]]
 
-    net.train()
-    for step in range(a.steps + 1):
-        if step % a.eval_every == 0 or step == a.steps:
+    step0 = 0
+    if a.resume:                                                                                 # continue a run from its checkpoint (weights,
+        rk = torch.load(a.resume, map_location=dev, weights_only=False)                         # optimiser, curves; the schedule as if never
+        net.load_state_dict(rk["model"]); curves[:] = rk.get("curves", [])                      # stopped)
+        if "opt" in rk:
+            opt.load_state_dict(rk["opt"])
+        step0 = int(rk.get("step", 0)); print(f"resumed {a.resume} at step {step0}", flush=True)
+    net.train(); t_last = time.time()
+    for step in range(step0, a.steps + 1):
+        if step % 100 == 0 and step > step0:                                                     # progress (and speed) between evaluations
+            print(f"    step {step}: {(time.time() - t_last) / 100:.2f} s/step", flush=True); t_last = time.time()
+        if (step % a.eval_every == 0 and not (a.resume and step == step0)) or step == a.steps:
             evaluate(step)
             if 0 < step < a.steps:
                 save(step)                                                                       # (a checkpoint at every evaluation)

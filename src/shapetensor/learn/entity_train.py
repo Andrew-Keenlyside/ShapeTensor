@@ -190,10 +190,14 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
                 ls = ent["log_s2"][vm]                                                                 # (error / s^2 + log s^2 on the detached error:
                 parts["vote_unc"] = 0.5 * ((fl.detach() + 1e-3) * torch.exp(-ls) + ls).mean()         # the vote itself keeps its plain loss)
                 total = total + W.get("vote_unc", 0.2) * parts["vote_unc"]
-            if "mvote" in ent:                                                                         # each voting direction: its owner's mass
-                m_own = torch.gather(mass, 2, owner)                                                   # (B, Q, D)
-                parts["mvote"] = (torch.log(ent["mvote"][vm].float() + 0.01) - torch.log(m_own[vm] + 0.01)).abs().mean()
-                total = total + W.get("mvote", 1.0) * parts["mvote"]
+            if "mvote" in ent:                                                                         # the mass votes: on every direction an oriented
+                orie = (T["e_kappa"][..., 0] >= VOTE_KAPPA_MIN)[:, :, None, :]                         # population mostly owns among the oriented ones
+                co_ = contrib * orie; ro_ = co_.sum(-1); sh_, own_ = (co_ / ro_.clamp_min(1e-9)[..., None]).max(-1)   # (share > 0.4) where they
+                mvm = (sh_ > 0.4) & (ro_ > 0.1 * rm) & (rm > DENS_EPS)                                 # stand above a tenth of the mean: the
+                if bool(mvm.any()):                                                                    # flanks and overlaps the readout averages
+                    m_own = torch.gather(mass, 2, own_)                                                # over too (review 3: 14 % of a lobe's
+                    parts["mvote"] = (torch.log(ent["mvote"][mvm].float() + 0.01) - torch.log(m_own[mvm] + 0.01)).abs().mean()   # directions had no vote)
+                    total = total + W.get("mvote", 1.0) * parts["mvote"]
             dt = torch.cat([torch.log2(1 + d_t[..., :1].clamp_min(0)), (d_t[..., 1:2] / d_t[..., :1].clamp_min(1e-3)).clamp(0, 1), d_t[..., 2:]], -1)
             parts["desc"] = (ent["desc"][vm] - dt[vm]).abs().mean()
             total = total + W["vote"] * parts["vote"] + W["desc"] * parts["desc"]

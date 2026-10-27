@@ -630,11 +630,22 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
     if mass in ("votes", "maps_votes"):                                                           # the entities' own mass votes (density-weighted
         if "mvote" not in r:                                                                     # over their directions; merged pieces: the
             raise ValueError("entities_from_query: mass='votes' needs a model with mass votes")  # survivor's -- a population's pieces vote alike)
-        lab = e["label"]; C = e["live"].shape[1]
-        w = torch.where(lab >= 0, r["f"].float(), torch.zeros_like(r["f"].float()))
-        mv = _comp_mean(r["mvote"].float()[..., None], w, lab, C)[..., 0]
+        lab = e["label"]; C = e["live"].shape[1]; f0 = r["f"].float()
+        fl = torch.quantile(f0, float(floor if floor is not None else 0.05), dim=1, keepdim=True)
         live_o = (ms > 0) & ~isoe
-        ms = torch.where(live_o, mv, torch.zeros_like(ms))
+        typ = torch.where(kv[..., 1] < 2.0, 1, 0)                                                # pieces of one population (same type, axes
+        axv = torch.where((typ == 1)[..., None], e["R"].float()[..., :, 0], e["R"].float()[..., :, 2])   # within the scorer's 30 deg) share one
+        near = ((axv @ axv.transpose(1, 2)).abs() >= math.cos(math.radians(30.0))) & (typ[:, :, None] == typ[:, None, :])   # vote: the mean
+        near &= live_o[:, :, None] & live_o[:, None, :]; near |= torch.eye(C, dtype=torch.bool, device=near.device)[None]  # over their union
+        grp = _components(near)                                                                   # (Q, C): each piece's group (its smallest slot)
+        lab_g = torch.where(lab >= 0, grp.gather(1, lab.clamp_min(0)), lab)
+        w = torch.where(lab >= 0, (f0 - fl).clamp_min(0), torch.zeros_like(f0))                  # (the lobe above the floor, as clustered)
+        mv_g = _comp_mean(r["mvote"].float()[..., None], w, lab_g, C)[..., 0]                    # (Q, C) per group slot
+        msk = torch.where(live_o, ms, torch.full_like(ms, -1.0))                                  # the group's vote on its heaviest piece (ties:
+        ar = torch.arange(C, device=ms.device)                                                    # the lowest slot)
+        beats = (grp[:, :, None] == grp[:, None, :]) & ((msk[:, None, :] > msk[:, :, None]) | ((msk[:, None, :] == msk[:, :, None]) & (ar[None, None, :] < ar[None, :, None])))
+        head = live_o & ~beats.any(-1)
+        ms = torch.where(head, mv_g.gather(1, grp), torch.zeros_like(ms))
         if mass == "maps_votes" and "orim" in r:                                                 # shares from the votes, the total from the map
             S = ms.sum(1); ms = ms * (r["orim"].float() / S.clamp_min(1e-6)).clamp(max=4.0)[:, None]
             unres = (r["orim"].float() - ms.sum(1)).clamp_min(0)
