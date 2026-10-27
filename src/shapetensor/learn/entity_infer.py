@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 import numpy as np
 import torch
@@ -32,6 +33,15 @@ def sphere_dirs(n: int = 300, device="cpu") -> torch.Tensor:
     phi = math.pi * (3 - math.sqrt(5)) * i
     r = torch.sqrt(1 - z ** 2)
     return torch.stack([z, r * torch.sin(phi), r * torch.cos(phi)], 1).float().to(device)        # (z, y, x)
+
+
+def parse_options(s: str) -> dict:
+    """Readout options from ``"saddle=0.9,lobe_merge_deg=15,sharpen_to=None"`` (numbers, None, True / False, words)."""
+    kw = {}
+    for kv in filter(None, s.split(",")):
+        k, x = kv.split("=")
+        kw[k] = None if x == "None" else (x == "True") if x in ("True", "False") else float(x) if re.fullmatch(r"-?[0-9.]+(e-?[0-9]+)?", x) else x
+    return kw
 
 
 def dir_neighbours(dirs: torch.Tensor, k: int = 8) -> torch.Tensor:
@@ -413,6 +423,24 @@ def cluster_lobes_floor(r: dict, dirs: torch.Tensor, floor: float | None = None,
     return cluster_lobes({**r, "f": (f0 - fl).clamp_min(0)}, dirs, **kw)
 
 
+def sharpen_density(f: torch.Tensor, dirs: torch.Tensor, kappa: float = 7.5, iters: int = 30, kappa_to: float | None = 17.0,
+                    floor: float = 0.05) -> torch.Tensor:
+    """The density ``f (Q, D)`` above its floor (the ``floor`` quantile) deconvolved by the model's own single-bundle
+    lobe -- a Watson exp(-``kappa`` sin^2) -- in ``iters`` Richardson-Lucy steps (non-negative, mass kept), then redrawn
+    with lobes of ``kappa_to`` (None: left as deconvolved). The overnight pilot draws one bundle ~30 deg wide at half
+    height at any window (kappa ~7.5, readout_xing.py, 27 Oct) against its training targets' kappa up to 40 (the
+    evaluation phantoms' ~17), so two bundles 25-30 deg apart sum to one lobe; deconvolved they are two."""
+    fl = torch.quantile(f.float(), float(floor), dim=1, keepdim=True)
+    h = (f.float() - fl).clamp_min(0); c2 = (dirs.float() @ dirs.float().T) ** 2                   # (antipodes identified)
+    H = torch.exp(-kappa * (1 - c2)); H = H / H.sum(0, keepdim=True)                               # columns: a unit lobe at each direction
+    w = h.clone() + 1e-12
+    for _ in range(int(iters)):
+        w = w * ((h / (w @ H.T).clamp_min(1e-12)) @ H)
+    if kappa_to is not None:
+        Ht = torch.exp(-kappa_to * (1 - c2)); w = w @ (Ht / Ht.sum(0, keepdim=True)).T
+    return w
+
+
 def _comp_mean(v: torch.Tensor, w: torch.Tensor, ent: torch.Tensor, C: int) -> torch.Tensor:
     Q, D = w.shape; e = torch.where(ent >= 0, ent, torch.full_like(ent, C))
     s = torch.zeros(Q, C + 1, v.shape[-1], device=v.device).scatter_add_(1, e[..., None].expand(-1, -1, v.shape[-1]), w[..., None] * v)
@@ -611,7 +639,8 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
                         entities: str = "lobes", axes: str = "ring", kappa: str = "votes", prune: float = 0.0, mass: str = "basins",
                         saddle: float | None = 0.8, maps_cap: float | None = None, ring: float = 0.8,
                         saddle_ring: float | None = None, lobe_frac: float = 0.1, weak_lines: bool = True, saddle_peaks: float | None = None,
-                        ring_soft: float = 0.1) -> dict:
+                        ring_soft: float = 0.1, lobe_merge_deg: float = 25.0, sharpen: int = 0, sharpen_kappa: float = 7.5,
+                        sharpen_to: float | None = 17.0) -> dict:
     """The entities from the decoder's outputs ``r`` at the directions ``dirs`` (:func:`query`): the density's floor
     (``floor`` quantile) the background plus isotropic objects (told apart by the background head where the model has
     one), entities from what rises above it, their mass split by lobe fit (:func:`split_mass`), near-parallel same-type
@@ -651,12 +680,20 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
     ``sheet``: the type as a weight for maps -- ``axes="ring"``: a smoothstep of the cover over ``ring`` +- ``ring_soft``
     (0.5 at the type boundary; 0: the hard type). The cover is a smooth field on real tissue while the types cut it at
     ``ring``, so a map drawing lines by their axis and sheets by their normal jumped 90 deg there (27 Oct); the types
-    themselves (``k``) are unchanged."""
+    themselves (``k``) are unchanged. ``lobe_merge_deg``: density maxima within it of a heavier one join it (25; 15 with
+    ``saddle_ring=0.6`` resolved more 30-60 deg crossings on the tuning set but split fans on the selection set, so not
+    the default -- notes/readout_crossings_2026-10-27.md). ``sharpen``: entities from the density deconvolved by the
+    model's single-bundle lobe (:func:`sharpen_density`, that many steps; off) -- narrower crossings, but fans split and
+    sheets lost."""
     for k_, v_, ok in (("entities", entities, ("votes", "lobes")), ("axes", axes, ("votes", "density", "hybrid", "ring")), ("kappa", kappa, ("moments", "votes", "votes_all")),
                        ("mass", mass, ("maps", "density", "votes", "maps_votes", "basins"))):
         if v_ not in ok:
             raise ValueError(f"entities_from_query: {k_}={v_!r}, not one of {ok}")
-    e = cluster(r, dirs, floor=floor) if entities == "votes" else cluster_lobes_floor(r, dirs, floor=floor, saddle=saddle, saddle_ring=saddle_ring, f_frac=lobe_frac, saddle_peaks=saddle_peaks)
+    r_raw = r
+    if sharpen > 0:                                                                               # entities, frames and basin shares from the
+        r = {**r, "f": sharpen_density(r["f"], dirs, sharpen_kappa, sharpen, sharpen_to, floor if floor is not None else 0.05)}   # sharpened density
+    e = cluster(r, dirs, floor=floor) if entities == "votes" else cluster_lobes_floor(r, dirs, floor=floor, saddle=saddle, saddle_ring=saddle_ring, f_frac=lobe_frac, saddle_peaks=saddle_peaks,
+                                                                                         merge_deg=lobe_merge_deg)
     if axes == "hybrid":                                                                          # frames from the density, types (and shapes)
         lab_ = e["label"]; C_ = e["live"].shape[1]                                                 # from the votes' own concentrations
         w_ = torch.where(lab_ >= 0, r["f"].float(), torch.zeros_like(r["f"].float()))
@@ -689,7 +726,7 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
         orie = e["kappa"].float()[..., 0] >= iso_k
         weak = orie & (peak < prune * fl)
         e = {**e, "live": e["live"] & ~weak}
-    sp = split_mass(r, dirs, {**e, "kappa": e["kappa_fit"]} if "kappa_fit" in e else e)       # (ring: the lobes fitted with the moment's shape)
+    sp = split_mass(r_raw, dirs, {**e, "kappa": e["kappa_fit"]} if "kappa_fit" in e else e)       # (ring: the lobes fitted with the moment's shape)
     ms = (sp["mass"] * e["live"]).float(); kv = e["kappa"].float(); isoe = kv[..., 0] < iso_k
     if mass == "basins" and weak_lines:                                                           # lobes too broad to type where the map holds
         weak = e["live"] & isoe                                                                   # oriented material: lines along their mode axis
@@ -754,7 +791,7 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
         scale = torch.where(has, (obj - iso_o).clamp_min(0) / S.clamp_min(1e-6), torch.zeros_like(S))   # background (all of it where no lobe
         ms = torch.where(isoe, ms, ori * scale[:, None])                                         # stands); the background is the head's
         bg = bgm; iso_tot = bg + torch.where(has, iso_o, obj)
-    un = (e["label"] < 0).float() * r["f"].float()                                              # the floor's directions
+    un = (e["label"] < 0).float() * r_raw["f"].float()                                              # the floor's directions
     iso_z = (un[..., None] * r["z"].float()).sum(1) / un.sum(1, keepdim=True).clamp_min(1e-9)
     if k_rep is not None:                                                                       # reported: the votes' concentrations where they
         kr = k_rep.float().clamp_min(0)                                                          # keep the entity's type (peaked / girdle /

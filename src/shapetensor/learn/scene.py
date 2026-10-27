@@ -20,7 +20,9 @@ What it adds over :mod:`~shapetensor.learn.generator` (the overnight review of 2
    sheets (bilayers), foams (Voronoi walls), porous walls (a level set), cells with nuclei (nested), crystals (the old
    solids);
 6. **scale**: a voxel size per scene (µm) with physical size priors per family -- what is resolvable and what is not
-   follows from it (unresolved fibres are drawn as their bundle's partial volume); large canvases cropped for training;
+   follows from it (unresolved fibres are drawn as their bundle's partial volume, mostly with the streaky texture of
+   their packing: strands of varying density that wander -- the direction shows inside the bundle, 27 Oct); bundle
+   paths gently curved or meandering (:data:`P_TORTUOUS`); large canvases cropped for training;
 7. **layout**: laminae -- a folded depth coordinate, cell density and fibre direction (radial / tangential) by depth;
 8. **acquisition**: histology tears and folds, local-tomography truncation, a second contrast channel, on top of
    :func:`~shapetensor.learn.generator.nuisance` (run with CPU-drawn scalars and a capped high-pass scale);
@@ -513,6 +515,8 @@ FAMILY_SCALE = {"bundle": (0.005, 200), "tree": (0.5, 3000), "network": (0.3, 10
                 "jigsaw": (0.1, 5), "honeycomb": (0.05, 30), "xylem": (0.5, 60), "lattice": (0.05, 50), "organs": (100, 5000), "granules": (0.01, 60)}
 SCALE_FALLOFF = 0.6               # decades: the width of the fall-off outside a family's range (a Gaussian in log10 voxel size)
 SCALE_FLOOR = 0.02                # never zero: a family out of its range still turns up now and then (generalisation)
+P_UNRESOLVED_TEXTURE = 0.85       # unresolved bundles drawn with strand texture (the rest a smooth partial-volume tube)
+P_TORTUOUS = 0.25                 # bundles whose path meanders on a short correlation length (5-15 voxels; curvature 0.03-0.08 / voxel)
 ISO_SCENE_P = 0.08                # scenes of isotropic content only (granules, crystals): there, the right answer is no direction
 
 
@@ -731,7 +735,11 @@ class Scene:
         else:
             c = centre if centre is not None else self.centre_point(); d = axis if axis is not None else r.unit()
         S = S0                                                              # through c with direction d there (the crossing point and angle)
-        Pc = centred_paths(c[None], d[None], torch.tensor([Lc], device=self.device), S, torch.tensor([curv if curv is not None else r.lu(0.001, 0.02)], device=self.device), r.lu(15, 80), r)
+        tort = curv is None and r.p(P_TORTUOUS)                             # a meandering path: turns on a short correlation length, the
+        cu = curv if curv is not None else (min(r.lu(0.03, 0.08), 0.4 / max(Rb, 1.0)) if tort else r.lu(0.001, 0.02))   # curvature radius
+        Pc = centred_paths(c[None], d[None], torch.tensor([Lc], device=self.device), S, torch.tensor([cu], device=self.device),   # >= ~3x the
+                           r.lu(5, 15) if tort else r.lu(15, 80), r)                                                         # bundle's (no folding;
+                                                                                                                     # DiSCo's ~20 deg per 15 um)
         s = torch.arange(S, device=self.device, dtype=torch.float32) / (S - 1)
         fan = r.u(0.3, 1.5) if (mode == "fanning" or r.p(0.15)) else 0.0
         Rs = Rb * (1 + fan * torch.relu(s - 0.5) * 2)                       # fanning: the bundle widens past its middle
@@ -801,13 +809,34 @@ class Scene:
             g.offsets, g.rf = o, float(rad.max())
             self.record["families"].append({"bundle": {"fibres": N, "fibre_um": round(rf_um, 2), "radius_vox": round(Rb, 1), "fan": round(fan, 2), "mode": mode if (cross_with is not None or mode == "split") else "single"}})
         else:                                                               # unresolved fibres: the bundle's partial volume
-            phi_ = r.u(0.3, 0.8)
-            cv = curves_like(Pc, Rs[None].clone(), r, obj=torch.tensor([bid], device=self.device), seg=torch.tensor([bid], device=self.device),
-                             contrast=contrast, density=torch.tensor([phi_], device=self.device), fibre_r=torch.tensor([rf], device=self.device))
-            g = Group("bundle", "line", rf, contrast, curves=[cv]); g.offsets = None
-            self.record["families"].append({"bundle": {"unresolved": True, "fibre_um": round(rf_um, 2), "packing": round(phi_, 2), "radius_vox": round(Rb, 1), "mode": mode if cross_with is not None else "single"}})
+            from . import fibres as FB
+            phi_ = r.u(0.3, 0.8); one = lambda v: torch.tensor([v], device=self.device)
+            beta = float(fibre["texture"]) if "texture" in fibre else (r.u(0.1, 0.7) if r.p(P_UNRESOLVED_TEXTURE) else 0.0)   # (the strands' share)
+            cv = curves_like(Pc, Rs[None].clone(), r, obj=one(bid), seg=one(bid), contrast=contrast, density=one(phi_ * (1 - beta)), fibre_r=one(rf))
+            curves = [cv]; tex = {}
+            if beta > 0:                                                    # the rest in strands: groups of sub-voxel fibres whose packing
+                rs = min(r.lu(0.6, 3.0), max(0.6, Rb / 3))                  # varies (fascicles, density fluctuations), wandering -- the
+                C_, R_ = FB.random_section(r.u(0.5, 0.6), rs, r.u(3, 8), Rb, r.np, max_n=600)   # streaky partial-volume texture that keeps a
+                o = torch.tensor(C_ / Rb, dtype=torch.float32, device=self.device); N = o.shape[0]   # bundle's direction visible where
+                fill = float(np.sum(R_ ** 2)) / Rb ** 2                     # its fibres are not (the smooth tube alone showed none)
+                xi = torch.exp(r.u(0.15, 0.5) * r.randn(N)); xi = xi / xi.mean()
+                dens = (beta * phi_ / max(fill, 1e-3) * xi).clamp(0.02, 1.0)
+                turn, lam = math.radians(r.lu(2.0, 20.0)), r.lu(6.0, 30.0)    # strand tortuosity (rms turn) over a correlation length (voxels)
+                disp = (turn * lam / Rb) * smooth1d(r.randn(N, S, 2), lam / H)
+                T_ = tangents(Pc); e1, e2 = rmf(Pc, T_)
+                oo = o[:, None] + disp
+                P = Pc + Rs[None, :, None] * (oo[..., :1] * e1 + oo[..., 1:] * e2)
+                rad = torch.tensor(R_, dtype=torch.float32, device=self.device)[:, None] * torch.exp(0.15 * smooth1d(r.randn(N, S), lam / H))
+                curves.append(curves_like(P, rad, r, obj=torch.full((N,), bid, device=self.device), seg=torch.full((N,), bid, device=self.device),
+                                          contrast=contrast, density=dens, fibre_r=torch.full((N,), rf, device=self.device)))
+                tex = {"texture": round(beta, 2), "strands": N, "strand_vox": round(rs, 2), "strand_turn_deg": round(math.degrees(turn), 1)}
+            g = Group("bundle", "line", rf, contrast, curves=curves); g.offsets = None
+            self.record["families"].append({"bundle": {"unresolved": True, "fibre_um": round(rf_um, 2), "packing": round(phi_, 2), "radius_vox": round(Rb, 1),
+                                                       "mode": mode if cross_with is not None else "single", **tex}})
         g.centreline = curves_like(Pc, Rs[None].clone(), r, obj=torch.tensor([bid], device=self.device), seg=torch.tensor([bid], device=self.device), contrast=contrast)
         g.cross, g.Rb = cross, float(Rs.max())
+        if tort:
+            self.record["families"][-1]["bundle"]["tortuous"] = round(cu, 3)
         g.centre_pt = c                                                     # where crops centre on it (crossing point, or the fan / split / bend)
         if cross is not None:
             self.record.setdefault("cross_deg", []).append(round(math.degrees(math.acos(min(1.0, abs(float(cross[1] @ cross[2]))))), 1))

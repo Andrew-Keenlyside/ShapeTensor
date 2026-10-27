@@ -42,10 +42,11 @@ ap.add_argument("--crops", type=int, nargs=3, default=[3, 2, 1], help="crops at 
 ap.add_argument("--n", type=int, default=96); ap.add_argument("--step", type=int, default=4); ap.add_argument("--look", default="bright", choices=["bright", "dark"])
 ap.add_argument("--merge-deg", type=float, default=20.0); ap.add_argument("--count-min", type=float, default=0.03); ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--spline", action="store_true", help="render along Catmull-Rom splines through the strands' points (disco_io)")
+ap.add_argument("--readout", default="", help="readout options, e.g. 'saddle=0.9,lobe_merge_deg=15'"); ap.add_argument("--dirs", type=int, default=200)
 a = ap.parse_args(); dev = "cuda"; UNIT = DIO.UNIT
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None; TR.set_background_entity(True)
 ck = torch.load(a.ckpt, map_location=dev, weights_only=False)
-net = PopulationNet.from_args(ck["args"]).to(dev).eval(); net.load_state_dict(ck["model"]); sph = EI.sphere_dirs(200, dev)
+net = PopulationNet.from_args(ck["args"]).to(dev).eval(); net.load_state_dict(ck["model"]); sph = EI.sphere_dirs(a.dirs, dev)
 LOOK = {"bright": {"bg": 0.15, "contrast": 0.6, "noise": 0.02, "blur": 0.5}, "dark": {"bg": 0.8, "contrast": -0.5, "noise": 0.02, "blur": 0.5}}[a.look]
 
 
@@ -100,7 +101,7 @@ def model_at(x, pts, sg, feats):
     sig = torch.full((pts.shape[0],), sg, device=dev)
     with torch.no_grad():
         f = torch.cat([EI.query(net, feats, pts[j:j + 2048], sig[j:j + 2048], sph, vol_shape=x.shape)["f"].float() for j in range(0, pts.shape[0], 2048)])
-        ro = EI.readout(net, x, pts, sig, sph, feats=feats, iso_k=ET.VOTE_KAPPA_MIN)
+        ro = EI.readout(net, x, pts, sig, sph, feats=feats, iso_k=ET.VOTE_KAPPA_MIN, **EI.parse_options(a.readout))
     mass = ro["mass"].float(); R = ro["R"].float(); sw = ro["sheet"].float()
     lm = mass * (1 - sw); o2 = lm.argsort(1, descending=True); ar = torch.arange(pts.shape[0], device=dev)
     ax = R[..., :, 2]

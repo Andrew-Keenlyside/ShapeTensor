@@ -29,6 +29,7 @@ from shapetensor.learn import entity_infer as EI, entity_train as ET, phantom2 a
 ap = argparse.ArgumentParser(); ap.add_argument("out"); ap.add_argument("--models", nargs="+", required=True)
 ap.add_argument("--families", nargs="+", default=["cross", "fine", "mix", "curve", "fan"]); ap.add_argument("--n", type=int, default=4)
 ap.add_argument("--sigma", type=float, default=2.5); ap.add_argument("--step", type=int, default=3); ap.add_argument("--count-min", type=float, default=0.03)
+ap.add_argument("--readout", default="", help="readout options, e.g. 'saddle=0.9,lobe_merge_deg=15'"); ap.add_argument("--dirs", type=int, default=200)
 a = ap.parse_args(); dev = "cuda"
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None; TR.set_background_entity(True)
 from shapetensor.learn.model import PopulationNet
@@ -37,7 +38,7 @@ for spec in a.models:
     name, path = spec.split("=", 1); um = path.endswith(":um"); path = path[:-3] if um else path
     ck = torch.load(path, map_location=dev, weights_only=False)
     m = PopulationNet.from_args(ck["args"]).to(dev).eval(); m.load_state_dict(ck["model"]); models.append((name, m))
-sph = EI.sphere_dirs(200, dev)
+sph = EI.sphere_dirs(a.dirs, dev)
 FAMS = ("cross", "fan", "curve", "sheet", "blob", "mix", "empty", "fine")
 
 
@@ -85,7 +86,7 @@ for fam in a.families:
             with torch.no_grad():
                 feats = EI.features(m, ph["image"])
                 f = torch.cat([EI.query(m, feats, pts[j:j + 2048], sig[j:j + 2048], sph, vol_shape=ph["image"].shape)["f"].float() for j in range(0, pts.shape[0], 2048)])
-                ro = EI.readout(m, ph["image"], pts, sig, sph, feats=feats, iso_k=ET.VOTE_KAPPA_MIN)
+                ro = EI.readout(m, ph["image"], pts, sig, sph, feats=feats, iso_k=ET.VOTE_KAPPA_MIN, **EI.parse_options(a.readout))
             mass = ro["mass"].float(); kk = ro["k"].float(); R = ro["R"].float()
             isl = (kk[..., 1] >= 2.0) & (mass >= a.count_min); mm = torch.where(isl, mass, torch.zeros_like(mass)); o2 = mm.argsort(1, descending=True)
             ar = torch.arange(len(pts), device=dev)

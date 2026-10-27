@@ -1216,7 +1216,9 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
         img = img * (vy[:, None] * vx[None, :])[None]; rec["mosaic"] = Tp
     # PSF (longer along the acquisition axis when anisotropic), resolution loss, k-space truncation, ghosting
     sig = [lu(0.3, 0.3 + 1.7 * sg) for _ in range(3)]
-    if on("aniso_psf"):
+    if on("heavy_psf"):                                                                          # a poor resolution: the PSF 1.5-3.5x wider
+        k_ = lu(1.5, 1.5 + 2.0 * sg); sig = [min(v * k_, 6.0) for v in sig]; rec["heavy_psf"] = round(k_, 2)   # (to ~6 voxels; targets merge
+    if on("aniso_psf"):                                                                          # what it cannot resolve: acquisition_blur)
         sig[0] = sig[0] * lu(1.5, 1.5 + 2.5 * sg)
     img = gaussian(img, tuple(sig), truncate=3.0); rec["psf"] = [round(v, 2) for v in sig]
     if on("resolution"):

@@ -213,7 +213,7 @@ def set_background_entity(on: bool = True):
 
 #: the entity targets' sampling: query points per crop, scales (crop voxels, log-uniform), entities kept per query, the
 #: resolution rule (an object is its own entity when its radius >= max(r_min, c_sig * sigma)), padded tree sizes
-ENTITY = {"n_points": 384, "sigma": (1.0, 4.0), "emax": 8, "r_min": 1.5, "c_sig": 0.5, "u_max": 1536, "d_max": 16, "margin": 2, "p_tissue": 0.7}
+ENTITY = {"n_points": 384, "sigma": (1.0, 12.0), "emax": 8, "r_min": 1.5, "c_sig": 0.5, "u_max": 1536, "d_max": 16, "margin": 2, "p_tissue": 0.7}
 
 
 def acquisition_blur(rec: dict) -> float:
@@ -1325,7 +1325,7 @@ def main():
     ap.add_argument("--n-dirs", type=int, default=32, help="entities: directions asked per query point")
     ap.add_argument("--dir-lmax", type=int, default=8, help="entities: the decoder's direction basis order (16: sharper switches between close entities)")
     ap.add_argument("--vote-unc", action="store_true", help="entities: a vote uncertainty output (a readout of the vote's expected error)")
-    ap.add_argument("--e-sigma", type=float, nargs=2, default=None, help="entities: query scales, voxels (default 1 4)")
+    ap.add_argument("--e-sigma", type=float, nargs=2, default=None, help="entities: query scales, voxels (default 1 12: the overnight pilot's 1-6 left wider windows untrained)")
     ap.add_argument("--deep-tree", action="store_true", help="entities: fascicles and branches in the generator's hierarchies")
     ap.add_argument("--no-dens-sh", action="store_true", help="entities: the density from the direction MLP only (no harmonics of the point code)")
     ap.add_argument("--read-keep", type=float, default=READ_KEEP, help="entities: the share of (almost) unreadable crops kept (1: no cap)")
