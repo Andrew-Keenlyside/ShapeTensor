@@ -46,6 +46,7 @@ ap.add_argument("--mass-vote", action="store_true", help="a per-direction vote f
 ap.add_argument("--split-head", action="store_true", help="a head for the objects' occupancy by kind (oriented / isotropic)")
 ap.add_argument("--lobe-weight", type=float, default=None, help="entity_train.DENS_LOBE_WEIGHT (the density loss weighted toward lobes)")
 ap.add_argument("--score-every", type=int, default=0, help="score the held-out set (criteria) every this many steps during training")
+ap.add_argument("--od-at-points", action="store_true", help="training: pool the direct path's bank only at the queries (model.OD_AT_POINTS; exact, ~2x faster bank)")
 ap.add_argument("--block-norm", type=int, default=0, help="the trunk's residual blocks: 1 read per-voxel normalised features (pre-norm), 2 also add a normalised update")
 ap.add_argument("--warmup", type=int, default=30, help="linear learning-rate warm-up steps")
 ap.add_argument("--clip", type=float, default=5.0, help="gradient norm clip")
@@ -70,6 +71,8 @@ TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "desc
 L.DESC_K = 5; L.DESC_NC = 0; TR.REGION_DENSITY = True; ET.REGION_DENSITY = True; TR.set_background_entity(True)
 ET.VOTE_OBJECTS = True; ET.OWN_OBJECTS = True; ET.DENS_SAME_NORM = True
 ET.SAMPLE_ORIENTED = bool(a.sample_oriented)
+import shapetensor.learn.model as _M
+_M.OD_AT_POINTS = bool(a.od_at_points)
 if a.lobe_weight is not None:
     ET.DENS_LOBE_WEIGHT = float(a.lobe_weight)
 batch = lambda ts: {k: torch.stack([t[k] for t in ts]) for k in ts[0]}

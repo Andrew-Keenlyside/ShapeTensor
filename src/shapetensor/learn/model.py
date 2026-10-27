@@ -154,6 +154,7 @@ class Feats(tuple):
     keeps working."""
     scal = None
     oe = None
+    od_v = None                                                                                  # the bank already sampled at the queries
 
 
 class Levels(list):
@@ -175,7 +176,16 @@ def with_scal(feats, scal) -> Feats:
 
 
 def with_oe(feats, oe) -> Feats:
-    f = Feats(tuple(feats)); f.scal = getattr(feats, "scal", None); f.oe = oe; return f
+    f = Feats(tuple(feats)); f.scal = getattr(feats, "scal", None); f.oe = oe; f.od_v = getattr(feats, "od_v", None); return f
+
+
+def with_odv(feats, od_v) -> Feats:
+    f = Feats(tuple(feats)); f.scal = getattr(feats, "scal", None); f.oe = getattr(feats, "oe", None); f.od_v = od_v; return f
+
+
+#: training: pool the direct path's bank only where the queries need it (z and y passes over the volume, the x pass at
+#: the queries' trilinear corners; review 5 -- the levels are never stored): ``(B, Q, L, Dd)`` straight into the decoder
+OD_AT_POINTS = False
 
 
 class EntityDecoder(nn.Module):
@@ -364,7 +374,8 @@ class EntityDecoder(nn.Module):
         od = None
         if getattr(self, "odirect", 0):
             B, Q = points.shape[:2]
-            od = torch.stack([self.od_code(self.od_sample(feats, points[b], b), self.od_weights(dirs[b])) for b in range(B)])   # once per point
+            ov = getattr(feats, "od_v", None)                                                    # (sampled at the queries already, or here)
+            od = torch.stack([self.od_code(ov[b] if ov is not None else self.od_sample(feats, points[b], b), self.od_weights(dirs[b])) for b in range(B)])
         dc = self.dens(p)[:, :, None].expand(-1, -1, D, -1) if self.dens is not None else None      # once per point, not per direction
         out = self.decode(p[:, :, None].expand(-1, -1, D, -1), Y, r, o, od, dens_c=dc)
         if self.mass is not None:
@@ -648,6 +659,52 @@ class PopulationNet(nn.Module):
         with torch.autocast(x.device.type, enabled=False):                                       # fp32 in training as at inference (under the
             return self._direct_levels(x, chunk, strides)                                        # training's bf16 autocast the energies were
 
+    @torch.no_grad()
+    def direct_at(self, x: torch.Tensor, points: torch.Tensor, chunk: int = 32, strides=None) -> torch.Tensor:
+        """``(B, Q, L, Dd)``: what :meth:`EntityDecoder.od_sample` reads from :meth:`direct_levels` at ``points (B, Q, 3)``,
+        without building the levels: per chunk of directions, the energies blurred along z and y over the volume, along x
+        only at the queries' trilinear corners; each level's per-voxel mean over the directions taken at the corners, its
+        global mean from the matrices' column sums -- the same sums (review 5: 3.8e-6 relative)."""
+        with torch.autocast(x.device.type, enabled=False):
+            from ..filters import gaussian, filter_matrix, kernel1d
+            sig = self.ent.od_sigmas
+            if strides is None:
+                strides = OD_STRIDES if OD_STRIDES is not None else tuple(1 if s_ < 8 else 2 for s_ in sig)
+            strides = tuple(strides) or (1,); strides = (strides + (strides[-1],) * len(sig))[:len(sig)]
+            xf = x[:, :1].float(); xf = xf - gaussian(xf, 3.0)
+            shp = tuple(x.shape[-3:]); F = torch.fft.rfftn(xf, dim=(-3, -2, -1)); Z, Y, X = shp
+            Dd = self.ent.od_dirs.shape[0]; B, Q = points.shape[:2]; L = len(sig); dev = x.device
+            Ms = [[filter_matrix(kernel1d(float(s), 0, 3.0), n, torch.float32, dev)[::st].contiguous() for n in shp] for s, st in zip(sig, strides)]
+            cor = []
+            for (Mz, My, Mx), st in zip(Ms, strides):                                              # trilinear corners (align_corners, border)
+                size = torch.tensor([Mz.shape[0], My.shape[0], Mx.shape[0]], device=dev, dtype=torch.float32)
+                c_ = torch.minimum((points.float() / st).clamp_min(0), size - 1); i0 = c_.floor(); w1 = c_ - i0
+                i1 = torch.minimum(i0 + 1, size - 1)
+                cor.append((torch.stack([i0, i1], -1).long(), torch.stack([1 - w1, w1], -1)))      # (B, Q, 3, 2) each
+            acc = torch.zeros(B, L, Dd, Q, 2, 2, 2, device=dev); gs = torch.zeros(B, L, device=dev)
+            for c in range(0, Dd, chunk):
+                H = self._od_filters(shp, c, chunk, dev)
+                E = torch.fft.irfftn(F * H[None], s=shp, dim=(-3, -2, -1)) ** 2; C = E.shape[1]
+                for li, (Mz, My, Mx) in enumerate(Ms):
+                    mz, my = Mz.shape[0], My.shape[0]
+                    v = My @ (Mz @ E.reshape(B * C, Z, Y * X)).view(B, C, mz, Y, X)                 # z, then y: (B, C, mz, my, X)
+                    gs[:, li] += (v.reshape(B, C, mz * my, X) @ Mx.sum(0)).sum((1, 2))
+                    idx = cor[li][0]
+                    for b in range(B):
+                        iz, iy, ix = idx[b, :, 0], idx[b, :, 1], idx[b, :, 2]
+                        rows = v[b].reshape(C, mz * my, X).index_select(1, (iz[:, :, None] * my + iy[:, None, :]).reshape(-1))   # (C, Q*4, X)
+                        r_ = torch.bmm(rows.view(C, Q, 4, X).transpose(0, 1).reshape(Q, C * 4, X), Mx[ix].transpose(1, 2))       # (Q, C*4, 2)
+                        acc[b, li, c:c + C] = r_.view(Q, C, 2, 2, 2).transpose(0, 1)
+                del E, H
+            out = []
+            for li, (Mz, My, Mx) in enumerate(Ms):
+                G = gs[:, li] / (Dd * Mz.shape[0] * My.shape[0] * Mx.shape[0]); P = acc[:, li]   # (B, Dd, Q, 2, 2, 2)
+                Nv = P / (P.mean(1, keepdim=True) + 1e-3 * G[:, None, None, None, None, None] + 1e-12)
+                w = cor[li][1]                                                                    # (B, Q, 3, 2)
+                W = w[:, :, 0, :, None, None] * w[:, :, 1, None, :, None] * w[:, :, 2, None, None, :]
+                out.append((Nv * W[:, None]).sum((-3, -2, -1)).transpose(1, 2))                    # (B, Q, Dd)
+            return torch.stack(out, 2)
+
     def _od_filters(self, shp, c: int, chunk: int, device) -> torch.Tensor:
         """The bank's filters ``(chunk, Z, Y, X // 2 + 1)`` on the half spectrum for directions ``c : c + chunk`` (8 voxels
         along, 0.6 across), symmetrised over the Nyquist planes as the full FFT's real part does (H at the Nyquist
@@ -797,7 +854,7 @@ class PopulationNet(nn.Module):
             if e_points is not None:
                 fe = with_scal((h0, h1, h), self.scalar_fields(x)) if getattr(self.ent, "oprobe", False) else (h0, h1, h)
                 if getattr(self.ent, "odirect", 0):
-                    fe = with_oe(fe, self.direct_levels(x))
+                    fe = with_odv(fe, self.direct_at(x, e_points.float())) if OD_AT_POINTS else with_oe(fe, self.direct_levels(x))
                 out["ent"] = self.ent(fe, e_points.float(), e_sigma.float(), e_dirs, None if context is None else context.float())
             if self.region is not None:                                                         # the population region, every voxel
                 out["region_logit"] = self.region_map(h0, h1, h); out["region"] = self.region_value(out["region_logit"])
