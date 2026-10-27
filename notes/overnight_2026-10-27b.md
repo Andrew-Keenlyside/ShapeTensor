@@ -11,7 +11,7 @@ Only one A6000 works (the second still needs a reset), so GPU jobs share it. Tim
 ## 0. Summary (corrected after an independent fact-check, review 6 -- §6.3)
 
 **Result.** A new pilot, retrained from scratch overnight (10000 steps, all phantom families, ~2.6 h on one A6000),
-passes every criterion on **9 of the 32 final-set phantoms**. Yesterday's direct-path pilot scored 4/32 with
+passes every criterion on **9 of the 32 final-set phantoms** (11/32 after an extension to 13000 steps, §7.2). Yesterday's direct-path pilot scored 4/32 with
 yesterday's readout and **~6/32 with tonight's readout** (CPU re-run, +-1-2 per criterion), so of the gain **the model
 accounts for 6 -> 9** and the readout for 4 -> 6. Same readout, yesterday's model -> tonight's (final set): mass level
 8 -> 13, count 19 -> 25, leakage 12 -> 24, found 17 -> 21; ODF shape slightly worse (31 -> 28). The 4 empty phantoms pass
@@ -507,3 +507,17 @@ in which crossing populations' contrasts are related as in tissue, with unequal-
 **Readout: a ring gate on the saddle merge** (`saddle_ring`, off): merging only groups whose directions form a ring keeps
 sheets and the 3-bundle crossing's weak bundle, but fragments fans again (step 4000, selection set: count 14 -> 12,
 leakage 12 -> 9). Not adopted; a prominence-based merge is the next thing to try.
+
+**Extension to 13000 steps (04:38-06:00).** The pilot resumed from its step-10000 checkpoint (optimiser state kept; the
+cosine schedule over 13000 steps, so the rate restarted at ~4e-5 and annealed). Same final readout:
+
+| final set | all | C1 | C2 | C3 | C4 | C5 | C6 | C7 | C8 | C9 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 10000 steps | 9 | 13 | 21 | 25 | 24 | 22 | 30 | 27 | 28 | 21 |
+| **13000 steps** | **11** | **15** | 21 | 24 | 23 | **24** | 29 | 26 | 28 | 21 |
+
+Selection set 6 -> 7/16. By family (all criteria): curves 2, blobs 4, empties 4, fans 1 of 4 each; sheets, crossings,
+fine crossings and mixes 0. Held-out losses at step 13000: density crossings 0.26, curves 0.11, sheets 0.03; oriented
+map 0.05-0.12. The crossing cores are unchanged in kind (overlaps 0.0 / 2.19, 0.0 / 1.67, 1.96 / 0.0 in three of eight):
+more training at the same data does not undo the contrast confound. (Changes of 1-2 phantoms are within the noise of a
+32-phantom set.)
