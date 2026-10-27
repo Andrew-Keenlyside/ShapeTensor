@@ -573,7 +573,7 @@ def readout(model, image: torch.Tensor, points: torch.Tensor, sigma: torch.Tenso
 @torch.no_grad()
 def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05, iso_k: float = 0.5, merge_deg: float | None = 15.0,
                         entities: str = "lobes", axes: str = "votes", kappa: str = "votes", prune: float = 0.0, mass: str = "maps",
-                        saddle: float | None = None) -> dict:
+                        saddle: float | None = None, maps_cap: float | None = None) -> dict:
     """The entities from the decoder's outputs ``r`` at the directions ``dirs`` (:func:`query`): the density's floor
     (``floor`` quantile) the background plus isotropic objects (told apart by the background head where the model has
     one), entities from what rises above it, their mass split by lobe fit (:func:`split_mass`), near-parallel same-type
@@ -654,9 +654,9 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
     elif "orim" in r and mass == "maps":                                                             # the oriented material's and the isotropic
         ori = ms * ~isoe; S = ori.sum(1); Si = (ms * isoe).sum(1); has = S > 1e-6                # objects' mass from their maps: the lobes only
         scale = r["orim"].float() / (S + Si).clamp_min(1e-6)                                      # share the oriented mass out (a partner lobe
-        new_ms = torch.minimum(ori * scale[:, None], 2.0 * ori)                                   # typed isotropic keeps its share: review 2), no
-                                                                                                 # more than twice the density split's (a lone
-                                                                                                 # ripple lobe took all of it)
+        new_ms = ori * scale[:, None]                                                             # typed isotropic keeps its share: review 2);
+        if maps_cap is not None:                                                                  # optionally no more than maps_cap x the density
+            new_ms = torch.minimum(new_ms, maps_cap * ori)                                        # split's (2x starved weak lobes early in training)
         ms = torch.where(isoe | ~has[:, None], torch.zeros_like(ms), new_ms)
         unres = (r["orim"].float() - ms.sum(1)).clamp_min(0)                                     # unexplained oriented mass: reported apart,
         bg = bgm if "bgm" in r else (iso_tot - r["isom"].float()).clamp_min(0)                    # never as isotropic objects
