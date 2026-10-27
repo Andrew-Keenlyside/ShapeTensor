@@ -43,7 +43,8 @@ TKEYS = ("slots", "mass", "kind", "layer", "fraction", "classes", "size", "size_
 HALF = ("slots", "mass", "fraction", "classes", "size")
 QKEYS = ("q_points", "q_sigma", "q_sh", "sh_t")
 LKEYS = ("identity_t", "points_t", "voxel", "fraction")    # the lobe model's extra targets
-EKEYS = ("e_points", "e_sigma", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa", "e_gnode", "region_t", "iface_t", "bg_t", "e_bg")   # the entity model's
+EKEYS = ("e_points", "e_sigma", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa", "e_gnode", "region_t", "iface_t", "bg_t", "e_bg",
+         "ori_t", "iso_t")   # the entity model's
 HEAD = "slots"                     # "slots" | "lobes" (set by train())
 DESC_KEY = "descriptors"           # the drawn descriptors the descriptor densities use ("descriptors5": the scenes' five)
 SH_EXACT = 0                       # > 0: the SH head's lattice target from the exact per-voxel density to this order
@@ -183,6 +184,11 @@ def _make_pair(seed: int, size: int, device, strength: float = 1.0, gen: dict | 
         out["iface_t"] = (d["occupancy"][ifc].float().sum(0).clamp(0, 1) if ifc else torch.zeros_like(d["occupancy"][0]).float()).half()   # hard negatives
         bgl = [k for k, L in enumerate(s.layers) if L.role == "isotropic"]                           # the background's occupancy (the bg head)
         out["bg_t"] = ((d["occupancy"][bgl].float() * vis[bgl]).sum(0).clamp(0, 1) if bgl else torch.zeros_like(d["occupancy"][0]).float()).half()
+        shp_l = [k for k, L in enumerate(s.layers) if L.role == "shape"]                             # the objects by kind (the split head, as the
+        ori_k = [k for k in shp_l if getattr(s.layers[k], "kind", "line") in ("line", "sheet")]      # phantoms' targets): oriented material and
+        iso_k = [k for k in shp_l if k not in ori_k]; z_ = torch.zeros_like(d["occupancy"][0]).float()   # isotropic objects (densities)
+        out["ori_t"] = (d["occupancy"][ori_k].float().sum(0) if ori_k else z_).half()
+        out["iso_t"] = (d["occupancy"][iso_k].float().sum(0) if iso_k else z_).half()
         out["voxel"] = torch.tensor(math.log2(d["voxel_um"]) if d.get("voxel_um") else float("nan"), device=device)
     out["kind"] = out["kind"].to(torch.int8); out["layer"] = out["layer"].to(torch.int16)
     return d["image"].to(torch.uint8), out
@@ -334,7 +340,7 @@ def stack(pairs, g=None, aug: bool = True):
     from .augment import contrast_route
     imgs, imgs2, tgts = [], [], []
     for img, t in pairs:
-        t = {k: (v.float() if k in HALF or k in ("q_sh", "sh_t", "points_t", "e_mass", "e_vis", "e_T6", "e_desc", "region_t", "iface_t", "bg_t") else
+        t = {k: (v.float() if k in HALF or k in ("q_sh", "sh_t", "points_t", "e_mass", "e_vis", "e_T6", "e_desc", "region_t", "iface_t", "bg_t", "ori_t", "iso_t") else
                  v.long() if k in ("kind", "layer", "identity_t", "e_node", "e_anc") else v) for k, v in t.items()}
         x = img.float() / 255.0
         if aug:
@@ -1035,7 +1041,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    region_dec: bool = False, where_first: int = 0, z_vote: bool = False, dir_sh: int = 0, background_entity: bool = True,
                    ray: bool = False, e_cross: float = 0.0, region_density: bool = True, kappa_log: bool = False, vote_objects: bool = False,
                    dens_same_norm: bool = False, own_objects: bool = False, bg_head: bool = False, orient_from_texture: bool = True,
-                   obj_head: bool = False, mc_fibres: bool = False, oriented: int = 0, geometry_targets: bool = False):
+                   obj_head: bool = False, mc_fibres: bool = False, oriented: int = 0, geometry_targets: bool = False, block_norm: int = 1,
+                   odirect: int = 0, od_sigmas: list | None = None, split_head: bool = False, mass_vote: bool = False):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -1105,7 +1112,10 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 dens_mlp=bool(dens_mlp), mass_region=bool(mass_region), region_dec=bool(region_dec), where_first=int(where_first),
                 z_vote=bool(z_vote), dir_sh=int(dir_sh), background_entity=bool(background_entity), ray=bool(ray),
                 region_density=bool(region_density), kappa_log=bool(kappa_log), vote_objects=bool(vote_objects), dens_same_norm=bool(dens_same_norm), own_objects=bool(own_objects), bg_head=bool(bg_head), orient_from_texture=bool(orient_from_texture), obj_head=bool(obj_head),
+                block_norm=int(block_norm), odirect=int(odirect), od_sigmas=list(od_sigmas) if od_sigmas else None, split_head=bool(split_head),
+                mass_vote=bool(mass_vote),
                 mc_fibres=bool(mc_fibres), oriented=int(oriented), geometry_targets=bool(geometry_targets))
+    skipped = {}                                                                                   # non-finite steps skipped
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)
@@ -1143,7 +1153,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                  "FB.PACKING": _fb.PACKING, "FB.RELAX": _fb.RELAX}
         cpu = DF.CpuWorkers(cpu_workers, size, buf.next + 90_000_000, cfg, state, threads=cpu_threads)
     pbuf = ET.EntityPairBuffer(pairs, size, "cpu", LT.difficulty_gen(level["v"], base), seed0=60_000_000 + rank * 1_000_000 + start,
-                               out_device=device, n0=4) if pairs else None                           # drawn on the CPU (see EntityPairBuffer)
+                               out_device=device, n0=2).start_async() if pairs else None             # drawn on the CPU, in a thread (see EntityPairBuffer)
     val = []
     if main and not benchmark:
         val = [augment(*make(10_000_000 + i, size, device, strength1, {"scene": {**LT.difficulty_gen(1.0, base), "crops_per_scene": 1}}), torch.Generator().manual_seed(i))
@@ -1222,13 +1232,17 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
             l1, _ = ET.entity_loss(P1, T1, dp, W=which_w(step), margin=margin, g=gd); l2, _ = ET.entity_loss(P2, T2, dp, W=which_w(step), margin=margin, g=gd)
             lx = ET.cross_window_loss(P1, P2, T1, T2, X, dp)
             (0.25 * (l1 + l2) + ET.ENT_WEIGHTS["cross"] * ramp(step) * lx).backward(); pa["cross"] = lx.detach()
-            if step % (4 * max(1, pair_every)) == 0:                                                  # a new pair now and then (a CPU draw)
-                pbuf.refresh(1)
+            pbuf.refresh(1)                                                                           # a new pair when one is ready (drawn in a thread)
         if bench is not None:
             tick(); tm = time.perf_counter()
         DF.allreduce_grads(model, world)
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-        opt.step()
+        if torch.isfinite(gn):
+            opt.step()
+        else:                                                                                         # a non-finite gradient: the step skipped
+            opt.zero_grad(set_to_none=True); skipped["n"] = skipped.get("n", 0) + 1
+            if skipped["n"] % 10 == 1:
+                print(f"step {step}: non-finite gradient, skipped ({skipped['n']} so far)", flush=True)
         if level["v"] < 1.0 and abs(lvl(step + 1) - level["v"]) >= 0.05:                              # the difficulty, widened in steps of 0.05
             level["v"] = lvl(step + 1); buf.gen = cur_gen(); cfg["gen"] = cur_gen(); set_routes()
             if pbuf is not None:
@@ -1269,6 +1283,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 prod.close()
             if cpu is not None:
                 cpu.close()
+            if pbuf is not None:
+                pbuf.stop()
             raise SystemExit(99)
     if bench is not None and main:
         k0 = max(1, len(bench["step"]) // 5)
@@ -1282,6 +1298,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
         prod.close()
     if cpu is not None:
         cpu.close()
+    if pbuf is not None:                                                                              # (the pair thread, before the interpreter
+        pbuf.stop()                                                                                    # exits: inside torch it would abort)
     DF.finish_distributed(world)
     return model
 
@@ -1335,7 +1353,7 @@ def main():
     ap.add_argument("--read-keep", type=float, default=READ_KEEP, help="entities: the share of (almost) unreadable crops kept (1: no cap)")
     ap.add_argument("--where-first", type=int, default=0, help="entities: steps of the where-losses alone (region, mass, overall), the which-way losses then ramped in over as many")
     ap.add_argument("--no-region-density", action="store_true", help="entities: the region map the populations' union (a probability), not their density")
-    ap.add_argument("--e-cross", type=float, default=0.0, help="entities: the share of query points placed in crossing cores (two objects' populations overlapping)")
+    ap.add_argument("--e-cross", type=float, default=0.2, help="entities: the share of query points placed in crossing cores (two populations overlapping at window scale)")
     ap.add_argument("--ray", action="store_true", help="entities: the decoder reads the features along each queried direction (the ray probe)")
     ap.add_argument("--kappa-log", action="store_true", help="entities: the vote's concentrations in log space (the softplus head collapses)")
     ap.add_argument("--dens-same-norm", action="store_true", help="entities: the density target's shape normalised over the prediction's uniform directions "
@@ -1343,6 +1361,12 @@ def main():
     ap.add_argument("--orient-from-texture", action="store_true", help="(the default now) entities: orientation visibility from the layers' oriented texture")
     ap.add_argument("--orient-from-contrast", action="store_true", help="entities: orientation visibility from the regions' contrast t (before 2026-10-27)")
     ap.add_argument("--obj-head", action="store_true", help="entities: an objects'-occupancy head (populations' mass predicted directly, relative loss)")
+    ap.add_argument("--block-norm", type=int, default=1, help="entities: the trunk's residual blocks read per-voxel normalised features (1; 2 also a normalised update; "
+                                                               "0: off -- the from-scratch trunk blew up without it, 27 Oct)")
+    ap.add_argument("--odirect", type=int, default=0, help="entities: the decoder's direct oriented path with this many bank directions (e.g. 256)")
+    ap.add_argument("--od-sigmas", type=float, nargs="+", default=None, help="entities: the direct path's pooling levels (e.g. 2 4 6 8)")
+    ap.add_argument("--split-head", action="store_true", help="entities: a head for the objects' occupancy by kind (oriented / isotropic; targets ori_t / iso_t)")
+    ap.add_argument("--mass-vote", action="store_true", help="entities: a per-direction vote for the owner's mass")
     ap.add_argument("--bg-head", action="store_true", help="entities: a background-occupancy head (isotropic objects told from the background by place)")
     ap.add_argument("--own-objects", action="store_true", help="entities: directions owned among the oriented entities only (the background owns none)")
     ap.add_argument("--vote-objects", action="store_true", help="entities: vote / kappa / descriptor losses only where an oriented entity owns the direction")
@@ -1395,6 +1419,7 @@ def main():
                        region_dec=a.region_dec, where_first=a.where_first, z_vote=a.z_vote, dir_sh=a.dir_sh,
                        background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, region_density=not a.no_region_density,
                        kappa_log=a.kappa_log, vote_objects=a.vote_objects, dens_same_norm=a.dens_same_norm, own_objects=a.own_objects, bg_head=a.bg_head, orient_from_texture=not a.orient_from_contrast, obj_head=a.obj_head,
+                       block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote,
                        mc_fibres=a.mc_fibres, oriented=a.oriented, geometry_targets=a.geometry_targets)
         return
     if a.head == "lobes":

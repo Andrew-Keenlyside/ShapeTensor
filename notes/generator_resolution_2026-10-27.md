@@ -155,3 +155,70 @@ and `entity_targets` together. Until then `p_affine=0` avoids the mirrors (the f
 - Training-side items (augmentation by the cube's symmetries, test-time rotations, losses, the sharpness input).
 - A fresh test set: phantom version 2 and tissue crops from unused seeds (4.1M, 4.2M), to be generated once and kept
   unseen until a candidate is scored.
+
+## Evening: every fix in the synthetic generator, QC before the overnight run (27 Oct, 17:00-22:30 ET)
+
+The rule from today: **never use real data** -- no calibration, losses or figures from it (memory `no-real-data`). The
+real-data texture idea is replaced by a synthetic one: power-law (1/f^beta, beta 0.5-3.5) underlays in 40 % of the grain
+draws. The figure script no longer shows a real crop.
+
+**The distortion fixed at its root: the specimen deforms, not the crop (`scene.Deform`).** Per scene (`render_scene`,
+p_warp 0.5, p_affine 0.3, as before but now of the specimen): material at x moves to c + A (x - c) + w(x) -- the affine
+(scales +-20 %, shears +-15 %) and a smooth warp (0-6 voxels over 8-30), invertible (det F >= 0.2, else no warp).
+- swept curves deform their centreline (tangents and frames from it), their section scaled by sqrt(det F / |F t|) so the
+  volume goes with det F; point splats move with F (tensor F T F^T, volume det F, sizes det F^(1/3)); dense fields
+  (tissue strands, foams, sheets' fields) are pulled back through the inverse map (fixed point plus two Newton steps; a
+  voxel whose inverse is not found to half a voxel is invalid); background, regions, labels and the outside mask pulled
+  with border padding; branch points and ends move;
+- crops stay inside the valid canvas (8 tries; centred crops shifted to the nearest valid place; the fill quota counts
+  invalid crops last); centring uses the crossing's deformed position;
+- the crop-level warp and affine in `nuisance` are off for scenes (they mirrored or smeared the crop's edge into fake
+  V-shaped crossings and streaks that the targets did not share).
+Tested: a sheared straight bundle renders along A d (< 3 deg) with its fill kept; a tube stretched 1.2 / compressed 0.8
+along or across its axis keeps its fill (< 6 %); the inverse's residual < 0.5 voxel wherever valid.
+
+**Independent review (an agent, fresh eyes) -- found and fixed:**
+1. *Packed tissue was never drawn in training*: the trainer passes the curriculum's family lists (`difficulty_gen`), which
+   had no "tissue" key, and the gate required one. Now `difficulty_gen` admits it at every level, and "tissue" is kept
+   out of the per-population family draw. (My QC had passed no family list; the QC scripts now use the training's own.)
+2. *Memory*: the cached scene kept each strand population's dense full-canvas fields (~0.9 GB each at 256^3) and the
+   deformation's fields; both are dropped once the scene is rendered (the cache keeps the render), dense parts are held in
+   half precision with a scalar object id, and the renderer's chunk is halved (4e6 points).
+3. *Swept curves did not conserve volume under anisotropic deformation* (section scaled by det F^(1/3)): now
+   sqrt(det F / |F t|).
+4. *Strand fields saturated*: a strand's blurred peak is ~1.39 x its density; densities are capped below that, and
+   overlapping strands' 99th percentile is kept under the smooth part's room, the mass moved into the smooth part.
+5. *The inverse map had no residual check*: Newton refinement and residual-based validity.
+6. Background / identities pulled with zero padding at the valid edge (artificial faces, an object-0 leaf): border padding.
+7. No zero-warp fallback when the invertibility shrink failed: added.
+Also: the fill quota now counts a cortical layout's outside as empty.
+
+**Trainer** (`train.py --head entities`): the model options the overnight pilot used were only in `phantom_ladder.py`;
+now `--block-norm` (default 1: the from-scratch trunk blew up without it), `--odirect`, `--od-sigmas`, `--split-head` (its
+targets `ori_t` / `iso_t` added to the scene path), `--mass-vote`; a non-finite gradient skips the step; `--e-cross`
+defaults to 0.2; the cross-window pairs are drawn in a background thread (a packed scene takes 30-45 s on a CPU; drawn in
+the loop every 16 steps they added ~2 s a step).
+
+**QC before the overnight run** (scripts `qc_generator_targets.py`, `qc_generator_gallery.py`; results in
+`.../dev_pipeline/scene_v2/`):
+- tests: the full suite **404 passed, 0 failed** on the final code (after the review fixes); the generator file has 16
+  tests (texture, crossings, meanders, heavy PSF, packed tissue, strata, phantom versions, the deformation's direction,
+  fill and inverse, the training family lists, strand saturation);
+- targets on 64 crops drawn exactly as training draws them (the curriculum's family lists at full difficulty): all finite;
+  98 % of crops fully inside the deformed canvas (min 99.7 %); target mass / rendered fill median 1.00 (p10 0.80, p90
+  1.26; packed tissue 0.99); single-population target direction against the rendered fibres median 0.5 deg (p90 3.2;
+  deformed scenes 0.5 / 3.2); crossing cores 11.6 % of the queries, their two axes a median 54 deg apart (19 % within
+  10 deg: neighbouring fascicles of one tract, told apart only by identity); 22 of 64 scenes packed tissue, 40 deformed;
+- gallery `qc_gallery.png`: 24 random training crops (image, populations, direction): no mirrored edges;
+- throughput (60-80 steps, alone on the GPU): the GPU producer 2.06 s a step, a new crop every ~6 s, **39.5 GB peak**;
+  **CPU workers** (12 x 4 threads) **1.78 s a step, ~1 new crop a step, 30.2 GB peak**, clean exit -- the overnight
+  launcher uses them;
+- found by these checks and fixed: a packed-cell domain of 10^7 points splatted in one call (out of memory: point
+  families now splat in chunks of 4e6, cell domains at most 1500 cells); the swept section's scale at a frozen path end
+  (zero tangent: 30x too wide -- now isotropic there, bounded 0.3-3x); the pair thread aborting the interpreter at exit
+  (stopped and joined at the end of training).
+
+**Launch** (single GPU 0; resumes with the same command): `.../dev_pipeline/scene_v2/launch_overnight.sh` (16000 steps at
+~1.8 s = ~8 h; `STEPS=... OUT=...` to change). The model: the overnight pilot's options (block pre-norm, direct oriented
+path 256 with pooling 2 4 6 8, split head, mass votes, vote uncertainty, kappa in log, direction basis 16, bg / object
+heads, region decoder), crops 64^3 from 128^3 canvases, windows sigma 1-12, 20 % of queries at crossing cores.

@@ -222,7 +222,7 @@ def test_warp_moves_the_identities_with_the_labels():
     fam = {k: (1.0 if k == "bundle" else 0.0) for k in Scene.FAMILIES}                          # resolved fibres: identity voxels are well filled
     s, d = draw_scene((48, 48, 48), seed=9, device=DEV, strength=0.0, p_warp=1.0, canvas=64, families=fam, underlay_p=0.0, voxel_um=2.0,
                       p_sparse=0.0, p_cutout=0.0)
-    assert d["warp_grid"] is not None
+    assert d["record"]["deform"]["warp"][0] > 0                                           # the specimen deformed (geometry, not the crop)
     occ = sum(d["occupancy"][k] for k, L in enumerate(s.layers) if hasattr(L, "desc5"))
     has = d["identity"] >= 0
     assert float((occ[has] > 0.05).float().mean()) > 0.9
@@ -284,8 +284,8 @@ def test_texture_and_shared_intensities_run_and_are_recorded():
 def test_affine_shears_the_tensors_with_the_image():
     from shapetensor.learn.generator import eig3
     s, d = draw_scene((48, 48, 48), seed=6, device=DEV, strength=0.0, canvas=64, p_affine=1.0, p_warp=0.0)
-    assert "affine" in d["record"] and d["warp_grid"] is not None
-    A = np.array(d["record"]["affine"]).reshape(3, 3)
+    assert d["record"]["deform"]["affine"] is not None and d.get("warp_grid") is None              # the specimen deformed, not the crop
+    A = np.array(d["record"]["deform"]["affine"]).reshape(3, 3)
     assert np.abs(A - np.eye(3)).max() > 1e-3
     T = d["tensors"]; assert torch.isfinite(T).all()
 

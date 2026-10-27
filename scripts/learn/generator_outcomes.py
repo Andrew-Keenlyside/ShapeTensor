@@ -5,8 +5,7 @@
    ``gen_outcome.py``-style draws: ``--old`` / ``--new`` JSON + image pickles).
 2. ``OUT_tissue.png``: the packed-tissue family through the training pipeline (``draw_scene``): per crop its
    populations, true fibre direction and acquired image, chosen to cover the crossing grains, the planar crossing, a
-   resolved scene and the grey-matter variant; beside them a real 20-um HiP-CT crop (a visual check only: real data
-   never enters the generator).
+   resolved scene and the grey-matter variant (synthetic only: no real data, ever).
 
 Usage: python scripts/learn/generator_outcomes.py OUT_STEM --old OLD_STEM --new NEW_STEM
 """
@@ -22,7 +21,6 @@ import shapetensor.learn.train as TR
 from shapetensor.learn import scene as SC
 
 ap = argparse.ArgumentParser(); ap.add_argument("out"); ap.add_argument("--old", required=True); ap.add_argument("--new", required=True)
-ap.add_argument("--real", default="/hdd/andrew/brain_atlas_20um_test_crops/AUMC-116-24/AUMC-116-24_deepbrain_L_20um_768")
 a = ap.parse_args(); dev = "cuda"
 TR.HEAD = "entities"
 plt.rcParams.update({"font.family": "sans-serif", "font.sans-serif": ["Nimbus Sans", "Liberation Sans", "DejaVu Sans"], "font.size": 8})
@@ -102,7 +100,7 @@ for seed in range(60):
         want[tag] = (s, d, vu, rec); print("picked", tag, seed, vu, flush=True)
     SC._scene_cache().clear()
 order = [k for k in ("fibre", "fascicle", "layers", "planar", "resolved", "grey") if want[k] is not None]
-cols = len(order) + 1
+cols = len(order)
 fig, axs = plt.subplots(3, cols, figsize=(2.3 * cols, 7.2))
 pal = plt.cm.tab10(np.arange(10))[:, :3]
 for j, k in enumerate(order):
@@ -123,19 +121,11 @@ for j, k in enumerate(order):
            "resolved": "resolved fibres", "grey": "grey-matter-like"}[k]
     ang = f", {cz[0]['angles'][0]:.0f} deg" if k in ("fibre", "fascicle", "layers") and cz[0].get("angles") else ""
     axs[0, j].set_title(f"{sub}{ang}\n{vu:g} um voxels, fibres {rec.get('fibre_um', 0):.2g} um", fontsize=8)
-try:
-    import tifffile
-    files = sorted(Path(a.real).glob("*.tif*")); zc = len(files) // 2
-    real = tifffile.imread(files[zc]).astype(np.float32); c0 = real.shape[0] // 2 - 48; c1 = real.shape[1] // 2 - 48
-    axs[2, -1].imshow(win(real[c0:c0 + 96, c1:c1 + 96]), cmap="gray"); axs[2, -1].set_title("real HiP-CT, 20 um\n(visual check only)", fontsize=8)
-except Exception as e:
-    print("no real crop:", e)
 for ax in axs.flat:
     ax.set_xticks([]); ax.set_yticks([])
     for sp in ax.spines.values():
         sp.set_visible(False)
 for i, lab in enumerate(("populations", "true direction (rgb = zyx)", "acquired image")):
     axs[i, 0].set_ylabel(lab, fontsize=8)
-axs[0, -1].axis("off"); axs[1, -1].axis("off")
 fig.suptitle("The packed-tissue family through the training pipeline (draw_scene; mid-slices of 96^3 crops)", fontsize=10, x=0.02, ha="left")
 plt.tight_layout(); plt.savefig(a.out + "_tissue.png", dpi=110); print("saved", a.out + "_tissue.png")

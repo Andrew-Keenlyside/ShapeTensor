@@ -258,6 +258,121 @@ def curves_subset(c: Curves, keep: torch.Tensor) -> Curves | None:
 # rendering: points with weights splatted (trilinear) onto the grid, several channels at once
 # ------------------------------------------------------------------------------------------------------------------
 
+class Deform:
+    """A specimen's deformation on the canvas (27 Oct): material at ``x`` moves to ``x + (A - I)(x - c) + w(x)`` -- an
+    affine about the canvas centre (scales +-20 %, shears +-15 %: section compression, shrinkage, calibration) and a
+    smooth warp ``w`` (amplitude 0-6 voxels over 8-30), kept invertible (det >= 0.2). It is applied where the scene is
+    rendered, so the geometry itself deforms: swept and splatted material moves forward exactly (its direction by the
+    local Jacobian F, its volume by det F, its sizes by det F^(1/3)); dense fields are pulled back through the inverse
+    map. The crop-level warp it replaces resampled the crop alone and mirrored or smeared its edge into fake kinks and
+    crossings. ``valid``: where the pulled-back source lies on the canvas (crops avoid the rest: no material was
+    drawn beyond it)."""
+
+    def __init__(self, shape, rng, warp: bool, affine: bool, device):
+        self.shape = tuple(shape); dev = device; Z, Y, X = shape
+        self.c = torch.tensor([(Z - 1) / 2, (Y - 1) / 2, (X - 1) / 2], device=dev)
+        A = np.eye(3)
+        if affine:
+            A = A + np.diag([rng.u(-0.2, 0.2) for _ in range(3)])
+            for (i, j) in ((0, 1), (0, 2), (1, 2)):
+                if rng.p(0.5):
+                    A[i, j] = rng.u(-0.15, 0.15) if rng.p(0.5) else 0.0
+        self.A = torch.tensor(A, dtype=torch.float32, device=dev)
+        sig = rng.lu(8, 30); amp = rng.u(0, 6) if warp else 0.0
+        n3 = torch.stack([smooth_noise(self.shape, sig, rng.g, dev) for _ in range(3)]) if warp else torch.zeros((3,) + self.shape, device=dev)
+        for _ in range(10):                                                                       # invertible: det F >= 0.2
+            G = torch.stack([torch.stack(torch.gradient(n3[i] * amp, dim=(0, 1, 2)), 0) for i in range(3)])   # (3, 3, Z, Y, X)
+            det = float(torch.linalg.det(self.A[..., None, None, None].permute(2, 3, 4, 0, 1) + G.permute(2, 3, 4, 0, 1)).min())
+            if det > 0.2:
+                break
+            amp *= 0.7
+        else:                                                                                     # (never invertible: no warp)
+            amp = 0.0; G = torch.zeros((3, 3) + self.shape, device=dev); det = float(torch.linalg.det(self.A))
+        self.W = n3 * amp; self.G = G                                                             # the warp and its gradient (canvas)
+        self.record = {"affine": [round(float(v), 3) for v in A.flatten()] if affine else None, "warp": (round(amp, 2), round(sig, 1)), "det_min": round(det, 2)}
+        self.prepare()
+
+    def prepare(self):
+        """The inverse map on the canvas grid (each voxel's source) and where it lies on the canvas."""
+        dev = self.A.device; self.Ai = torch.linalg.inv(self.A)
+        Xg = torch.stack(torch.meshgrid(*(torch.arange(n, device=dev, dtype=torch.float32) for n in self.shape), indexing="ij"), -1)
+        self.src = self.inverse(Xg.reshape(-1, 3)).view(*self.shape, 3)                           # each voxel's source (for dense fields)
+        lim = torch.tensor(self.shape, device=dev, dtype=torch.float32) - 1
+        self.valid = ((self.src >= -0.5) & (self.src <= lim + 0.5)).all(-1)
+        if self._res is not None:                                                                 # the inverse not found: not valid
+            self.valid &= self._res.view(self.shape) < 0.5
+        self.F_src = self.forward(self.src.reshape(-1, 3))[1]                                     # F at each voxel's source (once)
+        self.st_src = torch.linalg.det(self.F_src).clamp_min(1e-3).pow(1 / 3).view(self.shape)
+
+    def _field(self, Q):
+        """The warp and its gradient at ``Q (n, 3)`` (trilinear; border beyond the canvas): ``(n, 3)``, ``(n, 3, 3)``."""
+        F = torch.cat([self.W, self.G.reshape(9, *self.shape)])[None]                          # (1, 12, Z, Y, X)
+        out = []
+        for i in range(0, Q.shape[0], 1 << 21):
+            q = Q[i:i + (1 << 21)]
+            sz = torch.tensor(self.shape, device=q.device, dtype=torch.float32)
+            g = (2 * q / (sz - 1).clamp_min(1) - 1).flip(-1).view(1, 1, 1, -1, 3)
+            out.append(Fn.grid_sample(F, g, mode="bilinear", padding_mode="border", align_corners=True)[0, :, 0, 0].T)
+        o = torch.cat(out)
+        return o[:, :3], o[:, 3:].reshape(-1, 3, 3)
+
+    def forward(self, Q):
+        """Material at ``Q (n, 3)`` moved: ``(Q', F)``, F the deformation gradient there."""
+        lin = Q + (Q - self.c) @ (self.A - torch.eye(3, device=Q.device)).T
+        if float(self.record["warp"][0]) <= 0:                                                    # an affine alone: no field to sample
+            return lin, self.A[None].expand(Q.shape[0], 3, 3)
+        w, gw = self._field(Q)
+        return lin + w, self.A[None] + gw
+
+    def _warp_at(self, Q):
+        """The warp alone at ``Q (n, 3)`` (3 channels: the inverse's fixed point needs no gradient)."""
+        sz = torch.tensor(self.shape, device=Q.device, dtype=torch.float32); out = []
+        for i in range(0, Q.shape[0], 1 << 21):
+            g = (2 * Q[i:i + (1 << 21)] / (sz - 1).clamp_min(1) - 1).flip(-1).view(1, 1, 1, -1, 3)
+            out.append(Fn.grid_sample(self.W[None], g, mode="bilinear", padding_mode="border", align_corners=True)[0, :, 0, 0].T)
+        return torch.cat(out)
+
+    def inverse(self, Y, iters: int = 6):
+        """Where the material now at ``Y (n, 3)`` came from (fixed point of y = c + A (x - c) + w(x); exact for an affine
+        alone)."""
+        x = self.c + (Y - self.c) @ self.Ai.T
+        if float(self.record["warp"][0]) > 0:
+            for _ in range(iters):
+                x = self.c + (Y - self.c - self._warp_at(x)) @ self.Ai.T
+            for _ in range(2):                                                                    # Newton (the fixed point contracts
+                fx, Fx = self.forward(x)                                                          # slowly where |A^-1 grad w| nears 1)
+                x = x - torch.linalg.solve(Fx, (fx - Y)[..., None])[..., 0]
+            self._res = (self.forward(x)[0] - Y).norm(dim=-1)
+        else:
+            self._res = None
+        return x
+
+    def push_tensor(self, T6, F):
+        """Occupancy tensors ``T6 (n, 6)`` (zz yy xx zy zx yx) carried by ``F (n, 3, 3)``: F T F^T, trace 1."""
+        T = torch.stack([torch.stack([T6[:, 0], T6[:, 3], T6[:, 4]], -1), torch.stack([T6[:, 3], T6[:, 1], T6[:, 5]], -1),
+                         torch.stack([T6[:, 4], T6[:, 5], T6[:, 2]], -1)], -2)
+        S = F @ T @ F.transpose(-1, -2); S = S / S.diagonal(dim1=-2, dim2=-1).sum(-1)[:, None, None].clamp_min(1e-9)
+        return torch.stack([S[:, 0, 0], S[:, 1, 1], S[:, 2, 2], S[:, 0, 1], S[:, 0, 2], S[:, 1, 2]], -1)
+
+    def pull(self, x: torch.Tensor, mode: str = "bilinear", padding: str = "zeros") -> torch.Tensor:
+        """A canvas field ``x ((C,) Z, Y, X)`` deformed: each voxel takes its source's value (beyond the canvas 0 --
+        no material was drawn there -- or, ``padding="border"``, the nearest face's: background, regions, identities)."""
+        sq = x.dim() == 3; v = (x[None, None] if sq else x[None]).float()
+        sz = torch.tensor(self.shape, device=x.device, dtype=torch.float32)
+        g = (2 * self.src / (sz - 1).clamp_min(1) - 1).flip(-1)[None]
+        out = Fn.grid_sample(v, g, mode=mode, padding_mode=padding, align_corners=True)[0]
+        return (out[0] if sq else out).to(x.dtype)
+
+    def pull_dense(self, occ, tensor, desc):
+        """A dense population (occupancy, tensor (6, ...), descriptors (5, ...)) deformed: values from the source, the
+        tensor carried by F there, sizes scaled by det F^(1/3)."""
+        od = self.pull(torch.cat([occ[None], tensor, desc]))                                      # one resample for all the channels
+        o, t, d = od[0], od[1:7], od[7:].clone()
+        t = self.push_tensor(t.reshape(6, -1).T, self.F_src).T.reshape(6, *self.shape)
+        d[0] = d[0] * self.st_src; d[1] = d[1] * self.st_src
+        return o, t, d
+
+
 class Canvas:
     """Accumulates one population (layer) at a time: volume fraction, shape tensor, descriptors, contrast; and, across
     the whole scene, the (voxel, object) weights for the identity maps."""
@@ -271,8 +386,8 @@ class Canvas:
     NVD = 5
     ID_MIN = 0.05                          # the identity target: an object owns a voxel's identity only with >= 5 % of it
 
-    def __init__(self, shape, device):
-        self.shape = tuple(shape); self.device = device; self.n = int(np.prod(shape))
+    def __init__(self, shape, device, deform: "Deform | None" = None):
+        self.shape = tuple(shape); self.device = device; self.n = int(np.prod(shape)); self.deform = deform
         self.id_keys, self.id_w, self.id_v = [], [], []; self._nkeys = 0; self.group = 0; self._clampf = {}
         self.lumen = torch.zeros(self.n, device=device); self.lumen_c = torch.zeros(self.n, device=device)
         self.reset()
@@ -281,8 +396,14 @@ class Canvas:
         self.occ = torch.zeros(self.n, device=self.device)
         self.acc = torch.zeros(self.n, 6 + self.NDESC + 1, device=self.device)   # tensor, descriptors, contrast (all weighted)
 
-    def splat(self, Q, W, V, obj=None):
-        """Points ``Q (n, 3)`` with weights ``W (n,)`` (volumes, voxel units) carrying ``V (n, 12)`` (weighted later)."""
+    def splat(self, Q, W, V, obj=None, moved: bool = False):
+        """Points ``Q (n, 3)`` with weights ``W (n,)`` (volumes, voxel units) carrying ``V (n, 12)`` (weighted later).
+        With a :class:`Deform` the points move with the specimen (direction, volume and sizes with them); ``moved``:
+        already deformed (swept curves deform their centrelines, :func:`render_curves`)."""
+        if self.deform is not None and not moved:
+            Q, Fq = self.deform.forward(Q); dF = torch.linalg.det(Fq).clamp_min(1e-3)
+            W = W * dF; V = V.clone(); V[:, :6] = self.deform.push_tensor(V[:, :6], Fq); st = dF.pow(1 / 3)
+            V[:, 6] = V[:, 6] * st; V[:, 7] = V[:, 7] * st
         Z, Y, X = self.shape
         p0 = Q.floor(); fr = Q - p0; i0 = p0.long(); kc, wc, vc = [], [], []
         for dz in (0, 1):
@@ -332,7 +453,9 @@ class Canvas:
                 w[m] = w[m] * fac[vox[m]]; v[m] = v[m] * fac[vox[m]][:, None]
         return vox, grp, obj, w, v
 
-    def splat_lumen(self, Q, W, c):
+    def splat_lumen(self, Q, W, c, moved: bool = False):
+        if self.deform is not None and not moved:
+            Q, Fq = self.deform.forward(Q); W = W * torch.linalg.det(Fq).clamp_min(1e-3)
         Z, Y, X = self.shape
         n = Q.round().long()
         ok = (n[:, 0] >= 0) & (n[:, 0] < Z) & (n[:, 1] >= 0) & (n[:, 1] < Y) & (n[:, 2] >= 0) & (n[:, 2] < X)
@@ -341,6 +464,13 @@ class Canvas:
 
     def add_dense(self, occ, tensor, desc, contrast, obj_map=None):
         """A population given on the grid (implicit surfaces): ``occ (Z, Y, X)``, ``tensor (6, ...)``, ``desc (5, ...)``."""
+        occ, tensor, desc = occ.float(), tensor.float(), desc.float()                             # (stored in half precision)
+        if obj_map is not None and not torch.is_tensor(obj_map):                                   # one object for the whole population
+            obj_map = torch.full(self.shape, int(obj_map), device=self.device, dtype=torch.long)
+        if self.deform is not None:
+            occ, tensor, desc = self.deform.pull_dense(occ, tensor, desc)
+            contrast = self.deform.pull(contrast.float()) if torch.is_tensor(contrast) and contrast.dim() == 3 else contrast
+            obj_map = self.deform.pull(obj_map.float(), mode="nearest", padding="border").long() if obj_map is not None else None
         o = occ.reshape(-1)
         self.occ += o
         self.acc[:, :6] += o[:, None] * tensor.reshape(6, -1).T
@@ -402,6 +532,15 @@ def _template2d(n_side: int, device) -> torch.Tensor:
 def render_curves(cv: Canvas, c: Curves, max_points: float = 8e6):
     """Sweep each curve's cross-section along it and splat the material (and the lumen contents)."""
     P = c.P; N, S, _ = P.shape; dev = P.device
+    moved = getattr(cv, "deform", None) is not None
+    if moved:                                                                   # the centreline deformed with the specimen; its
+        T0 = tangents(P).reshape(-1, 3)                                         # section's area by det F / |F t| (the length takes
+        P, Fp = cv.deform.forward(P.reshape(-1, 3)); P = P.view(N, S, 3)       # |F t|: volume by det F, as point splats and dense
+        dF = torch.linalg.det(Fp).clamp_min(1e-3)                               # pulls; the section's own shear neglected; a frozen
+        lam = torch.where(T0.norm(dim=-1) > 0.5, (Fp @ T0[..., None])[..., 0].norm(dim=-1), dF.pow(1 / 3))   # end's zero tangent:
+        st = (dF / lam.clamp_min(0.05)).sqrt().clamp(0.3, 3.0).view(N, S)      # isotropic)
+        c = Curves(**{**{f: getattr(c, f) for f in c.__dataclass_fields__}, "P": P, "rad": c.rad * st,
+                      "wall": c.wall * st if c.wall is not None else None})
     T = tangents(P); e1, e2 = rmf(P, T)
     ds = torch.zeros(N, S, device=dev)
     seglen = (P[:, 1:] - P[:, :-1]).norm(dim=-1)
@@ -454,11 +593,11 @@ def render_curves(cv: Canvas, c: Curves, max_points: float = 8e6):
             idx = torch.nonzero(wall_pt)
             if idx.numel():
                 pi, mi = idx[:, 0], idx[:, 1]
-                cv.splat(Q[pi, mi], (w_area[:, 0] * dens[ci])[pi], V[pi], obj=c.obj[ci][pi])
+                cv.splat(Q[pi, mi], (w_area[:, 0] * dens[ci])[pi], V[pi], obj=c.obj[ci][pi], moved=moved)
             lidx = torch.nonzero(lumen_pt & (c.lumen_c[ci, si][:, None] != 0))
             if lidx.numel():
                 pi, mi = lidx[:, 0], lidx[:, 1]
-                cv.splat_lumen(Q[pi, mi], w_area[pi, 0], c.lumen_c[ci, si][pi])
+                cv.splat_lumen(Q[pi, mi], w_area[pi, 0], c.lumen_c[ci, si][pi], moved=moved)
 
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -517,7 +656,7 @@ SCALE_FALLOFF = 0.6               # decades: the width of the fall-off outside a
 SCALE_FLOOR = 0.02                # never zero: a family out of its range still turns up now and then (generalisation)
 P_UNRESOLVED_TEXTURE = 0.85       # unresolved bundles drawn with strand texture (the rest a smooth partial-volume tube)
 P_TORTUOUS = 0.25                 # bundles whose path meanders on a short correlation length (5-15 voxels; curvature 0.03-0.08 / voxel)
-P_TISSUE = 0.4                    # scenes of packed tissue (Scene.tissue: fibres wall to wall), where the voxel size suits
+P_TISSUE = 0.5                    # scenes of packed tissue (Scene.tissue: fibres wall to wall), where the voxel size suits
 P_GREY_TISSUE = 0.25              # of those, grey-matter-like (sparse turning fibres among dense cells and neuropil)
 P_NARROW = 0.5                    # crossing angles drawn at 8-40 deg (else 5-90): narrow crossings oversampled
 P_RELATED_CONTRAST = 0.4          # crossing populations of one material: contrasts within +-10 % of each other
@@ -1799,14 +1938,25 @@ class Scene:
                         seg = (P[:, 1:] - P[:, :-1]).norm(dim=-1).sum()                              # direction splatted and blurred by their
                         fill = max(float(seg) * math.pi * re * re / max(float(p["mask"].sum()), 1.0), 0.05)   # radius (soft-edged, as a
                         xi = torch.exp(r.u(0.15, 0.5) * r.randn(N)); xi = xi / xi.mean()            # group of fine fibres is; the swept
-                        dens = (beta * p["phi"] / fill * xi).clamp(0.02, 1.0)                        # renderer took minutes on a CPU)
-                        occ_s, ten_s = self._strand_field(P, re, dens)
-                        occ_b = p["mask"].float() * p["phi"] * (1 - beta)                           # the smooth part (the rest of the fill)
+                        cap_ = 0.7 * (1 - p["phi"] * (1 - beta))                                     # renderer took minutes on a CPU). A strand's
+                        dens = (beta * p["phi"] / fill * xi).clamp(0.02, max(cap_, 0.05))           # blurred peak is ~1.39 dens: capped below
+                        occ_s, ten_s = self._strand_field(P, re, dens)                              # saturation, the shortfall in the smooth part
+                        phi_b = max(p["phi"] - fill * float(dens.mean()), 0.0)
+                        m_in = p["mask"]
+                        for _ in range(2):                                                          # overlapping strands: the field's 99th
+                            v_ = occ_s[m_in]                                                        # percentile kept under the smooth part's
+                            s99 = float(torch.quantile(v_[:: max(1, v_.numel() // 200_000)], 0.99)) if v_.numel() else 0.0   # room, the
+                            room = 0.98 - phi_b                                                     # mass taken off spread into the smooth part
+                            if s99 <= room or room <= 0.05:
+                                break
+                            k_ = room / s99; ms = float(v_.mean())
+                            occ_s = occ_s * k_; ten_s = ten_s * k_; phi_b = min(phi_b + (1 - k_) * ms, 0.9)
+                        occ_b = p["mask"].float() * phi_b                                           # (the rest of the fill)
                         occ = occ_s + occ_b
                         tens = torch.where((occ > 1e-6)[None], (ten_s + occ_b[None] * tens) / occ.clamp_min(1e-6)[None], tens)
                         on = (occ > 1e-4).float()
                         desc = torch.zeros((5,) + shp, device=dev); desc[0] = rf * on; desc[3] = on
-                        g.dense.append((occ, tens, desc, p["contrast"], torch.full(shp, pid, device=dev, dtype=torch.long)))
+                        g.dense.append((occ.half(), tens.half(), desc.half(), p["contrast"], pid))  # (half precision, one object)
                 if P is None or P.shape[0] == 0:                                                    # (nothing placed: no population)
                     continue
                 g.centre_P = P[P.shape[0] // 2]
@@ -1823,8 +1973,8 @@ class Scene:
                 cell_ = (Cc / (2.2 * rc)).floor().long(); key = (cell_[:, 0] * 4099 + cell_[:, 1]) * 4099 + cell_[:, 2]
                 _, inv = torch.unique(key, return_inverse=True)
                 first = torch.full((int(inv.max()) + 1,), Cc.shape[0], device=dev, dtype=torch.long).scatter_reduce_(0, inv, torch.arange(Cc.shape[0], device=dev), "amin")
-                Cc = Cc[first]; n = Cc.shape[0]
-                A = _rot(r, n) * (rc * torch.exp(0.12 * r.randn(n, 1, 1)).clamp(0.8, 1.15))
+                Cc = Cc[first]; Cc = Cc[torch.randperm(Cc.shape[0], generator=r.g, device=dev)[:1500]]; n = Cc.shape[0]   # (at most 1500, as
+                A = _rot(r, n) * (rc * torch.exp(0.12 * r.randn(n, 1, 1)).clamp(0.8, 1.15))                              # the cells family's 700)
                 gc = self._solids(Cc, A, "cells", self.ids(n, rc))
                 if gc is not None:
                     groups.append(gc); rec["cells_packed"] = rec.get("cells_packed", 0) + n
@@ -1949,7 +2099,7 @@ class Scene:
                 for j in torch.unique(pj).tolist():                                                  # each population's coverage only within
                     Q = (P[pj == j][:, ::2].reshape(-1, 3) / 2).round().long(); okq = ((Q >= 0) & (Q < limc)).all(-1); Q = Q[okq]   # its own mask
                     hit = torch.zeros(shc, device=dev); hit[Q[:, 0], Q[:, 1], Q[:, 2]] = 1          # (thin layers: a neighbour's spill
-                    cov |= (Fn.max_pool3d(hit[None, None], k, stride=1, padding=k // 2)[0, 0] > 0) & Mc[j]   # must not fill them)
+                    cov |= (_dilate(hit, k) > 0) & Mc[j]                                             # must not fill them)
                 paths.append(P); pids.append(pj)
         if not paths:
             return None, None, [0.0] * len(pops)
@@ -2214,7 +2364,7 @@ class Scene:
         if r.p(layout_p):
             self.layout()
         fam = dict(self.FAMILIES); fam.update(families or {})
-        names = [k for k, v in fam.items() if v > 0 and (k != "radial" or self.depth is not None)]
+        names = [k for k, v in fam.items() if v > 0 and k != "tissue" and (k != "radial" or self.depth is not None)]   # (tissue: a scene, not a group)
         iso = r.p(ISO_SCENE_P) and fam.get("granules", 0) > 0                                  # nothing with a direction: granules (and crystals)
         if iso:
             names = [k for k in ("granules", "crystals") if fam.get(k, 0) > 0]
@@ -2307,7 +2457,7 @@ class Scene:
         """All populations on the canvas: per group occupancy / tensor / desc (5, voxels and 0-1) / contrast map; the
         lumen contents; identities; branch and endpoint maps. ``half``: each population's fields kept in half precision
         as soon as it is rendered (the cache's form: a 256^3 canvas's float32 fields are ~0.9 GB a population)."""
-        cv = Canvas(self.shape, self.device); out = []
+        cv = Canvas(self.shape, self.device, getattr(self, "deform", None)); out = []
         assert len(self.groups) <= Canvas.NG, f"{len(self.groups)} populations > Canvas.NG"
         for gi, g_ in enumerate(self.groups):
             cv.group = gi
@@ -2317,9 +2467,11 @@ class Scene:
                 desc = torch.stack([d3[0], torch.zeros_like(d3[0]), d3[1], torch.ones_like(d3[0]) * (occ > 0), d3[2]])
                 cv.add_dense(occ, tens, desc, g_.contrast, torch.full(self.shape, int(self.ids(1)[0]), device=self.device, dtype=torch.long))
             for c in g_.curves:
-                render_curves(cv, c, max_points=2e6 if c.N > 1000 else 8e6)                          # (many objects: smaller chunks, less memory)
-            for Q, W, V, obj in g_.points:
-                cv.splat(Q, W, V, obj=obj)
+                render_curves(cv, c, max_points=2e6 if c.N > 1000 else 4e6)                          # (chunks: the splat's peak ~2 GB per 1e6 points;
+                                                                                                     # the trainer's producer thread shares the GPU)
+            for Q, W, V, obj in g_.points:                                      # (in chunks: a field of cells can be 10^7 points,
+                for i in range(0, Q.shape[0], 4_000_000):                       # 8 corner keys each)
+                    cv.splat(Q[i:i + 4_000_000], W[i:i + 4_000_000], V[i:i + 4_000_000], obj=obj[i:i + 4_000_000] if obj is not None else None)
             for occ, tens, desc, con, om in g_.dense:
                 cv.add_dense(occ, tens, desc, con, om)
             res = cv.finish()
@@ -2330,16 +2482,17 @@ class Scene:
         ent = cv.entries()                                                                      # (voxel, population, object): the entities' targets
         lum = cv.lumen.view(self.shape).clamp(0, 1); lum_c = cv.lumen_c.view(self.shape) / cv.lumen.view(self.shape).clamp_min(1e-9)
         maps = torch.zeros((2,) + self.shape, device=self.device)
-        for k, pts in enumerate((self.branch, self.ends)):
-            if pts:
-                Pp = torch.cat(pts); idx = Pp.round().long()
+        dfm = getattr(self, "deform", None)
+        moved = [(dfm.forward(torch.cat(pts))[0] if (dfm is not None and pts) else (torch.cat(pts) if pts else None)) for pts in (self.branch, self.ends)]
+        for k, Pp in enumerate(moved):                                                          # (branch points and ends move with the specimen)
+            if Pp is not None:
+                idx = Pp.round().long()
                 ok = ((idx >= 0) & (idx < torch.tensor(self.shape, device=self.device))).all(1)
                 if bool(ok.any()):
                     maps[k].index_put_((idx[ok, 0], idx[ok, 1], idx[ok, 2]), torch.ones(int(ok.sum()), device=self.device), accumulate=True)
                     maps[k] = gaussian(maps[k], 1.0) * (2 * math.pi) ** 1.5
         return {"groups": out, "ids": ids, "id_frac": frac, "lumen": lum, "lumen_c": lum_c, "points": maps, "entries": ent,
-                "point_lists": (torch.cat(self.branch) if self.branch else torch.zeros(0, 3, device=self.device),
-                                torch.cat(self.ends) if self.ends else torch.zeros(0, 3, device=self.device))}
+                "point_lists": tuple(m_ if m_ is not None else torch.zeros(0, 3, device=self.device) for m_ in moved)}
 
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -2382,10 +2535,14 @@ def _compact(ren: dict) -> dict:
 
 
 def render_scene(canvas, scene_seed: int, device, voxel_um=None, families=None, n_groups=(1, 5), layout_p=0.3, content="general", style=None,
-                 underlay_p: float = 0.4, cross_p: float = 0.0, deep_tree: bool = False, dense_p: float = 0.0):
+                 underlay_p: float = 0.4, cross_p: float = 0.0, deep_tree: bool = False, dense_p: float = 0.0, p_warp: float = 0.0,
+                 p_affine: float = 0.0):
     """The scene (cached: crops of one scene are drawn in sequence) and its background on the whole canvas -- a
-    texture, regions and possibly a cell stain, so crops at any zoom of one scene share them."""
-    key = (tuple(canvas), scene_seed, str(device), voxel_um, str(families), tuple(n_groups), layout_p, content, style, underlay_p, cross_p, deep_tree, dense_p)
+    texture, regions and possibly a cell stain, so crops at any zoom of one scene share them. With probability
+    ``p_warp`` / ``p_affine`` the specimen is deformed (:class:`Deform`): the scene renders deformed, its background
+    and outside mask pulled back with it."""
+    key = (tuple(canvas), scene_seed, str(device), voxel_um, str(families), tuple(n_groups), layout_p, content, style, underlay_p, cross_p, deep_tree, dense_p,
+           p_warp, p_affine)
     _CACHE = _scene_cache()
     if key in _CACHE:
         _CACHE[key] = _CACHE.pop(key)                                       # most recently used last
@@ -2395,7 +2552,27 @@ def render_scene(canvas, scene_seed: int, device, voxel_um=None, families=None, 
         sc = Scene(canvas, scene_seed, device, voxel_um, content).build(families, n_groups, layout_p, underlay_p, cross_p, deep_tree, dense_p)
         st = style or ["flat", "regions", "tissue", "cells"][sc.r.i(0, 3)]
         bgp = background(tuple(canvas), st, sc.r.g, device, 1.0, content, nprng=sc.r.np)
+        dw, da = (p_warp > 0 and sc.r.p(p_warp)), (p_affine > 0 and sc.r.p(p_affine))
+        sc.deform = Deform(tuple(canvas), sc.r, dw, da, device) if (dw or da) else None
+        if sc.deform is not None:                                           # the background deforms with the specimen
+            dfm = sc.deform; bg0, lab0, R0, extra0 = bgp
+            for E in extra0:
+                E.occupancy = dfm.pull(E.occupancy.float())
+                tt = dfm.pull(E.tensor.float())
+                E.tensor = dfm.push_tensor(tt.reshape(6, -1).T, dfm.F_src).T.reshape(6, *tuple(canvas))
+            bgp = (dfm.pull(bg0.float(), padding="border"), dfm.pull(lab0.float(), mode="nearest", padding="border").to(lab0.dtype),
+                   dfm.pull(R0.float(), padding="border"), extra0)                         # (the background goes on past the canvas)
+            if sc.outside is not None:
+                sc.outside = dfm.pull(sc.outside.float(), padding="border") > 0.5
+            sc.record["deform"] = dfm.record
+            for g_ in sc.groups:                                                    # crops centre where the deformation took them
+                if getattr(g_, "centre_pt", None) is not None:
+                    g_.centre_pt_def = dfm.forward(g_.centre_pt.float().view(1, 3))[0][0]
         _CACHE[key] = (sc, _compact(sc.render(half=True)), bgp, st)
+        for g_ in sc.groups:                                                    # the cache keeps the render, not what made it: a packed
+            g_.dense = []; g_.paths = None                                      # scene's dense parts (~0.9 GB each at 256^3) and the
+        if sc.deform is not None:                                               # deformation's fields (the crop choice needs only `valid`)
+            sc.deform.W = sc.deform.G = sc.deform.src = sc.deform.F_src = sc.deform.st_src = None
     return _CACHE[key]
 
 
@@ -2447,8 +2624,19 @@ def microstructure_texture(shape, rng: Rng, device) -> torch.Tensor:
     fine = (fine - fine.mean()) / fine.std().clamp_min(1e-6)
     w = rng.u(0, 1)
     t = w * blobs + (1 - w) * fine
-    t = (t - t.mean()) / t.std().clamp_min(1e-6)
-    return t if rng.p(0.5) else -t
+    if rng.p(0.4):                                                                              # or power-law (1/f^beta) texture, beta
+        t = rng.u(0.3, 1.0) * power_law_noise(shape, rng.u(0.5, 3.5), rng, device) + (1 - rng.u(0.3, 1.0)) * t   # 0.5-3.5: from speckle to
+    t = (t - t.mean()) / t.std().clamp_min(1e-6)                                                # cloud (synthetic, every spectrum
+    return t if rng.p(0.5) else -t                                                              # in between -- 27 Oct)
+
+
+def power_law_noise(shape, beta: float, rng: Rng, device) -> torch.Tensor:
+    """Isotropic Gaussian noise with power spectrum ~ |k|^-beta (white noise filtered in Fourier space), zero mean, unit
+    spread."""
+    k = [torch.fft.fftfreq(n, device=device) for n in shape[:-1]] + [torch.fft.rfftfreq(shape[-1], device=device)]
+    K = torch.sqrt(sum(g ** 2 for g in torch.meshgrid(*k, indexing="ij"))).clamp_min(1.0 / max(shape))
+    t = torch.fft.irfftn(torch.fft.rfftn(rng.randn(*shape)) * K ** (-beta / 2), s=shape)
+    return (t - t.mean()) / t.std().clamp_min(1e-6)
 
 
 def sample_mask(shape, rng: Rng, device) -> torch.Tensor:
@@ -2556,6 +2744,19 @@ def _log_desc(d5: torch.Tensor) -> torch.Tensor:
     return torch.stack([torch.log2(1 + d5[0].clamp_min(0)), (d5[1] / d5[0].clamp_min(1e-3)).clamp(0, 1), d5[2], d5[3], d5[4]])
 
 
+def _dilate(x: torch.Tensor, k: int) -> torch.Tensor:
+    """A cube max filter of side ``k`` on ``x (Z, Y, X)``, separably (three 1-D passes: max_pool3d is slow on a CPU)."""
+    if k <= 1:
+        return x
+    r = k // 2
+    for ax in range(3):
+        xp = Fn.pad(x.movedim(ax, -1), (r, r)); y = xp[..., :x.shape[ax]]
+        for s_ in range(1, k):
+            y = torch.maximum(y, xp[..., s_:s_ + x.shape[ax]])
+        x = y.movedim(-1, ax)
+    return x
+
+
 def _trim_paths(P: torch.Tensor) -> torch.Tensor:
     """Paths ``(N, S, 3)`` that froze (repeated points: no material) shifted to start at their first moving sample and cut
     to the longest moving stretch -- the renderer sweeps every sample, frozen or not."""
@@ -2591,6 +2792,8 @@ def _oriented_extent(sc, ren, device) -> torch.Tensor:
             o_ = res["occupancy"].float(); occ = o_ if occ is None else occ + o_
     if occ is None:
         return torch.zeros(sc.shape, dtype=torch.bool, device=device)
+    if getattr(sc, "outside", None) is not None:                                                  # (beyond a cortical layout's pial surface:
+        occ = occ * (~sc.outside).float()                                                         # nothing, as the crop's mask makes it)
     return gaussian(occ[None, None], 2.0)[0, 0] > 0.15
 
 
@@ -2611,7 +2814,9 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
       ``zoom`` times larger -- multi-scale crops; paired renders with :func:`draw_pair`);
     * ``physics``: the image formation (:mod:`~shapetensor.learn.physics`; None: drawn for the modality with
       probability ``p_physics``, else additive);
-    * ``p_warp``: an elastic warp that moves the labels, identities, points and descriptors with the image;
+    * ``p_warp`` / ``p_affine``: the specimen deformed (per scene, :class:`Deform`) -- an elastic warp / an affine of
+      the geometry itself, so labels, identities, points, tensors and descriptors move with it exactly (the crop-level
+      warp it replaces mirrored the crop's edge into fake crossings);
     * ``acq_seed``: the acquisition's seed (modality, physics, materials, nuisance) apart from the crop's;
     * contrast routes at image formation: ``p_blend`` -- a blend with a second physics (either polarity), ``p_aniso`` -- an
       orientation-dependent term (``sin^2`` or ``cos^2`` of each population's angle to a random direction, its own
@@ -2635,13 +2840,25 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     log2(1 + size), relative wall, lumen fraction, flattening, angularity), ``desc_um``, ``points`` (branch points,
     endpoints), ``recoverability``, ``parents``, the voxel size and the physics."""
     sid = seed // max(1, crops_per_scene) if scene_seed is None else int(scene_seed)            # ``scene_seed``: another crop of that scene
-    sc, ren, bgp, st = render_scene((canvas,) * 3, 7_000_000 + sid, device, voxel_um, families, n_groups, layout_p, content, style, underlay_p, cross_p, deep_tree, dense_p)
+    sc, ren, bgp, st = render_scene((canvas,) * 3, 7_000_000 + sid, device, voxel_um, families, n_groups, layout_p, content, style, underlay_p, cross_p, deep_tree, dense_p,
+                                    p_warp, p_affine)                        # the specimen's deformation, per scene (Deform)
+    dfm = getattr(sc, "deform", None)
+    vfrac = (lambda oc: float(dfm.valid[tuple(slice(a, a + e) for a, e in zip(oc, ext))].float().mean())) if dfm is not None else (lambda oc: 1.0)
     r = Rng(seed, device); ra = Rng(acq_seed if acq_seed is not None else seed + 31337, device)
     from .generator import MODALITIES
     names = list(MODALITIES); modality = modality or names[ra.i(0, len(names) - 1)]          # X-ray, MRI, histology, EM, fluorescence, cryo-ET, mixed
     ext = [s_ * zoom for s_ in shape]
     assert all(e <= canvas for e in ext), "the zoomed crop must fit the canvas"
     o = list(crop) if crop is not None else [r.i(0, canvas - e) for e in ext]
+    if crop is None and dfm is not None:                                      # inside the deformed canvas (no material was drawn
+        best_o = (vfrac(o), o)                                                # beyond it)
+        for _ in range(8):
+            if best_o[0] >= 0.999:
+                break
+            oc = [r.i(0, canvas - e) for e in ext]; v_ = vfrac(oc)
+            if v_ > best_o[0]:
+                best_o = (v_, oc)
+        o = best_o[1]
     centred = False
     if crop is None and p_centre > 0 and r.p(p_centre):                        # centred on a crossing (or a bundle's fan / split / bend)
         cr = [g_.centre_pt for g_ in sc.groups if getattr(g_, "cross", None) is not None]
@@ -2649,7 +2866,17 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
         pick = cr if (cr and (not ce or r.p(0.75))) else ce
         if pick:
             P0 = pick[r.i(0, len(pick) - 1)]
+            if dfm is not None:                                               # where the deformation took it
+                P0 = next((g_.centre_pt_def for g_ in sc.groups if getattr(g_, "centre_pt", None) is P0 and hasattr(g_, "centre_pt_def")), P0)
             o = [int(min(max(round(float(P0[a]) - e / 2 + r.u(-e / 6, e / 6)), 0), canvas - e)) for a, e in enumerate(ext)]; centred = True
+            if dfm is not None and vfrac(o) < 0.999:                          # nearest shift that stays inside the deformed canvas
+                best_o = (vfrac(o), 0.0, o)
+                for _ in range(16):
+                    oc = [int(min(max(a_ + round(r.u(-e / 3, e / 3)), 0), canvas - e)) for a_, e in zip(o, ext)]
+                    v_, d_ = vfrac(oc), sum((x_ - y_) ** 2 for x_, y_ in zip(oc, o))
+                    if (v_, -d_) > (best_o[0], -best_o[1]):
+                        best_o = (v_, d_, oc)
+                o = best_o[2]
     fill_rec = None
     if crop is None and not centred and fill_quota:                            # crops stratified by how much oriented tissue they hold
         lo_hi = FILL_STRATA; q = np.array(fill_quota, dtype=float); q = q / q.sum()
@@ -2660,6 +2887,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
             oc = [r.i(0, canvas - e) for e in ext]
             f_ = float(ext_map[tuple(slice(a, a + e) for a, e in zip(oc, ext))].float().mean())
             lo_, hi_ = lo_hi[want]; miss = 0.0 if lo_ <= f_ < hi_ else min(abs(f_ - lo_), abs(f_ - hi_))
+            miss += 10.0 * (1.0 - vfrac(oc))                                    # (a crop reaching beyond the deformed canvas: last)
             if best is None or miss < best[0]:
                 best = (miss, oc, f_)
             if miss == 0.0:
@@ -2800,8 +3028,9 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     rec["physics"] = mode; rec["routes"] = routes
     img = _extra_acquisition(img, layers, ra, modality, rec, strength)
     s = Sample(img, shapes_, bg, lab, st, 1.0, content, rec, R, budget=cstore.get("over") if entity_ctx else None)
-    d = nuisance(s, seed=acq_seed if acq_seed is not None else seed, device=device, strength=strength, modality=modality, warp=ra.p(p_warp), fast=True, hp_max=12.0,
-                 vis_opts={"per_layer_hp": True, "local_corr": True, "ladder": VIS_LADDER, "window_ladder": VIS_WINDOWS}, affine=ra.p(p_affine),
+    d = nuisance(s, seed=acq_seed if acq_seed is not None else seed, device=device, strength=strength, modality=modality, warp=False, fast=True, hp_max=12.0,
+                 vis_opts={"per_layer_hp": True, "local_corr": True, "ladder": VIS_LADDER, "window_ladder": VIS_WINDOWS}, affine=False,   # (deformed
+                                                                                                                                          # with the scene)
                  orient_from_texture=True if "tissue" in sc.record else None)            # packed tissue: evidence from texture, not edges
     if fill_rec is not None:
         d["record"]["crop_fill"] = fill_rec

@@ -187,3 +187,84 @@ def test_phantom_version_1_is_unchanged_and_version_2_draws_narrow_packed_crossi
         angs.append(math.degrees(math.acos(min(1.0, abs(float(A @ B))))))
         assert all(s_["conc"] == 1.0 for s_ in sp) and sp[0]["half"] >= 16
     assert min(angs) < 12 and sum(a_ < 30 for a_ in angs) > 60
+
+
+# ---- the specimen's deformation (Deform): geometry deformed, not the crop (27 Oct) ---------------------------------------
+
+def test_a_sheared_bundle_renders_along_the_sheared_direction_with_its_fill_kept(monkeypatch):
+    monkeypatch.setattr(SC, "P_UNRESOLVED_TEXTURE", 0.0); monkeypatch.setattr(SC, "P_TORTUOUS", 0.0); monkeypatch.setattr(SC, "P_FAN", 0.0)
+    d0 = torch.nn.functional.normalize(torch.tensor([0.2, 0.3, 1.0], device=DEV), dim=0)
+    out = {}
+    for sheared in (False, True):
+        sc = SC.Scene((64, 64, 64), 3, DEV, 20.0)
+        sc.groups = [sc.bundle(None, "single", axis=d0, centre=torch.tensor([32.0, 32.0, 32.0], device=DEV), radius=8.0, curv=1e-4, fibre={"rf_um": 2.0})]
+        if sheared:
+            dfm = SC.Deform((64, 64, 64), SC.Rng(0, DEV), False, False, DEV)
+            dfm.A = torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.15], [0.0, 0.0, 0.9]], device=DEV); dfm.prepare(); sc.deform = dfm
+        g = sc.render()["groups"][0]; o = g["occupancy"].float(); T = g["tensor"].float()
+        m = o > 0.5 * float(o.max())                                                         # (the tube's own fill: 0.3-0.8)
+        M = torch.stack([torch.stack([T[0], T[3], T[4]], -1), torch.stack([T[3], T[1], T[5]], -1), torch.stack([T[4], T[5], T[2]], -1)], -2)[m]
+        Mm = (M * o[m][:, None, None]).sum(0).double().cpu()
+        out[sheared] = (torch.linalg.eigh(Mm + 1e-9 * torch.eye(3, dtype=torch.float64))[1][:, -1].float().to(DEV), float(o[o > 0.5 * float(o.max())].median()))
+    want = torch.nn.functional.normalize(dfm.A @ d0, dim=0)
+    ang = math.degrees(math.acos(min(1.0, abs(float(out[True][0] @ want)))))
+    assert ang < 3.0, ang                                                                    # the direction carried by F
+    assert abs(out[True][1] / out[False][1] - 1.0) < 0.05, (out[True][1] / out[False][1])  # the fill kept: volume carried by det F (else 1 / 0.9)
+
+
+def test_deformed_scenes_give_crops_inside_the_canvas_without_mirrored_edges():
+    for seed in range(4):
+        s, d = SC.draw_scene((48,) * 3, seed=98_000_000 + 8 * seed, device=DEV, canvas=96, crops_per_scene=8, strength=0.3, p_warp=1.0, p_affine=1.0, p_centre=0.5)
+        sc = SC._scene_cache()[next(reversed(SC._scene_cache()))][0]
+        o = d["record"]["crop"]; z = d["record"]["zoom"]
+        assert sc.deform is not None and float(sc.deform.valid[tuple(slice(a, a + 48 * z) for a in o)].float().mean()) > 0.99
+        assert "warp_padding" not in d["record"]                                             # no crop-level warp
+        SC._scene_cache().clear()
+
+
+# ---- review fixes (27 Oct evening) ------------------------------------------------------------------------------------
+
+def test_the_training_family_lists_draw_packed_tissue(monkeypatch):
+    from shapetensor.learn import lobe_train as LT
+    fam = LT.difficulty_gen(1.0, {"canvas": 64})["families"]
+    assert fam.get("tissue", 0) > 0
+    monkeypatch.setattr(SC, "P_TISSUE", 1.0)
+    got = sum("tissue" in SC.Scene((48,) * 3, sd, DEV, 4.0).build(fam, (1, 2), 0.0, 0.0).record for sd in range(3))
+    assert got == 3
+
+
+def test_a_stretched_tube_keeps_its_fill_along_and_across_the_stretch(monkeypatch):
+    monkeypatch.setattr(SC, "P_UNRESOLVED_TEXTURE", 0.0); monkeypatch.setattr(SC, "P_TORTUOUS", 0.0); monkeypatch.setattr(SC, "P_FAN", 0.0)
+    for axis in ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0)):                                          # along the stretch, across it
+        fills = []
+        for A in (None, [[0.8, 0.0, 0.0], [0.0, 0.8, 0.0], [0.0, 0.0, 1.2]]):
+            sc = SC.Scene((64, 64, 64), 3, DEV, 20.0)
+            sc.groups = [sc.bundle(None, "single", axis=torch.tensor(axis, device=DEV), centre=torch.tensor([32.0, 32.0, 32.0], device=DEV), radius=8.0,
+                                   curv=1e-4, fibre={"rf_um": 2.0})]
+            if A is not None:
+                dfm = SC.Deform((64, 64, 64), SC.Rng(0, DEV), False, False, DEV); dfm.A = torch.tensor(A, device=DEV); dfm.prepare(); sc.deform = dfm
+            o = sc.render()["groups"][0]["occupancy"].float()
+            fills.append(float(o[o > 0.5 * float(o.max())].median()))
+        assert abs(fills[1] / fills[0] - 1) < 0.06, (axis, fills)
+
+
+def test_packed_strands_deliver_their_packing_without_saturating():
+    for seed, vox in ((24, 4.0), (16, 20.0)):
+        sc = SC.Scene((96,) * 3, 96_000_000 + seed, DEV, vox); gs = sc.tissue(); sc.groups = gs
+        rec = sc.record["tissue"]
+        if rec.get("resolved"):
+            continue
+        ren = sc.render()
+        tr = [g for g in ren["groups"] if g["group"].name == "tract"]
+        for g, phi in zip(tr, rec["packing"]):
+            o = g["occupancy"].float(); inside = o > 0.02
+            assert float((o[inside] >= 0.999).float().mean()) < 0.05                            # (clamped at 1: mass lost)
+            assert abs(float(o[inside].mean()) - phi) < 0.15, (float(o[inside].mean()), phi)
+
+
+def test_the_inverse_map_is_found_wherever_the_canvas_is_valid():
+    for sd in range(4):
+        dfm = SC.Deform((64, 64, 64), SC.Rng(100 + sd, DEV), True, True, DEV)
+        Xg = torch.stack(torch.meshgrid(*[torch.arange(64.0, device=DEV)] * 3, indexing="ij"), -1).reshape(-1, 3)
+        res = (dfm.forward(dfm.src.reshape(-1, 3))[0] - Xg).norm(dim=-1).view(64, 64, 64)
+        assert float(res[dfm.valid].max()) < 0.5 and float(dfm.valid.float().mean()) > 0.5

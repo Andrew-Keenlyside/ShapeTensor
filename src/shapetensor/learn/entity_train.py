@@ -419,11 +419,47 @@ class EntityPairBuffer:
         t1["voxel"], t2["voxel"] = vox(d1), vox(d2)
         return d1["image"].to(torch.uint8), d2["image"].to(torch.uint8), t1, t2, X, info
 
+    def start_async(self, maxq: int = 2):
+        """Draw pairs in a background thread (27 Oct): a scene of the packed-tissue generator takes 30-45 s on a CPU, and
+        drawn in the training loop every 16 steps it added ~2 s a step; :meth:`refresh` then takes the pairs ready, never
+        waiting. (The scene cache is per thread.)"""
+        import queue, threading
+        self._q = queue.Queue(maxq); self._stop = False; self._err = None
+
+        def run():
+            while not self._stop:
+                try:
+                    it = self._make()
+                except Exception as e:                                                           # (a failed draw: reported, the next tried)
+                    self._err = repr(e); continue
+                while not self._stop:
+                    try:
+                        self._q.put(it, timeout=1.0); break
+                    except queue.Full:
+                        continue
+
+        self._th = threading.Thread(target=run, daemon=True, name="entity-pairs"); self._th.start()
+        return self
+
+    def stop(self, timeout: float = 120.0):
+        """Stop the background draws and wait for the one in progress (a thread still inside torch at exit aborts it)."""
+        if getattr(self, "_th", None) is not None:
+            self._stop = True; self._th.join(timeout); self._th = None
+
     def refresh(self, k: int = 1):
+        q = getattr(self, "_q", None)
         for _ in range(k):
+            if q is not None:                                                                    # asynchronous: the pairs ready, if any
+                import queue
+                try:
+                    it = q.get_nowait()
+                except queue.Empty:
+                    return
+            else:
+                it = self._make()
             if len(self.items) < getattr(self, "cap", len(self.items)):
-                self.items.append(self._make()); continue
-            i = self.next % len(self.items); self.items[i] = self._make()
+                self.items.append(it); continue
+            self.slot = (getattr(self, "slot", 0) + 1) % len(self.items); self.items[self.slot] = it
 
     def batch(self, B: int, g: torch.Generator):
         idx = torch.randint(0, len(self.items), (B,), generator=g).tolist(); sel = [self.items[i] for i in idx]
