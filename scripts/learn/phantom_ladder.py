@@ -137,9 +137,10 @@ def mass_budget(tgt, mdl, face, disc):
     ("iso spurious"), as isotropic objects in all (oriented phantoms: the populations read as isotropic), and the
     model's object total (oriented + isotropic) against the target's."""
     m = CA.match_p2(tgt, mdl); valid = (face.reshape(-1) >= CA.FACE_MARGIN) & disc.reshape(-1)
-    T = tgt["mass"][valid]; tot = max(float(T.sum()), 0.1 * int(valid.sum()))                 # evaluate_p2's normaliser (D)
+    T = tgt["mass"][valid]; tot = max(float(T.sum()), 1e-9)                                    # fractions of the target's own total (the
+    D = max(float(T.sum()), 0.1 * int(valid.sum()))                                             # leakage criterion's normaliser D kept apart)
     out = {"target": tot, "matched": float(m["m"][valid].sum()) / tot, "other": float(m["other"][valid].sum()) / tot,
-           "iso spurious": float(m["iso_spur"][valid].sum()) / tot, "iso": float(mdl["iso"][valid].sum()) / tot, "target sum": float(T.sum()),
+           "iso spurious": float(m["iso_spur"][valid].sum()) / tot, "iso": float(mdl["iso"][valid].sum()) / tot, "target sum": float(T.sum()), "D": D,
            "model total": float((mdl["mass"].sum(1) + mdl["iso"])[valid].sum()) / tot}
     for k in range(T.shape[1]):
         out[f"pop {k + 1}"] = float(m["m"][valid, k].sum()) / max(float(T[:, k].sum()), 1e-9)
