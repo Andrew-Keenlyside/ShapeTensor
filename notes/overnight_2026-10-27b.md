@@ -347,6 +347,23 @@ crossing tracts (usually both myelinated, similar contrast) is a question for th
 correlated contrasts in crossings, wider context levels (sigma 12-16), or scoring cores whose populations differ in
 contrast as context-only.
 
+**Line or sheet: the ring rule (independent agent, CPU, on the cached outputs of three checkpoints).** Density frames
+typed a fan's spread lobe as a girdle (its moment's kappa2 < 2); the votes' types lose sheets (at steps 2000-4000 the
+votes call sheets lines). The rule: a lobe the moment calls a girdle stays one only if its density covers most of the
+great circle -- the in-plane eigenvalue ratio lambda_mid / lambda_max >= 0.8 (a full ring ~1, a 120-degree sector ~0.4;
+measured: sheets' p5 0.84-0.93, fans' median 0.60-0.62); otherwise it is a line (kappa clamped to >= 2 for typing; the
+mass split still fits the moment's own Bingham). Now the default (`axes="ring"`):
+
+| selection set | density frames | ring rule |
+|---|---|---|
+| direct-path pilot: all criteria / C9 found / fans found | 2 / 9 / 0.43, 0.44 | **3** / 12 / 0.95, 1.00 |
+| overnight pilot step 2000 | 3 / 8 / 0.17, 0.63 | **4** / 10 / 0.85, 1.00 |
+| overnight pilot step 4000 | 3 / 8 / 0.23, 0.63 | 3 / 10 / 0.70, 1.00 |
+
+Sheets stay found (1.00) throughout; C4 leakage improves (6 -> 8, 8 -> 13, 9 -> 12); C6 direction loses 1-2 (the newly
+matched fan lobes are scored, with p95 up to 23 degrees near the fan's apex). Thresholds 0.75-0.85 are equivalent; 0.9
+starts losing sheets.
+
 **A readout bug this showed:** the maps' 2x cap (review 2) starved weak lobes -- oriented totals 0.03-0.12 of the target
 at step 2000 -- now off (`maps_cap`, default None): 0.13-0.70. The pilot's own mid-run scorings use the capped
 readout; its checkpoints are kept (`pilot3_step*.pt`) and rescored with the final readout below.
