@@ -112,6 +112,9 @@ def total_odf(model, feats, points: torch.Tensor, dirs: torch.Tensor, offset=(0,
     return cq @ real_sh(dirs.float(), lmax).T
 
 
+_MAPS: dict = {}                                                                                 # the last features' maps (query)
+
+
 @torch.no_grad()
 def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.Tensor, offset=(0, 0, 0), vol_shape=None,
           chunk: int = 1024, t_rel: float | None = None, t_abs: float = 0.0) -> dict:
@@ -128,11 +131,17 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
     reg = None
     from .model import window_mean
     tsz = [int(min(n, v - o)) for n, v, o in zip(feats[0].shape[-3:], vs.tolist(), off.tolist())]       # the tile (no far-face padding)
-    if getattr(model, "mass_region", False) and getattr(model, "region", None) is not None:     # the mass: the region map's window mean
-        reg = model.region_value(model.region_map(*feats))[:, :tsz[0], :tsz[1], :tsz[2]]
-    bgm = model.bg_map(*feats)[:, :tsz[0], :tsz[1], :tsz[2]] if getattr(model, "bgh", None) is not None else None   # the background's
-    objm = model.obj_map(*feats)[:, :tsz[0], :tsz[1], :tsz[2]] if getattr(model, "objh", None) is not None else None  # the objects'
-    spm = model.split_map(*feats)[:, :, :tsz[0], :tsz[1], :tsz[2]] if getattr(model, "splith", None) is not None else None  # by kind
+    hit = _MAPS.get("key")
+    if hit is not None and hit[0] is feats[0] and hit[1] is model and hit[2] == tsz:              # the maps of these features: once (readout
+        reg, bgm, objm, spm = _MAPS["maps"]                                                         # queries a slice in chunks)
+    else:
+        if getattr(model, "mass_region", False) and getattr(model, "region", None) is not None:     # the mass: the region map's window mean
+            reg = model.region_value(model.region_map(*feats))[:, :tsz[0], :tsz[1], :tsz[2]]
+        bgm = model.bg_map(*feats)[:, :tsz[0], :tsz[1], :tsz[2]] if getattr(model, "bgh", None) is not None else None   # the background's
+        objm = model.obj_map(*feats)[:, :tsz[0], :tsz[1], :tsz[2]] if getattr(model, "objh", None) is not None else None  # the objects'
+        spm = model.split_map(*feats)[:, :, :tsz[0], :tsz[1], :tsz[2]] if getattr(model, "splith", None) is not None else None  # by kind
+        if not torch.is_grad_enabled():
+            _MAPS["key"] = (feats[0], model, tsz); _MAPS["maps"] = (reg, bgm, objm, spm)
     for a in range(0, points.shape[0], chunk):
         p = points[a:a + chunk].float(); s = sigma[a:a + chunk].float(); n = p.shape[0]; D = dirs.shape[0]
         ctx = torch.minimum(p, vs - 1 - p).amin(-1)
@@ -158,6 +167,8 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
         full = {"f": torch.zeros(n, D, device=p.device), "z": torch.zeros(n, D, dec.emb, device=p.device),
                 "R": torch.eye(3, device=p.device).expand(n, D, 3, 3).clone(), "kappa": torch.zeros(n, D, 2, device=p.device),
                 "desc": torch.zeros(n, D, 5, device=p.device)}
+        if getattr(dec, "mvote", None) is not None:
+            full["mvote"] = torch.zeros(n, D, device=p.device)
         if r is not None:
             for k in full:
                 full[k][qi, di] = r[k].float()
@@ -584,7 +595,7 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
     Defaults (27 Oct, readout_lab.py on the direct-path pilot): entities from the density's lobes (count 7 -> 10 of
     16) and the votes' own concentrations reported (ODF shape 4 -> 16 of 16)."""
     for k_, v_, ok in (("entities", entities, ("votes", "lobes")), ("axes", axes, ("votes", "density")), ("kappa", kappa, ("moments", "votes", "votes_all")),
-                       ("mass", mass, ("maps", "density"))):
+                       ("mass", mass, ("maps", "density", "votes", "maps_votes"))):
         if v_ not in ok:
             raise ValueError(f"entities_from_query: {k_}={v_!r}, not one of {ok}")
     e = cluster(r, dirs, floor=floor) if entities == "votes" else cluster_lobes_floor(r, dirs, floor=floor, saddle=saddle)
@@ -615,24 +626,44 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
     iso_tot = sp["floor"].float() + (ms * isoe).sum(1)
     bgm = r["bgm"].float().clamp(0, 1) if "bgm" in r else iso_tot
     bg = torch.minimum(iso_tot, bgm)
-    if "objm" in r:                                                                              # the objects' mass predicted: the oriented
+    unres = torch.zeros_like(iso_tot)
+    if mass in ("votes", "maps_votes"):                                                           # the entities' own mass votes (density-weighted
+        if "mvote" not in r:                                                                     # over their directions; merged pieces: the
+            raise ValueError("entities_from_query: mass='votes' needs a model with mass votes")  # survivor's -- a population's pieces vote alike)
+        lab = e["label"]; C = e["live"].shape[1]
+        w = torch.where(lab >= 0, r["f"].float(), torch.zeros_like(r["f"].float()))
+        mv = _comp_mean(r["mvote"].float()[..., None], w, lab, C)[..., 0]
+        live_o = (ms > 0) & ~isoe
+        ms = torch.where(live_o, mv, torch.zeros_like(ms))
+        if mass == "maps_votes" and "orim" in r:                                                 # shares from the votes, the total from the map
+            S = ms.sum(1); ms = ms * (r["orim"].float() / S.clamp_min(1e-6)).clamp(max=4.0)[:, None]
+            unres = (r["orim"].float() - ms.sum(1)).clamp_min(0)
+        if "isom" in r:
+            bg = bgm if "bgm" in r else (iso_tot - r["isom"].float()).clamp_min(0); iso_tot = bg + r["isom"].float()
+    elif "orim" in r and mass == "maps":                                                             # the oriented material's and the isotropic
+        ori = ms * ~isoe; S = ori.sum(1); Si = (ms * isoe).sum(1); has = S > 1e-6                # objects' mass from their maps: the lobes only
+        scale = r["orim"].float() / (S + Si).clamp_min(1e-6)                                      # share the oriented mass out (a partner lobe
+        new_ms = torch.minimum(ori * scale[:, None], 2.0 * ori)                                   # typed isotropic keeps its share: review 2), no
+                                                                                                 # more than twice the density split's (a lone
+                                                                                                 # ripple lobe took all of it)
+        ms = torch.where(isoe | ~has[:, None], torch.zeros_like(ms), new_ms)
+        unres = (r["orim"].float() - ms.sum(1)).clamp_min(0)                                     # unexplained oriented mass: reported apart,
+        bg = bgm if "bgm" in r else (iso_tot - r["isom"].float()).clamp_min(0)                    # never as isotropic objects
+        iso_tot = bg + r["isom"].float()
+    elif "objm" in r:                                                                            # the objects' mass predicted: the oriented
         obj = r["objm"].float(); ori = ms * ~isoe; S = ori.sum(1); has = S > 1e-6                # populations and the isotropic objects share
         iso_o = torch.minimum((iso_tot - bgm).clamp_min(0), obj)                                 # it -- isotropic objects the floor beyond the
         scale = torch.where(has, (obj - iso_o).clamp_min(0) / S.clamp_min(1e-6), torch.zeros_like(S))   # background (all of it where no lobe
         ms = torch.where(isoe, ms, ori * scale[:, None])                                         # stands); the background is the head's
         bg = bgm; iso_tot = bg + torch.where(has, iso_o, obj)
-    if "orim" in r and mass != "density":                                                          # the oriented material's and the isotropic
-        ori = ms * ~isoe; S = ori.sum(1); has = S > 1e-6                                          # objects' mass from their maps: the lobes
-        scale = torch.where(has, r["orim"].float() / S.clamp_min(1e-6), torch.zeros_like(S))      # only share the oriented mass out
-        ms = torch.where(isoe, torch.zeros_like(ms), ori * scale[:, None])
-        bg = bgm; iso_tot = bg + r["isom"].float() + torch.where(has, torch.zeros_like(S), r["orim"].float())
     un = (e["label"] < 0).float() * r["f"].float()                                              # the floor's directions
     iso_z = (un[..., None] * r["z"].float()).sum(1) / un.sum(1, keepdim=True).clamp_min(1e-9)
     if k_rep is not None:                                                                       # reported: the votes' concentrations where they
         kr = k_rep.float().clamp_min(0)                                                          # keep the entity's type (peaked / girdle /
         typ = lambda k_: torch.where(k_[..., 0] < iso_k, 2, torch.where(k_[..., 1] < 2.0, 1, 0))   # isotropic: its frame was fitted for that type)
         kv = torch.where((typ(kr) == typ(kv))[..., None], kr, kv)
-    return {"mass": ms * ~isoe, "k": kv, "R": e["R"].float(), "iso": (iso_tot - bg).clamp_min(0), "bg": bg, "bgm": bgm, "iso_z": iso_z}
+    return {"mass": ms * ~isoe, "k": kv, "R": e["R"].float(), "iso": (iso_tot - bg).clamp_min(0), "bg": bg, "bgm": bgm, "iso_z": iso_z,
+            "ori_unres": unres}
 
 
 def cube_rotations(device="cpu") -> list:

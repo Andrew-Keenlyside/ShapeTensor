@@ -123,7 +123,8 @@ class Levels(list):
 
 #: each level kept at every ``s``-th voxel: (1, 1, 1) exact; (1, 2, 2) halves the memory of the coarse levels at a cost of
 #: up to ~0.19 of the mean density at a few crossing points (mean 3e-4; direct_path_speed.py, 27 Oct) -- for big volumes
-OD_STRIDES = (1, 1, 1)
+OD_STRIDES = None                                                                                # None: 1 below sigma 8, 2 from it (review 2: sigma 8
+                                                                                                 # at stride 2 moves log energies <= 0.015)
 
 
 def with_scal(feats, scal) -> Feats:
@@ -144,7 +145,7 @@ class EntityDecoder(nn.Module):
     def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8, unc: bool = False, mass_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False,
                  kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0,
-                 od_sigmas=(2.0, 4.0, 6.0)):
+                 od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -223,6 +224,10 @@ class EntityDecoder(nn.Module):
         self.dir = nn.Sequential(nn.Linear(hidden + n_coef(lmax) + rin, hidden), nn.SiLU(), nn.Linear(hidden, hidden), nn.SiLU(),
                                  nn.Linear(hidden, 1 + emb + 6 + 2 + 5 + int(self.unc)))
         nn.init.constant_(self.dir[-1].bias[0], -2.0)                                             # little density at the start
+        # each direction's vote for its owner's mass (the population's window-mean occupancy): the readout averages an
+        # entity's votes -- its mass then does not hang on the density's shape (lobe widths, the floor's ripples, which
+        # population's lobe stands out at a crossing core: reviews 27 Oct)
+        self.mvote = nn.Sequential(nn.Linear(hidden + n_coef(lmax) + rin, 64), nn.SiLU(), nn.Linear(64, 1)) if mass_vote else None
 
     def encode(self, feats, points: torch.Tensor, sigma: torch.Tensor, context: torch.Tensor | None = None) -> torch.Tensor:
         from .query import _sample
@@ -386,7 +391,7 @@ class EntityDecoder(nn.Module):
         if getattr(self, "odirect", 0):
             od = torch.zeros(*p.shape[:-1], 32, device=p.device, dtype=p.dtype) if od is None else od.to(p.dtype)
             parts.append(od)
-        y = self.dir(torch.cat(parts, -1)).float()
+        inp = torch.cat(parts, -1); y = self.dir(inp).float()
         if getattr(self, "dsh", None) is not None:
             from .sh import n_coef
             nc = n_coef(self.dir_sh)
@@ -411,6 +416,8 @@ class EntityDecoder(nn.Module):
         out = {"f": f, "z": poincare(zr), "R": R, "kappa": k, "desc": y[..., 9 + e:14 + e]}
         if self.unc:                                                                              # the vote's uncertainty: log variance of its error
             out["log_s2"] = y[..., 14 + e].clamp(-8.0, 8.0)
+        if getattr(self, "mvote", None) is not None:
+            out["mvote"] = Fn.softplus(self.mvote(inp).float()[..., 0])
         return out
 
 
@@ -424,7 +431,7 @@ class PopulationNet(nn.Module):
                  dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False,
                  dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False, oprobe: bool = False,
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
-                 odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0)):
+                 odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -461,7 +468,7 @@ class PopulationNet(nn.Module):
                                      mass_head=bool(mass_head) and not mass_region, dens_sh=bool(dens_sh), dens_mlp=bool(dens_mlp),
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
                                      oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect),
-                                     od_sigmas=tuple(od_sigmas))
+                                     od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             # the background's occupancy (the isotropic remainder) at every voxel: the density's floor is background plus
@@ -475,6 +482,8 @@ class PopulationNet(nn.Module):
             # populations' total and the isotropic objects' mass read from place, not as the density's floor less the
             # background (a 4 % ripple of an 85 % floor is a quarter of a thin bundle's mass; famO 27 Oct)
             self.splith = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 2, 1)) if split_head else None
+            if self.splith is not None:                                                         # starts near empty (softplus(-4) ~ 0.02): a fresh
+                nn.init.constant_(self.splith[-1].bias, -4.0)                                    # head's loss of ~6 otherwise took the clipped gradient
             self.region_dec = None
             if region_head and region_dec:                                                      # a small decoder: lattice -> stride 2 -> full,
                 self.region_dec = nn.ModuleDict({                                                # 3x3x3 convolutions at each (shapes, not only
@@ -532,7 +541,7 @@ class PopulationNet(nn.Module):
                    oprobe_only=bool(args.get("oprobe_only", False)), bg_head=bool(args.get("bg_head", False)),
                    obj_head=bool(args.get("obj_head", False)), oriented=int(args.get("oriented", 0) or 0),
                    odirect=int(args.get("odirect", 0) or 0), split_head=bool(args.get("split_head", False)),
-                   od_sigmas=tuple(args.get("od_sigmas") or (2.0, 4.0, 6.0))) \
+                   od_sigmas=tuple(args.get("od_sigmas") or (2.0, 4.0, 6.0)), mass_vote=bool(args.get("mass_vote", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
@@ -591,7 +600,9 @@ class PopulationNet(nn.Module):
     def _direct_levels(self, x: torch.Tensor, chunk: int, strides) -> "Levels":                 # rounding noise in low contrast: review 27 Oct)
         from ..filters import gaussian, gaussian_mm
         sig = self.ent.od_sigmas
-        strides = tuple(OD_STRIDES if strides is None else strides); strides = (strides + (strides[-1],) * len(sig))[:len(sig)]
+        if strides is None:
+            strides = OD_STRIDES if OD_STRIDES is not None else tuple(1 if s_ < 8 else 2 for s_ in sig)
+        strides = tuple(strides) or (1,); strides = (strides + (strides[-1],) * len(sig))[:len(sig)]
         xf = x[:, :1].float(); xf = xf - gaussian(xf, 3.0)                                       # high-passed (as oriented_energy's hp)
         F = torch.fft.fftn(xf, dim=(-3, -2, -1))
         k = torch.stack(torch.meshgrid(*[torch.fft.fftfreq(n, device=x.device) * 2 * math.pi for n in x.shape[-3:]], indexing="ij"), -1)

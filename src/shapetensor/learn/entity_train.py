@@ -190,6 +190,10 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
                 ls = ent["log_s2"][vm]                                                                 # (error / s^2 + log s^2 on the detached error:
                 parts["vote_unc"] = 0.5 * ((fl.detach() + 1e-3) * torch.exp(-ls) + ls).mean()         # the vote itself keeps its plain loss)
                 total = total + W.get("vote_unc", 0.2) * parts["vote_unc"]
+            if "mvote" in ent:                                                                         # each voting direction: its owner's mass
+                m_own = torch.gather(mass, 2, owner)                                                   # (B, Q, D)
+                parts["mvote"] = (torch.log(ent["mvote"][vm].float() + 0.01) - torch.log(m_own[vm] + 0.01)).abs().mean()
+                total = total + W.get("mvote", 1.0) * parts["mvote"]
             dt = torch.cat([torch.log2(1 + d_t[..., :1].clamp_min(0)), (d_t[..., 1:2] / d_t[..., :1].clamp_min(1e-3)).clamp(0, 1), d_t[..., 2:]], -1)
             parts["desc"] = (ent["desc"][vm] - dt[vm]).abs().mean()
             total = total + W["vote"] * parts["vote"] + W["desc"] * parts["desc"]
@@ -257,9 +261,9 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         total = total + W.get("obj", 1.0) * parts["obj"]
     if "split" in P and "ori_t" in T:                                                              # the objects by kind: window means at the
         from .model import window_mean                                                              # queries, log-L1 as the objects' (oriented
-        for c, key in enumerate(("ori_t", "iso_t")):                                               # material; isotropic objects)
-            wp = window_mean(P["split"][:, c].float(), T["e_points"].float(), T["e_sigma"].float())
-            wt = window_mean(T[key].float(), T["e_points"].float(), T["e_sigma"].float())
+        for ch, key in enumerate(("ori_t", "iso_t")):                                              # material; isotropic objects); the targets'
+            wp = window_mean(P["split"][:, ch].float(), T["e_points"].float(), T["e_sigma"].float())   # window means as the populations' masses
+            wt = T[key[:3] + "_m"].float() if key[:3] + "_m" in T else window_mean(T[key].float(), T["e_points"].float(), T["e_sigma"].float())
             parts["split_" + key[:3]] = (torch.log(wp + 0.01) - torch.log(wt + 0.01)).abs().mean()
             total = total + W.get("split", 1.0) * parts["split_" + key[:3]]
     if "fraction" in T and "fraction_logit" in P and lat_ok:

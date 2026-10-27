@@ -229,7 +229,15 @@ def targets(ph: dict, pts: torch.Tensor, sig: torch.Tensor, emax: int = 8) -> di
             "e_desc": torch.zeros(Q, emax, 5, device=dev), "e_anc": anc, "e_n": torch.tensor(E + 1, device=dev), "e_R": R, "e_kappa": Kp,
             "e_gnode": node, "region_t": torch.cat([ph["occ"], ph["bg"][None]]).sum(0), "iface_t": torch.zeros(n, n, n, device=dev),
             "voxel": torch.tensor(float("nan"), device=dev), "bg_t": ph["bg"], "e_bg": node == K + 1,
-            **_split_targets(ph)}
+            **_split_targets(ph), **_split_masses(ph, m[:, :K])}
+
+
+def _split_masses(ph: dict, m: torch.Tensor) -> dict:
+    """The split targets' window means at the queries, from the populations' masses ``m (Q, K)`` -- the same window
+    operator and (supersampled phantoms) the same fine volumes as ``e_mass`` (the coarse maps' means differ by up to
+    15 % at sigma 0.5 there: review 2, 27 Oct)."""
+    iso = torch.tensor([k in ISO_KINDS for k in ph["kinds"]], dtype=torch.bool, device=m.device)
+    return {"ori_m": (m * ~iso).sum(1), "iso_m": (m * iso).sum(1)}
 
 
 ISO_KINDS = ("blob",)

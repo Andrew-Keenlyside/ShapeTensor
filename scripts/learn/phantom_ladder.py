@@ -40,7 +40,8 @@ ap.add_argument("--ckpt", default=None, help="with --plot-only: score this check
 ap.add_argument("--entities", default="lobes", choices=("votes", "lobes"), help="readout: entities from the votes or the density's lobes")
 ap.add_argument("--axes", default="votes", choices=("votes", "density"), help="readout: entity frames/types from the votes or the density moment")
 ap.add_argument("--kappa", default="votes", choices=("votes", "moments", "votes_all"), help="readout: reported concentrations")
-ap.add_argument("--mass", default="maps", choices=("maps", "density"), help="readout: masses from the split head's maps (if any) or the density")
+ap.add_argument("--mass", default="maps", choices=("maps", "density", "votes", "maps_votes"), help="readout: masses from the split head's maps (if any), the density, the mass votes, or votes' shares of the map")
+ap.add_argument("--mass-vote", action="store_true", help="a per-direction vote for the owner's mass (the decoder)")
 ap.add_argument("--split-head", action="store_true", help="a head for the objects' occupancy by kind (oriented / isotropic)")
 ap.add_argument("--lobe-weight", type=float, default=None, help="entity_train.DENS_LOBE_WEIGHT (the density loss weighted toward lobes)")
 ap.add_argument("--sample-oriented", action="store_true", help="entity_train.SAMPLE_ORIENTED: entity directions from the oriented entities only")
@@ -51,6 +52,10 @@ ap.add_argument("--od-sigmas", type=float, nargs="+", default=None, help="the di
 a = ap.parse_args(); dev = "cuda"; stem = a.out.rsplit(".", 1)[0]
 if a.ckpt and not a.plot_only:
     ap.error("--ckpt only with --plot-only (training writes OUT's .pt)")
+if a.test_families and not set(a.test_families) <= {"cross", "fan", "curve", "sheet", "blob", "mix", "empty", "fine"}:
+    ap.error(f"--test-families: unknown {sorted(set(a.test_families) - {'cross', 'fan', 'curve', 'sheet', 'blob', 'mix', 'empty', 'fine'})}")
+if a.od_sigmas and not a.odirect:
+    ap.error("--od-sigmas needs --odirect")
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None
 L.DESC_K = 5; L.DESC_NC = 0; TR.REGION_DENSITY = True; ET.REGION_DENSITY = True; TR.set_background_entity(True)
 ET.VOTE_OBJECTS = True; ET.OWN_OBJECTS = True; ET.DENS_SAME_NORM = True
@@ -82,6 +87,7 @@ else:
     args["bg_head"] = bool(args.get("bg_head")) or a.bg_head; args["oprobe"] = bool(args.get("oprobe")) or a.oprobe
     args["obj_head"] = bool(args.get("obj_head")) or a.obj_head
     args["split_head"] = bool(args.get("split_head")) or a.split_head
+    args["mass_vote"] = bool(args.get("mass_vote")) or a.mass_vote
     if a.odirect:
         args["odirect"] = int(a.odirect)
     if a.od_sigmas:
@@ -91,6 +97,11 @@ else:
     net = PopulationNet.from_args(args).to(dev)
     if not a.scratch:
         DF.load_partial(net, ref["model"], lambda m: None)
+        Wo = ref["model"].get("ent.od_net.0.weight"); Lo = None if Wo is None else Wo.shape[1] - 1
+        if Lo is not None and getattr(net.ent, "odirect", 0) and net.ent.od_lv > Lo:              # more levels than the init: its weights on the
+            with torch.no_grad():                                                                 # shared levels and on the mean (load_partial put
+                w = torch.zeros_like(net.ent.od_net[0].weight); w[:, :Lo] = Wo[:, :Lo].to(w); w[:, -1] = Wo[:, -1].to(w)   # the mean's on the new level)
+                net.ent.od_net[0].weight.copy_(w)
     if not ref["args"].get("kappa_log") and not a.scratch:
         net.ent.reset_kappa()
     a.tag = a.tag or f"families {' '.join(a.families)}"
@@ -99,22 +110,31 @@ else:
     for i, (fam, ph) in enumerate(tests):
         ge.manual_seed(500 + i); T = batch([P2.targets(ph, *P2.draw_queries(ph, ge, a.n_points))]); held.append((fam, ph, T, ET.sample_dirs(T, 32, g=ge)))
 
+    def save(step):
+        torch.save({"model": net.state_dict(), "args": args, "curves": curves, "tag": a.tag, "init": a.init, "families": a.families, "step": step,
+                    "flags": {k: getattr(a, k) for k in ("lr", "lr_final", "batch", "steps", "bg_head", "oprobe", "floor", "obj_head", "widths", "scratch",
+                                                         "sigma_lo", "odirect", "split_head", "lobe_weight", "lobe_mass", "od_sigmas", "sample_oriented", "mass_vote")}},
+                   stem + (".pt" if step == a.steps else "_last.pt"))                               # (mid-run: OUT_last.pt, never the final name)
+
     def evaluate(step):
         net.eval(); r = {"step": step}
         for fam, ph, T, d in held:
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
                 P = net(ph["image"][None, None], voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=d)
-            tot, parts = ET.entity_loss(P, T, d, W={"desc": 0.0}, g=torch.Generator(device=dev).manual_seed(97))
+            tot, parts = ET.entity_loss(P, T, d, W={"desc": 0.0, "lobe_mass": a.lobe_mass}, g=torch.Generator(device=dev).manual_seed(97))
             r.setdefault(fam, []).append({"total": float(tot), **{k: float(v) for k, v in parts.items()}})
         net.train(); curves.append(r)
         print(f"  step {step}: " + " | ".join(f"{f} dens {np.mean([x['density'] for x in v]):.3f}" + (f" ori {np.mean([x['split_ori'] for x in v]):.3f}" if "split_ori" in v[0] else "")
-                                              + (f" obj {np.mean([x['obj'] for x in v]):.3f}" if "obj" in v[0] else "") for f, v in r.items() if f != "step"), flush=True)
+                                              + (f" obj {np.mean([x['obj'] for x in v]):.3f}" if "obj" in v[0] else "")
+                                              + (f" mv {np.mean([x['mvote'] for x in v if 'mvote' in x]):.3f}" if any("mvote" in x for x in v) else "") for f, v in r.items() if f != "step"), flush=True)
 
     opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=1e-4); g = torch.Generator(device=dev).manual_seed(0); gc = torch.Generator().manual_seed(0)
     net.train()
     for step in range(a.steps + 1):
         if step % a.eval_every == 0 or step == a.steps:
             evaluate(step)
+            if 0 < step < a.steps:
+                save(step)                                                                       # (a checkpoint at every evaluation)
         if step == a.steps:
             break
         for pg in opt.param_groups:
@@ -131,8 +151,7 @@ else:
             P = net(torch.stack(imgs)[:, None], voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
         tot, parts = ET.entity_loss(P, T, dirs, W={"desc": 0.0, "lobe_mass": a.lobe_mass}, g=g)
         opt.zero_grad(set_to_none=True); tot.backward(); torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0); opt.step()
-    torch.save({"model": net.state_dict(), "args": args, "curves": curves, "tag": a.tag, "init": a.init, "families": a.families,
-                "flags": {k: getattr(a, k) for k in ("lr", "lr_final", "batch", "steps", "bg_head", "oprobe", "floor", "obj_head", "widths", "scratch", "sigma_lo", "odirect", "split_head", "lobe_weight", "lobe_mass", "od_sigmas", "sample_oriented")}}, stem + ".pt")
+    save(a.steps)
 net.eval()
 sph = EI.sphere_dirs(200, dev)
 
