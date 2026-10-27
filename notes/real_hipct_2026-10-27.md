@@ -96,3 +96,27 @@ generator model's density peak is a little further off (14-17 deg), but its line
 agree best (10-11 deg). Agreement with the structure tensor is consistency with a classical baseline, not correctness:
 where the two differ at high coherence (13-30 % of those points beyond 20 deg) this test cannot say which is right.
 Figures: `orientation_vs_st_x1.png`, `orientation_vs_st_x4.png`.
+
+## The same comparison against the truth on hard synthetic phantoms (`scripts/learn/synth_vs_truth.py`)
+
+The final set's crossings, fine crossings and mixes (4 each; curves and fans for reference), held-out seeds, window
+sigma 2.5, all points every 3 voxels. Truth: the generator's line populations at each point. Single-population points:
+21 000+; crossing cores (two line populations, the lighter >= half the heavier): 3266 (cross 1759, fine 1255, mix 252).
+The two phantom pilots were trained on these families (other seeds); the generator model never saw them.
+
+| median angle to the truth (share within 20 deg) | single population | crossing core (nearer axis) | cores: both bundles found |
+|---|---|---|---|
+| structure tensor | 2 (89 %) | 16 (67 %); fine 19, mix 24 | -- (one direction) |
+| overnight pilot, density peak | 4 (94 %) | 4 (100 %) | |
+| overnight pilot, heaviest line population | 2 (95 %) | 4 (99 %) | **49 %** (cross 31, fine 69, mix 76) |
+| direct-path pilot, heaviest line population | 3 (94 %) | 4 (93 %) | 34 % |
+| generator model, heaviest line population | 9 (89 %) | 16 (69 %) | 0 % |
+
+**Reading.** On a single bundle the structure tensor is as good as any model (2 deg): the predominant orientation of
+one population is an easy classical problem. At crossing cores it is not: the structure tensor's one direction blends the
+two bundles (16 deg median, 24 deg in mixes, a third of core points beyond 20 deg), while the phantom-trained models'
+predominant direction stays on one true bundle (4 deg, ~100 % within 20 deg) -- and the overnight pilot also reports the
+second bundle at 49 % of core points (31 % of the crossings' cores: the contrast confound, §7 of the overnight notes),
+which no single-direction estimate can. The generator model, trained on different data, is near the structure tensor
+at cores and never finds both. So the real-data agreement (~10-13 deg) is what both get on single structures; the
+models' advantage is in multi-population windows, where the real-data test had no truth to show it.
