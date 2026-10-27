@@ -143,7 +143,8 @@ class EntityDecoder(nn.Module):
 
     def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8, unc: bool = False, mass_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False,
-                 kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0):
+                 kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0,
+                 od_sigmas=(2.0, 4.0, 6.0)):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -182,7 +183,11 @@ class EntityDecoder(nn.Module):
         # ``odirect`` directions interpolated to u; three smoothing levels) -- what the image shows along u, the same input
         # at every orientation, straight to the decoder: the trunk does not carry directions to it fast enough (even the
         # true directions given as input channels were not fitted on 64 crossings, 27 Oct)
-        self.odirect = int(odirect); self.od_lv = 3
+        # ``od_sigmas``: the levels' pooling; a wide one (8) lets the decoder compare the energy along u at the point with
+        # that along u around it -- the ratio cancels each population's contrast (energy ~ contrast^2 x occupancy): at
+        # crossing cores the brighter bundle took the density (direct-path pilot, 27 Oct); the classical ratio of ratios
+        # A/B with sigma 2 over 8 put the mass ratio's median log error at 0.25 against 0.45 (ctx_check, 16 crossings)
+        self.odirect = int(odirect); self.od_sigmas = tuple(float(x) for x in od_sigmas); self.od_lv = len(self.od_sigmas)
         if self.odirect:
             self.od_net = nn.Sequential(nn.Linear(self.od_lv + 1, 64), nn.SiLU(), nn.Linear(64, 32))
             self.od_dens = nn.Linear(32, 1); nn.init.zeros_(self.od_dens.weight); nn.init.zeros_(self.od_dens.bias)
@@ -349,13 +354,17 @@ class EntityDecoder(nn.Module):
         """The interpolation weights ``(..., Dd)`` from the bank to directions ``u (..., 3)`` (an axial kernel ~ its spacing)."""
         return torch.softmax(self.od_k * (Fn.normalize(u.float(), dim=-1) @ self.od_dirs.T).abs(), -1)
 
-    def od_code(self, v: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    def od_code(self, v: torch.Tensor, w: torch.Tensor, pairs=None) -> torch.Tensor:
         """The direct path's code ``(N, K, 32)`` from the energies ``v (N, L, Dd)`` and weights ``w (N, K, Dd)`` (or ``(K, Dd)``:
         the same directions at every point): the energy along each direction per level, as logs, with the levels' mean
         (how much any direction stands out)."""
-        e = torch.einsum("nld,kd->nkl", v, w) if w.dim() == 2 else torch.einsum("nld,nkd->nkl", v, w)
-        m = torch.log(v.mean(-1).clamp_min(1e-3)).mean(-1, keepdim=True)                          # (N, 1)
-        x = torch.cat([torch.log(e.clamp_min(1e-3)), m[:, None].expand(-1, e.shape[1], -1)], -1)
+        with torch.autocast(v.device.type, enabled=False):                                      # (fp32: under autocast the einsum ran in bf16)
+            v, w = v.float(), w.float()
+            e = torch.einsum("nld,kd->nkl", v, w) if w.dim() == 2 else torch.einsum("nld,nkd->nkl", v, w)
+            m = torch.log(v.mean(-1).clamp_min(1e-3)).mean(-1, keepdim=True)                      # (N, 1)
+            x = torch.cat([torch.log(e.clamp_min(1e-3)), m[:, None].expand(-1, e.shape[1], -1)], -1)
+        if pairs is not None:                                                                   # only these (point, direction) pairs
+            x = x[pairs]
         return Fn.silu(self.od_net(x.to(self.od_net[0].weight.dtype)))
 
     def od_feats(self, feats, pts: torch.Tensor, u: torch.Tensor, b: int = 0, chunk: int = 65536) -> torch.Tensor:
@@ -415,7 +424,7 @@ class PopulationNet(nn.Module):
                  dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False,
                  dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False, oprobe: bool = False,
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
-                 odirect: int = 0, split_head: bool = False):
+                 odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0)):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -451,7 +460,8 @@ class PopulationNet(nn.Module):
             self.ent = EntityDecoder(c0, c1, c2, emb=max(int(embed), 2), hidden=256, lmax=int(dir_lmax), unc=bool(vote_unc),
                                      mass_head=bool(mass_head) and not mass_region, dens_sh=bool(dens_sh), dens_mlp=bool(dens_mlp),
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
-                                     oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect))
+                                     oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect),
+                                     od_sigmas=tuple(od_sigmas))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             # the background's occupancy (the isotropic remainder) at every voxel: the density's floor is background plus
@@ -521,7 +531,8 @@ class PopulationNet(nn.Module):
                    oprobe=bool(args.get("oprobe", False)), dens_log=bool(args.get("dens_log", False)),
                    oprobe_only=bool(args.get("oprobe_only", False)), bg_head=bool(args.get("bg_head", False)),
                    obj_head=bool(args.get("obj_head", False)), oriented=int(args.get("oriented", 0) or 0),
-                   odirect=int(args.get("odirect", 0) or 0), split_head=bool(args.get("split_head", False))) \
+                   odirect=int(args.get("odirect", 0) or 0), split_head=bool(args.get("split_head", False)),
+                   od_sigmas=tuple(args.get("od_sigmas") or (2.0, 4.0, 6.0))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
@@ -530,6 +541,10 @@ class PopulationNet(nn.Module):
     def scalar_fields(self, x: torch.Tensor) -> torch.Tensor:
         """The image's rotation-invariant scalar fields for the oriented probe: its local contrast (the image itself
         without ``lcn``) and that blurred at sigma 1 and 2 (isotropic windows: rotating the image rotates the fields)."""
+        with torch.autocast(x.device.type, enabled=False):
+            return self._scalar_fields(x)
+
+    def _scalar_fields(self, x: torch.Tensor) -> torch.Tensor:
         from ..filters import gaussian
         lc = (self.local_contrast(x) if self.lcn else x).float()
         return torch.cat([lc, gaussian(lc, 1.0), gaussian(lc, 2.0)], 1)
@@ -570,8 +585,13 @@ class PopulationNet(nn.Module):
         1.1x and 0-2/8 (``bank_check.py``, 27 Oct). Built ``chunk`` directions at a time (the filters and energies of the
         whole bank at once: ~10 bytes x directions x voxels), each level kept at every ``strides[i]``-th voxel
         (:data:`OD_STRIDES`)."""
+        with torch.autocast(x.device.type, enabled=False):                                       # fp32 in training as at inference (under the
+            return self._direct_levels(x, chunk, strides)                                        # training's bf16 autocast the energies were
+
+    def _direct_levels(self, x: torch.Tensor, chunk: int, strides) -> "Levels":                 # rounding noise in low contrast: review 27 Oct)
         from ..filters import gaussian, gaussian_mm
-        strides = tuple(OD_STRIDES if strides is None else strides)
+        sig = self.ent.od_sigmas
+        strides = tuple(OD_STRIDES if strides is None else strides); strides = (strides + (strides[-1],) * len(sig))[:len(sig)]
         xf = x[:, :1].float(); xf = xf - gaussian(xf, 3.0)                                       # high-passed (as oriented_energy's hp)
         F = torch.fft.fftn(xf, dim=(-3, -2, -1))
         k = torch.stack(torch.meshgrid(*[torch.fft.fftfreq(n, device=x.device) * 2 * math.pi for n in x.shape[-3:]], indexing="ij"), -1)
@@ -580,13 +600,13 @@ class PopulationNet(nn.Module):
             kp2 = (k @ dirs[c:c + chunk].T).movedim(-1, 0) ** 2
             H = torch.exp(-0.5 * (8.0 ** 2 * kp2 + 0.6 ** 2 * (k2[None] - kp2)))
             E = torch.fft.ifftn(F * H[None], dim=(-3, -2, -1)).real ** 2                            # (B, chunk, Z, Y, X)
-            for li, (s, st) in enumerate(zip((2.0, 4.0, 6.0), strides)):
+            for li, (s, st) in enumerate(zip(sig, strides)):
                 parts[li].append(gaussian_mm(E, s)[..., ::st, ::st, ::st].contiguous())             # (= gaussian, as matrix products)
             del E, H
         out = []
         for P_ in parts:
             Ep = torch.cat(P_, 1)
-            out.append(Ep / (Ep.mean(1, keepdim=True) + 1e-3 * Ep.mean() + 1e-12))
+            out.append(Ep / (Ep.mean(1, keepdim=True) + 1e-3 * Ep.mean(dim=(1, 2, 3, 4), keepdim=True) + 1e-12))   # (per item)
         return Levels(out, strides)
 
     def features(self, x: torch.Tensor):

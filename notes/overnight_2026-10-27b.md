@@ -1,0 +1,152 @@
+# Overnight 27-28 Oct: readout, mass by maps, direct-path speed, short tests, pilot
+
+Asked (26 Oct, 23:10 ET): "make all fixes, test as you go and retrain to a pilot model overnight locally ... run an
+adversarial review as independent agent after each change an implement any recommended improvements. aim for correct
+mass, population sepearation and orientations in the simple, then hard phantoms ... really push the correctness at low
+training ... then extend to longer training runs ... run a seperate review into the generator and if it is creating
+data to answer the correct formulation of the question."
+
+Only one A6000 works (the second still needs a reset), so GPU jobs share it. Times are ET.
+
+## 1. What the direct-path pilot's numbers said (no training)
+
+The pilot's per-phantom scores, re-read with a new mass budget (`phantom_ladder.py`'s `mass_budget`: matched,
+off-axis "other", isotropic, total, as fractions of the target):
+
+- **The total mass is roughly right; it lands in the wrong entities.** Curves and fans: 0.48-0.82 on the right
+  population and 0.21-0.51 in entities pointing more than 30° off, summing to about 1.
+- **The density is not flat.** With the background counted, the model's density matches the target's profile (crossing
+  peaks 6.8 vs 6.4 times the sphere mean; single bundles 2.6-3.4 vs 4.3). But in the phantoms a population fills only
+  10-25 % of a sigma-2.5 window (fibre volume fraction 0.2-0.35), so a 4 % ripple in the 75-89 % background floor is a
+  quarter of a population's mass. The readout turned those ripples into spurious peaked entities 50-75° off axis.
+- **The ODF shape failures (C8) came from the readout**: averaging the votes' second moments over an entity's directions
+  broadens the fitted Bingham (kappa ~ (11, 7.5) for a (17, 13) target).
+
+## 2. Readout changes (`entity_infer.entities_from_query`, defaults changed)
+
+Measured with `scripts/learn/readout_lab.py` (decoder outputs cached once; each variant scored in seconds), selection set,
+direct-path pilot:
+
+| readout | pass | C1 mass | C3 count | C8 ODF shape | C9 found |
+|---|---|---|---|---|---|
+| votes (before) | 2/16 | 3 | 7 | 4 | 12 |
+| density's lobes | 2/16 | 3 | 10 | 4 | 10 |
+| lobes + votes' own kappa (new default) | 2/16 | 3 | 10 | **16** | 12 |
+
+- Entities now form from the density's own lobes (basins of its peaks on the sphere), not from vote/embedding agreement.
+- The reported concentrations are the density-weighted mean of the directions' own kappa votes; the mass split still
+  uses the moment fit (a lobe as broad as the density's), so masses don't move into the floor.
+- Tried and not kept: frames from the density's moment (sheets lost: a great-circle density has many peaks), pruning
+  weak lobes (no effect once the above was in).
+
+## 3. Speed (`scripts/learn/direct_path_speed.py`)
+
+- The bank's energies are sampled once per point, not once per (point, direction): the direct path's code for a query
+  of 1024 points x 200 directions 54-57 ms -> 7.5-9.5 ms (x0.14-0.18), outputs equal (max 0.4 % of the mean density:
+  half vs float storage).
+- The bank is built 32 directions at a time, and its Gaussian pooling (3 levels x 256 directions) is done as matrix
+  products (`filters.gaussian_mm`, equal to `gaussian` to 1e-7): the bank 192 -> 115 ms per 64³ phantom.
+- A training step (2 phantoms, 512 points x 32 directions): **902 -> 636 ms, peak memory 7.4 -> 5.0 GB**.
+- Decimated levels (`OD_STRIDES`) are available but off: (1, 2, 2) changed a few crossing points' density by up to 19 %
+  of the mean.
+
+## 4. Mass by maps, crossing cores and the context level
+
+**Split head.** A head predicting the objects' occupancy by kind at every voxel (oriented material, isotropic objects;
+densities, crossings count both; window means at the queries, log-L1 like the objects head). The readout's `mass="maps"`
+then takes the oriented material's mass from its map and only *shares it out* among the oriented entities by their lobes;
+the isotropic objects' mass is their map's. Before, the isotropic objects were the density's floor less the background
+head -- a small difference of two large numbers.
+
+**Crossing cores: the brighter bundle takes the density.** At the cores of the final set's crossings, the pilot's density
+along one axis was 0.8-1.5 (target 4.7-6.5) and along the other 5.8-11.2 (target 5.4-6.4). In every case the winner was
+the population with the larger |contrast| (e.g. contrasts 0.32 / 0.71: density 1.4 / 11.2). Line energy ~ contrast^2 x
+occupancy; the target is occupancy. Per-population contrasts in the phantoms are drawn independently (0.3-0.8).
+
+**Context level.** If E_s(u) is the line energy along u pooled at sigma s, divided by its mean over directions, then for
+two populations (E_2(A) / E_8(A)) / (E_2(B) / E_8(B)) ~ (O_A,2 / O_A,8) / (O_B,2 / O_B,8): the contrasts cancel. A
+classical check on 16 held-out crossings (`ctx_check`): the log mass ratio A/B at the cores from the sigma-2 energies has
+median error 0.45 (up to 1.5 where contrasts differ 2x); with the sigma-8 ratio 0.25 (the large errors gone). The direct
+path now takes its pooling levels from `od_sigmas` (default 2, 4, 6 as before; `--od-sigmas 2 4 6 8` adds the context
+level).
+
+**Per-population lobe-mass loss** (option `--lobe-mass W`): each oriented population's share of the density (directions
+weighted by the target's ownership) against the target's, log-L1 -- what the readout's mass split reads.
+
+## 5. Short training tests
+
+(in progress)
+
+## 6. Reviews
+
+### 6.1 Code review 1: readout and speed (independent agent, CPU checks)
+
+Verified by running: the (1, 1, 1) bank equals the old build; the per-point sampling matches the per-pair code (2.5e-4 on a
+code scale of 3, from the old half storage); plain-tensor `feats.oe` callers, `query(t_rel)` indexing, `with_scal` /
+`with_oe` and the frame conventions (`BG.fit` columns a, b, m against `_types` / `match_p2`) are all right; peak memory of
+the bank build 4.15 -> 1.80 GB (CPU).
+
+Found and fixed:
+- **Major (inherited): the bank ran in bf16 under the training's autocast** (the high-pass conv and the pooling), but in
+  fp32 at inference: log energies differed by mean 0.12, p99 1.0 at the sigma-2 level, the direct path's code by up to
+  1.4 on a scale of 3.9 -- the direct path trained on rounding noise in low contrast and was scored on clean inputs. Now
+  `direct_levels`, `scalar_fields` and `od_code`'s interpolation run with autocast off.
+- The bank's `1e-3 * mean` floor was a mean over the whole batch (an item's levels depended on its batch-mates by up to
+  12 %): now per item.
+- The reported vote kappa could flip an entity's type (peaked / girdle) away from the frame fitted for the split: kept
+  only where the type agrees.
+- `query(t_rel)`: `od_net` now runs only on the evaluated (point, direction) pairs.
+- `mass_budget` now uses `evaluate_p2`'s normaliser and prints "iso spurious"; option strings are validated; `--ckpt`
+  without `--plot-only` is an error.
+
+Not taken: `entities="lobes"` with `axes="density"` breaks sheets (a girdle splits into ~4 basins whose moments fit as
+peaked); the default keeps the votes' frames. A saddle-height merge of basins (join when the boundary is >= 0.8 of the
+lower peak) would allow density frames later.
+
+### 6.2 Generator review (independent agent)
+
+**Verdict: the phantom families pose the question correctly; the scene generator does not yet.** A perfect model output
+built from the targets passes C1-C9 on 16/16 selection phantoms through the real readout, so for a perfect density the
+readout's masses equal the targets.
+
+Findings (ranked by the reviewer; [run] = checked by code):
+1. **Blocker (scene): targets edited by visibility rules measured on an image the network never sees** (computed before
+   the batch-time contrast routes, ~95 % of images get a destructive route). Presence visibility removes mass without
+   giving it to the background; orientation visibility blends tensors toward isotropic and changes the *type*: 26-32 %
+   of line populations' visible mass gets girdle targets, 10-16 % isotropic; sheets 9-18 % isotropic [run].
+2. **Major: the readout's mass and type depended on vote-kappa thresholds** -- density lobes 3x broader than the votes
+   read crossings at 0.26-0.41x and sheets at 0.51x [run]. Addressed tonight by the mass maps (split head) and the lobe
+   readout; typing by the density's own anisotropy is still open.
+3. **Major: at Monte Carlo crossing cores the image locally shows mostly the population with the larger |contrast|**
+   (per-population contrast U(0.3, 0.8); 81 % of crossings differ by > 0.05) [run] -- the same finding as §4 below.
+4. **Major (scene): mass not conserved and window operators disagree**: populations + background > 1.1 of the window in
+   6.5-10 % of queries; background replicate-padded at faces but objects zero-padded (+10 % near faces); the Gaussian
+   truncated at 3 sigma not renormalised (0.97x) [run]. Phantoms sum to 1 except near faces.
+5. **Major: phantom and scene conventions disagree**: sheet dispersion floor (phantom kappa1 8.3, scene 16.7: a
+   scene-trained model fails C8 on phantom sheets by construction); scenes split a population into resolved objects,
+   phantoms never do; scene blobs 99 % peaked/girdle-typed, phantom blobs isotropic; 47 % of scene crossings under 30°,
+   phantoms only 30-90°.
+6. The mix family's bundle x interleaved-fan still uses the lattice (crossing-plane normal is the strongest direction at
+   its core).
+7. Scenes have no near-isotropic cut-off (cell layers typed girdle 31-74 %).
+8. **Direction sampling drew isotropic entities' directions around the frame's m-axis** (y/z axes at a third of the
+   rate) -- fixed; and the background (61-79 % of the mass) took ~2/3 of the entity-directed samples: new option
+   `SAMPLE_ORIENTED` draws them from the oriented entities only.
+9. `fine` was excluded from training by default but is 4/32 of the final set (the direct-path pilot never trained on
+   it): the overnight runs train on it.
+
+The scene generator's actual mix (Z4/E1 configuration) [run]: lines 64-68 % of object mass, sheets 20-25 %, blobs
+11-12 %; by target type peaked 36-44 %, girdle 40-48 %, isotropic 17 %; background 61-68 % of all target mass (the
+earlier 59 % sheets estimate does not describe it).
+
+**Generator workplan from the review (not done tonight -- the pilot trains on phantoms):**
+1. Scene targets from the geometry (true occupancy shared as the image shares it, the true ODF with one floor);
+   visibility / evidence a separate learned output computed after every degradation, never changing the type.
+2. One convention across phantoms and scenes: window operator (normalised, same padding), dispersion floor, population
+   rule, near-isotropic rule; add equal-contrast, low-angle and kissing crossings; replace the mix family's lattice.
+3. Types and masses from the ODF's shape and per-kind mass maps; crossing cores whose second population is not locally
+   visible labelled (and scored) as context-only.
+
+## 7. Overnight pilot
+
+(in progress)

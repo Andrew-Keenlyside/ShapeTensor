@@ -74,6 +74,11 @@ OVERALL_FLOOR = 0.01                # the overall ODF's relative error: energy f
 DENS_KAPPA_SMOOTH = None
 
 
+#: the entity half of the sampled directions drawn from the oriented entities only (by visible mass): the background holds
+#: 61-79 % of the mass, so ~2/3 of those draws were uniform directions -- ~4-5 per lobe at a crossing core (review 27 Oct)
+SAMPLE_ORIENTED = False
+
+
 def sample_dirs(T: dict, D: int = N_DIRS, frac_entity: float = 0.5, g: torch.Generator | None = None) -> torch.Tensor:
     """``(B, Q, D, 3)`` directions per query: a share drawn near the entities' Bingham ODFs (entity chosen by visible
     mass; mode axis spread by 1/sqrt(2 kappa + 1) along the frame's other axes), the rest uniform."""
@@ -83,6 +88,8 @@ def sample_dirs(T: dict, D: int = N_DIRS, frac_entity: float = 0.5, g: torch.Gen
     uni = Fn.normalize(torch.randn(B, Q, D, 3, generator=g, device=dev), dim=-1)
     if De == 0:
         return uni
+    if SAMPLE_ORIENTED:                                                                          # only the oriented entities' lobes (the
+        m = m * (T["e_kappa"][..., 0] >= VOTE_KAPPA_MIN)                                          # isotropic ones are the uniform half's)
     has = m.sum(-1) > 0
     pe = torch.where(has[..., None], m / m.sum(-1, keepdim=True).clamp_min(1e-12), torch.full_like(m, 1.0 / E))
     comp = torch.multinomial(pe.view(-1, E), De, replacement=True, generator=g).view(B, Q, De)
@@ -90,7 +97,9 @@ def sample_dirs(T: dict, D: int = N_DIRS, frac_entity: float = 0.5, g: torch.Gen
     k = torch.gather(T["e_kappa"], 2, comp[..., None].expand(-1, -1, -1, 2))
     n = torch.randn(B, Q, De, 2, generator=g, device=dev)
     u = R[..., :, 2] + n[..., :1] * R[..., :, 0] / torch.sqrt(2 * k[..., :1] + 1) + n[..., 1:] * R[..., :, 1] / torch.sqrt(2 * k[..., 1:] + 1)
-    u = torch.where(has[..., None, None], Fn.normalize(u, dim=-1), uni[:, :, :De])
+    iso = (k[..., 0] < VOTE_KAPPA_MIN)[..., None]                                                # isotropic entities: uniform (the frame's
+    u = torch.where(iso, uni[:, :, :De], u)                                                       # m-axis +- 1 sd drew y/z-axis directions
+    u = torch.where(has[..., None, None], Fn.normalize(u, dim=-1), uni[:, :, :De])                # at a third of the rate: review 27 Oct)
     return torch.cat([uni[:, :, De:], u], 2)
 
 
@@ -158,6 +167,15 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         share = contrib / rho.clamp_min(1e-9)[..., None]; best, owner = share.max(-1)
         owned = (best > 0.5) & (rho > OWN_REL * rm) & (rm > DENS_EPS)
     total = W["density"] * parts["density"] + W.get("mass", 0.0) * parts.get("mass", 0.0)
+    if W.get("lobe_mass", 0.0) > 0 and n_uni > 0:                                                 # each oriented population's share of the
+        f_ = ent["f"].float(); fb = f_[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-6)       # density (its directions weighted by the
+        tb = rho_d[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-9)                          # target's ownership), against the target's:
+        w_own = (contrib / rho.clamp_min(1e-9)[..., None]).detach()                               # what the readout's mass split reads. The
+        Mm = ((f_ / fb)[..., None] * w_own).mean(2); Mt = ((rho_d / tb)[..., None] * w_own).mean(2)   # per-direction loss let the brighter
+        ori_e = (T["e_kappa"][..., 0] >= VOTE_KAPPA_MIN) & (mass > 0.02)                          # bundle take crossing cores (27 Oct)
+        if bool(ori_e.any()):
+            parts["lobe_mass"] = (torch.log(Mm + 0.05) - torch.log(Mt + 0.05)).abs()[ori_e].mean()
+            total = total + W["lobe_mass"] * parts["lobe_mass"]
     if bool(owned.any()):
         R_t = torch.gather(T["e_R"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1, -1), 3, owner[..., None, None, None].expand(-1, -1, -1, 1, 3, 3))[..., 0, :, :]
         k_t = torch.gather(T["e_kappa"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1), 3, owner[..., None, None].expand(-1, -1, -1, 1, 2))[..., 0, :]

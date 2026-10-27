@@ -72,8 +72,12 @@ def run(kw):
     for it in cache["items"]:
         if a.families and it["fam"] not in a.families:
             continue
-        r = {k: v.to(dev) for k, v in it["r"].items()}
-        mdl = {k: v.cpu().numpy() for k, v in EI.entities_from_query(r, dirs, iso_k=ET.VOTE_KAPPA_MIN, **kw).items()}
+        P = it["r"]["f"].shape[0]; parts = []
+        for j in range(0, P, 1024):                                                              # in chunks (memory)
+            parts.append(EI.entities_from_query({k: v[j:j + 1024].to(dev) for k, v in it["r"].items()}, dirs, iso_k=ET.VOTE_KAPPA_MIN, **kw))
+        C = max(x["mass"].shape[1] for x in parts)
+        pad = lambda x: torch.cat([x, torch.zeros((x.shape[0], C - x.shape[1]) + tuple(x.shape[2:]), device=x.device, dtype=x.dtype)], 1) if x.shape[1] < C else x
+        mdl = {k: torch.cat([pad(x[k]) if k in ("mass", "k", "R") else x[k] for x in parts]).cpu().numpy() for k in parts[0]}
         orc = CA.evaluate_p2(it["n"], it["tgt"], {"mass": np.where(CA._types(it["tgt"]["k"][..., 0], it["tgt"]["k"][..., 1]) == 2, 0.0, it["tgt"]["mass"]),
                                                   "k": it["tgt"]["k"], "R": it["tgt"]["R"], "iso": (it["tgt"]["mass"] * (CA._types(it["tgt"]["k"][..., 0], it["tgt"]["k"][..., 1]) == 2)).sum(1),
                                                   "bg": it["tgt"]["bg"], "bgm": it["tgt"]["bg"]}, it["face"], it["disc"])

@@ -153,7 +153,7 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
         oo = dec.oprobe_feats(feats, (p - off)[qi], dirs[di]) if (getattr(dec, "oprobe", False) and qi.numel()) else None
         od = None
         if getattr(dec, "odirect", 0) and qi.numel():                                             # the bank sampled once per point
-            od = dec.od_code(dec.od_sample(feats, p - off), dec.od_weights(dirs))[qi, di]
+            od = dec.od_code(dec.od_sample(feats, p - off), dec.od_weights(dirs), pairs=(qi, di))
         r = dec.decode(enc[qi], Y[di].to(enc.dtype), rr, oo, od) if qi.numel() else None
         full = {"f": torch.zeros(n, D, device=p.device), "z": torch.zeros(n, D, dec.emb, device=p.device),
                 "R": torch.eye(3, device=p.device).expand(n, D, 3, 3).clone(), "kappa": torch.zeros(n, D, 2, device=p.device),
@@ -300,7 +300,7 @@ def cluster(r: dict, dirs: torch.Tensor, f_frac: float = 0.25, f_abs: float = 1e
 
 
 def cluster_lobes(r: dict, dirs: torch.Tensor, f_frac: float = 0.25, f_abs: float = 1e-4, merge_deg: float = 25.0,
-                  share_min: float = 0.03, k: int = 8, cmax: int = 12) -> dict:
+                  share_min: float = 0.03, k: int = 8, cmax: int = 12, saddle: float | None = None) -> dict:
     """Entities per point from the density's lobes alone: each living direction (density >= ``f_frac`` of the mean)
     climbs the density over the direction grid (steepest ascent among its ``k`` nearest neighbours, pointer jumping) to
     a local maximum; a maximum's basin is an entity; maxima within ``merge_deg`` of a heavier one join it; the
@@ -336,6 +336,19 @@ def cluster_lobes(r: dict, dirs: torch.Tensor, f_frac: float = 0.25, f_abs: floa
         cd = (pd @ dirs[order].transpose(1, 2)).abs().masked_fill(~pk[:, None, :], -1.0)          # (Q, D, C)
         bc, bi = cd.max(-1)
         ent0 = torch.where(lost & (bc >= math.cos(math.radians(merge_deg))), root.gather(1, bi), ent0)
+    if saddle is not None:                                                                         # basins joined across a high saddle: a girdle's
+        lab0 = torch.where(alive, ent0, torch.full_like(ent0, -1))                                  # ridge has many peaks (~4 basins per point on a
+        la, lb = lab0[:, :, None].expand(-1, -1, nb.shape[1]), lab0[:, nbc]                         # sheet), a crossing's lobes a deep valley
+        fa, fb = f[:, :, None].expand(-1, -1, nb.shape[1]), f[:, nbc]                               # between them (review 27 Oct: girdle saddles ~0.9
+        edge = (la >= 0) & (lb >= 0) & (la != lb) & (nb >= 0)[None]                                 # of the lower peak; 45-deg crossings <= 0.75)
+        sv = torch.where(edge, torch.minimum(fa, fb), torch.zeros_like(fa))
+        S = torch.zeros(Q, C * C, device=dev).scatter_reduce_(1, (la.clamp_min(0) * C + lb.clamp_min(0)).reshape(Q, -1), sv.reshape(Q, -1), "amax")
+        S = S.view(Q, C, C); S = torch.maximum(S, S.transpose(1, 2))
+        pkv = torch.full((Q, C + 1), 0.0, device=dev).scatter_reduce_(1, torch.where(lab0 >= 0, lab0, torch.full_like(lab0, C)), torch.where(lab0 >= 0, f, torch.zeros_like(f)), "amax")[:, :C]
+        adj = (S >= saddle * torch.minimum(pkv[:, :, None], pkv[:, None, :])) & (S > 0)
+        adj |= torch.eye(C, dtype=torch.bool, device=dev)[None]
+        comp = _components(adj)                                                                     # (Q, C): the smallest slot of each group
+        ent0 = torch.where(ent0 >= 0, comp.gather(1, ent0.clamp_min(0)), ent0)
     cm = torch.zeros(Q, C + 1, device=dev).scatter_add_(1, torch.where(ent0 >= 0, ent0, torch.full_like(ent0, C)), w)[:, :C]
     o2 = cm.argsort(1, descending=True); keepc = (cm.gather(1, o2) >= share_min * cm.sum(1, keepdim=True).clamp_min(1e-12)) & (cm.gather(1, o2) > 0)
     rank = torch.full((Q, C + 1), -1, dtype=torch.long, device=dev)
@@ -548,7 +561,8 @@ def readout(model, image: torch.Tensor, points: torch.Tensor, sigma: torch.Tenso
 
 @torch.no_grad()
 def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05, iso_k: float = 0.5, merge_deg: float | None = 15.0,
-                        entities: str = "lobes", axes: str = "votes", kappa: str = "votes", prune: float = 0.0, mass: str = "maps") -> dict:
+                        entities: str = "lobes", axes: str = "votes", kappa: str = "votes", prune: float = 0.0, mass: str = "maps",
+                        saddle: float | None = None) -> dict:
     """The entities from the decoder's outputs ``r`` at the directions ``dirs`` (:func:`query`): the density's floor
     (``floor`` quantile) the background plus isotropic objects (told apart by the background head where the model has
     one), entities from what rises above it, their mass split by lobe fit (:func:`split_mass`), near-parallel same-type
@@ -569,7 +583,11 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
 
     Defaults (27 Oct, readout_lab.py on the direct-path pilot): entities from the density's lobes (count 7 -> 10 of
     16) and the votes' own concentrations reported (ODF shape 4 -> 16 of 16)."""
-    e = cluster(r, dirs, floor=floor) if entities == "votes" else cluster_lobes_floor(r, dirs, floor=floor)
+    for k_, v_, ok in (("entities", entities, ("votes", "lobes")), ("axes", axes, ("votes", "density")), ("kappa", kappa, ("moments", "votes", "votes_all")),
+                       ("mass", mass, ("maps", "density"))):
+        if v_ not in ok:
+            raise ValueError(f"entities_from_query: {k_}={v_!r}, not one of {ok}")
+    e = cluster(r, dirs, floor=floor) if entities == "votes" else cluster_lobes_floor(r, dirs, floor=floor, saddle=saddle)
     if axes == "density":
         e = {**e, "R": e["R_odf"], "kappa": e["kappa_odf"]}
     k_rep = None
@@ -610,9 +628,10 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
         bg = bgm; iso_tot = bg + r["isom"].float() + torch.where(has, torch.zeros_like(S), r["orim"].float())
     un = (e["label"] < 0).float() * r["f"].float()                                              # the floor's directions
     iso_z = (un[..., None] * r["z"].float()).sum(1) / un.sum(1, keepdim=True).clamp_min(1e-9)
-    if k_rep is not None:                                                                       # reported: the votes' concentrations (types kept)
-        kv = torch.where(isoe[..., None], kv, k_rep.float().clamp_min(0))
-        kv = torch.where((kv[..., 0] < iso_k)[..., None] & ~isoe[..., None], kv.clamp_min(iso_k), kv)   # (an oriented entity stays oriented)
+    if k_rep is not None:                                                                       # reported: the votes' concentrations where they
+        kr = k_rep.float().clamp_min(0)                                                          # keep the entity's type (peaked / girdle /
+        typ = lambda k_: torch.where(k_[..., 0] < iso_k, 2, torch.where(k_[..., 1] < 2.0, 1, 0))   # isotropic: its frame was fitted for that type)
+        kv = torch.where((typ(kr) == typ(kv))[..., None], kr, kv)
     return {"mass": ms * ~isoe, "k": kv, "R": e["R"].float(), "iso": (iso_tot - bg).clamp_min(0), "bg": bg, "bgm": bgm, "iso_z": iso_z}
 
 

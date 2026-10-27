@@ -43,10 +43,18 @@ ap.add_argument("--kappa", default="votes", choices=("votes", "moments", "votes_
 ap.add_argument("--mass", default="maps", choices=("maps", "density"), help="readout: masses from the split head's maps (if any) or the density")
 ap.add_argument("--split-head", action="store_true", help="a head for the objects' occupancy by kind (oriented / isotropic)")
 ap.add_argument("--lobe-weight", type=float, default=None, help="entity_train.DENS_LOBE_WEIGHT (the density loss weighted toward lobes)")
+ap.add_argument("--sample-oriented", action="store_true", help="entity_train.SAMPLE_ORIENTED: entity directions from the oriented entities only")
+ap.add_argument("--lobe-mass", type=float, default=0.0, help="weight of the per-population lobe-mass loss (entity_train: W['lobe_mass'])")
+ap.add_argument("--test-families", nargs="+", default=None, help="score only these families (short tests; default: all)")
+ap.add_argument("--no-final", action="store_true", help="skip the final set at the end of training (short tests)")
+ap.add_argument("--od-sigmas", type=float, nargs="+", default=None, help="the direct path's pooling levels (e.g. 2 4 6 8: a context level)")
 a = ap.parse_args(); dev = "cuda"; stem = a.out.rsplit(".", 1)[0]
+if a.ckpt and not a.plot_only:
+    ap.error("--ckpt only with --plot-only (training writes OUT's .pt)")
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None
 L.DESC_K = 5; L.DESC_NC = 0; TR.REGION_DENSITY = True; ET.REGION_DENSITY = True; TR.set_background_entity(True)
 ET.VOTE_OBJECTS = True; ET.OWN_OBJECTS = True; ET.DENS_SAME_NORM = True
+ET.SAMPLE_ORIENTED = bool(a.sample_oriented)
 if a.lobe_weight is not None:
     ET.DENS_LOBE_WEIGHT = float(a.lobe_weight)
 batch = lambda ts: {k: torch.stack([t[k] for t in ts]) for k in ts[0]}
@@ -55,6 +63,8 @@ def build_tests(S0, k):
     """Held-out phantoms: ``k`` per family from seeds ``S0`` (900000: the selection set; 1900000: the final set)."""
     out = []
     for fi, fam in enumerate(FAMS):
+        if a.test_families and fam not in a.test_families:
+            continue
         for i in range(k):
             spec, look = P2.random_spec(fam, torch.Generator().manual_seed(S0 + 100 * fi + i))
             out.append((fam, P2.make(spec, seed=S0 + 50_000 + 100 * fi + i, look=look, device=dev, ss=2 if fam == "fine" else 1)))
@@ -74,6 +84,8 @@ else:
     args["split_head"] = bool(args.get("split_head")) or a.split_head
     if a.odirect:
         args["odirect"] = int(a.odirect)
+    if a.od_sigmas:
+        args["od_sigmas"] = [float(x) for x in a.od_sigmas]
     if a.widths:
         args["widths"] = list(a.widths)
     net = PopulationNet.from_args(args).to(dev)
@@ -117,10 +129,10 @@ else:
         T = batch(ts); dirs = ET.sample_dirs(T, 32, g=g)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             P = net(torch.stack(imgs)[:, None], voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
-        tot, parts = ET.entity_loss(P, T, dirs, W={"desc": 0.0}, g=g)
+        tot, parts = ET.entity_loss(P, T, dirs, W={"desc": 0.0, "lobe_mass": a.lobe_mass}, g=g)
         opt.zero_grad(set_to_none=True); tot.backward(); torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0); opt.step()
     torch.save({"model": net.state_dict(), "args": args, "curves": curves, "tag": a.tag, "init": a.init, "families": a.families,
-                "flags": {k: getattr(a, k) for k in ("lr", "lr_final", "batch", "steps", "bg_head", "oprobe", "floor", "obj_head", "widths", "scratch", "sigma_lo", "odirect", "split_head", "lobe_weight")}}, stem + ".pt")
+                "flags": {k: getattr(a, k) for k in ("lr", "lr_final", "batch", "steps", "bg_head", "oprobe", "floor", "obj_head", "widths", "scratch", "sigma_lo", "odirect", "split_head", "lobe_weight", "lobe_mass", "od_sigmas", "sample_oriented")}}, stem + ".pt")
 net.eval()
 sph = EI.sphere_dirs(200, dev)
 
@@ -172,9 +184,9 @@ def mass_budget(tgt, mdl, face, disc):
     ("iso spurious"), as isotropic objects in all (oriented phantoms: the populations read as isotropic), and the
     model's object total (oriented + isotropic) against the target's."""
     m = CA.match_p2(tgt, mdl); valid = (face.reshape(-1) >= CA.FACE_MARGIN) & disc.reshape(-1)
-    T = tgt["mass"][valid]; tot = max(float(T.sum()), 1e-9)
+    T = tgt["mass"][valid]; tot = max(float(T.sum()), 0.1 * int(valid.sum()))                 # evaluate_p2's normaliser (D)
     out = {"target": tot, "matched": float(m["m"][valid].sum()) / tot, "other": float(m["other"][valid].sum()) / tot,
-           "iso spurious": float(m["iso_spur"][valid].sum()) / tot, "iso": float(mdl["iso"][valid].sum()) / tot,
+           "iso spurious": float(m["iso_spur"][valid].sum()) / tot, "iso": float(mdl["iso"][valid].sum()) / tot, "target sum": float(T.sum()),
            "model total": float((mdl["mass"].sum(1) + mdl["iso"])[valid].sum()) / tot}
     for k in range(T.shape[1]):
         out[f"pop {k + 1}"] = float(m["m"][valid, k].sum()) / max(float(T[:, k].sum()), 1e-9)
@@ -224,16 +236,17 @@ def score_set(tests_, sigma, suffix, figure=True):
                     f"{'PASS' if npass == len(acc) else 'FAIL'} ({npass}/{len(acc)})")
     CA.save_json(acc, stem + suffix + "_acceptance.json")
     import json
-    json.dump(budget, open(stem + suffix + "_budget.json", "w"), indent=1)
+    with open(stem + suffix + "_budget.json", "w") as fh:
+        json.dump(budget, fh, indent=1)
     for fam in FAMS:                                                                             # the mass budget per family (medians)
-        b = [v for lab, v in budget if lab.startswith(fam + " ") and v["target"] > 1.0]
+        b = [v for lab, v in budget if lab.startswith(fam + " ") and v["target sum"] > 1.0]
         if b:
-            print(f"  budget {fam:6s}: " + " ".join(f"{k} {np.median([x[k] for x in b]):.2f}" for k in ("matched", "other", "iso", "model total")), flush=True)
+            print(f"  budget {fam:6s}: " + " ".join(f"{k} {np.median([x[k] for x in b]):.2f}" for k in ("matched", "other", "iso spurious", "model total")), flush=True)
     print(f"acceptance [{suffix or 'selection'} sigma {sigma}]:", f"{npass}/{len(acc)} |",
           " ; ".join(f"{lab}: " + " ".join(k.split()[0] + ("+" if v[0] else "-") for k, v in r_.items() if k != "PASS") for lab, r_ in acc), flush=True)
 
 
 for si, sg in enumerate(a.sigmas):
     score_set(tests, sg, ("_final" if a.final else "") + ("" if sg == 2.5 else f"_s{sg}"), figure=(si == 0))
-if not a.plot_only and not a.final:                                                              # the final set, once, at the end of training
+if not a.plot_only and not a.final and not a.no_final:                                           # the final set, once, at the end of training
     score_set(build_tests(1_900_000, 4), 2.5, "_final", figure=False)
