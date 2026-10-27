@@ -183,6 +183,27 @@ No blockers. Fixed:
   the bank uses the real half spectrum with Nyquist-symmetrised, cached filters (exact to 4e-7); cudnn benchmark on.
 - Trainer: optimiser state in checkpoints and `--resume`; progress lines.
 
+### 6.1d Code review 4: the pre-norm, the divergence guard (independent agent)
+
+- **Why the trunk blows up** (verified on the diverged checkpoint): the filter norms grew only 1.6-3.2x over their
+  initialisation; shuffling each filter's 27 taps leaves a block's gain unchanged, shuffling across channels cuts it
+  6-400x -- the tap-summed channel-mixing matrices lined up with the smooth part of the features. Zero-mean filters
+  (weight standardisation) cut it only ~13x, so normalising activations is the right fix. At initialisation every family
+  prefers smaller features; in a trained model the saturating heads (objects softplus, background, votes) pull toward
+  larger ones -- a weak, consistent pull that Adam's per-coordinate steps turn into full-size updates.
+- **The pre-norm stops the compounding but does not bound what the heads read** (diverged weights with the pre-norm:
+  |h| 18 / 320 / 5e3 instead of 1.6 / 1e5 / 4e15) -- now `--block-norm 2` also normalises each block's update (each block
+  then adds ~g per voxel; |h| 0.2-2 in a test run). The running pilot (pre-norm only) stayed healthy (|h| ~0.4 / 3-4.6 /
+  1.2-1.6 to step 1200), so it was not restarted.
+- **Guard bugs, fixed:** the optimiser snapshot was aliased by `load_state_dict` (a second rollback restored diverged
+  moments); snapshots were of weights no forward had checked, with none in the first 250 steps; a non-finite gradient
+  with a finite loss went through; only three levels were watched (l3 had the largest gains); diverged weights could be
+  saved. Now: snapshots of checked weights (from the start), a copy restored, non-finite gradients skipped, all levels
+  and the mixed features watched with a relative test (10x their running size), saves only when healthy. Tested: a trip
+  rolled back to the start snapshot at half rate and training recovered.
+- Also: `--resume` takes the run's own args; CPU workers exit when the trainer is killed; the bank's filter cache has a
+  byte budget (a whole-volume bank would have cached GBs).
+
 ### 6.2 Generator review (independent agent)
 
 **Verdict: the phantom families pose the question correctly; the scene generator does not yet.** A perfect model output
