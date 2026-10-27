@@ -479,3 +479,31 @@ At step 10000 the core balance is unchanged in kind (density at A / B against th
 **A readout bug this showed:** the maps' 2x cap (review 2) starved weak lobes -- oriented totals 0.03-0.12 of the target
 at step 2000 -- now off (`maps_cap`, default None): 0.13-0.70. The pilot's own mid-run scorings use the capped
 readout; its checkpoints are kept (`pilot3_step*.pt`) and rescored with the final readout below.
+
+### 7.2 A wider context level (sigma 16) at low training, and the extension
+
+**Context A/B (05:00-05:52).** The overnight pilot's run again from scratch with the same seed and data order, plus a
+sigma-16 level in the direct path, stopped at step 2000 and compared with the pilot's own step-2000 checkpoint.
+(Small differences besides the level: the RMS norm's eps 1e-4 instead of 1e-6.) Density at the true axes in the final
+set's crossing cores, ratio A/B against the target's:
+
+| | pilot (sigma 2-8) | + sigma 16 | target |
+|---|---|---|---|
+| cross 0 | 0.23 | 0.28 | 1.20 |
+| cross 1 | 2.18 | 2.04 | 1.07 |
+| cross 2 | 1.24 | 1.11 | 0.99 |
+| cross 3 | 0.08 | 0.09 | 0.73 |
+| fine 0 | 0.33 | 0.39 | 0.76 |
+| fine 1 | 0.69 | 0.72 | 1.28 |
+| fine 2 | 1.27 | 1.23 | 0.82 |
+| fine 3 | 2.03 | 1.67 | 0.68 |
+
+Slightly toward the target in 7 of 8, but nowhere near it: **a wider context level alone does not undo the contrast
+confound at low training.** Held-out density losses at step 2000 were mixed (crossings 0.36 vs 0.29, sheets 0.13 vs
+0.24). The confound needs either an explicit per-population contrast (e.g. normalising each direction's energy by that
+direction's energy along the bundle away from the core -- a path integral rather than an isotropic window), or a generator
+in which crossing populations' contrasts are related as in tissue, with unequal-contrast cores scored as context-only.
+
+**Readout: a ring gate on the saddle merge** (`saddle_ring`, off): merging only groups whose directions form a ring keeps
+sheets and the 3-bundle crossing's weak bundle, but fragments fans again (step 4000, selection set: count 14 -> 12,
+leakage 12 -> 9). Not adopted; a prominence-based merge is the next thing to try.
