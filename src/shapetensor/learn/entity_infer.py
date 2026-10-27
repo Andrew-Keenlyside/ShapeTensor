@@ -326,12 +326,18 @@ def cluster(r: dict, dirs: torch.Tensor, f_frac: float = 0.25, f_abs: float = 1e
 
 
 def cluster_lobes(r: dict, dirs: torch.Tensor, f_frac: float = 0.25, f_abs: float = 1e-4, merge_deg: float = 25.0,
-                  share_min: float = 0.03, k: int = 8, cmax: int = 12, saddle: float | None = None, saddle_ring: float | None = None) -> dict:
+                  share_min: float = 0.03, k: int = 8, cmax: int = 12, saddle: float | None = None, saddle_ring: float | None = None,
+                  saddle_peaks: float | None = None) -> dict:
     """Entities per point from the density's lobes alone: each living direction (density >= ``f_frac`` of the mean)
     climbs the density over the direction grid (steepest ascent among its ``k`` nearest neighbours, pointer jumping) to
     a local maximum; a maximum's basin is an entity; maxima within ``merge_deg`` of a heavier one join it; the
     ``cmax`` heaviest kept, those below ``share_min`` dropped. Where the votes do not (yet) switch between the lobes
-    of a crossing, the density's own peaks still separate its entities. Returns :func:`cluster`'s fields."""
+    of a crossing, the density's own peaks still separate its entities. Returns :func:`cluster`'s fields.
+
+    ``saddle``: basins whose shared boundary's highest point is at least ``saddle`` of the lower peak are joined
+    (single linkage). ``saddle_peaks``: and only if the lower peak is at least ``saddle_peaks`` of the higher -- the
+    valley must be shallow seen from both peaks (a ridge of comparable peaks: a sheet's ring, a fan's arc), so a weak
+    population standing on a strong one's flank (a shoulder: little prominence of its own, but a low peak) stays its own."""
     f = r["f"]; Q, D = f.shape; dev = f.device
     nb = sym_neighbours(dirs, k).to(dev); nbc = nb.clamp_min(0)
     alive = (f >= f_frac * f.mean(1, keepdim=True)) & (f >= f_abs)
@@ -371,7 +377,10 @@ def cluster_lobes(r: dict, dirs: torch.Tensor, f_frac: float = 0.25, f_abs: floa
         S = torch.zeros(Q, C * C, device=dev).scatter_reduce_(1, (la.clamp_min(0) * C + lb.clamp_min(0)).reshape(Q, -1), sv.reshape(Q, -1), "amax")
         S = S.view(Q, C, C); S = torch.maximum(S, S.transpose(1, 2))
         pkv = torch.full((Q, C + 1), 0.0, device=dev).scatter_reduce_(1, torch.where(lab0 >= 0, lab0, torch.full_like(lab0, C)), torch.where(lab0 >= 0, f, torch.zeros_like(f)), "amax")[:, :C]
-        adj = (S >= saddle * torch.minimum(pkv[:, :, None], pkv[:, None, :])) & (S > 0)
+        lo, hi = torch.minimum(pkv[:, :, None], pkv[:, None, :]), torch.maximum(pkv[:, :, None], pkv[:, None, :])
+        adj = (S >= saddle * lo) & (S > 0)
+        if saddle_peaks is not None:                                                               # comparable peaks only: a weak lobe on a strong
+            adj &= lo >= saddle_peaks * hi                                                         # one's flank is a shoulder, not a ridge's peak
         adj |= torch.eye(C, dtype=torch.bool, device=dev)[None]
         comp = _components(adj)                                                                     # (Q, C): the smallest slot of each group
         if saddle_ring is not None:                                                                 # a group is kept only if its directions make a
@@ -601,7 +610,7 @@ def readout(model, image: torch.Tensor, points: torch.Tensor, sigma: torch.Tenso
 def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05, iso_k: float = 0.5, merge_deg: float | None = 15.0,
                         entities: str = "lobes", axes: str = "ring", kappa: str = "votes", prune: float = 0.0, mass: str = "maps",
                         saddle: float | None = 0.8, maps_cap: float | None = None, ring: float = 0.8,
-                        saddle_ring: float | None = None) -> dict:
+                        saddle_ring: float | None = None, saddle_peaks: float | None = None) -> dict:
     """The entities from the decoder's outputs ``r`` at the directions ``dirs`` (:func:`query`): the density's floor
     (``floor`` quantile) the background plus isotropic objects (told apart by the background head where the model has
     one), entities from what rises above it, their mass split by lobe fit (:func:`split_mass`), near-parallel same-type
@@ -638,7 +647,7 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
                        ("mass", mass, ("maps", "density", "votes", "maps_votes"))):
         if v_ not in ok:
             raise ValueError(f"entities_from_query: {k_}={v_!r}, not one of {ok}")
-    e = cluster(r, dirs, floor=floor) if entities == "votes" else cluster_lobes_floor(r, dirs, floor=floor, saddle=saddle, saddle_ring=saddle_ring)
+    e = cluster(r, dirs, floor=floor) if entities == "votes" else cluster_lobes_floor(r, dirs, floor=floor, saddle=saddle, saddle_ring=saddle_ring, saddle_peaks=saddle_peaks)
     if axes == "hybrid":                                                                          # frames from the density, types (and shapes)
         lab_ = e["label"]; C_ = e["live"].shape[1]                                                 # from the votes' own concentrations
         w_ = torch.where(lab_ >= 0, r["f"].float(), torch.zeros_like(r["f"].float()))

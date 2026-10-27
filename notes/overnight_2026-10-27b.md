@@ -507,7 +507,12 @@ in which crossing populations' contrasts are related as in tissue, with unequal-
 
 **Readout: a ring gate on the saddle merge** (`saddle_ring`, off): merging only groups whose directions form a ring keeps
 sheets and the 3-bundle crossing's weak bundle, but fragments fans again (step 4000, selection set: count 14 -> 12,
-leakage 12 -> 9). Not adopted; a prominence-based merge is the next thing to try.
+leakage 12 -> 9). Not adopted. **A peak-ratio gate** (`saddle_peaks=0.4`, off; independent agent, selection-set caches only): a merge also
+needs the lower peak >= 0.4 of the higher, so comparable peaks on a sheet's ring or a fan's arc still join but a weak
+population on a strong one's flank stays apart -- the 3-bundle crossing's third bundle found 0.03-0.13 -> 0.72-0.84,
+sheets kept (2/2), fans in between (other 0.16-0.29 vs default 0.08-0.23); but leakage C4 12 -> 9, 13 -> 9, 8 -> 6 (mostly
+the mixes, whose spurious fragments the default's merge also swallowed). The next step is to absorb small fragments by
+mass share after the gated merge, then decide on a fresh test set.
 
 **Extension to 13000 steps (04:38-06:00).** The pilot resumed from its step-10000 checkpoint (optimiser state kept; the
 cosine schedule over 13000 steps, so the rate restarted at ~4e-5 and annealed). Same final readout:
