@@ -33,7 +33,7 @@ class ChannelRMSNorm(nn.Module):
     """Each voxel's features divided by their root mean square over the channels (a learned per-channel scale): local, so
     the same at any crop or tile size (a group norm's volume statistics would not be)."""
 
-    def __init__(self, c: int, eps: float = 1e-6):
+    def __init__(self, c: int, eps: float = 1e-4):
         super().__init__()
         self.w = nn.Parameter(torch.ones(1, c, 1, 1, 1)); self.eps = eps
 
@@ -48,15 +48,18 @@ class Block(nn.Module):
     normalised per voxel (pre-norm): without it, from-scratch runs blew up -- each block's 3^3 convolutions grew coherent
     (mean |w| 0.02, yet a gain of 300-400 per block), compounding to mean |h| 1e16 by the lattice level (28 Oct)."""
 
-    def __init__(self, c: int, g0: float = 0.25, norm: bool = False):
+    def __init__(self, c: int, g0: float = 0.25, norm: int = 0):
         super().__init__()
         self.a = nn.Conv3d(c, c, 3, padding=1); self.b = nn.Conv3d(c, c, 3, padding=1)
         self.g = nn.Parameter(torch.full((1,), float(g0)))
-        self.n = ChannelRMSNorm(c) if norm else None
-
+        self.n = ChannelRMSNorm(c) if norm >= 1 else None                                      # 1: the branch reads normalised features
+        self.m = ChannelRMSNorm(c) if norm >= 2 else None                                      # 2: and adds a normalised update (each block
+                                                                                                 # adds ~g per voxel: review 4 -- pre-norm alone
+                                                                                                 # still let a block add 150-1000)
     def forward(self, x):
         y = self.n(x) if self.n is not None else x
-        return x + self.g * self.b(Fn.silu(self.a(Fn.silu(y))))
+        y = self.b(Fn.silu(self.a(Fn.silu(y))))
+        return x + self.g * (self.m(y) if self.m is not None else y)
 
 
 class Down(nn.Module):
@@ -162,6 +165,7 @@ class Levels(list):
 
 #: each level kept at every ``s``-th voxel: (1, 1, 1) exact; (1, 2, 2) halves the memory of the coarse levels at a cost of
 #: up to ~0.19 of the mean density at a few crossing points (mean 3e-4; direct_path_speed.py, 27 Oct) -- for big volumes
+OD_CACHE_BYTES = 512 * 2 ** 20                                                                   # the bank's filters cached up to this size
 OD_STRIDES = None                                                                                # None: 1 below sigma 8, 2 from it (review 2: sigma 8
                                                                                                  # at stride 2 moves log energies <= 0.015)
 
@@ -472,7 +476,7 @@ class PopulationNet(nn.Module):
                  dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False,
                  dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False, oprobe: bool = False,
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
-                 odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: bool = False):
+                 odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -489,7 +493,7 @@ class PopulationNet(nn.Module):
             ph = math.pi * (3 - math.sqrt(5)) * i                                                # a Fibonacci hemisphere (axial directions)
             self.register_buffer("o_dirs", torch.stack([zc, rc * torch.sin(ph), rc * torch.cos(ph)], 1).float(), persistent=False)
         self.stem = nn.Conv3d((2 if lcn else 1) + self.oriented, c0, 3, padding=1)              # with ``lcn``: the image and its local contrast
-        bn = bool(block_norm)
+        bn = int(block_norm)
         self.l0 = Block(c0, norm=bn)
         self.d1 = Down(c0, c1); self.l1 = nn.Sequential(Block(c1, norm=bn), Block(c1, norm=bn))
         self.d2 = Down(c1, c2); self.l2 = Block(c2, norm=bn)
@@ -584,7 +588,7 @@ class PopulationNet(nn.Module):
                    obj_head=bool(args.get("obj_head", False)), oriented=int(args.get("oriented", 0) or 0),
                    odirect=int(args.get("odirect", 0) or 0), split_head=bool(args.get("split_head", False)),
                    od_sigmas=tuple(args.get("od_sigmas") or (2.0, 4.0, 6.0)), mass_vote=bool(args.get("mass_vote", False)),
-                   block_norm=bool(args.get("block_norm", False))) \
+                   block_norm=int(args.get("block_norm", 0) or 0)) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
@@ -668,7 +672,9 @@ class PopulationNet(nn.Module):
         for kk in (k, kf):
             kp2 = (kk @ d.T).movedim(-1, 0) ** 2; k2 = (kk ** 2).sum(-1)
             Hs.append(torch.exp(-0.5 * (8.0 ** 2 * kp2 + 0.6 ** 2 * (k2[None] - kp2))))
-        H = cache[key] = 0.5 * (Hs[0] + Hs[1])
+        H = 0.5 * (Hs[0] + Hs[1])
+        if H.numel() * 4 * (self.ent.od_dirs.shape[0] // max(chunk, 1)) <= OD_CACHE_BYTES:            # (a whole-volume bank would hold GBs)
+            cache[key] = H
         return H
 
     def _direct_levels(self, x: torch.Tensor, chunk: int, strides) -> "Levels":                 # rounding noise in low contrast: review 27 Oct)

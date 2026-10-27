@@ -16,9 +16,10 @@ ap.add_argument("--sigma-lo", type=float); ap.add_argument("--start", type=int);
 ap.add_argument("--ahead", type=int, default=6); ap.add_argument("--threads", type=int, default=4); a = ap.parse_args()
 torch.set_num_threads(a.threads)
 mine = lambda: sum(1 for f in os.listdir(a.dir) if f.endswith(".pt") and int(f[:7]) % a.n == a.rank)
+parent = os.getppid()
 for step in range(a.start + (a.rank - a.start) % a.n, a.stop, a.n):
     while mine() >= a.ahead:
-        if not os.path.isdir(a.dir):
+        if not os.path.isdir(a.dir) or os.getppid() != parent:                                   # the trainer gone (killed: no atexit)
             sys.exit(0)
         time.sleep(0.2)
     imgs, ts = [], []
