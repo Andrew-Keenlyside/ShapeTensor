@@ -38,7 +38,7 @@ ap.add_argument("--odirect", type=int, default=0, help="the decoder's direct ori
 ap.add_argument("--final", action="store_true", help="score the final test set (seeds never used to choose between variants) instead of the selection set")
 ap.add_argument("--ckpt", default=None, help="with --plot-only: score this checkpoint (outputs named after OUT)")
 ap.add_argument("--entities", default="lobes", choices=("votes", "lobes"), help="readout: entities from the votes or the density's lobes")
-ap.add_argument("--axes", default="density", choices=("votes", "density"), help="readout: entity frames/types from the votes or the density moment")
+ap.add_argument("--axes", default="ring", choices=("votes", "density", "hybrid", "ring"), help="readout: entity frames/types from the votes or the density moment")
 ap.add_argument("--saddle", type=float, default=0.8, help="readout: lobes joined across saddles this high (of the lower peak); <= 0: off")
 ap.add_argument("--kappa", default="votes", choices=("votes", "moments", "votes_all"), help="readout: reported concentrations")
 ap.add_argument("--mass", default="maps", choices=("maps", "density", "votes", "maps_votes"), help="readout: masses from the split head's maps (if any), the density, the mass votes, or votes' shares of the map")

@@ -590,8 +590,8 @@ def readout(model, image: torch.Tensor, points: torch.Tensor, sigma: torch.Tenso
 
 @torch.no_grad()
 def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05, iso_k: float = 0.5, merge_deg: float | None = 15.0,
-                        entities: str = "lobes", axes: str = "density", kappa: str = "votes", prune: float = 0.0, mass: str = "maps",
-                        saddle: float | None = 0.8, maps_cap: float | None = None) -> dict:
+                        entities: str = "lobes", axes: str = "ring", kappa: str = "votes", prune: float = 0.0, mass: str = "maps",
+                        saddle: float | None = 0.8, maps_cap: float | None = None, ring: float = 0.8) -> dict:
     """The entities from the decoder's outputs ``r`` at the directions ``dirs`` (:func:`query`): the density's floor
     (``floor`` quantile) the background plus isotropic objects (told apart by the background head where the model has
     one), entities from what rises above it, their mass split by lobe fit (:func:`split_mass`), near-parallel same-type
@@ -601,9 +601,13 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
 
     ``entities``: "votes" (:func:`cluster`: the directions grouped by their votes and embeddings) or "lobes"
     (:func:`cluster_lobes_floor`: the density's own lobes). ``axes``: "votes" (each entity's frame and type from its
-    directions' averaged votes) or "density" (from the entity's own density moment) -- used for the types, the mass
-    split and the merging alike. ``kappa``: "moments" (the Bingham fitted to the averaged vote moments: broader than
-    any single vote where the votes' frames scatter) or "votes" (the density-weighted mean of the directions' own
+    directions' averaged votes), "density" (from the entity's own density moment) -- used for the types, the mass
+    split and the merging alike -- or "ring": density frames, and a girdle only where the entity's density covers its
+    great circle -- the moment's in-plane eigenvalue ratio (middle / largest; 1 a full ring, ~0.4 a 120-deg sector) at
+    least ``ring`` -- else peaked: a fan's or a curve's lobe is broader than its target and its moment often falls
+    below the girdle line (kappa2 < 2) while covering only a sector; the mass split keeps the moment's own Bingham.
+    ``kappa``: "moments" (the Bingham fitted to the averaged vote moments: broader than any single vote where the
+    votes' frames scatter) or "votes" (the density-weighted mean of the directions' own
     concentration votes, in log1p). ``prune`` (> 0): oriented entities whose lobe stands less than ``prune`` times the
     point's floor above it (the peak of the floor-subtracted density over the floor) are dropped before the mass split
     -- ripples of the floor, not populations. ``mass``: "maps" (with a split head: the oriented material's mass from
@@ -615,8 +619,12 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
     moment with lobes joined across high saddles (``saddle``: a sheet's ridge stays one entity). The votes lag the density
     early in training: at step 2000 of the overnight pilot, density frames matched 0.80 / 0.83 / 1.06 of crossings' /
     curves' / sheets' mass against 0.20 / 0.01 / 0.00 with the votes' (count 5 -> 13, direction 11 -> 15 of 16); on the
-    long-trained direct-path pilot they were neutral to better (count 10 -> 12, direction 12 -> 16)."""
-    for k_, v_, ok in (("entities", entities, ("votes", "lobes")), ("axes", axes, ("votes", "density", "hybrid")), ("kappa", kappa, ("moments", "votes", "votes_all")),
+    long-trained direct-path pilot they were neutral to better (count 10 -> 12, direction 12 -> 16). ``axes="ring"``
+    (the default since 28 Oct): density frames, but a lobe the moment calls a girdle stays one only if its density
+    covers most of the great circle (in-plane eigenvalue ratio >= ``ring``) -- a fan's spread lobe is otherwise a
+    line: fans found 0.2-0.6 -> 0.7-1.0, sheets kept (1.0), all criteria 2 -> 3 (direct-path pilot) and 3 -> 4
+    (overnight pilot, step 2000) of 16."""
+    for k_, v_, ok in (("entities", entities, ("votes", "lobes")), ("axes", axes, ("votes", "density", "hybrid", "ring")), ("kappa", kappa, ("moments", "votes", "votes_all")),
                        ("mass", mass, ("maps", "density", "votes", "maps_votes"))):
         if v_ not in ok:
             raise ValueError(f"entities_from_query: {k_}={v_!r}, not one of {ok}")
@@ -629,6 +637,11 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
         e = {**e, "R": e["R_odf"], "kappa": torch.where(e["live"][..., None], kv_h, e["kappa_odf"])}
     elif axes == "density":
         e = {**e, "R": e["R_odf"], "kappa": e["kappa_odf"]}
+    elif axes == "ring":                                                                          # density frames; a girdle only where the density
+        Ko = e["kappa_odf"]; _, ea, eb = BG._stats(Ko)                                            # covers its great circle: the in-plane eigenvalue
+        cover = (eb / (1.0 - ea - eb).clamp_min(1e-12)).to(Ko.dtype)                              # ratio of its moment (its fitted Bingham's, exactly)
+        line = (Ko[..., 0] >= iso_k) & (Ko[..., 1] < 2.0) & (cover < ring)                       # a sector of it: peaked (the votes' kappa reported)
+        e = {**e, "R": e["R_odf"], "kappa": torch.where(line[..., None], Ko.clamp_min(2.0), Ko), "kappa_fit": Ko}
     k_rep = None
     if kappa in ("votes", "votes_all"):                                                          # the reported shape: the votes' own concentrations
         lab = e["label"]; C = e["live"].shape[1]
@@ -646,7 +659,7 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
         orie = e["kappa"].float()[..., 0] >= iso_k
         weak = orie & (peak < prune * fl)
         e = {**e, "live": e["live"] & ~weak}
-    sp = split_mass(r, dirs, e)
+    sp = split_mass(r, dirs, {**e, "kappa": e["kappa_fit"]} if "kappa_fit" in e else e)       # (ring: the lobes fitted with the moment's shape)
     ms = (sp["mass"] * e["live"]).float(); kv = e["kappa"].float(); isoe = kv[..., 0] < iso_k
     if merge_deg is not None:
         ms, lv = merge_parallel({**e, "live": e["live"] & ~isoe}, ms * ~isoe, merge_deg, iso_k)

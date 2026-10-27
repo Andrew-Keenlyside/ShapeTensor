@@ -8,6 +8,10 @@ data to answer the correct formulation of the question."
 
 Only one A6000 works (the second still needs a reset), so GPU jobs share it. Times are ET.
 
+## 0. Summary
+
+(filled in at the end of the night -- see §8)
+
 ## 1. What the direct-path pilot's numbers said (no training)
 
 The pilot's per-phantom scores, re-read with a new mass budget (`phantom_ladder.py`'s `mass_budget`: matched,
