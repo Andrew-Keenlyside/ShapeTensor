@@ -29,17 +29,34 @@ import torch.nn.functional as Fn
 TRIL = ((0, 0), (1, 0), (1, 1), (2, 0), (2, 1), (2, 2))
 
 
-class Block(nn.Module):
-    """``x + g * conv(act(conv(act(x))))`` with a learned gain ``g`` (initialised at ``g0`` = 0.25): stable without
-    normalisation, and open from the start (at ``g`` = 0 the branches stayed shut through a whole smoke run)."""
+class ChannelRMSNorm(nn.Module):
+    """Each voxel's features divided by their root mean square over the channels (a learned per-channel scale): local, so
+    the same at any crop or tile size (a group norm's volume statistics would not be)."""
 
-    def __init__(self, c: int, g0: float = 0.25):
+    def __init__(self, c: int, eps: float = 1e-6):
+        super().__init__()
+        self.w = nn.Parameter(torch.ones(1, c, 1, 1, 1)); self.eps = eps
+
+    def forward(self, x):
+        xf = x.float()
+        return (xf * torch.rsqrt(xf.pow(2).mean(1, keepdim=True) + self.eps)).to(x.dtype) * self.w.to(x.dtype)
+
+
+class Block(nn.Module):
+    """``x + g * conv(act(conv(act(x))))`` with a learned gain ``g`` (initialised at ``g0`` = 0.25): open from the start
+    (at ``g`` = 0 the branches stayed shut through a whole smoke run). With ``norm``, the branch reads the features
+    normalised per voxel (pre-norm): without it, from-scratch runs blew up -- each block's 3^3 convolutions grew coherent
+    (mean |w| 0.02, yet a gain of 300-400 per block), compounding to mean |h| 1e16 by the lattice level (28 Oct)."""
+
+    def __init__(self, c: int, g0: float = 0.25, norm: bool = False):
         super().__init__()
         self.a = nn.Conv3d(c, c, 3, padding=1); self.b = nn.Conv3d(c, c, 3, padding=1)
         self.g = nn.Parameter(torch.full((1,), float(g0)))
+        self.n = ChannelRMSNorm(c) if norm else None
 
     def forward(self, x):
-        return x + self.g * self.b(Fn.silu(self.a(Fn.silu(x))))
+        y = self.n(x) if self.n is not None else x
+        return x + self.g * self.b(Fn.silu(self.a(Fn.silu(y))))
 
 
 class Down(nn.Module):
@@ -455,7 +472,7 @@ class PopulationNet(nn.Module):
                  dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False,
                  dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False, oprobe: bool = False,
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
-                 odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False):
+                 odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -472,12 +489,13 @@ class PopulationNet(nn.Module):
             ph = math.pi * (3 - math.sqrt(5)) * i                                                # a Fibonacci hemisphere (axial directions)
             self.register_buffer("o_dirs", torch.stack([zc, rc * torch.sin(ph), rc * torch.cos(ph)], 1).float(), persistent=False)
         self.stem = nn.Conv3d((2 if lcn else 1) + self.oriented, c0, 3, padding=1)              # with ``lcn``: the image and its local contrast
-        self.l0 = Block(c0)
-        self.d1 = Down(c0, c1); self.l1 = nn.Sequential(Block(c1), Block(c1))
-        self.d2 = Down(c1, c2); self.l2 = Block(c2)
+        bn = bool(block_norm)
+        self.l0 = Block(c0, norm=bn)
+        self.d1 = Down(c0, c1); self.l1 = nn.Sequential(Block(c1, norm=bn), Block(c1, norm=bn))
+        self.d2 = Down(c1, c2); self.l2 = Block(c2, norm=bn)
         self.skip = Down(c1, c2)                                                                 # the stride-2 level, brought to the lattice
         if self.context_level:                                                                   # a stride-8 level: twice the context, upsampled back
-            self.d3 = Down(c2, c2); self.l3 = nn.Sequential(Block(c2), Block(c2))
+            self.d3 = Down(c2, c2); self.l3 = nn.Sequential(Block(c2, norm=bn), Block(c2, norm=bn))
         self.mix = nn.Conv3d((3 if self.context_level else 2) * c2, c2, 1)
         if self.voxel_cond:                                                                      # the voxel size (log2 um, and whether known): FiLM
             self.film = nn.Sequential(nn.Linear(2, 32), nn.SiLU(), nn.Linear(32, 2 * c2))
@@ -565,7 +583,8 @@ class PopulationNet(nn.Module):
                    oprobe_only=bool(args.get("oprobe_only", False)), bg_head=bool(args.get("bg_head", False)),
                    obj_head=bool(args.get("obj_head", False)), oriented=int(args.get("oriented", 0) or 0),
                    odirect=int(args.get("odirect", 0) or 0), split_head=bool(args.get("split_head", False)),
-                   od_sigmas=tuple(args.get("od_sigmas") or (2.0, 4.0, 6.0)), mass_vote=bool(args.get("mass_vote", False))) \
+                   od_sigmas=tuple(args.get("od_sigmas") or (2.0, 4.0, 6.0)), mass_vote=bool(args.get("mass_vote", False)),
+                   block_norm=bool(args.get("block_norm", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":

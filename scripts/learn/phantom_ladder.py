@@ -45,6 +45,7 @@ ap.add_argument("--mass-vote", action="store_true", help="a per-direction vote f
 ap.add_argument("--split-head", action="store_true", help="a head for the objects' occupancy by kind (oriented / isotropic)")
 ap.add_argument("--lobe-weight", type=float, default=None, help="entity_train.DENS_LOBE_WEIGHT (the density loss weighted toward lobes)")
 ap.add_argument("--score-every", type=int, default=0, help="score the held-out set (criteria) every this many steps during training")
+ap.add_argument("--block-norm", action="store_true", help="the trunk's residual blocks read per-voxel normalised features (pre-norm)")
 ap.add_argument("--warmup", type=int, default=30, help="linear learning-rate warm-up steps")
 ap.add_argument("--clip", type=float, default=5.0, help="gradient norm clip")
 ap.add_argument("--h-max", type=float, default=50.0, help="divergence guard: the trunk's mean |feature| above this rolls back to the last snapshot at half the rate")
@@ -209,6 +210,7 @@ else:
     args["obj_head"] = bool(args.get("obj_head")) or a.obj_head
     args["split_head"] = bool(args.get("split_head")) or a.split_head
     args["mass_vote"] = bool(args.get("mass_vote")) or a.mass_vote
+    args["block_norm"] = bool(args.get("block_norm")) or a.block_norm
     if a.odirect:
         args["odirect"] = int(a.odirect)
     if a.od_sigmas:

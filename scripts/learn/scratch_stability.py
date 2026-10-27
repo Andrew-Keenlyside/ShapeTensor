@@ -16,14 +16,14 @@ ap = argparse.ArgumentParser(); ap.add_argument("ckpt"); ap.add_argument("--name
 ap.add_argument("--every", type=int, default=25); ap.add_argument("--batch", type=int, default=2); ap.add_argument("--odirect", type=int, default=0)
 ap.add_argument("--od-sigmas", type=float, nargs="+", default=None); ap.add_argument("--split-head", action="store_true"); ap.add_argument("--mass-vote", action="store_true")
 ap.add_argument("--sample-oriented", action="store_true"); ap.add_argument("--lr", type=float, default=3e-4); ap.add_argument("--no-obj-head", action="store_true")
-ap.add_argument("--clip", type=float, default=5.0); ap.add_argument("--seed", type=int, default=0)
+ap.add_argument("--clip", type=float, default=5.0); ap.add_argument("--block-norm", action="store_true"); ap.add_argument("--seed", type=int, default=0)
 a = ap.parse_args(); dev = "cuda"
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None; TR.set_background_entity(True)
 TR.REGION_DENSITY = True; ET.REGION_DENSITY = True; ET.VOTE_OBJECTS = True; ET.OWN_OBJECTS = True; ET.DENS_SAME_NORM = True; ET.SAMPLE_ORIENTED = a.sample_oriented
 torch.backends.cudnn.benchmark = True
 ref = torch.load(a.ckpt, map_location=dev, weights_only=False)
 args = {**ref["args"], "region_density": True, "kappa_log": True, "vote_objects": True, "own_objects": True, "dens_same_norm": True, "bg_head": True,
-        "obj_head": not a.no_obj_head, "split_head": a.split_head, "mass_vote": a.mass_vote, "odirect": a.odirect}
+        "obj_head": not a.no_obj_head, "split_head": a.split_head, "mass_vote": a.mass_vote, "odirect": a.odirect, "block_norm": a.block_norm}
 if a.od_sigmas:
     args["od_sigmas"] = a.od_sigmas
 torch.manual_seed(a.seed)
