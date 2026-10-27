@@ -616,12 +616,18 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
     early in training: at step 2000 of the overnight pilot, density frames matched 0.80 / 0.83 / 1.06 of crossings' /
     curves' / sheets' mass against 0.20 / 0.01 / 0.00 with the votes' (count 5 -> 13, direction 11 -> 15 of 16); on the
     long-trained direct-path pilot they were neutral to better (count 10 -> 12, direction 12 -> 16)."""
-    for k_, v_, ok in (("entities", entities, ("votes", "lobes")), ("axes", axes, ("votes", "density")), ("kappa", kappa, ("moments", "votes", "votes_all")),
+    for k_, v_, ok in (("entities", entities, ("votes", "lobes")), ("axes", axes, ("votes", "density", "hybrid")), ("kappa", kappa, ("moments", "votes", "votes_all")),
                        ("mass", mass, ("maps", "density", "votes", "maps_votes"))):
         if v_ not in ok:
             raise ValueError(f"entities_from_query: {k_}={v_!r}, not one of {ok}")
     e = cluster(r, dirs, floor=floor) if entities == "votes" else cluster_lobes_floor(r, dirs, floor=floor, saddle=saddle)
-    if axes == "density":
+    if axes == "hybrid":                                                                          # frames from the density, types (and shapes)
+        lab_ = e["label"]; C_ = e["live"].shape[1]                                                 # from the votes' own concentrations
+        w_ = torch.where(lab_ >= 0, r["f"].float(), torch.zeros_like(r["f"].float()))
+        kv_h = torch.expm1(_comp_mean(torch.log1p(r["kappa"].float().clamp_min(0)), w_, lab_, C_))
+        kv_h = torch.stack([kv_h.max(-1).values, kv_h.min(-1).values], -1)
+        e = {**e, "R": e["R_odf"], "kappa": torch.where(e["live"][..., None], kv_h, e["kappa_odf"])}
+    elif axes == "density":
         e = {**e, "R": e["R_odf"], "kappa": e["kappa_odf"]}
     k_rep = None
     if kappa in ("votes", "votes_all"):                                                          # the reported shape: the votes' own concentrations
