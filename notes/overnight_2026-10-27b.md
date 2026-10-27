@@ -139,6 +139,38 @@ Not taken: `entities="lobes"` with `axes="density"` breaks sheets (a girdle spli
 peaked); the default keeps the votes' frames. A saddle-height merge of basins (join when the boundary is >= 0.8 of the
 lower peak) would allow density frames later.
 
+### 6.1b Code review 2: split head, context level, losses (independent agent)
+
+Verified sound: old checkpoints load and behave identically (bit-identical bank); the split targets double-count
+crossings exactly as `e_mass` does; the sampler's masks and fallbacks; the autocast wrappers.
+
+Found and fixed:
+- **Warm-starting the context level from a 3-level checkpoint put the old mean-feature weights on the new level**
+  (`load_partial` grew the first layer column-wise): the start's density moved by up to 2x the mean -- remapped.
+- **The maps readout could inflate a lone ripple lobe to all of the oriented mass (12x)**, give a crossing partner's
+  share to the remaining lobe when the partner was typed isotropic, and report unexplained oriented mass as isotropic
+  objects -- now the scale-up is capped at 2x the density split, isotropic-typed lobes keep their share, and the
+  remainder is `ori_unres`. With a perfect split head on the direct-path pilot's density, maps fixed sheets, blobs and
+  the mix's blob (C1 1.00) but lowered fans, curves and crossings (their off-axis lobes) -- the lobe split is the limit.
+- The objects branch could zero every lobe before the maps branch ran (now exclusive); maps without a background head
+  double-counted blobs; a loss loop variable shadowed the lattice-crop helper (latent crash); split targets on
+  supersampled phantoms came from the coarse maps (now from the populations' fine window means); the fresh split head
+  started at a loss of ~6 (bias now -4); the context level is stored at stride 2.
+- The lobe-mass loss is a consistent but weak mass signal (a 2x mass error moves it 0.25-0.34 in log; shape errors move
+  it as much): off. The reviewer's alternative, **mass votes**, was implemented.
+
+### 6.1c Code review 3: mass votes, window_mean, trainer (independent agent)
+
+No blockers. Fixed:
+- Vote masses were not conserved: two pieces of one population each kept the full vote (scored 2x), and `votes` mode
+  had no bound -- pieces of one type within 30 deg now share one vote; votes weighted by the floor-subtracted density;
+  supervised over lobe flanks and overlaps too (14 % of a lobe's directions had none); the head starts near the masses.
+- `window_mean` ran its matrix products and sampling coordinates in bf16 under autocast (0.06-0.28 voxel off): now fp32;
+  its matrices are built on the device (each step's new sigma levels cost a host copy) and without transposes.
+- Speed: the four full-resolution map heads now apply their 1x1 convolution before upsampling (exact, ~2.4x faster);
+  the bank uses the real half spectrum with Nyquist-symmetrised, cached filters (exact to 4e-7); cudnn benchmark on.
+- Trainer: optimiser state in checkpoints and `--resume`; progress lines.
+
 ### 6.2 Generator review (independent agent)
 
 **Verdict: the phantom families pose the question correctly; the scene generator does not yet.** A perfect model output
@@ -185,4 +217,22 @@ earlier 59 % sheets estimate does not describe it).
 
 ## 7. Overnight pilot
 
-(in progress)
+**First launch (00:43) diverged.** From scratch at lr 3e-4 with every fix, scored every 2000 steps. By step 1000 the
+density losses were where they started and the split / vote heads output zero. In the checkpoint the trunk's features
+had blown up: mean |h| 8.5, 6e5 and 1e16 at its three levels. Every head saturated, gradients ~0, but no NaN. The
+from-scratch simple-family run of 23:45 (older code) showed the same signature at step 500, and the crossing A/B runs
+used the same configuration, so all three were stopped (01:35). A probe (`scratch_stability.py`, 400 steps) of a
+famN-like configuration against the pilot's showed both stable to step 400 (|h| ~0.1 / 2-3.7 / 0.5-1, growing), so
+the blow-up is intermittent and later. The cause is not found; the earlier from-scratch model (famN) trained at
+batch 1 without the direct path.
+
+**Second launch (01:55):**
+- same model, at lr 2e-4 with a 300-step warm-up and gradient clip 2;
+- **a divergence guard**: if the trunk's mean |feature| exceeds 50 or the loss is non-finite, it rolls back to the last
+  healthy snapshot (every 250 steps) and halves the rate;
+- 10000 steps, sized to finish with time to analyse.
+
+The CPU phantom workers did not keep up (fine-crossing phantoms take 7-30 s each on the CPU), so phantoms stay on
+the GPU. A step is ~0.8 s.
+
+(results below)
