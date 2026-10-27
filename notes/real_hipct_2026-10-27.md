@@ -120,3 +120,21 @@ second bundle at 49 % of core points (31 % of the crossings' cores: the contrast
 which no single-direction estimate can. The generator model, trained on different data, is near the structure tensor
 at cores and never finds both. So the real-data agreement (~10-13 deg) is what both get on single structures; the
 models' advantage is in multi-population windows, where the real-data test had no truth to show it.
+
+## Separated mass images, overnight pilot only (`scripts/learn/mass_maps.py`)
+
+`mass_maps_overnight_pilot_synthetic.png`, `..._real_x4.png`, `..._real_x1.png` (results/.../overnight/real/).
+
+**Synthetic (final set; truth beside model, model mass matched to each true population):** backgrounds match the truth
+closely; curves, fans and blobs (as isotropic objects) are separated cleanly. Crossings show the contrast confound as
+mass images: in cross 0 (contrasts 0.32 / 0.71) the dim bundle keeps 96 of 579 units of mass and the bright one takes
+790 of 425; in fine 2 the dimmer bundle (0.34) drops out of the core; cross 2 has notches where one bundle takes the
+other's core. Cross 1 and fine 0 are shared (589 / 413 and 289 / 287; 274 / 345 and 650 / 548). The bundle + sheet mix
+finds the sheet only at the centre (147 / 189, the rest "other"); the sheet phantom is found only in a central strip,
+the rest typed as lines ("other") -- the ring rule's cost on unseen sheets.
+
+**Real HiP-CT (no truth; populations ranked by mass at each point):** at both 20 and 80 um the model splits every
+window into one dominant oriented population (mass 0.4-0.8, a smooth direction field) and background; a second
+population appears only in scattered patches; isotropic objects are ~0 everywhere (vessels are read as oriented
+populations, not isotropic objects). At 80 um the featureless zones get more background and less oriented mass; at 20 um
+the oriented mass is high almost everywhere -- the over-confidence of a model trained on phantoms only.
