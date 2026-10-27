@@ -38,7 +38,8 @@ ap.add_argument("--odirect", type=int, default=0, help="the decoder's direct ori
 ap.add_argument("--final", action="store_true", help="score the final test set (seeds never used to choose between variants) instead of the selection set")
 ap.add_argument("--ckpt", default=None, help="with --plot-only: score this checkpoint (outputs named after OUT)")
 ap.add_argument("--entities", default="lobes", choices=("votes", "lobes"), help="readout: entities from the votes or the density's lobes")
-ap.add_argument("--axes", default="votes", choices=("votes", "density"), help="readout: entity frames/types from the votes or the density moment")
+ap.add_argument("--axes", default="density", choices=("votes", "density"), help="readout: entity frames/types from the votes or the density moment")
+ap.add_argument("--saddle", type=float, default=0.8, help="readout: lobes joined across saddles this high (of the lower peak); <= 0: off")
 ap.add_argument("--kappa", default="votes", choices=("votes", "moments", "votes_all"), help="readout: reported concentrations")
 ap.add_argument("--mass", default="maps", choices=("maps", "density", "votes", "maps_votes"), help="readout: masses from the split head's maps (if any), the density, the mass votes, or votes' shares of the map")
 ap.add_argument("--mass-vote", action="store_true", help="a per-direction vote for the owner's mass (the decoder)")
@@ -116,7 +117,8 @@ def maps(ph, sigma=2.5):
     tgt = {"mass": t["e_mass"][:, :K].cpu().numpy(), "k": t["e_kappa"][:, :K].cpu().numpy(), "R": t["e_R"][:, :K].cpu().numpy(),
            "bg": t["e_mass"][:, K].cpu().numpy(), "kinds": ph["kinds"]}
     ro = EI.readout(net, ph["image"], pts, sig, sph, floor=a.floor if a.floor >= 0 else None, iso_k=ET.VOTE_KAPPA_MIN,
-                    merge_deg=None if a.no_merge else 15.0, entities=a.entities, axes=a.axes, kappa=a.kappa, mass=a.mass)
+                    merge_deg=None if a.no_merge else 15.0, entities=a.entities, axes=a.axes, kappa=a.kappa, mass=a.mass,
+                    saddle=a.saddle if a.saddle > 0 else None)
     mdl = {k: v.cpu().numpy() for k, v in ro.items()}
     face = torch.minimum(pts, (n - 1) - pts).amin(1).view(n, n).cpu().numpy()
     size = torch.tensor([n - 1.0] * 3, device=dev)

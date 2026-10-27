@@ -572,8 +572,8 @@ def readout(model, image: torch.Tensor, points: torch.Tensor, sigma: torch.Tenso
 
 @torch.no_grad()
 def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05, iso_k: float = 0.5, merge_deg: float | None = 15.0,
-                        entities: str = "lobes", axes: str = "votes", kappa: str = "votes", prune: float = 0.0, mass: str = "maps",
-                        saddle: float | None = None, maps_cap: float | None = None) -> dict:
+                        entities: str = "lobes", axes: str = "density", kappa: str = "votes", prune: float = 0.0, mass: str = "maps",
+                        saddle: float | None = 0.8, maps_cap: float | None = None) -> dict:
     """The entities from the decoder's outputs ``r`` at the directions ``dirs`` (:func:`query`): the density's floor
     (``floor`` quantile) the background plus isotropic objects (told apart by the background head where the model has
     one), entities from what rises above it, their mass split by lobe fit (:func:`split_mass`), near-parallel same-type
@@ -592,8 +592,12 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
     its map, shared among the oriented entities by their lobes; the isotropic objects' from theirs) or "density" (the
     lobe fit's floor less the background head's).
 
-    Defaults (27 Oct, readout_lab.py on the direct-path pilot): entities from the density's lobes (count 7 -> 10 of
-    16) and the votes' own concentrations reported (ODF shape 4 -> 16 of 16)."""
+    Defaults (readout_lab.py, selection set): entities from the density's lobes (count 7 -> 10 of 16 on the direct-path
+    pilot), the votes' own concentrations reported (ODF shape 4 -> 16 of 16), frames and types from the density's own
+    moment with lobes joined across high saddles (``saddle``: a sheet's ridge stays one entity). The votes lag the density
+    early in training: at step 2000 of the overnight pilot, density frames matched 0.80 / 0.83 / 1.06 of crossings' /
+    curves' / sheets' mass against 0.20 / 0.01 / 0.00 with the votes' (count 5 -> 13, direction 11 -> 15 of 16); on the
+    long-trained direct-path pilot they were neutral to better (count 10 -> 12, direction 12 -> 16)."""
     for k_, v_, ok in (("entities", entities, ("votes", "lobes")), ("axes", axes, ("votes", "density")), ("kappa", kappa, ("moments", "votes", "votes_all")),
                        ("mass", mass, ("maps", "density", "votes", "maps_votes"))):
         if v_ not in ok:
