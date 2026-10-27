@@ -10,7 +10,45 @@ Only one A6000 works (the second still needs a reset), so GPU jobs share it. Tim
 
 ## 0. Summary
 
-(filled in at the end of the night -- see §8)
+**Result.** A new pilot, retrained from scratch overnight (10000 steps, all phantom families, ~2.3 h on one A6000),
+passes every criterion on **9 of the 32 final-set phantoms** (yesterday's direct-path pilot: 4). Per criterion:
+mass level 4 -> 13, count 10 -> 25, leakage 8 -> 24, edges 12 -> 22, direction 24 -> 30, ODF shape 11 -> 28, found
+19 -> 21 (§7.1). Simple phantoms (curves, blobs, empties) pass nearly everything; crossing cores remain the main failure.
+
+**What changed (each reviewed by an independent agent, then fixed):**
+1. **Readout** (§2): populations from the density's own lobes; frames and line/sheet types from the density (a "ring"
+   rule tells sheets from fans); concentrations from the votes. On yesterday's model alone this took count 10 -> 16,
+   ODF shape 11 -> 30 of 32.
+2. **Mass by maps** (§4): a head predicts oriented and isotropic material at every voxel; the density's lobes only share
+   the oriented mass out. Matched mass is now ~1.0 of the target for crossings, curves, fans and fine crossings (it was
+   0.5-0.8, with the rest in spurious off-axis entities). Mass votes per direction were added and trained too.
+3. **Context level** in the direct path (sigma 8; §4).
+4. **Trunk stability** (§7): from-scratch training diverged (features 1e16, every head dead) -- coherent convolutions in
+   an unnormalised residual trunk. Fixed with a per-voxel RMS pre-norm (optionally also a normalised update) and a
+   divergence guard. The divergence cost the first launch.
+5. **Speed** (§3): a training step 2.1 -> ~0.8 s (targets' window means as matrix products, the bank's pooling and FFT,
+   fused heads, per-point sampling); queries' direct-path code 7x faster; exact to float rounding throughout.
+
+**Low training (asked to push this first).** The structure gets *where* (the maps) and *which way* (the density) right
+early: by step 2000, read with the final readout, count 13/16 and direction 15/16 on the selection set, and each
+population's mass lands on the right population (~1.0). The per-direction votes (frames, concentrations) are what lag --
+which is why the readout now takes frames from the density (§7). Mass level, ODF shape and found-rate keep improving to
+step 10000 (`pilot3rs_progress.png`).
+
+**Crossings -- the structural finding (§7).** The cores fail because the brighter bundle takes them: line energy goes
+as contrast^2 x occupancy, and the phantoms draw each population's contrast independently. With the two contrasts made
+equal, the same model splits the cores in about the true mass ratio (1.17 vs 1.20, 0.69 vs 0.76, 1.36 vs 1.28). Whether
+real crossings differ this much in contrast is a generator question.
+
+**Generator review (§6.2).** The phantom families pose the question correctly (a perfect output passes 16/16). The scene
+generator does not yet: its targets are edited by visibility rules measured before the image is degraded (26-32 % of
+lines' mass typed as sheets), it does not conserve mass, and its conventions differ from the phantoms'. A
+`--geometry-targets` switch (targets from the true geometry) was added; the rest is a workplan.
+
+**Open:** the contrast confound at crossing cores (context levels sigma 12-16, or correlated contrasts in the
+generator), mass level within +-10 % (the oriented map runs 5-20 % high on some families), sheets' edges and leakage,
+fan apexes, the scene generator workplan, and the trunk's normalisation tested at length (norm 2).
+(An extension of the pilot to 13000 steps is in §7.2.)
 
 ## 1. What the direct-path pilot's numbers said (no training)
 
