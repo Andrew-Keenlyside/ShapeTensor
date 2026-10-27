@@ -326,7 +326,7 @@ def cluster(r: dict, dirs: torch.Tensor, f_frac: float = 0.25, f_abs: float = 1e
 
 
 def cluster_lobes(r: dict, dirs: torch.Tensor, f_frac: float = 0.25, f_abs: float = 1e-4, merge_deg: float = 25.0,
-                  share_min: float = 0.03, k: int = 8, cmax: int = 12, saddle: float | None = None) -> dict:
+                  share_min: float = 0.03, k: int = 8, cmax: int = 12, saddle: float | None = None, saddle_ring: float | None = None) -> dict:
     """Entities per point from the density's lobes alone: each living direction (density >= ``f_frac`` of the mean)
     climbs the density over the direction grid (steepest ascent among its ``k`` nearest neighbours, pointer jumping) to
     a local maximum; a maximum's basin is an entity; maxima within ``merge_deg`` of a heavier one join it; the
@@ -374,6 +374,15 @@ def cluster_lobes(r: dict, dirs: torch.Tensor, f_frac: float = 0.25, f_abs: floa
         adj = (S >= saddle * torch.minimum(pkv[:, :, None], pkv[:, None, :])) & (S > 0)
         adj |= torch.eye(C, dtype=torch.bool, device=dev)[None]
         comp = _components(adj)                                                                     # (Q, C): the smallest slot of each group
+        if saddle_ring is not None:                                                                 # a group is kept only if its directions make a
+            g0 = torch.where(lab0 >= 0, comp.gather(1, lab0.clamp_min(0)), lab0)                   # ring (a sheet's ridge: in-plane eigenvalue ratio
+            uu = (dirs[:, :, None] * dirs[:, None, :]).reshape(1, D, 9).expand(Q, -1, -1)         # >= saddle_ring); two bundles joined across a
+            Mg = _comp_mean(uu, torch.where(g0 >= 0, f, torch.zeros_like(f)), g0, C).reshape(Q, C, 3, 3)   # saddle are not one (review 6: the
+            ev = torch.linalg.eigvalsh(0.5 * (Mg + Mg.transpose(-1, -2)))                          # merge absorbed weak crossing populations)
+            ring_ok = ev[..., 1] >= saddle_ring * ev[..., 2].clamp_min(1e-12)                      # (Q, C) per group slot
+            many = (torch.zeros(Q, C, device=dev).scatter_add_(1, comp, torch.ones_like(comp, dtype=torch.float)) > 1)   # merged groups
+            keep = ring_ok | ~many
+            comp = torch.where(keep.gather(1, comp), comp, torch.arange(C, device=dev)[None].expand(Q, C))
         ent0 = torch.where(ent0 >= 0, comp.gather(1, ent0.clamp_min(0)), ent0)
     cm = torch.zeros(Q, C + 1, device=dev).scatter_add_(1, torch.where(ent0 >= 0, ent0, torch.full_like(ent0, C)), w)[:, :C]
     o2 = cm.argsort(1, descending=True); keepc = (cm.gather(1, o2) >= share_min * cm.sum(1, keepdim=True).clamp_min(1e-12)) & (cm.gather(1, o2) > 0)
@@ -591,7 +600,8 @@ def readout(model, image: torch.Tensor, points: torch.Tensor, sigma: torch.Tenso
 @torch.no_grad()
 def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05, iso_k: float = 0.5, merge_deg: float | None = 15.0,
                         entities: str = "lobes", axes: str = "ring", kappa: str = "votes", prune: float = 0.0, mass: str = "maps",
-                        saddle: float | None = 0.8, maps_cap: float | None = None, ring: float = 0.8) -> dict:
+                        saddle: float | None = 0.8, maps_cap: float | None = None, ring: float = 0.8,
+                        saddle_ring: float | None = None) -> dict:
     """The entities from the decoder's outputs ``r`` at the directions ``dirs`` (:func:`query`): the density's floor
     (``floor`` quantile) the background plus isotropic objects (told apart by the background head where the model has
     one), entities from what rises above it, their mass split by lobe fit (:func:`split_mass`), near-parallel same-type
@@ -628,7 +638,7 @@ def entities_from_query(r: dict, dirs: torch.Tensor, floor: float | None = 0.05,
                        ("mass", mass, ("maps", "density", "votes", "maps_votes"))):
         if v_ not in ok:
             raise ValueError(f"entities_from_query: {k_}={v_!r}, not one of {ok}")
-    e = cluster(r, dirs, floor=floor) if entities == "votes" else cluster_lobes_floor(r, dirs, floor=floor, saddle=saddle)
+    e = cluster(r, dirs, floor=floor) if entities == "votes" else cluster_lobes_floor(r, dirs, floor=floor, saddle=saddle, saddle_ring=saddle_ring)
     if axes == "hybrid":                                                                          # frames from the density, types (and shapes)
         lab_ = e["label"]; C_ = e["live"].shape[1]                                                 # from the votes' own concentrations
         w_ = torch.where(lab_ >= 0, r["f"].float(), torch.zeros_like(r["f"].float()))
