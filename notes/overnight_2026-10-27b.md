@@ -1,4 +1,4 @@
-# Overnight 27-28 Oct: readout, mass by maps, direct-path speed, short tests, pilot
+# Overnight 26-27 Oct: readout, mass by maps, direct-path speed, short tests, pilot
 
 Asked (26 Oct, 23:10 ET): "make all fixes, test as you go and retrain to a pilot model overnight locally ... run an
 adversarial review as independent agent after each change an implement any recommended improvements. aim for correct
@@ -8,47 +8,55 @@ data to answer the correct formulation of the question."
 
 Only one A6000 works (the second still needs a reset), so GPU jobs share it. Times are ET.
 
-## 0. Summary
+## 0. Summary (corrected after an independent fact-check, review 6 -- §6.3)
 
-**Result.** A new pilot, retrained from scratch overnight (10000 steps, all phantom families, ~2.3 h on one A6000),
-passes every criterion on **9 of the 32 final-set phantoms** (yesterday's direct-path pilot: 4). Per criterion:
-mass level 4 -> 13, count 10 -> 25, leakage 8 -> 24, edges 12 -> 22, direction 24 -> 30, ODF shape 11 -> 28, found
-19 -> 21 (§7.1). Simple phantoms (curves, blobs, empties) pass nearly everything; crossing cores remain the main failure.
+**Result.** A new pilot, retrained from scratch overnight (10000 steps, all phantom families, ~2.6 h on one A6000),
+passes every criterion on **9 of the 32 final-set phantoms**. Yesterday's direct-path pilot scored 4/32 with
+yesterday's readout and **~6/32 with tonight's readout** (CPU re-run, +-1-2 per criterion), so of the gain **the model
+accounts for 6 -> 9** and the readout for 4 -> 6. Same readout, yesterday's model -> tonight's (final set): mass level
+8 -> 13, count 19 -> 25, leakage 12 -> 24, found 17 -> 21; ODF shape slightly worse (31 -> 28). The 4 empty phantoms pass
+for every model; excluding them it is 5/28 against ~2/28. **Hard families (crossings, fine crossings, mixes) pass no
+phantom in either model (0/12).** Curves, blobs and empties pass nearly everything; fans and sheets 0/4 each.
 
-**What changed (each reviewed by an independent agent, then fixed):**
-1. **Readout** (§2): populations from the density's own lobes; frames and line/sheet types from the density (a "ring"
-   rule tells sheets from fans); concentrations from the votes. On yesterday's model alone this took count 10 -> 16,
-   ODF shape 11 -> 30 of 32.
+**What changed (each change reviewed by an independent agent, findings fixed):**
+1. **Readout** (§2): populations from the density's own lobes, concentrations from the votes, frames and line/sheet
+   types from the density with a "ring" rule and a saddle merge. Caveat: the frame/type rules were tuned on the
+   selection set's 2 sheets and 2 fans per family; **on the final set they find fewer sheets** (found 3/4 -> 1/4 against
+   the readout the pilot launched with), and the saddle merge can absorb a weak crossing population (§6.3). Both final-set
+   readouts are reported in §7.1 (8/32 launched, 9/32 final); the final set has now been looked at, so further readout
+   choices need a fresh test set.
 2. **Mass by maps** (§4): a head predicts oriented and isotropic material at every voxel; the density's lobes only share
-   the oriented mass out. Matched mass is now ~1.0 of the target for crossings, curves, fans and fine crossings (it was
-   0.5-0.8, with the rest in spurious off-axis entities). Mass votes per direction were added and trained too.
-3. **Context level** in the direct path (sigma 8; §4).
-4. **Trunk stability** (§7): from-scratch training diverged (features 1e16, every head dead) -- coherent convolutions in
-   an unnormalised residual trunk. Fixed with a per-voxel RMS pre-norm (optionally also a normalised update) and a
-   divergence guard. The divergence cost the first launch.
-5. **Speed** (§3): a training step 2.1 -> ~0.8 s (targets' window means as matrix products, the bank's pooling and FFT,
-   fused heads, per-point sampling); queries' direct-path code 7x faster; exact to float rounding throughout.
+   the oriented mass out. Matched mass totals are ~1.0 of the target for crossings, curves, fans and fine crossings (they
+   were 0.5-0.8, the rest in spurious off-axis entities) -- **but per population, the split in crossing cores is still
+   2-15x off** (e.g. 0.13 / 2.01). Mass votes per direction were trained; reading mass from them is not usable yet (§6.3).
+3. **Context level** in the direct path (sigma 8; §4). No clean training A/B (the first one was stopped with the
+   diverged runs); a sigma-16 A/B at step 2000 is in §7.2.
+4. **Trunk stability** (§7): from-scratch training diverged (features 1e16, every head dead): coherent convolutions in an
+   unnormalised residual trunk. Fixed with a per-voxel RMS pre-norm (optionally a normalised update too) and a divergence
+   guard. The divergence cost the first launch.
+5. **Speed** (§3): a training step 2.1 -> ~0.8 s alone (targets' window means as matrix products, the bank's pooling and
+   FFT, fused heads, per-point sampling); queries' direct-path code 7x faster; exact to float rounding.
 
 **Low training (asked to push this first).** The structure gets *where* (the maps) and *which way* (the density) right
-early: by step 2000, read with the final readout, count 13/16 and direction 15/16 on the selection set, and each
-population's mass lands on the right population (~1.0). The per-direction votes (frames, concentrations) are what lag --
-which is why the readout now takes frames from the density (§7). Mass level, ODF shape and found-rate keep improving to
-step 10000 (`pilot3rs_progress.png`).
+early: by step 2000, with the final readout, count 13/16 and direction 15/16 on the selection set, and single
+populations' mass is 0.84-1.22 of the target. **Multi-population phantoms are not right at step 2000** (a 3-bundle
+crossing 1.26 / 0.50 / 0.01, the mixes' blob 0.00). The per-direction votes (frames, concentrations) are what lag, hence
+density frames in the readout. From step 6000 the selection-set criteria are flat within +-1 (`pilot3rs_progress.png`).
 
-**Crossings -- the structural finding (§7).** The cores fail because the brighter bundle takes them: line energy goes
-as contrast^2 x occupancy, and the phantoms draw each population's contrast independently. With the two contrasts made
-equal, the same model splits the cores in about the true mass ratio (1.17 vs 1.20, 0.69 vs 0.76, 1.36 vs 1.28). Whether
-real crossings differ this much in contrast is a generator question.
+**Crossings (§7).** The cores fail mostly because the brighter bundle takes them: line energy goes as contrast^2 x
+occupancy, and the phantoms draw each population's contrast independently. With the two contrasts made equal, the same
+model's core densities follow the target's (4 of 6 cores within ~20 % at step 10000; 2 still 1.4-1.6x off). Part of the
+1:0 cores is the readout's saddle merge. Whether real crossings differ this much in contrast is a generator question.
 
 **Generator review (§6.2).** The phantom families pose the question correctly (a perfect output passes 16/16). The scene
 generator does not yet: its targets are edited by visibility rules measured before the image is degraded (26-32 % of
 lines' mass typed as sheets), it does not conserve mass, and its conventions differ from the phantoms'. A
 `--geometry-targets` switch (targets from the true geometry) was added; the rest is a workplan.
 
-**Open:** the contrast confound at crossing cores (context levels sigma 12-16, or correlated contrasts in the
-generator), mass level within +-10 % (the oriented map runs 5-20 % high on some families), sheets' edges and leakage,
-fan apexes, the scene generator workplan, and the trunk's normalisation tested at length (norm 2).
-(An extension of the pilot to 13000 steps is in §7.2.)
+**Open:** the crossing cores (contrast confound; per-population split), the saddle merge (merge only ring-like groups),
+sheets on unseen phantoms (the ring threshold), mass level within +-10 % (the oriented map runs 5-20 % high on some
+families), fan apexes, the scene generator workplan, the trunk's normalisation at length (norm 2), and a fresh test set
+for readout choices.
 
 ## 1. What the direct-path pilot's numbers said (no training)
 
@@ -153,8 +161,9 @@ map's total. Masses then no longer hang on the density's shape (lobe widths, flo
 crossing core). The pilot trains it; which readout to use is chosen afterwards on the selection set.
 
 **Maps readout hardening (review 2):** the maps branch no longer runs after the objects branch (which could zero every
-lobe); the scale-up is at most 2x the density split; a partner lobe typed isotropic keeps its share; oriented mass with
-no lobe to carry it is reported as `ori_unres`, never as isotropic objects.
+lobe); a partner lobe typed isotropic keeps its share; oriented mass with no lobe to carry it is reported as
+`ori_unres`, never as isotropic objects. (A 2x cap on the scale-up was added, then removed: it starved weak lobes early
+in training -- §7.)
 
 ## 5. Short training tests
 
@@ -162,8 +171,9 @@ no lobe to carry it is reported as `ori_unres`, never as isotropic objects.
   scratch on the simple families). On one GPU they ran ~4x slower each (half the total throughput), and review 1 then
   found the bank ran in bf16 under autocast in all of them -- stopped at ~400 steps (00:35) without results; their
   question is answered by the runs below on fixed code.
-- 00:43: **crossing context A/B** -- from scratch, crossings only (cross, fine), 1200 steps, scored on 8 held-out
-  crossings: without (`x_base`) and with (`x_ctx`) the sigma-8 context level. (results below)
+- 00:43: **crossing context A/B** -- from scratch, crossings only (cross, fine), 1200 steps: without (`x_base`) and with
+  (`x_ctx`) the sigma-8 context level. **Never produced results**: stopped at 01:35 with the diverged runs (same
+  configuration); see §7.2 for a later sigma-16 A/B.
 - The pilot itself is scored on the selection set every 2000 steps (`--score-every`), so correctness is followed from low
   training upward on every family.
 
@@ -203,8 +213,8 @@ Found and fixed:
   (`load_partial` grew the first layer column-wise): the start's density moved by up to 2x the mean -- remapped.
 - **The maps readout could inflate a lone ripple lobe to all of the oriented mass (12x)**, give a crossing partner's
   share to the remaining lobe when the partner was typed isotropic, and report unexplained oriented mass as isotropic
-  objects -- now the scale-up is capped at 2x the density split, isotropic-typed lobes keep their share, and the
-  remainder is `ori_unres`. With a perfect split head on the direct-path pilot's density, maps fixed sheets, blobs and
+  objects -- the scale-up was capped at 2x the density split (later removed: §7), isotropic-typed lobes keep their
+  share, and the remainder is `ori_unres`. With a perfect split head on the direct-path pilot's density, maps fixed sheets, blobs and
   the mix's blob (C1 1.00) but lowered fans, curves and crossings (their off-axis lobes) -- the lobe split is the limit.
 - The objects branch could zero every lobe before the maps branch ran (now exclusive); maps without a background head
   double-counted blobs; a loss loop variable shadowed the lattice-crop helper (latent crash); split targets on
@@ -245,6 +255,25 @@ No blockers. Fixed:
   rolled back to the start snapshot at half rate and training recovered.
 - Also: `--resume` takes the run's own args; CPU workers exit when the trainer is killed; the bank's filter cache has a
   byte budget (a whole-volume bank would have cached GBs).
+
+### 6.3 Review 6: fact-check of these notes and the final readout (independent agent, CPU)
+
+Every quoted pass count, per-family count, budget median and C1 value was recomputed from the result files; the tables
+in §2, §7 and §7.1 reproduce. Corrections (now in §0):
+- **The headline mixed readout and model.** Yesterday's model with tonight's final readout scores ~6/32 on the final set
+  (CPU re-run: 6 | C1 8, C2 20, C3 19, C4 12, C5 19, C6 28, C7 24, C8 31, C9 17), so the model's own gain is 6 -> 9 (C1
+  8 -> 13, C3 19 -> 25, C4 12 -> 24, C9 17 -> 21; C8 31 -> 28 worse). C6 and C8 include 8 passes that cannot fail (blobs,
+  empties), and C6 is scored only on matched points (a sheet found at 31 % can pass it).
+- **The final readout was tuned on the selection set** and costs sheets on the final set (found 3/4 -> 1/4 against the
+  launched readout; the ring threshold 0.8 sits inside the final-set sheets' cover distribution, median 0.76-0.80).
+- **The saddle merge absorbs real weak populations** (single linkage on a ridge): the 3-bundle crossing's third bundle
+  is found 0.72-0.84 without it, 0.03-0.13 with it; on the final set fine 2's weaker bundle drops from found 0.95 to
+  0.47 (overlap 0.50 -> 0.0) -- part of the one-sided cores is the readout. Without the merge, sheets are lost. Proposed:
+  merge only groups whose merged moment is ring-like, or a prominence rule.
+- "Matched ~1.0 for crossings" is the total; per population the crossing split is 2-15x off. At step 2000 only single
+  populations are right. With equal contrasts 2 of 6 cores stay 1.4-1.6x off. The first context A/B never ran.
+- Mass votes (`mass="votes"`, `"maps_votes"`) give each surviving lobe a full population vote (count 0/16 on the hard
+  families): not usable as is. `kappa="votes_all"` with `axes="ring"` ignores its own docstring (minor).
 
 ### 6.2 Generator review (independent agent)
 
@@ -329,7 +358,7 @@ the GPU. A step is ~0.8 s.
 **Third launch (01:57): with the block pre-norm**, lr 3e-4 (300-step warm-up, clip 2), the guard kept as a safety net;
 10000 steps, scored on the selection set every 2000.
 
-Healthy: |h| ~0.3-0.9 / 3-4.6 / 1-1.6 throughout, no guard trips, 0.7-0.85 s/step alone. Held-out losses at step 1000:
+Healthy: |h| 0.15-1.4 / 1.0-4.6 / 0.5-3.4 over the run, no guard trips, 0.7-0.85 s/step alone. Held-out losses at step 1000:
 density cross 0.34 (start 0.69), fine 0.34, curve 0.15, sheet 0.25, blob 0.02; oriented-mass map 0.13-0.35; mass votes
 0.19-0.34. At step 2000: density cross 0.29, curve 0.135, sheet 0.24; oriented-mass map 0.085-0.23.
 
@@ -363,8 +392,8 @@ lobe fits a broader, sometimes girdle-typed Bingham).
 **Step 4000, final readout (maps; density frames), selection set:** 3/16; **C6 direction 16/16, C3 count 14/16**, C5 11,
 C2 12, C9 8, C1 4. Single populations' mass 1.0-1.24 of the target (the oriented-mass map ~10-20 % high). Remaining
 failures: crossing cores (two of four crossing phantoms one-sided: overlap 2.84 / 0.0 and 0.0 / 2.17) and fans
-(density frames type a spread fan lobe as a girdle: one fan's solo mass 0.0, with vote frames 0.95 -- but vote frames
-lose the sheets).
+(density frames type a spread fan lobe as a girdle: one fan's solo mass 0.0; the "hybrid" readout -- density frames,
+the votes' types -- recovers it (1.16) but loses the sheets).
 
 **The crossing cores are a contrast confound, not a failure to separate.** Density at each true axis in the final
 set's crossing cores (target in brackets), step 4000:
@@ -413,6 +442,10 @@ Final set (32 held-out phantoms, never used to choose anything), phantoms passin
 | overnight pilot, the readout it launched with | 8 | 9 | 22 | 21 | 19 | 21 | 29 | 28 | 31 | 24 |
 | **overnight pilot, final readout** | **9** | **13** | 21 | **25** | **24** | **22** | **30** | 27 | 28 | 21 |
 
+Like for like (the final readout on both models; yesterday's re-run on CPU, +-1-2): yesterday 6 | C1 8, C2 20, C3 19,
+C4 12, C5 19, C6 28, C7 24, C8 31, C9 17 -> tonight 9 | 13, 21, 25, 24, 22, 30, 27, 28, 21. The readout the pilot
+launched with (lobes, the votes' frames, capped maps) finds 3/4 final-set sheets, the final readout 1/4 (§6.3).
+
 Per family (final readout; criteria C1..C9 passed of 4, then all criteria):
 
 | family | C1 C2 C3 C4 C5 C6 C7 C8 C9 | all |
@@ -446,5 +479,3 @@ At step 10000 the core balance is unchanged in kind (density at A / B against th
 **A readout bug this showed:** the maps' 2x cap (review 2) starved weak lobes -- oriented totals 0.03-0.12 of the target
 at step 2000 -- now off (`maps_cap`, default None): 0.13-0.70. The pilot's own mid-run scorings use the capped
 readout; its checkpoints are kept (`pilot3_step*.pt`) and rescored with the final readout below.
-
-(results below)
