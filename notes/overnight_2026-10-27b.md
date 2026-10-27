@@ -432,6 +432,17 @@ criterion; fans and sheets fail on mass level (C1, +-10 %) and edges/leakage. Ha
 (C1, C2)** -- e.g. overlap masses 0.0 / 2.19 and 0.0 / 1.64 in two of the four crossings -- the contrast confound
 above; in the other two the cores are shared (1.84 / 0.59, 1.38 / 0.64) but not yet equally.
 
+At step 10000 the core balance is unchanged in kind (density at A / B against the target, final set):
+
+| | as drawn | contrasts equalised | target ratio A/B |
+|---|---|---|---|
+| cross 0 | 2.15 / 6.97 (0.31) | 5.15 / 4.43 (1.16) | 1.20 |
+| cross 1 | 5.81 / 2.73 (2.13) | 5.19 / 3.48 (1.49) | 1.07 |
+| cross 3 | 0.70 / 7.23 (0.10) | 2.65 / 5.85 (0.45) | 0.73 |
+| fine 0 | 2.46 / 5.83 (0.42) | 3.71 / 4.91 (0.76) | 0.76 |
+| fine 1 | 3.72 / 4.93 (0.75) | 4.89 / 3.75 (1.30) | 1.28 |
+| fine 3 | 5.25 / 3.02 (1.74) | 3.68 / 4.80 (0.77) | 0.68 |
+
 **A readout bug this showed:** the maps' 2x cap (review 2) starved weak lobes -- oriented totals 0.03-0.12 of the target
 at step 2000 -- now off (`maps_cap`, default None): 0.13-0.70. The pilot's own mid-run scorings use the capped
 readout; its checkpoints are kept (`pilot3_step*.pt`) and rescored with the final readout below.
