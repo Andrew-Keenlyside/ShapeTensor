@@ -45,6 +45,9 @@ ap.add_argument("--mass-vote", action="store_true", help="a per-direction vote f
 ap.add_argument("--split-head", action="store_true", help="a head for the objects' occupancy by kind (oriented / isotropic)")
 ap.add_argument("--lobe-weight", type=float, default=None, help="entity_train.DENS_LOBE_WEIGHT (the density loss weighted toward lobes)")
 ap.add_argument("--score-every", type=int, default=0, help="score the held-out set (criteria) every this many steps during training")
+ap.add_argument("--warmup", type=int, default=30, help="linear learning-rate warm-up steps")
+ap.add_argument("--clip", type=float, default=5.0, help="gradient norm clip")
+ap.add_argument("--h-max", type=float, default=50.0, help="divergence guard: the trunk's mean |feature| above this rolls back to the last snapshot at half the rate")
 ap.add_argument("--resume", default=None, help="continue from this checkpoint (OUT_last.pt or a final .pt with its step; --steps is the total)")
 ap.add_argument("--cpu-workers", type=int, default=0, help="make the batches (phantoms, targets) in this many CPU processes")
 ap.add_argument("--prefetch", action="store_true", help="make the next step's phantoms and targets in a thread while the step trains")
@@ -232,7 +235,7 @@ else:
         torch.save({"model": net.state_dict(), "args": args, "curves": curves, "tag": a.tag, "init": a.init, "families": a.families, "step": step,
                     "opt": opt.state_dict(),
                     "flags": {k: getattr(a, k) for k in ("lr", "lr_final", "batch", "steps", "bg_head", "oprobe", "floor", "obj_head", "widths", "scratch",
-                                                         "sigma_lo", "odirect", "split_head", "lobe_weight", "lobe_mass", "od_sigmas", "sample_oriented", "mass_vote")}},
+                                                         "sigma_lo", "odirect", "split_head", "lobe_weight", "lobe_mass", "od_sigmas", "sample_oriented", "mass_vote", "warmup", "clip")}},
                    stem + (".pt" if step == a.steps else "_last.pt"))                               # (mid-run: OUT_last.pt, never the final name)
 
     def evaluate(step):
@@ -294,9 +297,17 @@ else:
             opt.load_state_dict(rk["opt"])
         step0 = int(rk.get("step", 0)); print(f"resumed {a.resume} at step {step0}", flush=True)
     net.train(); t_last = time.time()
+    import copy
+    hmag = {}                                                                                    # the trunk's feature magnitudes (divergence guard)
+    for i_, lvl in enumerate((net.l0, net.l1, net.l2)):
+        lvl.register_forward_hook(lambda m, inp, out, i_=i_: hmag.__setitem__(i_, out.detach().float().abs().mean()))
+    lr_scale = 1.0; snap = None; bad_run = 0; loss_ema = None
     for step in range(step0, a.steps + 1):
         if step % 100 == 0 and step > step0:                                                     # progress (and speed) between evaluations
-            print(f"    step {step}: {(time.time() - t_last) / 100:.2f} s/step", flush=True); t_last = time.time()
+            print(f"    step {step}: {(time.time() - t_last) / 100:.2f} s/step, |h| {' '.join(f'{float(v):.3g}' for _, v in sorted(hmag.items()))}, "
+                  f"loss ema {loss_ema if loss_ema is None else round(loss_ema, 3)}, lr x{lr_scale:g}", flush=True); t_last = time.time()
+        if step % 250 == 0 and step > step0 and bad_run == 0:                                    # a healthy snapshot to roll back to
+            snap = (step, copy.deepcopy({k: v.detach().cpu() for k, v in net.state_dict().items()}), copy.deepcopy(opt.state_dict()))
         if (step % a.eval_every == 0 and not (a.resume and step == step0)) or step == a.steps:
             evaluate(step)
             if 0 < step < a.steps:
@@ -306,7 +317,7 @@ else:
         if step == a.steps:
             break
         for pg in opt.param_groups:
-            lr_ = a.lr * min(1.0, (step + 1) / 30)
+            lr_ = a.lr * lr_scale * min(1.0, (step + 1) / a.warmup)
             pg["lr"] = a.lr_final + (lr_ - a.lr_final) * 0.5 * (1 + math.cos(math.pi * step / max(a.steps, 1))) if a.lr_final is not None else lr_
         if a.cpu_workers:                                                                        # the batch from the CPU workers (in order)
             imgs, ts = load_batch(step)
@@ -319,7 +330,18 @@ else:
         with torch.autocast("cuda", dtype=torch.bfloat16):
             P = net(torch.stack(imgs)[:, None], voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
         tot, parts = ET.entity_loss(P, T, dirs, W={"desc": 0.0, "lobe_mass": a.lobe_mass}, g=g)
-        opt.zero_grad(set_to_none=True); tot.backward(); torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0); opt.step()
+        hm = max(float(v) for v in hmag.values()) if hmag else 0.0
+        if not torch.isfinite(tot) or hm > a.h_max:                                              # diverging: roll back, halve the rate (from-scratch
+            bad_run += 1                                                                          # runs blew the trunk's features up to 1e16 by
+            if snap is not None:                                                                  # step 500-1000 at lr 3e-4: 28 Oct)
+                net.load_state_dict({k: v.to(dev) for k, v in snap[1].items()}); opt.load_state_dict(snap[2])
+            lr_scale *= 0.5
+            print(f"    step {step}: diverging (loss {float(tot):.3g}, |h| max {hm:.3g}) -- rolled back to step {snap[0] if snap else 'none'}, lr x{lr_scale:g}", flush=True)
+            if lr_scale < 1e-3:
+                raise RuntimeError("diverged repeatedly")
+            continue
+        bad_run = 0; loss_ema = float(tot) if loss_ema is None else 0.98 * loss_ema + 0.02 * float(tot)
+        opt.zero_grad(set_to_none=True); tot.backward(); torch.nn.utils.clip_grad_norm_(net.parameters(), a.clip); opt.step()
     save(a.steps)
 net.eval()
 for si, sg in enumerate(a.sigmas):
