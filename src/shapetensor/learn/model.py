@@ -81,6 +81,32 @@ def poincare_dist(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     return torch.acosh((1 + 2 * du / (a * b)).clamp_min(1 + 1e-7))
 
 
+_WM_CACHE: dict = {}
+
+
+def _window_matrix(n: int, s_: float, device, dtype) -> torch.Tensor:
+    """The ``(n, n)`` matrix of :func:`window_mean`'s 1-D blur along an axis of length ``n``: its normalised Gaussian
+    truncated at ``ceil(3 sigma)``, zero beyond the map -- ``v @ M.T`` equals the zero-padded convolution."""
+    key = (n, round(float(s_), 9), str(device), dtype)
+    M = _WM_CACHE.get(key)
+    if M is None:
+        if len(_WM_CACHE) > 512:
+            _WM_CACHE.clear()
+        rad = int(math.ceil(3 * s_)); t = torch.arange(-rad, rad + 1.0, dtype=torch.float64); k = torch.exp(-0.5 * (t / s_) ** 2); k = k / k.sum()
+        i = torch.arange(n)[:, None]; j = torch.arange(n)[None]; d = j - i
+        M = _WM_CACHE[key] = torch.where(d.abs() <= rad, k[(d + rad).clamp(0, 2 * rad)], torch.zeros(())).to(device=device, dtype=dtype)
+    return M
+
+
+def _blur3(v: torch.Tensor, s_: float) -> torch.Tensor:
+    """``v (..., Z, Y, X)`` blurred as :func:`window_mean` blurs (separable, zero beyond the map) by matrix products: the
+    single-channel 3-D convolutions were half of a training step's time in the targets (step_profile, 28 Oct)."""
+    Z, Y, X = v.shape[-3:]
+    v = v @ _window_matrix(X, s_, v.device, v.dtype).T
+    v = (v.transpose(-1, -2) @ _window_matrix(Y, s_, v.device, v.dtype).T).transpose(-1, -2)
+    return (v.transpose(-1, -3) @ _window_matrix(Z, s_, v.device, v.dtype).T).transpose(-1, -3)
+
+
 def window_mean(r: torch.Tensor, points: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
     """The Gaussian-window mean of a map ``r (B, Z, Y, X)`` at ``points (B, Q, 3)`` (voxels) and per-query ``sigma (B, Q)``
     (voxels): zero beyond the map (as the entity targets count nothing beyond the crop), blurred at sigma steps of sqrt 2
@@ -93,12 +119,8 @@ def window_mean(r: torch.Tensor, points: torch.Tensor, sigma: torch.Tensor) -> t
     g = (points / (size - 1) * 2 - 1).flip(-1).view(B, -1, 1, 1, 3)                                # grid_sample's (x, y, z), align_corners
     S = []
     for s_ in lv.tolist():
-        rad = int(math.ceil(3 * s_)); t = torch.arange(-rad, rad + 1.0, device=r.device); k = torch.exp(-0.5 * (t / s_) ** 2); k = k / k.sum()
-        v = r[:, None]
-        for ax in range(3):
-            sh = [1, 1, 1, 1, 1]; sh[2 + ax] = -1
-            v = Fn.conv3d(v, k.view(*sh).to(v.dtype), padding=tuple(rad if a == ax else 0 for a in range(3)))
-        S.append(Fn.grid_sample(v, g, mode="bilinear", align_corners=True).view(B, -1))
+        v = _blur3(r.float() if r.dtype not in (torch.float32, torch.float64) else r, s_)[:, None]
+        S.append(Fn.grid_sample(v, g.to(v.dtype), mode="bilinear", align_corners=True).view(B, -1))
     S = torch.stack(S)                                                                              # (n_lv, B, Q)
     t = (torch.log(sigma.clamp_min(s_lo)) - math.log(s_lo)) / max(math.log(s_hi / s_lo), 1e-6) * (n_lv - 1)
     i0 = t.floor().long().clamp(0, n_lv - 2); a = (t - i0.float()).clamp(0, 1)
