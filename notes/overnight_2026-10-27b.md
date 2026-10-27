@@ -551,3 +551,9 @@ Trainer (`phantom_ladder.py`) flags added: `--split-head --mass-vote --od-sigmas
    (window operator, floor, population rule) across phantoms and scenes, then retrain the generator model with the
    trunk pre-norm.
 5. Train longer (13000 steps improved 9 -> 11/32; the selection set was flat from step 6000) and try `--block-norm 2`.
+
+Tests (CPU, 06:18): 153 passed, 1 skipped (GPU timing), 1 failed -- `test_model.py::test_lattice_cells_centred_on_the_target_cells`
+(centre off by 0.33 voxel against a 0.25 tolerance), which fails identically at yesterday's commit db4f597: not from
+tonight's changes. New: `tests/test_direct_path.py` (11 tests: the bank against its reference build, chunking,
+per-item normalisation, fp32 under autocast, per-point sampling against per-pair, strides, old checkpoints, split
+targets, isotropic direction sampling, option validation, the saddle merge).
