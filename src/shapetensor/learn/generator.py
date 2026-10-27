@@ -1003,6 +1003,12 @@ ORIENT_SINGLE_SCALE = False
 #: regressed on the image at the single scale with the window ladder -- material that shows only as a region is not
 #: credited with a visible orientation. Overrides ORIENT_SINGLE_SCALE. Off: the shared t.
 ORIENT_FROM_TEXTURE = False
+#: the entity targets from the geometry: every layer fully visible (presence and orientation), so the targets are the true
+#: occupancy and the true tensors, whatever the image shows. The visibility rules were measured on the image *before* the
+#: batch-time contrast routes (~95 % of images then get a destructive route), removed mass without giving it to the
+#: background, and moved tensors toward isotropic -- changing a population's type, not only its confidence (26-32 % of
+#: line populations' visible mass got girdle targets: generator review, 27 Oct). Evidence belongs in its own output.
+TARGETS_FROM_GEOMETRY = False
                                    # local structure tensor's (8-25; sigma_int 3), which is a lower bound on what a 48-voxel receptive
                                    # field can integrate along a fibre -- to be re-measured with the trained model's own error against t
 
@@ -1344,6 +1350,8 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     if bool((present < 1).any()):                                                               # lost sections: the visibility window (sigma 5) would
         pm = gaussian(present.view(A, 1, 1), (1.5, 0.0, 0.0), truncate=3.0).view([-1 if b == ax else 1 for b in range(3)])   # bridge them; a gap of
         vis = torch.where(iso, vis, vis * pm[None]); ovis = torch.where(iso, ovis, ovis * pm[None])                            # 1-2 sections still is
+    if TARGETS_FROM_GEOMETRY:                                                                    # the true geometry as the targets
+        vis = torch.ones_like(vis); ovis = torch.ones_like(ovis)
     wmean = lambda v: [round(float((x * o).sum() / o.sum().clamp_min(1e-6)), 2) for x, o in zip(v, occ)]   # occupancy-weighted means, for the record
     rec["visibility"] = wmean(vis); rec["orientation_visibility"] = wmean(ovis)
     return {"image": img, "occupancy": occ, "tensors": T, "descriptors": Dsc, "visibility": vis, "orientation_visibility": ovis, "stretch": stretch, "record": rec,

@@ -47,8 +47,26 @@ direct-path pilot:
 - The bank is built 32 directions at a time, and its Gaussian pooling (3 levels x 256 directions) is done as matrix
   products (`filters.gaussian_mm`, equal to `gaussian` to 1e-7): the bank 192 -> 115 ms per 64³ phantom.
 - A training step (2 phantoms, 512 points x 32 directions): **902 -> 636 ms, peak memory 7.4 -> 5.0 GB**.
-- Decimated levels (`OD_STRIDES`) are available but off: (1, 2, 2) changed a few crossing points' density by up to 19 %
-  of the mean.
+- Decimated levels: off below sigma 8 ((1, 2, 2) changed a few crossing points' density by up to 19 % of the mean); the
+  sigma-8 context level is kept at every 2nd voxel (log energies move <= 0.015).
+
+**The whole training step** (`scripts/learn/step_profile.py`, batch 2, all families, one A6000):
+
+| | before | after |
+|---|---|---|
+| step | 2087 ms | **901 ms** |
+| targets (`window_mean` of every population's occupancy and tensor) | 962 | 68 |
+| the direct path's bank | 256 | 255 |
+| phantom generation | 221 | 220 |
+| backward | 285 | 191 |
+| loss | 202 | 32 |
+
+`window_mean` (the Gaussian window mean at the queries, used for every mass target and every map loss) blurred each map
+with single-channel 3-D convolutions at ~9 scales; it is now banded-matrix products with the same normalised truncated
+kernel and zero padding (64³ x 15 maps: 238 -> 11 ms; 128³: 1730 -> 68 ms; max difference 3e-4, the old convolutions'
+TF32 rounding). Making the next step's phantoms in a thread did not help (68 vs 67 s per 60 steps): generation and
+training serialise on the GPU. Running four jobs at once on the one GPU halved the total throughput, so the short tests
+were cut to two at a time.
 
 ## 4. Mass by maps, crossing cores and the context level
 
@@ -71,11 +89,29 @@ path now takes its pooling levels from `od_sigmas` (default 2, 4, 6 as before; `
 level).
 
 **Per-population lobe-mass loss** (option `--lobe-mass W`): each oriented population's share of the density (directions
-weighted by the target's ownership) against the target's, log-L1 -- what the readout's mass split reads.
+weighted by the target's ownership) against the target's, log-L1. Review 2 measured it as weak and entangled with lobe
+shape (a 2x mass error moves it by 0.25-0.34 in log; a 2x kappa error by 0.11-0.29), so it is off in the pilot.
+
+**Mass votes** (`--mass-vote`; the reviewer's suggestion): each direction an oriented population owns also votes that
+population's window mass (a small MLP beside the per-direction one; log-L1 on owned directions). The readout's
+`mass="votes"` takes each entity's density-weighted mean vote; `"maps_votes"` takes the votes' shares of the oriented
+map's total. Masses then no longer hang on the density's shape (lobe widths, floor ripples, which lobe stands out at a
+crossing core). The pilot trains it; which readout to use is chosen afterwards on the selection set.
+
+**Maps readout hardening (review 2):** the maps branch no longer runs after the objects branch (which could zero every
+lobe); the scale-up is at most 2x the density split; a partner lobe typed isotropic keeps its share; oriented mass with
+no lobe to carry it is reported as `ori_unres`, never as isotropic objects.
 
 ## 5. Short training tests
 
-(in progress)
+- 23:45: four fine-tunes/short runs from the direct-path pilot (control; + split head; + split head + lobe weighting; from
+  scratch on the simple families). On one GPU they ran ~4x slower each (half the total throughput), and review 1 then
+  found the bank ran in bf16 under autocast in all of them -- stopped at ~400 steps (00:35) without results; their
+  question is answered by the runs below on fixed code.
+- 00:43: **crossing context A/B** -- from scratch, crossings only (cross, fine), 1200 steps, scored on 8 held-out
+  crossings: without (`x_base`) and with (`x_ctx`) the sigma-8 context level. (results below)
+- The pilot itself is scored on the selection set every 2000 steps (`--score-every`), so correctness is followed from low
+  training upward on every family.
 
 ## 6. Reviews
 
