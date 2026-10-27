@@ -129,3 +129,102 @@ while the model gets better (11 -> 8 deg; both found 37 -> 47 %).
 - Mass calibration in packed tissue: a phantom family packed wall to wall (NFG-like dense sections) would test the
   over-estimation without touching DiSCo.
 - DiSCo2 / DiSCo3 and a pre-committed protocol before scoring the next model.
+
+## Single-fibre resolution (`scripts/learn/disco_fibres.py`, 27 Oct 10:05-10:40 ET)
+
+Asked: "Can we not sample at much higher resolution? At single fibre resolution in this? Like st with rho = 3? We
+should be looking at much more accurate orientations."
+
+**DiSCo's strands are tortuous, not smooth.** Consecutive 15 um centreline segments turn by a median 21 deg (p90 41).
+Chords of 15, 30, 60 and 120 um all turn ~20 deg; arc / chord is 1.34; the turns partly zig-zag. So at 1-4 um a
+"single-bundle" window holds fibres of one connection pointing +-10-20 deg apart, and the scores above were measured
+against their blurred mean. The single-fibre test therefore:
+- renders each strand along a **Catmull-Rom spline through its own points** (no 21-deg kinks every 15 um; a tangent
+  defined everywhere, as an axon's) -- `disco_io.Disco(spline=True)`;
+- scores at **voxels inside one fibre** (occupancy >= 0.75, one strand >= 95 % of it; up to 2000 per crop, the same
+  six crops) against **that fibre's tangent**;
+- also scores against the window's mean direction (all fibres in the window), what a population's axis is trained to
+  be, and splits out coherent windows (mean-dyad eigenvalue >= 0.95: one direction in the window).
+
+Voxels: 0.25 um (axon radius ~3.4 voxels, beyond the phantoms' 0.6-1.5), 0.5 um (~1.7, their top), 1 um (~0.85).
+Windows / structure-tensor rho: 1.5, 2, 3, 4 voxels. The model's density was sampled at 200 (the readout's default),
+800 and 2000 directions: a random axis lies 3.9 / 1.9 / 1.2 deg on average from the nearest sample.
+
+### Findings
+
+1. **The structure tensor is ~1 deg on a resolved fibre**: 1.1-1.3 deg at 0.25 um (rho 1.5-3; 93-95 % within 5 deg),
+   1.6-1.9 deg at 0.5 um (rho 1.5-2), 4.6 deg at 1 um (rho 1.5). It worsens with larger rho at 0.5-1 um as the window
+   takes in neighbouring fibres at other angles (0.5 um: 5.1 deg at rho 4).
+2. **The model's density does not depend on the query window.** Same points, sigma 1 / 1.5 / 4 / 8: the density's
+   correlation is 0.999-1.000 and its peak does not move (median 0.0 deg); only its height changes. The model reads
+   orientation at one fixed scale (its receptive field and the direct path's fixed pooling, sigma 2-8), whatever window
+   is asked for. Its accuracy is therefore flat in sigma.
+3. **Its lobes are broad**: the mean angle to the peak within 45 deg is ~23 deg. The density target spreads every
+   phantom fibre to conc 0.94 (Bingham kappa ~17: 12.6 deg mean from the axis), and the model draws them broader.
+4. **The model's best direction is 2-3x the structure tensor's error**: the density peak at 2000 directions is 2.8 deg
+   (0.25 um), 4.4 (0.5 um) and 8.5 (1 um). At the readout's 200 directions it is 4.8 / 5.9 / 9.6 -- the sampling costs
+   1-2 deg.
+5. **The population axes are worse**: the heaviest line population is 6.8 deg at 0.5 um and 12 deg at 1 um, whatever
+   the sampling. An axis is the moment of a broad, often lopsided lobe, and it is trained to be the window's mean
+   direction, not the centre fibre's. At 0.25 um with dense sampling (800-2000 directions) and small windows it fails
+   (47-55 deg): the lobe clustering (8 neighbours, 25-deg peak merge, saddle 0.8) was tuned at 200 directions and
+   fragments a sharply sampled lobe.
+6. **Refinement from the image fixes the precision**, with no retraining (`src/shapetensor/learn/axis_refine.py`). It
+   is a structure tensor per population, seeded by the model:
+   - each gradient in the window is shared among the model's line populations by how perpendicular it is to each
+     axis;
+   - each axis becomes the smallest eigenvector of its own share;
+   - 3 iterations, the gate 15 deg on the first and 8 deg after.
+
+   On the synthetic test a 15-deg gate let a 60-deg crossing's other bundle pull the axes together (3-4 deg, 53-56
+   deg apart); 8 deg leaves 1.5-2.2 deg. Seeded by the model's 200-direction populations, inside fibres it gives:
+
+   | rho / sigma (voxels) | 1.5 | 2 | 3 | 4 |
+   |---|---|---|---|---|
+   | 0.25 um: structure tensor / model / model + refinement | 1.2 / 13.9 / **1.2** | 1.1 / 9.8 / **1.1** | 1.3 / 6.8 / **1.3** | 1.9 / 5.5 / **1.8** |
+   | 0.5 um | 1.6 / 6.7 / **1.6** | 1.9 / 6.8 / **1.8** | 3.2 / 6.8 / **3.0** | 5.1 / 6.9 / **4.7** |
+   | 1 um | 4.5 / 12.0 / **4.6** | 5.6 / 12.1 / **5.5** | 8.5 / 12.2 / **8.0** | 11.0 / 12.2 / **10.0** |
+
+   (Median angle to the fibre's tangent, deg; "model" is the heaviest line population.) On single fibres the refined
+   axis equals the structure tensor, and is a little better in wide windows, where the gate rejects neighbouring
+   fibres at other angles.
+7. **At the 1-4 um crossings (`disco_test.py`, polylines), the refinement helps only where fibres are resolved.**
+   - 1 um: the worse of the two bundles' axes 9.3 -> 6.7 deg (sigma 4) and 13.4 -> 8.9 (sigma 2.5); nearer-axis
+     9.0 -> 7.6; both found 44 -> 46 %.
+   - 2 and 4 um: unchanged (13 / 30 deg). The gradients there no longer carry single fibres, and the truth is itself
+     a blend of +-10-20 deg wandering fibres.
+8. **At single-fibre resolution the refinement makes crossings precise** (`disco_test.py --spline --voxel 0.5 1`,
+   `results/.../disco/disco1_spline*`, the same crops and the window truth).
+
+   | 0.5 um, sigma 2 / 3 / 4 voxels | |
+   |---|---|
+   | single bundle: structure tensor / model / refined | 2.0 / 6.3 / **2.0**; 1.8 / 4.7 / **1.8**; 1.6 / 3.3 / **1.6** |
+   | cores where the model reports two: the worse of the two axes, model -> refined | 12.5 -> **5.9**; 10.2 -> **3.7**; 8.0 -> **3.2** |
+   | cores: both bundles found (each within 20 deg), model -> refined | 34 -> 39 %; 37 -> 41 %; 43 -> 45 % |
+   | both found by crossing angle (model; sigma 3): 20-40 / 40-60 / 60-90 deg | 2 / 31 / 49 % |
+   | oriented mass / true occupancy | 0.24 / 0.26 (calibrated; 0.38 / 0.25 at 1 um) |
+
+   At 1 um the worse axis goes 12.3 -> 7.8 deg (sigma 3). Where the model reports only one population at a core, the
+   refinement cannot add the missing one: the nearer-axis angle stays ~10 deg (the structure tensor 18). The density
+   peak there is 5-6 deg.
+
+### Bottom line
+
+- **Precision is solved at inference.** The model + image refinement reads each population's axis as precisely as a
+  structure tensor reads a single fibre: ~1 deg at 0.25 um, ~2 deg at 0.5 um, 3-4 deg at crossings where both are
+  found.
+- **Separation is still the model's limit.** Both bundles are found at 41-45 % of single-fibre-resolution cores
+  (49-58 % at 60-90 deg, ~2 % below 40 deg). That is set by the density's broad lobes and its fixed scale, not by the
+  axes.
+
+### Next (not done)
+
+- Move the refinement into the default readout (`entities_from_query` gets the image; `refine="image"`), score it on
+  the phantoms' selection set (C1-C9), then the real HiP-CT direction fields.
+- Make the query window matter and sharpen the lobes in training:
+  - density targets from the window's actual fibre spread instead of a fixed conc 0.94;
+  - DENS_KAPPA_MAX above 40;
+  - phantoms whose directions change at fine scales (tortuous fibres, tight curves), so the answer at sigma 1.5
+    differs from sigma 6;
+  - crossings down to 20 deg.
+- A readout that is robust to dense direction sampling: the lobe clustering fragments at 800-2000 directions.

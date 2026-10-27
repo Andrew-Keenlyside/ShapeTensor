@@ -31,6 +31,9 @@ import shapetensor.learn.train as TR
 from shapetensor.filters import gaussian
 from shapetensor.learn import entity_infer as EI, entity_train as ET
 from shapetensor.learn.model import PopulationNet, window_mean
+from shapetensor.learn.axis_refine import refine_axes
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import disco_io as DIO
 
 ap = argparse.ArgumentParser(); ap.add_argument("out"); ap.add_argument("ckpt"); ap.add_argument("--name", default="overnight pilot")
 ap.add_argument("--data", default="/hdd/andrew/disco_data/DiSCo1"); ap.add_argument("--voxel", type=float, nargs="+", default=[1.0, 2.0, 4.0])
@@ -38,73 +41,15 @@ ap.add_argument("--sigmas", type=float, nargs="+", default=[2.5, 4.0, 6.0]); ap.
 ap.add_argument("--crops", type=int, nargs=3, default=[3, 2, 1], help="crops at 4+, 2-3 and 1 bundles")
 ap.add_argument("--n", type=int, default=96); ap.add_argument("--step", type=int, default=4); ap.add_argument("--look", default="bright", choices=["bright", "dark"])
 ap.add_argument("--merge-deg", type=float, default=20.0); ap.add_argument("--count-min", type=float, default=0.03); ap.add_argument("--seed", type=int, default=0)
-a = ap.parse_args(); dev = "cuda"; UNIT = 25.0                                                    # um per DiSCo coordinate unit
+ap.add_argument("--spline", action="store_true", help="render along Catmull-Rom splines through the strands' points (disco_io)")
+a = ap.parse_args(); dev = "cuda"; UNIT = DIO.UNIT
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None; TR.set_background_entity(True)
 ck = torch.load(a.ckpt, map_location=dev, weights_only=False)
 net = PopulationNet.from_args(ck["args"]).to(dev).eval(); net.load_state_dict(ck["model"]); sph = EI.sphere_dirs(200, dev)
 LOOK = {"bright": {"bg": 0.15, "contrast": 0.6, "noise": 0.02, "blur": 0.5}, "dark": {"bg": 0.8, "contrast": -0.5, "noise": 0.02, "blur": 0.5}}[a.look]
 
 
-# ---- DiSCo reader (test harness only) ----------------------------------------------------------------------------
-def read_tck(path):
-    """MRtrix .tck (Float32LE): the strands as (N_i, 3) arrays, in the file's coordinates."""
-    raw = Path(path).read_bytes(); hdr = raw[:raw.index(b"END\n")].decode("latin1")
-    off = int([l for l in hdr.splitlines() if l.startswith("file:")][0].split()[-1])
-    assert "Float32LE" in hdr
-    v = np.frombuffer(raw[off:], dtype="<f4"); v = v[: len(v) // 3 * 3].reshape(-1, 3)
-    brk = np.where(~np.isfinite(v).all(1))[0]; out = []; s = 0
-    for b in brk:
-        if b > s + 1:
-            out.append(v[s:b].astype(np.float64))
-        s = b + 1
-    return out
-
-
-D = Path(a.data); stem = D.name
-strands = read_tck(D / f"{stem}_Strands_Trajectories.tck")
-radius = np.loadtxt(D / f"{stem}_Strands_Diameters.txt") * 1e3 / 2                               # um
-pairs = np.sort(np.loadtxt(D / f"{stem}_Strands_ROIs_Pairs.txt", dtype=int), 1)
-_, conn = np.unique(pairs, axis=0, return_inverse=True); conn = conn.ravel(); NC = int(conn.max()) + 1
-assert len(strands) == len(radius) == len(conn), (len(strands), len(radius), len(conn))
-# all segments in um, (z, y, x) order (the codebase's axes: DEC red = x)
-seg0 = np.concatenate([s[:-1] for s in strands])[:, ::-1] * UNIT; seg1 = np.concatenate([s[1:] for s in strands])[:, ::-1] * UNIT
-seg_r = np.concatenate([np.full(len(s) - 1, radius[i]) for i, s in enumerate(strands)])
-seg_c = np.concatenate([np.full(len(s) - 1, conn[i]) for i, s in enumerate(strands)])
-SEG = [torch.tensor(x, device=dev) for x in (seg0, seg1)]; SEG_R = torch.tensor(seg_r, device=dev, dtype=torch.float32); SEG_C = torch.tensor(seg_c, device=dev)
-print(f"{stem}: {len(strands)} strands, {len(seg_r)} segments, {NC} connections, radius {radius.min():.2f}-{radius.max():.2f} um", flush=True)
-
-
-def render(centre_um, v, n, ss):
-    """Occupancy per connection ``(NC, n, n, n)`` and its direction dyad ``(NC, 6, n, n, n)`` (zz yy xx zy zx yx) of the
-    96^3 crop centred at ``centre_um`` with ``v``-um voxels, from a grid ``ss`` times finer."""
-    f = v / ss; nf = n * ss; o = torch.tensor(centre_um, device=dev, dtype=torch.float64) - n * v / 2
-    rmax = float(SEG_R.max()); lo, hi = o - rmax - 1, o + n * v + rmax + 1
-    p0, p1 = SEG
-    keep = ((torch.maximum(p0, p1) >= lo) & (torch.minimum(p0, p1) <= hi)).all(1)
-    p0, p1, rr, cc = p0[keep], p1[keep], SEG_R[keep], SEG_C[keep]
-    L = (p1 - p0).norm(dim=1); step = torch.minimum(rr.double() / 2, torch.tensor(f, device=dev, dtype=torch.float64))
-    k = (L / step).ceil().long().clamp_min(1); idx = torch.repeat_interleave(torch.arange(len(L), device=dev), k)
-    t = (torch.arange(int(k.sum()), device=dev) - torch.repeat_interleave(k.cumsum(0) - k, k)).double() / k[idx].double()
-    s = p0[idx] + t[:, None] * (p1 - p0)[idx]; q = ((s - o) / f - 0.5).float()                       # fine-cell coordinates
-    tan = torch.nn.functional.normalize((p1 - p0)[idx].float(), dim=1); r_f = (rr[idx] / f).float(); c_s = cc[idx]
-    R = int(math.ceil(float(r_f.max()))); g = torch.arange(-R, R + 1, device=dev)
-    off = torch.stack(torch.meshgrid(g, g, g, indexing="ij"), -1).reshape(-1, 3)
-    lab = torch.zeros(nf ** 3, dtype=torch.int16, device=dev); tg = torch.zeros(nf ** 3, 3, dtype=torch.float16, device=dev)
-    ch = max(1, int(1.5e7 // off.shape[0]))
-    for i in range(0, q.shape[0], ch):
-        qq = q[i:i + ch]; cell = qq.round().long()[:, None] + off[None]                              # (S, O, 3)
-        ok = ((cell - qq[:, None]).float().norm(dim=-1) <= r_f[i:i + ch, None]) & ((cell >= 0) & (cell < nf)).all(-1)
-        lin = (cell[..., 0] * nf + cell[..., 1]) * nf + cell[..., 2]
-        sel = ok.nonzero(as_tuple=True)
-        lab[lin[sel]] = (c_s[i:i + ch][sel[0]] + 1).to(torch.int16); tg[lin[sel]] = tan[i:i + ch][sel[0]].half()
-    zf = (lab > 0).nonzero()[:, 0]; cz, cy, cx = zf // (nf * nf) // ss, zf // nf % nf // ss, zf % nf // ss   # occupied fine cells only
-    coarse = (cz * n + cy) * n + cx; lc = lab[zf].long() - 1
-    occ = torch.zeros(NC, n ** 3, device=dev); occ.index_put_((lc, coarse), torch.ones(len(zf), device=dev), accumulate=True)
-    u = tg[zf].float(); dy = torch.stack([u[:, 0] ** 2, u[:, 1] ** 2, u[:, 2] ** 2, u[:, 0] * u[:, 1], u[:, 0] * u[:, 2], u[:, 1] * u[:, 2]], 1)
-    dyad = torch.zeros(NC, 6, n ** 3, device=dev)
-    for j in range(6):
-        dyad[:, j].index_put_((lc, coarse), dy[:, j], accumulate=True)
-    return (occ / ss ** 3).view(NC, n, n, n), (dyad / ss ** 3).view(NC, 6, n, n, n)
+DISCO = DIO.Disco(a.data, dev, spline=a.spline); NC = DISCO.NC
 
 
 def sym(t6):
@@ -162,39 +107,24 @@ def model_at(x, pts, sg, feats):
     p1 = ax[ar, o2[:, 0]]; p2 = ax[ar, o2[:, 1]] if mass.shape[1] > 1 else p1
     l1 = lm.gather(1, o2[:, :1])[:, 0]; l2 = lm.gather(1, o2[:, 1:2])[:, 0] if mass.shape[1] > 1 else torch.zeros_like(l1)
     dy = (lm[..., None, None] * ax[..., :, None] * ax[..., None, :]).sum(1); dom = torch.linalg.eigh(dy + 1e-9 * torch.eye(3, device=dev))[1][..., -1]
-    return {"peak": sph[f.argmax(1)], "p1": p1, "p2": p2, "l1": l1, "l2": l2, "count": (lm >= a.count_min).sum(1), "mass": mass.sum(1), "lmass": lm.sum(1),
+    o3 = o2[:, :3]; L0 = lm.gather(1, o3) >= a.count_min; L0[:, 0] = True                         # the line populations refined from the image
+    Ar = refine_axes(x, pts, sg, ax.gather(1, o3[..., None].expand(-1, -1, 3)), L0)
+    return {"peak": sph[f.argmax(1)], "p1": p1, "p2": p2, "p1r": Ar[:, 0], "p2r": Ar[:, 1] if Ar.shape[1] > 1 else Ar[:, 0], "l1": l1, "l2": l2, "count": (lm >= a.count_min).sum(1), "mass": mass.sum(1), "lmass": lm.sum(1),
             "smass": (mass * sw).sum(1), "bg": ro["bg"].float(), "iso": ro["iso"].float(), "dom": dom}
 
 
 # ---- crops ------------------------------------------------------------------------------------------------------
-import nibabel as nib
-bc = np.asarray(nib.load(D / f"{stem}_Strand_Bundle_Count.nii.gz").dataobj).astype(int)       # (x, y, z) index = coordinate
-mask = np.asarray(nib.load(D / f"{stem}_mask.nii.gz").dataobj) > 0
-from scipy.ndimage import binary_erosion
-inner = binary_erosion(mask, iterations=5)                                                         # >= 125 um inside the sphere
-rng = np.random.default_rng(a.seed); centres = []
-for (lo_, hi_), k_ in list(zip(((4, 99), (2, 3), (1, 1)), a.crops))[::-1]:                      # the rarest (1 bundle) placed first
-    cand = np.argwhere(inner & (bc >= lo_) & (bc <= hi_)); rng.shuffle(cand); got = 0
-    for c_ in cand:
-        if got == k_:
-            break
-        if all(np.abs(c_ - c2).max() >= 6 for c2, _ in centres):                                  # >= 150 um apart
-            centres.append((c_, f"{int(bc[tuple(c_)])} bundles")); got += 1
-centres = centres[::-1]                                                                          # listed 4+ first
+centres = DIO.select_crops(a.data, a.crops, a.seed)
 print("crop centres (DiSCo voxels x, y, z):", [(c.tolist(), l) for c, l in centres], flush=True)
 
-ss_of = lambda v: max(1, int(round(v / 0.5)))                                                # fine cells of 0.5 um
+ss_of = lambda v: max(2, int(round(v / 0.5)))                                                # fine cells of 0.5 um (at least 2 per voxel)
 acc = {}; both = {}; both_ang = {}; cnt = {}; massr = {}; shows = {}
 ABINS = ((20, 40), (40, 60), (60, 90.01))
 for v in a.voxel:
     for ci, (c_, lab_) in enumerate(centres):
         centre_um = (c_[::-1].astype(np.float64)) * UNIT                                          # (z, y, x) um
-        occ, dyad = render(centre_um, v, a.n, ss_of(v))
-        tot = occ.sum(0).clamp(max=1)
-        img = LOOK["bg"] + LOOK["contrast"] * tot
-        img = gaussian(img[None, None], LOOK["blur"])[0, 0]
-        img = (img + LOOK["noise"] * torch.randn(img.shape, generator=torch.Generator(device=dev).manual_seed(ci), device=dev)).clamp(0, 1)
-        x = (img * 255).round() / 255
+        rd = DISCO.render(centre_um, v, a.n, ss_of(v)); occ, dyad = rd["occ"], rd["dyad"]
+        x = DIO.image(occ.sum(0).clamp(max=1), LOOK, ci, lambda y, s_: gaussian(y[None, None], s_)[0, 0])
         with torch.no_grad():
             feats = EI.features(net, x)
         g1 = torch.arange(8, a.n - 8, a.step, device=dev, dtype=torch.float32)
@@ -208,11 +138,18 @@ for v in a.voxel:
             ax1, ax2 = pa[:, 0], pa[:, 1] if pa.shape[1] > 1 else pa[:, 0]
             _, st = structure_tensor(x, pts, sg); mo = model_at(x, pts, sg, feats)
             key = (v, sg)
-            for en, d1 in (("structure tensor", st), ("model: density peak", mo["peak"]), ("model: heaviest line population", mo["p1"])):
+            for en, d1 in (("structure tensor", st), ("model: density peak", mo["peak"]), ("model: heaviest line population", mo["p1"]),
+                           ("model + image refinement", mo["p1r"])):
                 acc.setdefault(key + ("single", en), []).append(ang(d1, ax1)[single].cpu())
                 acc.setdefault(key + ("core", en), []).append(torch.minimum(ang(d1, ax1), ang(d1, ax2))[core].cpu())
             okb = (((ang(mo["p1"], ax1) <= 20) & (ang(mo["p2"], ax2) <= 20)) | ((ang(mo["p1"], ax2) <= 20) & (ang(mo["p2"], ax1) <= 20))) & (mo["l2"] >= a.count_min)
             both.setdefault(key, []).append(okb[core].float().cpu())
+            okr = (((ang(mo["p1r"], ax1) <= 20) & (ang(mo["p2r"], ax2) <= 20)) | ((ang(mo["p1r"], ax2) <= 20) & (ang(mo["p2r"], ax1) <= 20))) & (mo["l2"] >= a.count_min)
+            both.setdefault(key + ("refined",), []).append(okr[core].float().cpu())
+            acc.setdefault(key + ("core both axes", "model"), []).append(torch.maximum(torch.minimum(ang(mo["p1"], ax1), ang(mo["p1"], ax2)),
+                                                                                       torch.minimum(ang(mo["p2"], ax1), ang(mo["p2"], ax2)))[core & (mo["l2"] >= a.count_min)].cpu())
+            acc.setdefault(key + ("core both axes", "refined"), []).append(torch.maximum(torch.minimum(ang(mo["p1r"], ax1), ang(mo["p1r"], ax2)),
+                                                                                         torch.minimum(ang(mo["p2r"], ax1), ang(mo["p2r"], ax2)))[core & (mo["l2"] >= a.count_min)].cpu())
             both_ang.setdefault(key, []).append(torch.stack([ang(ax1, ax2), okb.float(), torch.minimum(ang(st, ax1), ang(st, ax2)),
                                                              torch.minimum(ang(mo["p1"], ax1), ang(mo["p1"], ax2))], 1)[core].cpu())
             tc = (pm >= a.count_min).sum(1).clamp(max=3); mc = mo["count"].clamp(max=3)
@@ -244,9 +181,12 @@ summary = {}
 for key in sorted({k[:2] for k in acc}):
     v, sg = key; s = {}
     for cls in ("single", "core"):
-        for en in ("structure tensor", "model: density peak", "model: heaviest line population"):
+        for en in ("structure tensor", "model: density peak", "model: heaviest line population", "model + image refinement"):
             s[f"{cls}|{en}"] = st_(torch.cat(acc[key + (cls, en)]))
+    for en in ("model", "refined"):                                                                # the worse of the two populations' angles
+        s[f"core both axes|{en}"] = st_(torch.cat(acc[key + ("core both axes", en)]))
     b = torch.cat(both[key]); s["core both found"] = float(b.mean()) if b.numel() else float("nan")
+    b = torch.cat(both[key + ("refined",)]); s["core both found (refined)"] = float(b.mean()) if b.numel() else float("nan")
     ba = torch.cat(both_ang[key])                                                                  # by the crossing angle (truth's two axes)
     for lo_, hi_ in ABINS:
         sel = (ba[:, 0] >= lo_) & (ba[:, 0] < hi_)
@@ -262,7 +202,9 @@ json.dump({"crops": [(c.tolist(), l) for c, l in centres], "look": LOOK, "summar
 for k, s in summary.items():
     print(f"== {k}: single median ST {s['single|structure tensor'].get('median', np.nan):.0f} / peak {s['single|model: density peak'].get('median', np.nan):.0f} / line "
           f"{s['single|model: heaviest line population'].get('median', np.nan):.0f} deg (n {s['single|structure tensor']['n']}); cores ST {s['core|structure tensor'].get('median', np.nan):.0f} / line "
-          f"{s['core|model: heaviest line population'].get('median', np.nan):.0f} deg (n {s['core|structure tensor']['n']}), both found {s['core both found'] * 100:.0f} %; count exact {s['count exact'] * 100:.0f} %; "
+          f"{s['core|model: heaviest line population'].get('median', np.nan):.0f} / refined {s['core|model + image refinement'].get('median', np.nan):.0f} deg (n {s['core|structure tensor']['n']}), "
+          f"both found {s['core both found'] * 100:.0f} % (refined {s['core both found (refined)'] * 100:.0f} %; worse of the two axes {s['core both axes|model'].get('median', np.nan):.1f} -> "
+          f"{s['core both axes|refined'].get('median', np.nan):.1f} deg); single refined {s['single|model + image refinement'].get('median', np.nan):.1f}; count exact {s['count exact'] * 100:.0f} %; "
           f"occupancy {s['occupancy mean']:.2f} vs oriented mass {s['oriented mass mean']:.2f} (r {s['mass corr']:.2f}), background {s['background mean']:.2f}")
 
 # ---- figures ----------------------------------------------------------------------------------------------------
@@ -298,16 +240,18 @@ for v in a.voxel:
 
 keys = list(summary); fig, axs = plt.subplots(1, 5, figsize=(25, 4.8), layout="constrained")
 xl = [k.replace(" um|sigma ", " um\nsigma ") for k in keys]
-ens = [("structure tensor", "#555555", None), ("model: density peak", "#2a78d6", "//"), ("model: heaviest line population", "#2a78d6", None)]
-xs = np.arange(len(keys)); w = 0.27
+ens = [("structure tensor", "#555555", None), ("model: density peak", "#2a78d6", "//"), ("model: heaviest line population", "#2a78d6", None),
+       ("model + image refinement", "#eb6834", None)]
+xs = np.arange(len(keys)); w = 0.2
 for ax, cls, title in ((axs[0], "single", "single-population points:\nmedian angle to the true axis (deg)"), (axs[1], "core", "crossing cores:\nmedian angle to the nearer true axis (deg)")):
     for e_i, (en, col, hat) in enumerate(ens):
         ax.bar(xs + e_i * w, [summary[k][f"{cls}|{en}"].get("median", np.nan) for k in keys], w, color=col, hatch=hat, edgecolor="white", label=en)
-    ax.set_xticks(xs + w); ax.set_xticklabels(xl, fontsize=7); ax.set_title(title, fontsize=10)
+    ax.set_xticks(xs + 1.5 * w); ax.set_xticklabels(xl, fontsize=7); ax.set_title(title, fontsize=10)
 axs[0].legend(fontsize=8)
-axs[2].bar(xs, [summary[k]["core both found"] * 100 for k in keys], 0.5, color="#2a78d6", label="both bundles found at cores")
-axs[2].bar(xs + 0.5, [summary[k]["count exact"] * 100 for k in keys], 0.4, color="#1baf7a", label="population count exact")
-axs[2].set_xticks(xs + 0.25); axs[2].set_xticklabels(xl, fontsize=7); axs[2].set_ylim(0, 100); axs[2].legend(fontsize=8)
+axs[2].bar(xs, [summary[k]["core both found"] * 100 for k in keys], 0.3, color="#2a78d6", label="both bundles found at cores")
+axs[2].bar(xs + 0.3, [summary[k]["core both found (refined)"] * 100 for k in keys], 0.3, color="#eb6834", label="... after the image refinement")
+axs[2].bar(xs + 0.6, [summary[k]["count exact"] * 100 for k in keys], 0.3, color="#1baf7a", label="population count exact")
+axs[2].set_xticks(xs + 0.3); axs[2].set_xticklabels(xl, fontsize=7); axs[2].set_ylim(0, 100); axs[2].legend(fontsize=8)
 axs[2].set_title("%% of points (cores: two populations, the lighter >= half;\ncount: line populations with mass >= %.2f, 3 = 3+)" % a.count_min, fontsize=10)
 axs[3].bar(xs, [summary[k]["occupancy mean"] for k in keys], 0.4, color="#999999", label="true occupancy (window mean)")
 axs[3].bar(xs + 0.4, [summary[k]["oriented mass mean"] for k in keys], 0.4, color="#2a78d6", label="model oriented mass")

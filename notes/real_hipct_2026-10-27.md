@@ -184,11 +184,13 @@ structure tensor at the same window (gradient sigma 1 voxel). Means over the spe
 lines carry most of the mass; sheet normals: against its normal where sheets do.)
 
 **Reading.**
-1. **Agreement with the structure tensor is set by the window in voxels, not in um**: ~15-30 deg at sigma 1.5 voxels,
-   4-8 deg at 6 voxels, at every resolution -- at small windows both estimates are noisy (the structure tensor's
-   integration over ~1.5 voxels especially), so the small-window disagreement is not evidence against either. 40 um
-   agrees best at each window (block-averaging lowers the noise while the texture is still resolved). Per specimen at
-   sigma 4: 5-10 deg at 20-80 um, 8-15 deg at 160 um.
+1. **Agreement with the structure tensor rises with the window in voxels**: ~15-30 deg at sigma 1.5 voxels, 4-8 deg at
+   6 voxels, at every resolution. 40 um agrees best at each window. Per specimen at sigma 4: 5-10 deg at 20-80 um,
+   8-15 deg at 160 um.
+   *Corrected the same day (DiSCo single-fibre test, `notes/disco_greyscale_2026-10-27.md`)*: the model's density does
+   not depend on the query window at all (correlation 0.999-1.000 between sigma 1 and 8; peaks unmoved). So it is the
+   structure tensor that changes with the window, converging on the model's fixed-scale direction as rho grows -- not
+   "both estimates noisy at small windows" as first read.
 2. **Resolution sets how much is oriented**: oriented mass falls 0.67 -> 0.42 and background rises 0.16 -> 0.48 from 20
    to 160 um, nearly independent of the window. At 20 um the phantom-trained pilot still calls ~2/3 of every window
    oriented (the over-confidence above); coarser crops take in featureless tissue and the model reports more
