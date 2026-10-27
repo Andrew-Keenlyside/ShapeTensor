@@ -298,6 +298,26 @@ Read by the maps, the mass is there but in entities whose axes do not yet match 
 C9 found 4/16, C6 direction passes only vacuously where nothing matched. The same flat start was seen in the framing
 review (the density's per-direction loss is flat-friendly early on).
 
+**But the density already carries the orientations at step 2000 -- it is the vote heads that lag.** Reading each
+entity's frame and type from the density's own moment (with lobes joined across high saddles so a sheet's ridge stays
+one entity) instead of from the votes, on the same step-2000 outputs:
+
+| step 2000, selection set | frames from the votes | frames from the density |
+|---|---|---|
+| crossings: matched mass | 0.20 | **0.80** |
+| curves: matched mass | 0.01 | **0.83** |
+| sheets: matched mass | 0.00 | **1.06** |
+| C3 count | 5 | **13** |
+| C6 direction | 11 | **15** |
+| C9 found | 4 | **8** |
+| C1 mass | 3 | **5** |
+
+So at low training the structure learns where (maps) and which way (density) first; the per-direction votes (frames,
+concentrations) come last. On the long-trained direct-path pilot the density frames were neutral to better (count
+10 -> 12, direction 12 -> 16 of 16), so they are now the readout's default (`axes="density"`, `saddle=0.8`); the votes
+still supply the reported concentrations (ODF shape). Fans lose some mass to "other" with density frames (their spread
+lobe fits a broader, sometimes girdle-typed Bingham).
+
 **A readout bug this showed:** the maps' 2x cap (review 2) starved weak lobes -- oriented totals 0.03-0.12 of the target
 at step 2000 -- now off (`maps_cap`, default None): 0.13-0.70. The pilot's own mid-run scorings use the capped
 readout; its checkpoints are kept (`pilot3_step*.pt`) and rescored with the final readout below.
