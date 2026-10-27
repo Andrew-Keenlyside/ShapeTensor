@@ -339,3 +339,20 @@ def random_spec(family: str, g: torch.Generator, n: int = 64) -> tuple:
     bg = u(0.05, 0.9 - max(con, default=0.3)) if bright else u(max(con, default=0.3) + 0.05, 0.95)
     look = {"bg": bg, "contrast": [c if bright else -c for c in con], "noise": u(0.0, 0.05), "blur": u(0, 0.8)}
     return spec, look
+
+
+def batch_worker(rank: int, n_workers: int, families, batch: int, n_points: int, sigma, q, start: int, stop: int, threads: int = 4):
+    """A CPU process making the trainer's batches ``(step, images, targets)`` for steps ``start + rank, + n_workers, ...``
+    into its own queue ``q`` (in order: the trainer reads worker ``step % n_workers``'s queue for step ``step``, so the
+    order and the backpressure are the queues'). Family, spec, phantom and queries seeded by the step: the same batches
+    whatever the number of workers."""
+    torch.set_num_threads(threads)
+    for step in range(start + rank, stop, n_workers):
+        imgs, ts = [], []
+        for b in range(batch):
+            fam = families[int(torch.randint(0, len(families), (1,), generator=torch.Generator().manual_seed(7919 * step + b)))]
+            spec, look = random_spec(fam, torch.Generator().manual_seed(step * 31 + b))
+            ph = make(spec, seed=step * 31 + b, look=look, device="cpu", ss=2 if fam == "fine" else 1)
+            g = torch.Generator().manual_seed(104729 * step + b)
+            imgs.append(ph["image"]); ts.append(targets(ph, *draw_queries(ph, g, n_points, sigma=sigma)))
+        q.put((step, imgs, ts))

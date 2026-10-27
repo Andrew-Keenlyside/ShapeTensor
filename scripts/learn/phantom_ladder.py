@@ -8,7 +8,7 @@ the isotropic objects' target and model mass; the model's unmatched oriented mas
 Usage: python scripts/learn/phantom_ladder.py OUT.png [--init CKPT] [--steps 6000] [--families cross fan curve sheet blob mix empty]
        python scripts/learn/phantom_ladder.py OUT.png --plot-only
 """
-import argparse, math, sys
+import argparse, math, os, sys, time
 import numpy as np
 import torch
 import matplotlib
@@ -45,6 +45,7 @@ ap.add_argument("--mass-vote", action="store_true", help="a per-direction vote f
 ap.add_argument("--split-head", action="store_true", help="a head for the objects' occupancy by kind (oriented / isotropic)")
 ap.add_argument("--lobe-weight", type=float, default=None, help="entity_train.DENS_LOBE_WEIGHT (the density loss weighted toward lobes)")
 ap.add_argument("--score-every", type=int, default=0, help="score the held-out set (criteria) every this many steps during training")
+ap.add_argument("--cpu-workers", type=int, default=0, help="make the batches (phantoms, targets) in this many CPU processes")
 ap.add_argument("--prefetch", action="store_true", help="make the next step's phantoms and targets in a thread while the step trains")
 ap.add_argument("--sample-oriented", action="store_true", help="entity_train.SAMPLE_ORIENTED: entity directions from the oriented entities only")
 ap.add_argument("--lobe-mass", type=float, default=0.0, help="weight of the per-population lobe-mass loss (entity_train: W['lobe_mass'])")
@@ -257,6 +258,30 @@ else:
 
     import concurrent.futures as cf
     pool = cf.ThreadPoolExecutor(1) if a.prefetch else None; nxt = None
+    procs, wdir = [], None
+    if a.cpu_workers:                                                                            # phantoms and targets made by CPU processes
+        import subprocess, tempfile, atexit, shutil                                              # (~0.22 s of a 0.9 s step on the GPU), as files
+        wdir = tempfile.mkdtemp(prefix="ladder_", dir="/dev/shm" if os.path.isdir("/dev/shm") else None)
+        env = {**os.environ, "CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "4", "MKL_NUM_THREADS": "4"}
+        for w in range(a.cpu_workers):
+            procs.append(subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "phantom_workers.py"), wdir,
+                                           "--rank", str(w), "--n", str(a.cpu_workers), "--families", *a.families, "--batch", str(a.batch),
+                                           "--n-points", str(a.n_points), "--sigma-lo", str(a.sigma_lo), "--start", "0", "--stop", str(a.steps)], env=env))
+        def _stop_workers():
+            for pr in procs:
+                pr.terminate()
+            shutil.rmtree(wdir, ignore_errors=True)
+        atexit.register(_stop_workers)
+
+    def load_batch(step):
+        f = os.path.join(wdir, f"{step:07d}.pt")
+        while not os.path.exists(f):
+            if any(pr.poll() not in (None, 0) for pr in procs):
+                raise RuntimeError("a phantom worker died")
+            time.sleep(0.02)
+        d = torch.load(f, weights_only=False); os.remove(f)
+        return [x.to(dev, non_blocking=True) for x in d["imgs"]], [{k: v.to(dev, non_blocking=True) for k, v in t_.items()} for t_ in d["ts"]]
+
     net.train()
     for step in range(a.steps + 1):
         if step % a.eval_every == 0 or step == a.steps:
@@ -270,7 +295,9 @@ else:
         for pg in opt.param_groups:
             lr_ = a.lr * min(1.0, (step + 1) / 30)
             pg["lr"] = a.lr_final + (lr_ - a.lr_final) * 0.5 * (1 + math.cos(math.pi * step / max(a.steps, 1))) if a.lr_final is not None else lr_
-        if a.prefetch:                                                                           # the next step's phantoms made in a thread
+        if a.cpu_workers:                                                                        # the batch from the CPU workers (in order)
+            imgs, ts = load_batch(step)
+        elif a.prefetch:                                                                         # the next step's phantoms made in a thread
             imgs, ts = nxt.result() if nxt is not None else make_batch(step)                     # while this one trains (~a quarter of a step)
             nxt = pool.submit(make_batch, step + 1) if step + 1 < a.steps else None
         else:
