@@ -1,7 +1,10 @@
 # Generator: poor resolution, wider windows, meandering bundles (27 Oct 2026)
 
-What the overnight pilot trained on (the scene generator, `gen={"scene": ...}`), checked against the code, and the gaps
-fixed. Not retrained.
+What the scene generator (the full training generator: `train.py`, `gen={"scene": ...}`) provides, checked against the
+code, and the gaps fixed. Not retrained. **The overnight pilot (`pilot3x.pt`) did not train on it**: `phantom_ladder.py`
+trained it on the phantom families (`phantom2`: crossings 30-90 deg, fibre radius 0.35-1.4 voxels, uniform slabs,
+targets at conc 0.94 / kappa ~17, windows sigma 1-6, no voxel size or acquisition); the `gen` entry in its checkpoint's
+arguments is an unused default. These fixes are for the next model, trained on the scene generator.
 
 ## What was already there
 
@@ -18,9 +21,9 @@ fixed. Not retrained.
   the direction basis (`DENS_KAPPA_MAX` 40, half height at ~8 deg) -- crossings down to ~15 deg are two lobes in the
   target. (The evaluation phantoms' conc 0.94, kappa ~17, is theirs only.)
 
-Corrections to what I said earlier the same day: the training windows were sigma 1-6 (not 1-4); crossings go to 5 deg
-(30-90 is the evaluation phantoms'); DiSCo's 1.7-3.4-voxel fibres at 0.5 / 0.25 um are inside the training range; and
-the narrow-crossing target is not single-lobed down to ~15 deg. The model's broad lobes (kappa ~7.5) are its own.
+(Earlier the same day I described these scene-generator ranges as the overnight pilot's; they are not. For the pilot
+the phantom ranges stand: no crossings below 30 deg, fibres to 1.4 voxels -- DiSCo at 0.25-0.5 um was outside them --
+targets at kappa ~17, which it draws at ~7.5.)
 
 ## Gaps fixed
 

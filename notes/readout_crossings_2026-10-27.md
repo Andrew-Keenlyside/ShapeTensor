@@ -36,9 +36,8 @@ DiSCo1 it found both bundles at 0-2 % of 20-40 deg crossing cores, 4-35 % at 40-
 
 1. **The model's lobes are broad, at any window.** On the tuning set's single bundles the density above its floor
    falls to half at ~16 deg from its own axis (a Watson fit: kappa 7.6 at sigma 2.5, 7.3 at sigma 4). Its training
-   targets are far sharper: the scene generator stores exact fibre tangents, so a straight bundle's target is capped
-   only by the direction basis (`DENS_KAPPA_MAX` 40, half at ~8 deg); the evaluation phantoms' conc 0.94 (kappa ~17,
-   half at ~12 deg) is theirs alone. The broad lobes are the model's (training), not its targets'. Two such lobes 30 deg apart sum to one hump with a shallow dip,
+   targets (the phantom families, conc 0.94) are kappa ~17, half at ~12 deg; the scene generator's exact tangents
+   would allow up to the basis's 40 (~8 deg). The model draws its lobes ~2x broader in kappa than its targets. Two such lobes 30 deg apart sum to one hump with a shallow dip,
    25 deg apart to one peak.
 2. **Is the second peak in the density?** At cores, along the great circle through the two true axes (smoke test,
    one phantom per angle, sigma 2.5): at 60 deg the model has two maxima at 94 % (valley 0.60 of the lower peak; the

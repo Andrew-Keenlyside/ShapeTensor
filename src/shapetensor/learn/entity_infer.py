@@ -428,8 +428,9 @@ def sharpen_density(f: torch.Tensor, dirs: torch.Tensor, kappa: float = 7.5, ite
     """The density ``f (Q, D)`` above its floor (the ``floor`` quantile) deconvolved by the model's own single-bundle
     lobe -- a Watson exp(-``kappa`` sin^2) -- in ``iters`` Richardson-Lucy steps (non-negative, mass kept), then redrawn
     with lobes of ``kappa_to`` (None: left as deconvolved). The overnight pilot draws one bundle ~30 deg wide at half
-    height at any window (kappa ~7.5, readout_xing.py, 27 Oct) against its training targets' kappa up to 40 (the
-    evaluation phantoms' ~17), so two bundles 25-30 deg apart sum to one lobe; deconvolved they are two."""
+    height at any window (kappa ~7.5, readout_xing.py, 27 Oct) against its training targets' ~17 (the phantom
+    families' conc 0.94; the scene generator's reach 40), so two bundles 25-30 deg apart sum to one lobe; deconvolved
+    they are two."""
     fl = torch.quantile(f.float(), float(floor), dim=1, keepdim=True)
     h = (f.float() - fl).clamp_min(0); c2 = (dirs.float() @ dirs.float().T) ** 2                   # (antipodes identified)
     H = torch.exp(-kappa * (1 - c2)); H = H / H.sum(0, keepdim=True)                               # columns: a unit lobe at each direction
