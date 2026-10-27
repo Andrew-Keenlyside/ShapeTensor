@@ -34,8 +34,9 @@ phantom in either model (0/12).** Curves, blobs and empties pass nearly everythi
 4. **Trunk stability** (§7): from-scratch training diverged (features 1e16, every head dead): coherent convolutions in an
    unnormalised residual trunk. Fixed with a per-voxel RMS pre-norm (optionally a normalised update too) and a divergence
    guard. The divergence cost the first launch.
-5. **Speed** (§3): a training step 2.1 -> ~0.8 s alone (targets' window means as matrix products, the bank's pooling and
-   FFT, fused heads, per-point sampling); queries' direct-path code 7x faster; exact to float rounding.
+5. **Speed** (§3): a training step 2.1 -> 0.68 s alone (targets' window means as matrix products, the bank's pooling and
+   FFT, fused heads, per-point sampling, vectorised harmonics, fewer Bingham nodes); queries' direct-path code 7x faster;
+   the readout's entity statistics ~8x cheaper; all exact to float rounding.
 
 **Low training (asked to push this first).** The structure gets *where* (the maps) and *which way* (the density) right
 early: by step 2000, with the final readout, count 13/16 and direction 15/16 on the selection set, and single
@@ -521,3 +522,32 @@ fine crossings and mixes 0. Held-out losses at step 13000: density crossings 0.2
 map 0.05-0.12. The crossing cores are unchanged in kind (overlaps 0.0 / 2.19, 0.0 / 1.67, 1.96 / 0.0 in three of eight):
 more training at the same data does not undo the contrast confound. (Changes of 1-2 phantoms are within the noise of a
 32-phantom set.)
+
+## 8. Files and next steps
+
+Results: `/home/andrew/bridge_wmcov/shapetensor/results/dev_pipeline/pilot_entities/overnight/`
+- `pilot3.pt` (step 10000), `pilot3x.pt` (step 13000; optimiser state inside, `--resume` continues it),
+  `pilot3_step{2000..9000}.pt`; `ctx16_step2000.pt` (the sigma-16 A/B).
+- Scores: `pilot3rs_final_acceptance.json/.png` (step 10000, final readout), `pilot3x_final_acceptance.*` (13000),
+  `pilot3rs_s{2000..8000}_*` (selection set over training), `*_budget.json` (mass budgets).
+- Figures: `pilot3x_glyphs_final.png` and `pilot3_glyphs_final.png` (populations' direction and mass against the truth),
+  `pilot3rs_progress.png` (criteria and mass over training), `pilot3x.png` (the ladder's maps).
+- `diverged/` (the first launch), `stopped/` (the second).
+
+Scripts added: `readout_lab.py` (readout variants on cached outputs), `entity_glyphs.py`, `ladder_progress.py`,
+`step_profile.py`, `direct_path_speed.py`, `scratch_stability.py`, `entity_diag.py`, `phantom_workers.py`.
+Trainer (`phantom_ladder.py`) flags added: `--split-head --mass-vote --od-sigmas --sample-oriented --block-norm
+--warmup --clip --h-max --resume --score-every --test-families --no-final --cpu-workers --od-at-points --lobe-mass
+--lobe-weight`; readout flags `--entities --axes --kappa --mass --saddle --ckpt`.
+
+**Next steps, in order:**
+1. **Crossing cores.** The contrast confound (§7, §7.2): decide with the user whether crossing populations' contrasts
+   should be related in the generator; model side, an explicit per-direction contrast reference (energy along the bundle
+   away from the core) rather than wider isotropic windows; score unequal-contrast cores apart.
+2. **A fresh test set** for readout choices (the final set has now been looked at), then a prominence-based lobe merge
+   (not single-linkage saddles) and a ring threshold checked on more than 2 sheets.
+3. **Mass level within +-10 %:** the oriented-material map runs 5-20 % high on fans, curves and mixes.
+4. **Scene generator workplan** (§6.2): geometry targets by default with evidence as its own output, one convention
+   (window operator, floor, population rule) across phantoms and scenes, then retrain the generator model with the
+   trunk pre-norm.
+5. Train longer (13000 steps improved 9 -> 11/32; the selection set was flat from step 6000) and try `--block-norm 2`.
