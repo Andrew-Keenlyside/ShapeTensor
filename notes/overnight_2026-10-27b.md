@@ -364,6 +364,36 @@ Sheets stay found (1.00) throughout; C4 leakage improves (6 -> 8, 8 -> 13, 9 -> 
 matched fan lobes are scored, with p95 up to 23 degrees near the fan's apex). Thresholds 0.75-0.85 are equivalent; 0.9
 starts losing sheets.
 
+### 7.1 The overnight pilot at step 10000 (04:37)
+
+Final set (32 held-out phantoms, never used to choose anything), phantoms passing each criterion:
+
+| | all | C1 mass | C2 flat | C3 count | C4 leakage | C5 edges | C6 direction | C7 background | C8 ODF shape | C9 found |
+|---|---|---|---|---|---|---|---|---|---|---|
+| direct-path pilot (yesterday), old readout | 4 | 4 | 20 | 10 | 8 | 12 | 24 | 25 | 11 | 19 |
+| direct-path pilot, new readout | 4 | 5 | 20 | 16 | 9 | 11 | 27 | 25 | 30 | 17 |
+| overnight pilot, the readout it launched with | 8 | 9 | 22 | 21 | 19 | 21 | 29 | 28 | 31 | 24 |
+| **overnight pilot, final readout** | **9** | **13** | 21 | **25** | **24** | **22** | **30** | 27 | 28 | 21 |
+
+Per family (final readout; criteria C1..C9 passed of 4, then all criteria):
+
+| family | C1 C2 C3 C4 C5 C6 C7 C8 C9 | all |
+|---|---|---|
+| curve | 4 4 4 2 4 4 4 4 4 | 2 |
+| blob | 3 4 4 4 4 4 4 4 4 | 3 |
+| empty | 4 4 4 4 4 4 4 4 4 | 4 |
+| fan | 1 4 4 3 3 3 4 4 3 | 0 |
+| sheet | 1 4 4 1 1 4 2 3 1 | 0 |
+| cross | 0 0 1 4 1 4 2 4 1 | 0 |
+| fine | 0 0 2 4 2 3 3 4 3 | 0 |
+| mix | 0 1 2 2 3 4 4 1 1 | 0 |
+
+Mass budget (final set, medians, fractions of the target): matched cross 1.00, fan 1.08, curve 0.97, fine 1.03,
+mix 1.06; sheets 0.62 (0.28 in "other"), blobs 0.79. **Simple phantoms: curves, blobs and empties pass nearly every
+criterion; fans and sheets fail on mass level (C1, +-10 %) and edges/leakage. Hard phantoms: crossings fail on the cores
+(C1, C2)** -- e.g. overlap masses 0.0 / 2.19 and 0.0 / 1.64 in two of the four crossings -- the contrast confound
+above; in the other two the cores are shared (1.84 / 0.59, 1.38 / 0.64) but not yet equally.
+
 **A readout bug this showed:** the maps' 2x cap (review 2) starved weak lobes -- oriented totals 0.03-0.12 of the target
 at step 2000 -- now off (`maps_cap`, default None): 0.13-0.70. The pilot's own mid-run scorings use the capped
 readout; its checkpoints are kept (`pilot3_step*.pt`) and rescored with the final readout below.

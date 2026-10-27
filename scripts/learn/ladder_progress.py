@@ -11,7 +11,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-ap = argparse.ArgumentParser(); ap.add_argument("stem"); ap.add_argument("--name", default=None); a = ap.parse_args()
+ap = argparse.ArgumentParser(); ap.add_argument("stem"); ap.add_argument("--name", default=None)
+ap.add_argument("--final-step", type=int, default=None, help="the step of OUT_acceptance.json (default: OUT.pt's, else the last + 1000)"); a = ap.parse_args()
 stem = a.stem[:-4] if a.stem.endswith(".png") else a.stem
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a"]                                                       # reference palette slots 1-3
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
@@ -29,7 +30,7 @@ if os.path.exists(stem + "_acceptance.json"):
     ck = stem + ".pt"
     import torch
     final = torch.load(ck, map_location="cpu", weights_only=False).get("step") if os.path.exists(ck) else None
-    runs.append((final or (max(r[0] for r in runs) + 1000 if runs else 0), stem + "_acceptance.json", stem + "_budget.json"))
+    runs.append((a.final_step or final or (max(r[0] for r in runs) + 1000 if runs else 0), stem + "_acceptance.json", stem + "_budget.json"))
 runs.sort()
 if not runs:
     raise SystemExit("no scorings found for " + stem)
