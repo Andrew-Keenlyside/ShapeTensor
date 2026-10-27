@@ -228,7 +228,21 @@ def targets(ph: dict, pts: torch.Tensor, sig: torch.Tensor, emax: int = 8) -> di
     return {"e_points": pts, "e_sigma": sig, "e_node": node, "e_mass": mass, "e_vis": (node >= 0).float(), "e_T6": T6,
             "e_desc": torch.zeros(Q, emax, 5, device=dev), "e_anc": anc, "e_n": torch.tensor(E + 1, device=dev), "e_R": R, "e_kappa": Kp,
             "e_gnode": node, "region_t": torch.cat([ph["occ"], ph["bg"][None]]).sum(0), "iface_t": torch.zeros(n, n, n, device=dev),
-            "voxel": torch.tensor(float("nan"), device=dev), "bg_t": ph["bg"], "e_bg": node == K + 1}
+            "voxel": torch.tensor(float("nan"), device=dev), "bg_t": ph["bg"], "e_bg": node == K + 1,
+            **_split_targets(ph)}
+
+
+ISO_KINDS = ("blob",)
+
+
+def _split_targets(ph: dict) -> dict:
+    """The objects' occupancy by kind at every voxel (densities: crossings count both): ``ori_t`` the oriented
+    populations' (bundles, fans, curves, sheets), ``iso_t`` the isotropic objects' (blobs)."""
+    occ = ph["occ"]; z = torch.zeros(occ.shape[1:], device=occ.device)
+    iso = [k in ISO_KINDS for k in ph["kinds"]]
+    ori_t = sum((occ[k] for k in range(occ.shape[0]) if not iso[k]), z.clone())
+    iso_t = sum((occ[k] for k in range(occ.shape[0]) if iso[k]), z.clone())
+    return {"ori_t": ori_t, "iso_t": iso_t}
 
 
 def draw_queries(ph: dict, g: torch.Generator, n_q: int, sigma=(1.0, 6.0)) -> tuple:

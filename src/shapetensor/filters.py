@@ -77,6 +77,39 @@ def filter_axis(x: torch.Tensor, kernel, axis: int, chunk_rows: int = 1 << 22) -
     return out.reshape(shape).movedim(-1, axis)
 
 
+_MCACHE: dict = {}
+
+
+def filter_matrix(kernel, n: int, dtype, device) -> torch.Tensor:
+    """The ``(n, n)`` matrix of :func:`filter_axis` along an axis of length ``n`` (replicate padding folded onto the
+    edge samples): ``y = x @ M.T`` filters the last axis -- the same sums, as one matrix product (cached)."""
+    k = np.asarray(kernel, dtype=np.float64); r = (len(k) - 1) // 2
+    key = (k.tobytes(), n, dtype, str(device))
+    M = _MCACHE.get(key)
+    if M is None:
+        if len(_MCACHE) > 256:
+            _MCACHE.clear()
+        A = np.zeros((n, n))
+        for i in range(n):
+            for t in range(-r, r + 1):                                                         # filter_axis: out[i] = sum_t k[t + r] x[i - t]
+                A[i, min(max(i - t, 0), n - 1)] += k[t + r]                                    # (conv1d of the reversed kernel)
+        M = _MCACHE[key] = torch.as_tensor(A, dtype=dtype, device=device)
+    return M
+
+
+def gaussian_mm(x: torch.Tensor, sigma: float, truncate: float = 3.0) -> torch.Tensor:
+    """:func:`gaussian` (order 0, one ``sigma``) over the last three axes by matrix products: for many channels of a
+    small volume the single-channel 1-D convolutions are memory-bound (the direct oriented path's bank: ~6x slower)."""
+    if sigma <= 0:
+        return x
+    k = kernel1d(float(sigma), 0, truncate)
+    Z, Y, X = x.shape[-3:]
+    x = x @ filter_matrix(k, X, x.dtype, x.device).T
+    x = (x.transpose(-1, -2) @ filter_matrix(k, Y, x.dtype, x.device).T).transpose(-1, -2)
+    x = (x.transpose(-1, -3) @ filter_matrix(k, Z, x.dtype, x.device).T).transpose(-1, -3)
+    return x
+
+
 def gaussian(x: torch.Tensor, sigma, order=(0, 0, 0), truncate: float = 3.0, axes=(-3, -2, -1)) -> torch.Tensor:
     """Separable Gaussian (derivative) filter over ``axes``; ``sigma`` a scalar or one value per axis."""
     sig = (sigma,) * len(axes) if np.isscalar(sigma) else tuple(sigma)

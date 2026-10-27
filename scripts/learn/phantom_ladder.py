@@ -36,10 +36,19 @@ ap.add_argument("--no-merge", action="store_true", help="readout: keep near-para
 ap.add_argument("--sigmas", type=float, nargs="+", default=[2.5], help="the query windows to score at (each its own table)")
 ap.add_argument("--odirect", type=int, default=0, help="the decoder's direct oriented path with this many bank directions (0: off; e.g. 48)")
 ap.add_argument("--final", action="store_true", help="score the final test set (seeds never used to choose between variants) instead of the selection set")
+ap.add_argument("--ckpt", default=None, help="with --plot-only: score this checkpoint (outputs named after OUT)")
+ap.add_argument("--entities", default="lobes", choices=("votes", "lobes"), help="readout: entities from the votes or the density's lobes")
+ap.add_argument("--axes", default="votes", choices=("votes", "density"), help="readout: entity frames/types from the votes or the density moment")
+ap.add_argument("--kappa", default="votes", choices=("votes", "moments", "votes_all"), help="readout: reported concentrations")
+ap.add_argument("--mass", default="maps", choices=("maps", "density"), help="readout: masses from the split head's maps (if any) or the density")
+ap.add_argument("--split-head", action="store_true", help="a head for the objects' occupancy by kind (oriented / isotropic)")
+ap.add_argument("--lobe-weight", type=float, default=None, help="entity_train.DENS_LOBE_WEIGHT (the density loss weighted toward lobes)")
 a = ap.parse_args(); dev = "cuda"; stem = a.out.rsplit(".", 1)[0]
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None
 L.DESC_K = 5; L.DESC_NC = 0; TR.REGION_DENSITY = True; ET.REGION_DENSITY = True; TR.set_background_entity(True)
 ET.VOTE_OBJECTS = True; ET.OWN_OBJECTS = True; ET.DENS_SAME_NORM = True
+if a.lobe_weight is not None:
+    ET.DENS_LOBE_WEIGHT = float(a.lobe_weight)
 batch = lambda ts: {k: torch.stack([t[k] for t in ts]) for k in ts[0]}
 
 def build_tests(S0, k):
@@ -55,13 +64,14 @@ def build_tests(S0, k):
 tests = build_tests(1_900_000, max(a.test_per_family, 4)) if a.final else build_tests(900_000, a.test_per_family)
 
 if a.plot_only:
-    ck = torch.load(stem + ".pt", map_location=dev, weights_only=False)
+    ck = torch.load(a.ckpt or stem + ".pt", map_location=dev, weights_only=False)
     net = PopulationNet.from_args(ck["args"]).to(dev); net.load_state_dict(ck["model"]); curves, args, a.tag, a.init = ck["curves"], ck["args"], ck["tag"], ck["init"]
 else:
     ref = torch.load(a.init, map_location=dev, weights_only=False)
     args = {**ref["args"], "region_density": True, "kappa_log": True, "vote_objects": True, "own_objects": True, "dens_same_norm": True}
     args["bg_head"] = bool(args.get("bg_head")) or a.bg_head; args["oprobe"] = bool(args.get("oprobe")) or a.oprobe
     args["obj_head"] = bool(args.get("obj_head")) or a.obj_head
+    args["split_head"] = bool(args.get("split_head")) or a.split_head
     if a.odirect:
         args["odirect"] = int(a.odirect)
     if a.widths:
@@ -85,7 +95,8 @@ else:
             tot, parts = ET.entity_loss(P, T, d, W={"desc": 0.0}, g=torch.Generator(device=dev).manual_seed(97))
             r.setdefault(fam, []).append({"total": float(tot), **{k: float(v) for k, v in parts.items()}})
         net.train(); curves.append(r)
-        print(f"  step {step}: " + " | ".join(f"{f} dens {np.mean([x['density'] for x in v]):.3f}" for f, v in r.items() if f != "step"), flush=True)
+        print(f"  step {step}: " + " | ".join(f"{f} dens {np.mean([x['density'] for x in v]):.3f}" + (f" ori {np.mean([x['split_ori'] for x in v]):.3f}" if "split_ori" in v[0] else "")
+                                              + (f" obj {np.mean([x['obj'] for x in v]):.3f}" if "obj" in v[0] else "") for f, v in r.items() if f != "step"), flush=True)
 
     opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=1e-4); g = torch.Generator(device=dev).manual_seed(0); gc = torch.Generator().manual_seed(0)
     net.train()
@@ -109,7 +120,7 @@ else:
         tot, parts = ET.entity_loss(P, T, dirs, W={"desc": 0.0}, g=g)
         opt.zero_grad(set_to_none=True); tot.backward(); torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0); opt.step()
     torch.save({"model": net.state_dict(), "args": args, "curves": curves, "tag": a.tag, "init": a.init, "families": a.families,
-                "flags": {k: getattr(a, k) for k in ("lr", "lr_final", "batch", "steps", "bg_head", "oprobe", "floor", "obj_head", "widths", "scratch", "sigma_lo", "odirect")}}, stem + ".pt")
+                "flags": {k: getattr(a, k) for k in ("lr", "lr_final", "batch", "steps", "bg_head", "oprobe", "floor", "obj_head", "widths", "scratch", "sigma_lo", "odirect", "split_head", "lobe_weight")}}, stem + ".pt")
 net.eval()
 sph = EI.sphere_dirs(200, dev)
 
@@ -140,7 +151,7 @@ def maps(ph, sigma=2.5):
     tgt = {"mass": t["e_mass"][:, :K].cpu().numpy(), "k": t["e_kappa"][:, :K].cpu().numpy(), "R": t["e_R"][:, :K].cpu().numpy(),
            "bg": t["e_mass"][:, K].cpu().numpy(), "kinds": ph["kinds"]}
     ro = EI.readout(net, ph["image"], pts, sig, sph, floor=a.floor if a.floor >= 0 else None, iso_k=ET.VOTE_KAPPA_MIN,
-                    merge_deg=None if a.no_merge else 15.0)
+                    merge_deg=None if a.no_merge else 15.0, entities=a.entities, axes=a.axes, kappa=a.kappa, mass=a.mass)
     mdl = {k: v.cpu().numpy() for k, v in ro.items()}
     face = torch.minimum(pts, (n - 1) - pts).amin(1).view(n, n).cpu().numpy()
     size = torch.tensor([n - 1.0] * 3, device=dev)
@@ -155,17 +166,32 @@ def oracle(tgt):
     return {"mass": np.where(iso, 0.0, tgt["mass"]), "k": tgt["k"], "R": tgt["R"], "iso": (tgt["mass"] * iso).sum(1), "bg": tgt["bg"], "bgm": tgt["bg"]}
 
 
+def mass_budget(tgt, mdl, face, disc):
+    """Where the model puts the populations' mass (over the scored points, as fractions of the target total): on the
+    matched populations, in unmatched oriented entities ("other"), as isotropic objects where there are none
+    ("iso spurious"), as isotropic objects in all (oriented phantoms: the populations read as isotropic), and the
+    model's object total (oriented + isotropic) against the target's."""
+    m = CA.match_p2(tgt, mdl); valid = (face.reshape(-1) >= CA.FACE_MARGIN) & disc.reshape(-1)
+    T = tgt["mass"][valid]; tot = max(float(T.sum()), 1e-9)
+    out = {"target": tot, "matched": float(m["m"][valid].sum()) / tot, "other": float(m["other"][valid].sum()) / tot,
+           "iso spurious": float(m["iso_spur"][valid].sum()) / tot, "iso": float(mdl["iso"][valid].sum()) / tot,
+           "model total": float((mdl["mass"].sum(1) + mdl["iso"])[valid].sum()) / tot}
+    for k in range(T.shape[1]):
+        out[f"pop {k + 1}"] = float(m["m"][valid, k].sum()) / max(float(T[:, k].sum()), 1e-9)
+    return out
+
+
 def score_set(tests_, sigma, suffix, figure=True):
     """Every held-out phantom the ground truth passes, scored at ``sigma``: the table (OUT{suffix}_acceptance.png / .json)
     and, with ``figure``, the figure (a row per family)."""
-    acc = []; rows = []; dropped = []
+    acc = []; rows = []; dropped = []; budget = []
     for fam, ph in tests_:
         tgt, mdl, face, disc, img = maps(ph, sigma); n = ph["n"]
         orc = CA.evaluate_p2(n, tgt, oracle(tgt), face, disc)
         lab = f"{fam} ({','.join(k[:5] for k in ph['kinds']) or 'none'})"
         if not orc["PASS"]:                                                                      # the truth fails the measurement: unscoreable
             dropped.append((lab, [k.split()[0] for k, v in orc.items() if k != "PASS" and not v[0]])); continue
-        res = CA.evaluate_p2(n, tgt, mdl, face, disc); acc.append((lab, res))
+        res = CA.evaluate_p2(n, tgt, mdl, face, disc); acc.append((lab, res)); budget.append((lab, mass_budget(tgt, mdl, face, disc)))
         if not any(r_[0] == fam for r_ in rows):
             rows.append((fam, ph, tgt, mdl, CA.match_p2(tgt, mdl), disc, img, res))
     npass = sum(r_["PASS"] for _, r_ in acc); st = curves[-1]["step"] if curves else 0
@@ -197,6 +223,12 @@ def score_set(tests_, sigma, suffix, figure=True):
     CA.table_figure(acc, stem + suffix + "_acceptance.png", f"phantom families -- {a.tag}, {st} steps, sigma {sigma}{' (final set)' if 'final' in suffix else ''}: "
                     f"{'PASS' if npass == len(acc) else 'FAIL'} ({npass}/{len(acc)})")
     CA.save_json(acc, stem + suffix + "_acceptance.json")
+    import json
+    json.dump(budget, open(stem + suffix + "_budget.json", "w"), indent=1)
+    for fam in FAMS:                                                                             # the mass budget per family (medians)
+        b = [v for lab, v in budget if lab.startswith(fam + " ") and v["target"] > 1.0]
+        if b:
+            print(f"  budget {fam:6s}: " + " ".join(f"{k} {np.median([x[k] for x in b]):.2f}" for k in ("matched", "other", "iso", "model total")), flush=True)
     print(f"acceptance [{suffix or 'selection'} sigma {sigma}]:", f"{npass}/{len(acc)} |",
           " ; ".join(f"{lab}: " + " ".join(k.split()[0] + ("+" if v[0] else "-") for k, v in r_.items() if k != "PASS") for lab, r_ in acc), flush=True)
 

@@ -237,6 +237,13 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         wt = window_mean(ot, T["e_points"].float(), T["e_sigma"].float())
         parts["obj"] = (torch.log(wo + 0.01) - torch.log(wt + 0.01)).abs().mean()
         total = total + W.get("obj", 1.0) * parts["obj"]
+    if "split" in P and "ori_t" in T:                                                              # the objects by kind: window means at the
+        from .model import window_mean                                                              # queries, log-L1 as the objects' (oriented
+        for c, key in enumerate(("ori_t", "iso_t")):                                               # material; isotropic objects)
+            wp = window_mean(P["split"][:, c].float(), T["e_points"].float(), T["e_sigma"].float())
+            wt = window_mean(T[key].float(), T["e_points"].float(), T["e_sigma"].float())
+            parts["split_" + key[:3]] = (torch.log(wp + 0.01) - torch.log(wt + 0.01)).abs().mean()
+            total = total + W.get("split", 1.0) * parts["split_" + key[:3]]
     if "fraction" in T and "fraction_logit" in P and lat_ok:
         parts["fraction"] = Fn.binary_cross_entropy_with_logits(c(P["fraction_logit"].float()), c(T["fraction"].float())); total = total + W["fraction"] * parts["fraction"]
     if "points" in P and "points_t" in T and lat_ok:

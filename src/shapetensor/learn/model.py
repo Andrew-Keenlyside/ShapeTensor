@@ -114,6 +114,18 @@ class Feats(tuple):
     oe = None
 
 
+class Levels(list):
+    """The direct oriented path's energies: one ``(B, D, Z', Y', X')`` tensor per smoothing level, level ``i`` stored at
+    every ``strides[i]``-th voxel (sample ``j`` is voxel ``j * strides[i]``): smoothed levels need not keep every voxel."""
+    def __init__(self, levels, strides):
+        super().__init__(levels); self.strides = tuple(int(s) for s in strides)
+
+
+#: each level kept at every ``s``-th voxel: (1, 1, 1) exact; (1, 2, 2) halves the memory of the coarse levels at a cost of
+#: up to ~0.19 of the mean density at a few crossing points (mean 3e-4; direct_path_speed.py, 27 Oct) -- for big volumes
+OD_STRIDES = (1, 1, 1)
+
+
 def with_scal(feats, scal) -> Feats:
     f = Feats(tuple(feats)); f.scal = scal; f.oe = getattr(feats, "oe", None); return f
 
@@ -297,8 +309,7 @@ class EntityDecoder(nn.Module):
         od = None
         if getattr(self, "odirect", 0):
             B, Q = points.shape[:2]
-            od = torch.stack([self.od_feats(feats, points[b][:, None].expand(-1, D, -1).reshape(-1, 3), dirs[b].reshape(-1, 3), b).view(Q, D, -1)
-                              for b in range(B)])
+            od = torch.stack([self.od_code(self.od_sample(feats, points[b], b), self.od_weights(dirs[b])) for b in range(B)])   # once per point
         out = self.decode(p[:, :, None].expand(-1, -1, D, -1), Y, r, o, od)
         if self.mass is not None:
             out["m"] = self.mass_of(p)
@@ -319,21 +330,38 @@ class EntityDecoder(nn.Module):
         a scalar per point, apart from the directional density (which then carries only the angular shape)."""
         return Fn.softplus(self.mass(p)[..., 0].float())
 
-    def od_feats(self, feats, pts: torch.Tensor, u: torch.Tensor, b: int = 0, chunk: int = 65536) -> torch.Tensor:
-        """The direct oriented path's code ``(N, 32)`` for item ``b``: the line energies ``feats.oe`` (levels x bank directions)
-        sampled at ``pts (N, 3)`` and interpolated to the directions ``u (N, 3)`` (an axial kernel over the bank), as logs, with
-        the levels' mean (how much any direction stands out)."""
-        E = feats.oe[b:b + 1].float(); L, Dd = E.shape[1], E.shape[2]; Ef = E.reshape(1, L * Dd, *E.shape[-3:])
-        size = torch.tensor(E.shape[-3:], device=pts.device, dtype=torch.float32); out = []
+    def od_sample(self, feats, pts: torch.Tensor, b: int = 0, chunk: int = 65536) -> torch.Tensor:
+        """The bank's energies ``(N, L, Dd)`` (levels x bank directions) for item ``b`` at ``pts (N, 3)`` -- once per point:
+        every direction asked there shares them. ``feats.oe``: a ``(B, L, Dd, Z, Y, X)`` tensor or :class:`Levels`."""
+        oe = feats.oe
+        levels, strides = (list(oe), oe.strides) if isinstance(oe, Levels) else ([oe[:, i] for i in range(oe.shape[1])], (1,) * oe.shape[1])
+        out = []
         for a in range(0, pts.shape[0], chunk):
-            p_, u_ = pts[a:a + chunk].float(), Fn.normalize(u[a:a + chunk].float(), dim=-1); n = p_.shape[0]
-            g = (p_ / (size - 1).clamp_min(1) * 2 - 1).flip(-1).view(1, -1, 1, 1, 3)
-            v = Fn.grid_sample(Ef, g, mode="bilinear", padding_mode="border", align_corners=True)[0, :, :, 0, 0].T.view(n, L, Dd)
-            w = torch.softmax(self.od_k * (u_ @ self.od_dirs.T).abs(), -1)                    # (n, Dd) interpolation weights
-            e = (v * w[:, None]).sum(-1)                                                       # (n, L) energy along u (relative to the mean)
-            x = torch.cat([torch.log(e.clamp_min(1e-3)), torch.log(v.mean(-1).clamp_min(1e-3)).mean(-1, keepdim=True)], -1)
-            out.append(Fn.silu(self.od_net(x.to(self.od_net[0].weight.dtype))))
+            p_ = pts[a:a + chunk].float(); vs = []
+            for E, st in zip(levels, strides):
+                E = E[b:b + 1]; size = torch.tensor(E.shape[-3:], device=pts.device, dtype=torch.float32)
+                g = (p_ / st / (size - 1).clamp_min(1) * 2 - 1).flip(-1).view(1, -1, 1, 1, 3)
+                vs.append(Fn.grid_sample(E.float(), g, mode="bilinear", padding_mode="border", align_corners=True)[0, :, :, 0, 0].T)
+            out.append(torch.stack(vs, 1))
         return torch.cat(out)
+
+    def od_weights(self, u: torch.Tensor) -> torch.Tensor:
+        """The interpolation weights ``(..., Dd)`` from the bank to directions ``u (..., 3)`` (an axial kernel ~ its spacing)."""
+        return torch.softmax(self.od_k * (Fn.normalize(u.float(), dim=-1) @ self.od_dirs.T).abs(), -1)
+
+    def od_code(self, v: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        """The direct path's code ``(N, K, 32)`` from the energies ``v (N, L, Dd)`` and weights ``w (N, K, Dd)`` (or ``(K, Dd)``:
+        the same directions at every point): the energy along each direction per level, as logs, with the levels' mean
+        (how much any direction stands out)."""
+        e = torch.einsum("nld,kd->nkl", v, w) if w.dim() == 2 else torch.einsum("nld,nkd->nkl", v, w)
+        m = torch.log(v.mean(-1).clamp_min(1e-3)).mean(-1, keepdim=True)                          # (N, 1)
+        x = torch.cat([torch.log(e.clamp_min(1e-3)), m[:, None].expand(-1, e.shape[1], -1)], -1)
+        return Fn.silu(self.od_net(x.to(self.od_net[0].weight.dtype)))
+
+    def od_feats(self, feats, pts: torch.Tensor, u: torch.Tensor, b: int = 0, chunk: int = 65536) -> torch.Tensor:
+        """The direct oriented path's code ``(N, 32)`` for item ``b`` at (point, direction) pairs ``pts (N, 3)``, ``u (N, 3)``
+        (:meth:`od_sample` then :meth:`od_code`; where many directions share a point, call those once per point instead)."""
+        return self.od_code(self.od_sample(feats, pts, b, chunk), self.od_weights(u)[:, None])[:, 0]
 
     def decode(self, p: torch.Tensor, Y: torch.Tensor, r: torch.Tensor | None = None, o: torch.Tensor | None = None,
                od: torch.Tensor | None = None) -> dict:
@@ -387,7 +415,7 @@ class PopulationNet(nn.Module):
                  dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False,
                  dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False, oprobe: bool = False,
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
-                 odirect: int = 0):
+                 odirect: int = 0, split_head: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -433,6 +461,10 @@ class PopulationNet(nn.Module):
             # from total - background is a small difference of large numbers (background ~85 % of the window: 2 % error
             # there is 12-37 % on a thin bundle's mass); predicted directly, with a relative loss, it is not
             self.objh = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if obj_head else None
+            # the objects' occupancy split by kind (oriented material, isotropic objects) at every voxel, densities: the
+            # populations' total and the isotropic objects' mass read from place, not as the density's floor less the
+            # background (a 4 % ripple of an 85 % floor is a quarter of a thin bundle's mass; famO 27 Oct)
+            self.splith = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 2, 1)) if split_head else None
             self.region_dec = None
             if region_head and region_dec:                                                      # a small decoder: lattice -> stride 2 -> full,
                 self.region_dec = nn.ModuleDict({                                                # 3x3x3 convolutions at each (shapes, not only
@@ -489,7 +521,7 @@ class PopulationNet(nn.Module):
                    oprobe=bool(args.get("oprobe", False)), dens_log=bool(args.get("dens_log", False)),
                    oprobe_only=bool(args.get("oprobe_only", False)), bg_head=bool(args.get("bg_head", False)),
                    obj_head=bool(args.get("obj_head", False)), oriented=int(args.get("oriented", 0) or 0),
-                   odirect=int(args.get("odirect", 0) or 0)) \
+                   odirect=int(args.get("odirect", 0) or 0), split_head=bool(args.get("split_head", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
@@ -529,19 +561,33 @@ class PopulationNet(nn.Module):
         return (E / (E.mean(1, keepdim=True) + 1e-8) - 1).to(x.dtype)
 
     @torch.no_grad()
-    def direct_levels(self, x: torch.Tensor) -> torch.Tensor:
-        """``(B, 3, D, Z, Y, X)`` the decoder's direct oriented path's input: line energies along the decoder's bank of
-        directions (filters 8 voxels along, 0.6 across), pooled at sigma 2, 4, 6 and *then* divided by their mean over the
-        directions (contrast-free). Pooling before normalising, long filters and a fine bank: at Monte Carlo crossing cores
-        the true axes stand out 1.9x over the median direction and are the two strongest in 7/8 (the true energies: 2.4x,
-        7/8); the first bank (48 directions, 3 along, normalised per voxel) gave 1.1x and 0-2/8 (``bank_check.py``, 27 Oct)."""
-        from ..filters import gaussian
-        E = self.oriented_energy(x[:, :1], sig_par=8.0, sig_perp=0.6, pool=0.0, dirs=self.ent.od_dirs, relative=False).float()
+    def direct_levels(self, x: torch.Tensor, chunk: int = 32, strides=None) -> "Levels":
+        """The decoder's direct oriented path's input (:class:`Levels`: ``(B, D, Z', Y', X')`` per level, float): line
+        energies along the decoder's bank of directions (filters 8 voxels along, 0.6 across), pooled at sigma 2, 4, 6 and
+        *then* divided by their mean over the directions (contrast-free). Pooling before normalising, long filters and a
+        fine bank: at Monte Carlo crossing cores the true axes stand out 1.9x over the median direction and are the two
+        strongest in 7/8 (the true energies: 2.4x, 7/8); the first bank (48 directions, 3 along, normalised per voxel) gave
+        1.1x and 0-2/8 (``bank_check.py``, 27 Oct). Built ``chunk`` directions at a time (the filters and energies of the
+        whole bank at once: ~10 bytes x directions x voxels), each level kept at every ``strides[i]``-th voxel
+        (:data:`OD_STRIDES`)."""
+        from ..filters import gaussian, gaussian_mm
+        strides = tuple(OD_STRIDES if strides is None else strides)
+        xf = x[:, :1].float(); xf = xf - gaussian(xf, 3.0)                                       # high-passed (as oriented_energy's hp)
+        F = torch.fft.fftn(xf, dim=(-3, -2, -1))
+        k = torch.stack(torch.meshgrid(*[torch.fft.fftfreq(n, device=x.device) * 2 * math.pi for n in x.shape[-3:]], indexing="ij"), -1)
+        k2 = (k ** 2).sum(-1); dirs = self.ent.od_dirs; parts = [[] for _ in strides]
+        for c in range(0, dirs.shape[0], chunk):
+            kp2 = (k @ dirs[c:c + chunk].T).movedim(-1, 0) ** 2
+            H = torch.exp(-0.5 * (8.0 ** 2 * kp2 + 0.6 ** 2 * (k2[None] - kp2)))
+            E = torch.fft.ifftn(F * H[None], dim=(-3, -2, -1)).real ** 2                            # (B, chunk, Z, Y, X)
+            for li, (s, st) in enumerate(zip((2.0, 4.0, 6.0), strides)):
+                parts[li].append(gaussian_mm(E, s)[..., ::st, ::st, ::st].contiguous())             # (= gaussian, as matrix products)
+            del E, H
         out = []
-        for s in (2.0, 4.0, 6.0):
-            Ep = gaussian(E, s)
+        for P_ in parts:
+            Ep = torch.cat(P_, 1)
             out.append(Ep / (Ep.mean(1, keepdim=True) + 1e-3 * Ep.mean() + 1e-12))
-        return torch.stack(out, 1).half()
+        return Levels(out, strides)
 
     def features(self, x: torch.Tensor):
         """The three feature levels: stride 1, stride 2 and the stride-4 lattice."""
@@ -582,6 +628,13 @@ class PopulationNet(nn.Module):
         sz = h0.shape[2:]
         up = lambda t: Fn.interpolate(t, size=sz, mode="trilinear", align_corners=False)
         return Fn.softplus(self.objh(torch.cat([h0, up(h1), up(h)], 1))[:, 0].float())
+
+    def split_map(self, h0, h1, h) -> torch.Tensor:
+        """The objects' occupancy by kind ``(B, 2, Z, Y, X)``: oriented material, isotropic objects (densities: crossings
+        count both) (``split_head``)."""
+        sz = h0.shape[2:]
+        up = lambda t: Fn.interpolate(t, size=sz, mode="trilinear", align_corners=False)
+        return Fn.softplus(self.splith(torch.cat([h0, up(h1), up(h)], 1)).float())
 
     def bg_map(self, h0, h1, h) -> torch.Tensor:
         """The background's occupancy ``(B, Z, Y, X)`` in 0-1 (``bg_head``)."""
@@ -626,6 +679,8 @@ class PopulationNet(nn.Module):
                 out["bg"] = self.bg_map(h0, h1, h)
             if getattr(self, "objh", None) is not None:
                 out["obj"] = self.obj_map(h0, h1, h)
+            if getattr(self, "splith", None) is not None:
+                out["split"] = self.split_map(h0, h1, h)
             out["_feats"] = (h0, h1, h)
             return out
         if self.head == "lobes":
