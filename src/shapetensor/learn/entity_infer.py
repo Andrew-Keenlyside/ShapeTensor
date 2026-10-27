@@ -213,9 +213,23 @@ def query_volume(model, x: torch.Tensor, points: torch.Tensor, sigma: torch.Tens
     return res
 
 
+_SYMNB: dict = {}
+
+
 def sym_neighbours(dirs: torch.Tensor, k: int = 8) -> torch.Tensor:
     """``(D, kk)`` neighbour lists of the direction grid made symmetric (k nearest, plus every direction that counts
-    this one among its k nearest), padded with -1."""
+    this one among its k nearest), padded with -1. Cached per grid (it took ~200 host syncs per readout chunk)."""
+    key = (dirs.data_ptr(), tuple(dirs.shape), str(dirs.device), k, float(dirs.sum()))
+    hit = _SYMNB.get(key)
+    if hit is not None:
+        return hit
+    if len(_SYMNB) > 16:
+        _SYMNB.clear()
+    out = _SYMNB[key] = _sym_neighbours(dirs, k)
+    return out
+
+
+def _sym_neighbours(dirs: torch.Tensor, k: int) -> torch.Tensor:
     nb = dir_neighbours(dirs, k); D = dirs.shape[0]
     A = torch.zeros(D, D, dtype=torch.bool, device=dirs.device)
     A[torch.arange(D, device=dirs.device)[:, None].expand(-1, k), nb] = True; A = A | A.T
