@@ -61,3 +61,38 @@ Per crop at 80 um, AUC of oriented mass (structure tensor / overnight / direct-p
 - A "featureless" control: homogeneous regions where the right answer is isotropic / no population.
 - The population model trained on the scene generator (with `--geometry-targets`, the trunk pre-norm and the split head)
   before judging real-data transfer.
+
+## Predominant orientation against the structure tensor (`scripts/learn/real_vs_st.py`)
+
+Same crops; at every grid point the 3-D angle between the structure tensor's line direction (smallest-eigenvalue
+eigenvector; gradient sigma 1, integration sigma 2.5 = the model's window) and (a) the density's peak direction, (b) the
+heaviest line population's axis. Chance: median 60 deg. Median angle (and share within 20 deg) by the structure tensor's
+coherence -- where it is low, the structure tensor has no defined direction:
+
+| 80 um (x4) | all points | coh 0.1-0.2 | coh 0.2-0.3 | coh 0.3-0.5 | coh >= 0.5 |
+|---|---|---|---|---|---|
+| share of points | | 4 % | 14 % | 54 % | 28 % |
+| overnight pilot, density peak | 13 | 36 (23 %) | 23 (43 %) | 12 (72 %) | 10 (78 %) |
+| overnight pilot, heaviest line population | 12 | 35 (25 %) | 22 (45 %) | 11 (76 %) | 9 (84 %) |
+| direct-path pilot, density peak | 13 | 36 (23 %) | 23 (43 %) | 12 (72 %) | 10 (76 %) |
+| generator model, density peak | 18 | 43 (18 %) | 30 (32 %) | 17 (58 %) | 14 (70 %) |
+| generator model, heaviest line population | 11 | 24 (43 %) | 17 (60 %) | 11 (85 %) | 10 (87 %) |
+
+| 20 um (x1) | all points | coh 0.1-0.2 | coh 0.2-0.3 | coh 0.3-0.5 | coh >= 0.5 |
+|---|---|---|---|---|---|
+| share of points | | 13 % | 26 % | 44 % | 16 % |
+| overnight pilot, density peak | 16 | 38 (23 %) | 25 (41 %) | 13 (69 %) | 9 (84 %) |
+| overnight pilot, heaviest line population | 15 | 34 (25 %) | 22 (46 %) | 12 (73 %) | 9 (87 %) |
+| generator model, heaviest line population | 12 | 30 (33 %) | 18 (56 %) | 11 (80 %) | 10 (85 %) |
+
+Per crop (density peak, all points): 10-35 deg at 20 um (S-21-46 the outlier at 35), 10-17 deg at 80 um (generator
+model 14-26).
+
+**Reading.** Where the image is clearly oriented (coherence >= 0.3: 60-82 % of points), the models' predominant
+orientation is within ~10-13 deg (median) of the structure tensor's, 70-87 % within 20 deg -- they read the same
+orientation as the classical estimate. Where the image is weakly oriented the angles approach chance, as they must:
+neither direction is defined there. The two phantom-trained pilots agree with the structure tensor equally; the
+generator model's density peak is a little further off (14-17 deg), but its line populations, where it reports any,
+agree best (10-11 deg). Agreement with the structure tensor is consistency with a classical baseline, not correctness:
+where the two differ at high coherence (13-30 % of those points beyond 20 deg) this test cannot say which is right.
+Figures: `orientation_vs_st_x1.png`, `orientation_vs_st_x4.png`.
