@@ -128,6 +128,19 @@ def smooth1d(x: torch.Tensor, sigma: float) -> torch.Tensor:
     return y[:, 0] if sq else y.view(x.shape[0], x.shape[2], -1).movedim(1, -1)
 
 
+def smooth_noise1d(rng: "Rng", N: int, S: int, sigma: float, C: int | None = None) -> torch.Tensor:
+    """White noise ``(N, S)`` or ``(N, S, C)`` smoothed along ``S`` with unit variance *everywhere*: drawn ``S + 2r`` long
+    and convolved without padding. (28 Oct review: ``smooth1d``'s replicated ends gave the first and last samples 3-12x
+    the variance, so every bundle grown from its centre kinked there -- at the crossing point -- fibres folded back and
+    trees kinked at every branch start.)"""
+    if sigma <= 0.3:
+        return rng.randn(N, S) if C is None else rng.randn(N, S, C)
+    r = int(3 * sigma + 0.5); k = torch.exp(-0.5 * (torch.arange(-r, r + 1, device=rng.device, dtype=torch.float32) / sigma) ** 2)
+    k = k / k.norm()                                                       # white noise in, unit variance out
+    y = Fn.conv1d(rng.randn(N * (C or 1), S + 2 * r)[:, None], k.view(1, 1, -1))[:, 0]
+    return y if C is None else y.view(N, C or 1, S).movedim(1, -1)
+
+
 # ------------------------------------------------------------------------------------------------------------------
 # curves: paths, frames, attribute profiles
 # ------------------------------------------------------------------------------------------------------------------
@@ -138,7 +151,7 @@ def smooth_paths(start: torch.Tensor, d0: torch.Tensor, length: torch.Tensor, S:
     by a smoothed random walk (``curv``: turning per voxel, rad; ``corr``: its correlation length, voxels).
     ``exact_start``: the direction at the start is ``d0`` itself (no first turn)."""
     ds = (length / max(S - 1, 1))[:, None, None]
-    w = smooth1d(rng.randn(start.shape[0], S, 3), corr / max(float(ds.mean()), 1e-3))
+    w = smooth_noise1d(rng, start.shape[0], S, corr / max(float(ds.mean()), 1e-3), 3)
     inc = w * curv[:, None, None] * ds
     d = Fn.normalize(d0[:, None] + torch.cumsum(inc, 1) - (inc[:, :1] if exact_start else 0), dim=-1)
     return start[:, None] + torch.cumsum(d * ds, 1) - d[:, :1] * ds
@@ -195,7 +208,7 @@ def rmf(P: torch.Tensor, T: torch.Tensor, stride: int = 4) -> tuple[torch.Tensor
 def profile(N: int, S: int, base, rel_sd: float, corr_samples: float, rng: Rng) -> torch.Tensor:
     """A smooth positive profile ``(N, S)``: ``base * exp(rel_sd * smooth noise)``."""
     base = base if torch.is_tensor(base) else torch.full((N,), float(base), device=rng.device)
-    return base[:, None] * torch.exp(rel_sd * smooth1d(rng.randn(N, S), corr_samples))
+    return base[:, None] * torch.exp(rel_sd * smooth_noise1d(rng, N, S, corr_samples))
 
 
 def events(N: int, S: int, rate: float, depth: tuple, width: tuple, rng: Rng) -> torch.Tensor:
@@ -300,7 +313,7 @@ class Deform:
         lim = torch.tensor(self.shape, device=dev, dtype=torch.float32) - 1
         self.valid = ((self.src >= -0.5) & (self.src <= lim + 0.5)).all(-1)
         if self._res is not None:                                                                 # the inverse not found: not valid
-            self.valid &= self._res.view(self.shape) < 0.5
+            self.valid &= self._res.view(self.shape) < 0.1                                             # (28 Oct review: 0.5 let a 0.36-voxel miss pass)
         self.F_src = self.forward(self.src.reshape(-1, 3))[1]                                     # F at each voxel's source (once)
         self.st_src = torch.linalg.det(self.F_src).clamp_min(1e-3).pow(1 / 3).view(self.shape)
 
@@ -888,7 +901,7 @@ class Scene:
         if rng.p(0.15):                                                     # angular (square-ish or diamond-ish) sections
             kw["sexp"] = torch.full_like(rad, rng.lu(0.8, 6.0))
         if rng.p(0.15):                                                     # ribbons
-            kw["flat"] = torch.full_like(rad, rng.lu(0.25, 0.8)); kw["phi"] = smooth1d(rng.randn(N, S), 20) * 0.3
+            kw["flat"] = torch.full_like(rad, rng.lu(0.25, 0.8)); kw["phi"] = smooth_noise1d(rng, N, S, 20) * 0.3
         return rad, con, kw
 
     def bundle(self, cross_with: Curves | None = None, mode: str = "angled", axis=None, centre=None, radius=None, curv=None, fibre: dict | None = None,
@@ -929,7 +942,8 @@ class Scene:
                                                                                                                      # DiSCo's ~20 deg per 15 um)
         s = torch.arange(S, device=self.device, dtype=torch.float32) / (S - 1)
         fan = fan if fan is not None else (r.u(0.3, 1.5) if (mode == "fanning" or r.p(P_FAN)) else 0.0)
-        Rs = Rb * (1 + fan * torch.relu(s - 0.5) * 2)                       # fanning: the bundle widens past its middle
+        Rs = Rb * (1 + fan * 0.1 * Fn.softplus((s - 0.5) / 0.05))            # fanning: the bundle widens past its middle (a smooth
+                                                                            # knee: edge fibres turned by up to 16 deg at the centre)
         contrast = self.contrast() if contrast is None else float(contrast); bid = int(self.ids(1, Rb)[0])
         side = None
         if rf >= 0.45:                                                      # resolved fibres
@@ -956,7 +970,7 @@ class Scene:
             tau = r.u(-0.03, 0.03); psi = tau * s * Lc
             amp = fibre.get("disp", r.u(0.3, 1.5) if FB.RELAX else 0.25)        # with the relaxation fibres may wander and intertwine;
             wmax = (30 * H) ** 2 / (4.9 * max(rf, 0.5) * Rb)                    # without it, within half a spacing: no overlaps; a
-            disp = min(amp * sp, wmax) * smooth1d(r.randn(N, S, 2), 30)         # fibre bends no tighter than ~4 radii (rms; 28 Oct: a
+            disp = min(amp * sp, wmax) * smooth_noise1d(r, N, S, 30, 2)         # fibre bends no tighter than ~4 radii (rms; 28 Oct: a
                                                                                 # fibre as wide as its bundle zig-zagged, folding its section)
             oo = o[:, None] + disp
             ox = oo[..., 0] * torch.cos(psi) - oo[..., 1] * torch.sin(psi); oy = oo[..., 0] * torch.sin(psi) + oo[..., 1] * torch.cos(psi)
@@ -1011,11 +1025,11 @@ class Scene:
                 xi = torch.exp(r.u(0.15, 0.5) * r.randn(N)); xi = xi / xi.mean()
                 dens = (beta * phi_ / max(fill, 1e-3) * xi).clamp(0.02, 1.0)
                 turn, lam = math.radians(r.lu(2.0, 20.0)), r.lu(6.0, 30.0)    # strand tortuosity (rms turn) over a correlation length (voxels)
-                disp = (turn * lam / Rb) * smooth1d(r.randn(N, S, 2), lam / H)
+                disp = (turn * lam / Rb) * smooth_noise1d(r, N, S, lam / H, 2)
                 T_ = tangents(Pc); e1, e2 = rmf(Pc, T_)
                 oo = o[:, None] + disp
                 P = Pc + Rs[None, :, None] * (oo[..., :1] * e1 + oo[..., 1:] * e2)
-                rad = torch.tensor(R_, dtype=torch.float32, device=self.device)[:, None] * torch.exp(0.15 * smooth1d(r.randn(N, S), lam / H))
+                rad = torch.tensor(R_, dtype=torch.float32, device=self.device)[:, None] * torch.exp(0.15 * smooth_noise1d(r, N, S, lam / H))
                 curves.append(curves_like(P, rad, r, obj=torch.full((N,), bid, device=self.device), seg=torch.full((N,), bid, device=self.device),
                                           contrast=contrast, density=dens, fibre_r=torch.full((N,), rf, device=self.device)))
                 tex = {"texture": round(beta, 2), "strands": N, "strand_vox": round(rs, 2), "strand_turn_deg": round(math.degrees(turn), 1)}
@@ -1051,12 +1065,14 @@ class Scene:
         n = n / n.norm(); r = self.r
         rfm = max(getattr(ga, "rf", 0.5), getattr(gb, "rf", 0.5))
         w = r.u(3, 10) * 2 * rfm; gap = 2.2 * rfm
-        mA = Fn.normalize(torch.linalg.cross(n, tA), dim=0); mB = Fn.normalize(torch.linalg.cross(n, dB), dim=0)
-        for g, parity, m_other, R_other in ((ga, 0, mB, gb.Rb), (gb, 1, mA, ga.Rb)):
-            for c in g.curves:
+        for g, parity, g_other, R_other in ((ga, 0, gb, gb.Rb), (gb, 1, ga, ga.Rb)):
+            cl = g_other.centreline.P[0, ::4] - P0                            # the other bundle's actual centreline (28 Oct review:
+            cl = cl - (cl @ n)[:, None] * n                                  # its straight axis put a meandering bundle's crossing
+            for c in g.curves:                                               # elsewhere: 12-13 % of the voxels shared)
                 rel = c.P - P0
                 h = rel @ n
-                dist = (rel @ m_other).abs()                                 # in-plane distance from the other bundle's axis
+                q = rel - h[..., None] * n                                   # in-plane distance from the other bundle's centreline
+                dist = (q[:, :, None, :] - cl[None, None]).norm(dim=-1).amin(-1)
                 taper = max(2.0 * w, 0.5 * R_other)
                 wt = ((R_other + rfm + taper - dist) / taper).clamp(0, 1)
                 wt = wt * wt * (3 - 2 * wt)                                  # smoothstep
@@ -1183,7 +1199,7 @@ class Scene:
         a, b = pts[e[:, 0]], pts[e[:, 1]]; L = (b - a).norm(dim=1)
         S = max(8, int(math.ceil(float(L.max()) / H)))
         s = torch.linspace(0, 1, S, device=self.device)[None, :, None]
-        wob = smooth1d(r.randn(e.shape[0], S, 3), S / 4) * (0.08 * L[:, None, None]) * torch.sin(math.pi * s)
+        wob = smooth_noise1d(r, e.shape[0], S, S / 4, 3) * (0.08 * L[:, None, None]) * torch.sin(math.pi * s)
         P = a[:, None] + (b - a)[:, None] * s + wob
         rad = (rc * torch.exp(0.15 * r.randn(e.shape[0])))[:, None].expand(-1, S).clone()
         nid = int(self.ids(1, rc)[0]); contrast = self.contrast()
@@ -2036,6 +2052,7 @@ class Scene:
             if Cs:
                 Cc = torch.cat(Cs); Tt = torch.cat(Ts); n = Cc.shape[0]; el = r.lu(1.2, 2.0)
                 e1_ = Fn.normalize(torch.linalg.cross(Tt, r.unit()[None].expand(n, 3)), dim=-1); e2_ = torch.linalg.cross(Tt, e1_)
+                Cc = Cc + e1_ * (rc * r.u(1.0, 2.0) + 0.5)                                          # beside the fibre, not on its path
                 A = torch.stack([e1_ * rc, e2_ * rc, Tt * rc * el], -1)                             # long axis along the fibres
                 gc = self._solids(Cc, A, "cell rows", self.ids(n, rc))
                 if gc is not None:

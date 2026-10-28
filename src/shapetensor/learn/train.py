@@ -44,7 +44,7 @@ HALF = ("slots", "mass", "fraction", "classes", "size")
 QKEYS = ("q_points", "q_sigma", "q_sh", "sh_t")
 LKEYS = ("identity_t", "points_t", "voxel", "fraction")    # the lobe model's extra targets
 EKEYS = ("e_points", "e_sigma", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa", "e_gnode", "region_t", "iface_t", "bg_t", "e_bg",
-         "ori_t", "iso_t")   # the entity model's
+         "ori_t", "iso_t", "e_ovis")   # the entity model's
 HEAD = "slots"                     # "slots" | "lobes" (set by train())
 DESC_KEY = "descriptors"           # the drawn descriptors the descriptor densities use ("descriptors5": the scenes' five)
 SH_EXACT = 0                       # > 0: the SH head's lattice target from the exact per-voxel density to this order
@@ -207,6 +207,8 @@ NOT_OBJECT = ("isotropic", "interface")
 #: the region target a density (the sum of the populations' visible occupancies, crossings counting both) rather than
 #: their union clipped at one -- with the targets' populations no longer sharing the voxel (generator.TARGETS_BUDGET)
 REGION_DENSITY = True
+OVIS_TARGETS = True                # entities: the orientation targets' visibility measured on the acquired image at each query
+                                   # (``entities.orientation_visibility``; 28 Oct review): an erased lobe asks for a flat density
 #: the entity tensors' dispersion floor ``T' = c T + (1 - c)(I - T) / 2`` (trace 1; isotropic unchanged): straight objects
 #: gave kappa at the fit's cap (600) -- delta lobes no image shows and the density basis (order 16) cannot draw; 0.94
 #: caps a line near kappa 17, as the phantoms' fibres. None: off (2026-10-27)
@@ -322,9 +324,13 @@ def entity_queries(s, d: dict, size: int, seed: int, device, points: torch.Tenso
         Rf, Kf = bfit(T[live].double()); R[live], Kp[live] = Rf.float(), Kf.float()
     bg_g = torch.tensor([tree.n + j for j, k in enumerate(dense) if s.layers[k].role == "isotropic"] or [-2], device=device)
     e_bg = (gnode[..., None] == bg_g).any(-1) & (e_node >= 0)                                          # the background's entity (no object)
-    return {"e_points": pts, "e_sigma": sig, "e_node": e_node.int(), "e_mass": mass.half(), "e_vis": evis.half(),
-            "e_T6": T6.half(), "e_desc": desc.half(), "e_anc": e_anc, "e_n": torch.tensor(U.numel() + nd, device=device),
-            "e_R": R.float(), "e_kappa": Kp.float(), "e_gnode": torch.where(e_node >= 0, gnode, torch.full_like(gnode, -1)), "e_bg": e_bg}
+    out = {"e_points": pts, "e_sigma": sig, "e_node": e_node.int(), "e_mass": mass.half(), "e_vis": evis.half(),
+           "e_T6": T6.half(), "e_desc": desc.half(), "e_anc": e_anc, "e_n": torch.tensor(U.numel() + nd, device=device),
+           "e_R": R.float(), "e_kappa": Kp.float(), "e_gnode": torch.where(e_node >= 0, gnode, torch.full_like(gnode, -1)), "e_bg": e_bg}
+    if OVIS_TARGETS and "image" in d:
+        from .entities import orientation_visibility
+        out["e_ovis"] = orientation_visibility(d["image"].float() / 255, pts, sig, R, Kp, (mass * evis).clamp_min(0) * live).half()
+    return out
 
 
 ROUTES = 0.0                       # > 0: batch-time contrast routes (learn/augment.py) at this strength, a fresh draw each use
@@ -340,7 +346,7 @@ def stack(pairs, g=None, aug: bool = True):
     from .augment import contrast_route
     imgs, imgs2, tgts = [], [], []
     for img, t in pairs:
-        t = {k: (v.float() if k in HALF or k in ("q_sh", "sh_t", "points_t", "e_mass", "e_vis", "e_T6", "e_desc", "region_t", "iface_t", "bg_t", "ori_t", "iso_t") else
+        t = {k: (v.float() if k in HALF or k in ("q_sh", "sh_t", "points_t", "e_mass", "e_vis", "e_T6", "e_desc", "region_t", "iface_t", "bg_t", "ori_t", "iso_t", "e_ovis") else
                  v.long() if k in ("kind", "layer", "identity_t", "e_node", "e_anc") else v) for k, v in t.items()}
         x = img.float() / 255.0
         if aug:
@@ -1042,7 +1048,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    ray: bool = False, e_cross: float = 0.0, region_density: bool = True, kappa_log: bool = False, vote_objects: bool = False,
                    dens_same_norm: bool = False, own_objects: bool = False, bg_head: bool = False, orient_from_texture: bool = True,
                    obj_head: bool = False, mc_fibres: bool = False, oriented: int = 0, geometry_targets: bool = False, block_norm: int = 1,
-                   odirect: int = 0, od_sigmas: list | None = None, split_head: bool = False, mass_vote: bool = False, overfit: int = 0):
+                   odirect: int = 0, od_sigmas: list | None = None, split_head: bool = False, mass_vote: bool = False, overfit: int = 0,
+                   init_reset: str = "", ovis_targets: bool = True, od_norm: bool = False):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -1064,8 +1071,10 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     from . import lobe_train as LT
     from . import losses as _losses
     from .model import poincare_dist
-    global HEAD, DESC_KEY, SH_EXACT, DESC_LMAX, QUERY, CACHE, ROUTES, VIEWS, READ_KEEP
-    READ_KEEP = float(read_keep); set_background_entity(background_entity)
+    global HEAD, DESC_KEY, SH_EXACT, DESC_LMAX, QUERY, CACHE, ROUTES, VIEWS, READ_KEEP, REGION_DENSITY, OVIS_TARGETS
+    READ_KEEP = float(read_keep); set_background_entity(background_entity); OVIS_TARGETS = bool(ovis_targets)
+    REGION_DENSITY = bool(region_density); ET.REGION_DENSITY = REGION_DENSITY                          # (28 Oct review: was set in train_lobes only, so
+                                                                                                      # the region, a density target, was trained with BCE)
     rank, world, local = DF.init_distributed(device)
     if str(device).startswith("cuda"):
         device = f"cuda:{local}"; torch.cuda.set_device(device)
@@ -1118,7 +1127,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 z_vote=bool(z_vote), dir_sh=int(dir_sh), background_entity=bool(background_entity), ray=bool(ray),
                 region_density=bool(region_density), kappa_log=bool(kappa_log), vote_objects=bool(vote_objects), dens_same_norm=bool(dens_same_norm), own_objects=bool(own_objects), bg_head=bool(bg_head), orient_from_texture=bool(orient_from_texture), obj_head=bool(obj_head),
                 block_norm=int(block_norm), odirect=int(odirect), od_sigmas=list(od_sigmas) if od_sigmas else None, split_head=bool(split_head),
-                mass_vote=bool(mass_vote),
+                mass_vote=bool(mass_vote), od_norm=bool(od_norm), ovis_targets=bool(ovis_targets),
                 mc_fibres=bool(mc_fibres), oriented=int(oriented), geometry_targets=bool(geometry_targets))
     skipped = {}                                                                                   # non-finite steps skipped
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
@@ -1131,13 +1140,24 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
         resume = str(outd / "model.pt") if (outd / "model.pt").exists() else None
     if init and not resume:
         ick = torch.load(init, map_location=device, weights_only=False)
-        DF.load_partial(model, ick["model"], log)
+        isd = ick["model"]
+        if init_reset:                                                                               # heads left at their fresh initialisation
+            pre = [p.strip() for p in init_reset.split(",") if p.strip()]                            # (28 Oct review: the pilot's lattice ODF head
+            hit = lambda k: any(k == p or k.startswith(p + ".") or ("." + p + ".") in k for p in pre)   # was 93 % of the warm start's gradient)
+            drop = [k for k in isd if hit(k)]; isd = {k: v for k, v in isd.items() if k not in drop}
+            own = model.state_dict()
+            with torch.no_grad():
+                for k in drop:                                                                       # at zero: the head predicts nothing, its
+                    if k in own:                                                                     # loss starts at its floor (a random head's
+                        own[k].zero_()                                                               # lattice ODF loss was 10-19 in a dry run)
+            log(f"init: {len(drop)} tensors at zero ({', '.join(drop[:6])}{', ...' if len(drop) > 6 else ''})")
+        DF.load_partial(model, isd, log)
         if kappa_log and not (ick.get("args") or {}).get("kappa_log"):                               # a softplus checkpoint's kappa rows
             model.ent.reset_kappa(); log("kappa outputs restarted in log space")
     if resume:
         ck = torch.load(resume, map_location=device)
         model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); start = ck["step"]; level["v"] = ck.get("level", level["v"])
-        log(f"resumed at step {start} (level {level['v']:.2f})")
+        log(f"resumed at step {start} (level {level['v']:.2f}){'; --init ignored' if init else ''}")
     if channels_last:
         model = model.to(memory_format=torch.channels_last_3d)
     fwd = torch.compile(model) if compile_model else model
@@ -1153,18 +1173,25 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     cpu = None
     if cpu_workers > 0:
         state = {"HEAD": HEAD, "DESC_KEY": DESC_KEY, "SH_EXACT": SH_EXACT, "DESC_LMAX": DESC_LMAX, "QUERY": QUERY, "CACHE": None,
-                 "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC, "ENTITY": dict(ENTITY), "READ_KEEP": READ_KEEP, "NOT_ENTITY": NOT_ENTITY, "REGION_DENSITY": REGION_DENSITY,
+                 "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC, "ENTITY": dict(ENTITY), "READ_KEEP": READ_KEEP, "NOT_ENTITY": NOT_ENTITY, "REGION_DENSITY": REGION_DENSITY, "OVIS_TARGETS": OVIS_TARGETS,
                  "GN.ORIENT_FROM_TEXTURE": bool(orient_from_texture), "GN.TARGETS_FROM_GEOMETRY": bool(geometry_targets), "ENTITY_DISPERSION": ENTITY_DISPERSION,
                  "FB.PACKING": _fb.PACKING, "FB.RELAX": _fb.RELAX}
         cpu = DF.CpuWorkers(cpu_workers, size, buf.next + 90_000_000, cfg, state, threads=cpu_threads)
     pbuf = ET.EntityPairBuffer(pairs, size, "cpu", LT.difficulty_gen(level["v"], base), seed0=60_000_000 + rank * 1_000_000 + start,
-                               out_device=device, n0=2).start_async() if pairs else None             # drawn on the CPU, in a thread (see EntityPairBuffer)
-    val = []
+                               out_device=device, n0=2, strength=strength(start)).start_async() if pairs else None   # drawn on the CPU, in a thread
+    val = []                                                                                         # (see EntityPairBuffer)
+    def make_val(i):                                                                                 # on a shared card an OOM here lost the run
+        for t_ in range(4):                                                                          # before its first step (28 Oct): retried
+            try:
+                return make(10_000_000 + i, size, device, strength1, {"scene": {**LT.difficulty_gen(1.0, base), "crops_per_scene": 1}})
+            except torch.OutOfMemoryError:
+                if t_ == 3:
+                    raise
+                torch.cuda.empty_cache(); log(f"val crop {i}: GPU out of memory, retrying in 60 s"); time.sleep(60)
     if overfit and main:
         val = list(buf.items[:val_n]); torch.save([(x_.cpu() if torch.is_tensor(x_) else x_, {k: v.cpu() if torch.is_tensor(v) else v for k, v in t_.items()}) for x_, t_ in buf.items], outd / "overfit_items.pt")
     elif main and not benchmark:
-        val = [augment(*make(10_000_000 + i, size, device, strength1, {"scene": {**LT.difficulty_gen(1.0, base), "crops_per_scene": 1}}), torch.Generator().manual_seed(i))
-               for i in range(val_n)]
+        val = [augment(*make_val(i), torch.Generator().manual_seed(i)) for i in range(val_n)]
     def evaluate():
         model.eval(); acc = {}
         gv = torch.Generator(device=device).manual_seed(123) if str(device).startswith("cuda") else torch.Generator().manual_seed(123)
@@ -1196,7 +1223,10 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     ramp = lambda s_: 1.0 if where_first <= 0 else min(1.0, max(0.0, (s_ - where_first) / where_first))
     def which_w(s_):                                                                                 # the "which way" losses, ramped
         a_ = ramp(s_)
-        return None if a_ >= 1.0 else {k: ET.ENT_WEIGHTS.get(k, 0.2) * a_ for k in WHICH}
+        w_ = {} if a_ >= 1.0 else {k: ET.ENT_WEIGHTS.get(k, 0.2) * a_ for k in WHICH}
+        if init and s_ < warmup:                                                                     # a warm start: the lattice ODF loss, far off on
+            w_["overall"] = ET.ENT_WEIGHTS["overall"] * s_ / max(warmup, 1)                          # new targets, ramped in so it cannot own the
+        return w_ or None                                                                            # clipped gradient (28 Oct review: 93 % of it)
     end = min(steps, start + benchmark) if benchmark else steps
     for step in range(start, end):
         if bench is not None:
@@ -1259,6 +1289,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
         cfg["strength"] = strength(step)
         if cpu is not None and step % 25 == 0:
             cpu.update(strength=cfg["strength"])
+        if pbuf is not None:
+            pbuf.strength = cfg["strength"]                                                           # the pairs follow the curriculum too
         new = (prod.take(refresh) if prod is not None else []) + (cpu.take(refresh, device) if cpu is not None else [])
         if prod is None and cpu is None:
             buf.refresh(refresh, g, strength(step))
@@ -1323,6 +1355,7 @@ def main():
     ap.add_argument("--refresh", type=int, default=1); ap.add_argument("--lr", type=float, default=3e-4); ap.add_argument("--margin", type=int, default=4)
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
+    ap.add_argument("--init-reset", default="", help="warm start: comma-separated heads left fresh, e.g. total (the lattice ODF head)")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
     ap.add_argument("--axis-head", action="store_true", help="a committed axis output per slot and for the mixture (axis cost: target anisotropy x (1 - cos^2); review 8)")
     ap.add_argument("--sh-loss", default="batchnorm", choices=("batchnorm", "decoupled"), help="density loss: per-order error over the batch's energy, or magnitude + target-weighted angle per order over running energies (order 2 first)")
@@ -1371,6 +1404,8 @@ def main():
     ap.add_argument("--block-norm", type=int, default=1, help="entities: the trunk's residual blocks read per-voxel normalised features (1; 2 also a normalised update; "
                                                                "0: off -- the from-scratch trunk blew up without it, 27 Oct)")
     ap.add_argument("--odirect", type=int, default=0, help="entities: the decoder's direct oriented path with this many bank directions (e.g. 256)")
+    ap.add_argument("--od-norm", action="store_true", help="entities: the direct path also sees each level's energy along u relative to the strongest direction at the point")
+    ap.add_argument("--no-ovis-targets", action="store_true", help="entities: the density targets at the generator's visibility, not the image's (entities.orientation_visibility)")
     ap.add_argument("--od-sigmas", type=float, nargs="+", default=None, help="entities: the direct path's pooling levels (e.g. 2 4 6 8)")
     ap.add_argument("--split-head", action="store_true", help="entities: a head for the objects' occupancy by kind (oriented / isotropic; targets ori_t / iso_t)")
     ap.add_argument("--mass-vote", action="store_true", help="entities: a per-direction vote for the owner's mass")
@@ -1426,8 +1461,8 @@ def main():
                        region_dec=a.region_dec, where_first=a.where_first, z_vote=a.z_vote, dir_sh=a.dir_sh,
                        background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, region_density=not a.no_region_density,
                        kappa_log=a.kappa_log, vote_objects=a.vote_objects, dens_same_norm=a.dens_same_norm, own_objects=a.own_objects, bg_head=a.bg_head, orient_from_texture=not a.orient_from_contrast, obj_head=a.obj_head,
-                       block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote,
-                       mc_fibres=a.mc_fibres, oriented=a.oriented, geometry_targets=a.geometry_targets, overfit=a.overfit)
+                       block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote, od_norm=a.od_norm, ovis_targets=not a.no_ovis_targets,
+                       mc_fibres=a.mc_fibres, oriented=a.oriented, geometry_targets=a.geometry_targets, overfit=a.overfit, init_reset=a.init_reset)
         return
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,

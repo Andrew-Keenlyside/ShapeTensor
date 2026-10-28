@@ -118,7 +118,10 @@ def test_entity_loss_is_small_for_the_targets_themselves():
     R = torch.gather(T["e_R"][:, :, None].expand(-1, -1, D, -1, -1, -1), 3, owner[..., None, None, None].expand(-1, -1, -1, 1, 3, 3))[..., 0, :, :]
     k = torch.gather(T["e_kappa"][:, :, None].expand(-1, -1, D, -1, -1), 3, owner[..., None, None].expand(-1, -1, -1, 1, 2))[..., 0, :]
     B, Q = dirs.shape[:2]
-    P = {"ent": {"f": contrib.sum(-1), "R": R, "kappa": k, "z": torch.zeros(B, Q, D, 4, device=DEV), "desc": torch.zeros(B, Q, D, 5, device=DEV)}}
+    f = contrib.sum(-1)
+    if "e_ovis" in T:                                                                         # the density target as the loss forms it: an
+        v = T["e_ovis"].float()[..., None]; f = v * f + (1 - v) * mass.sum(-1)[..., None]       # invisible orientation asks for flat (28 Oct)
+    P = {"ent": {"f": f, "R": R, "kappa": k, "z": torch.zeros(B, Q, D, 4, device=DEV), "desc": torch.zeros(B, Q, D, 5, device=DEV)}}
     _, parts = ET.entity_loss(P, T, dirs, g=g)
     assert float(parts["density"]) < 1e-5
     if "vote" in parts:

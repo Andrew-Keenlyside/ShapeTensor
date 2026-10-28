@@ -198,7 +198,7 @@ class EntityDecoder(nn.Module):
     def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8, unc: bool = False, mass_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False,
                  kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0,
-                 od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False):
+                 od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -241,9 +241,14 @@ class EntityDecoder(nn.Module):
         # that along u around it -- the ratio cancels each population's contrast (energy ~ contrast^2 x occupancy): at
         # crossing cores the brighter bundle took the density (direct-path pilot, 27 Oct); the classical ratio of ratios
         # A/B with sigma 2 over 8 put the mass ratio's median log error at 0.25 against 0.45 (ctx_check, 16 crossings)
+        # ``od_norm``: each level's energy along u relative to the strongest direction at the point as well (28 Oct review:
+        # the code saw only the energy along u, never the point's angular context -- fitted to convergence on readable
+        # crops the path beat flat by 5 %, with these features 9 %; the levels' mean is ~0 since the energies are
+        # already normalised per level)
         self.odirect = int(odirect); self.od_sigmas = tuple(float(x) for x in od_sigmas); self.od_lv = len(self.od_sigmas)
+        self.od_norm = bool(od_norm)
         if self.odirect:
-            self.od_net = nn.Sequential(nn.Linear(self.od_lv + 1, 64), nn.SiLU(), nn.Linear(64, 32))
+            self.od_net = nn.Sequential(nn.Linear(self.od_lv * (2 if self.od_norm else 1) + 1, 64), nn.SiLU(), nn.Linear(64, 32))
             self.od_dens = nn.Linear(32, 1); nn.init.zeros_(self.od_dens.weight); nn.init.zeros_(self.od_dens.bias)
             i = torch.arange(self.odirect, dtype=torch.float64) + 0.5; zc = 1 - i / self.odirect; rc = torch.sqrt(1 - zc ** 2)
             ph = math.pi * (3 - math.sqrt(5)) * i
@@ -424,7 +429,10 @@ class EntityDecoder(nn.Module):
             v, w = v.float(), w.float()
             e = torch.einsum("nld,kd->nkl", v, w) if w.dim() == 2 else torch.einsum("nld,nkd->nkl", v, w)
             m = torch.log(v.mean(-1).clamp_min(1e-3)).mean(-1, keepdim=True)                      # (N, 1)
-            x = torch.cat([torch.log(e.clamp_min(1e-3)), m[:, None].expand(-1, e.shape[1], -1)], -1)
+            le = torch.log(e.clamp_min(1e-3))
+            x = torch.cat([le, m[:, None].expand(-1, e.shape[1], -1)], -1)
+            if getattr(self, "od_norm", False):                                                  # relative to the point's strongest direction
+                x = torch.cat([x, le - torch.log(v.amax(-1).clamp_min(1e-3))[:, None]], -1)
         if pairs is not None:                                                                   # only these (point, direction) pairs
             x = x[pairs]
         return Fn.silu(self.od_net(x.to(self.od_net[0].weight.dtype)))
@@ -491,7 +499,8 @@ class PopulationNet(nn.Module):
                  dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False,
                  dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False, oprobe: bool = False,
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
-                 odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0):
+                 odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0,
+                 od_norm: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -529,7 +538,7 @@ class PopulationNet(nn.Module):
                                      mass_head=bool(mass_head) and not mass_region, dens_sh=bool(dens_sh), dens_mlp=bool(dens_mlp),
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
                                      oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect),
-                                     od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote))
+                                     od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote), od_norm=bool(od_norm))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             # the background's occupancy (the isotropic remainder) at every voxel: the density's floor is background plus
@@ -603,7 +612,7 @@ class PopulationNet(nn.Module):
                    obj_head=bool(args.get("obj_head", False)), oriented=int(args.get("oriented", 0) or 0),
                    odirect=int(args.get("odirect", 0) or 0), split_head=bool(args.get("split_head", False)),
                    od_sigmas=tuple(args.get("od_sigmas") or (2.0, 4.0, 6.0)), mass_vote=bool(args.get("mass_vote", False)),
-                   block_norm=int(args.get("block_norm", 0) or 0)) \
+                   block_norm=int(args.get("block_norm", 0) or 0), od_norm=bool(args.get("od_norm", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":

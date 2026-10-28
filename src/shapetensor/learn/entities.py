@@ -364,3 +364,41 @@ def _vis_at(vis: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
     scale = torch.tensor([2.0 / max(Z - 1, 1), 2.0 / max(Y - 1, 1), 2.0 / max(X - 1, 1)], device=points.device)
     g = (points * scale - 1.0).flip(-1).view(1, -1, 1, 1, 3)
     return torch.nn.functional.grid_sample(vis.float()[None], g, align_corners=True, padding_mode="border")[0, :, :, 0, 0].T
+
+
+OVIS_ANGLE = (10.0, 40.0)           # orientation visibility: 1 within 10 deg of the target's axis, 0 beyond 40
+
+
+def orientation_visibility(img: torch.Tensor, pts: torch.Tensor, sig: torch.Tensor, R: torch.Tensor, kappa: torch.Tensor,
+                           mass: torch.Tensor, angle=None) -> torch.Tensor:
+    """How far the acquired image ``img (Z, Y, X)`` shows each query's orientation target, ``(Q,)`` in 0-1: the structure
+    tensor in the query's own window (gradients at sigma 1, the Gaussian-window mean of their products at ``sig``)
+    against the dominant line entity's axis (``R[..., 2]`` of the heaviest entity with ``kappa2 >= 2``) -- a line's axis
+    is the tensor's weakest direction; at a crossing core (a second line entity at half the first's mass or more, at
+    least ~17 degrees from it) the two axes' plane normal. 1 within ``angle[0]`` degrees, 0 beyond ``angle[1]``; 1 where
+    no entity is a line. (28 Oct review: the generator's own orientation visibility was 0.7-1 whether or not a classical
+    reader could recover the axis -- it could on 15 % of oriented queries at full strength -- so the targets asked for
+    sharp lobes the image did not carry, and under the log-L1 shape loss the flat density was the optimum.)"""
+    from ..filters import gaussian
+    from .model import window_mean
+    angle = angle or OVIS_ANGLE
+    x = img.float(); dev = pts.device; Q = pts.shape[0]
+    gz = gaussian(x, (1.0,) * 3, order=(1, 0, 0)); gy = gaussian(x, (1.0,) * 3, order=(0, 1, 0)); gx = gaussian(x, (1.0,) * 3, order=(0, 0, 1))
+    pr = torch.stack([gz * gz, gy * gy, gx * gx, gz * gy, gz * gx, gy * gx])                      # (6, Z, Y, X)
+    j6 = window_mean(pr, pts[None].expand(6, -1, -1).contiguous(), sig[None].expand(6, -1).contiguous()).T   # (Q, 6)
+    M = torch.stack([torch.stack([j6[:, 0], j6[:, 3], j6[:, 4]], -1), torch.stack([j6[:, 3], j6[:, 1], j6[:, 5]], -1),
+                     torch.stack([j6[:, 4], j6[:, 5], j6[:, 2]], -1)], 1)
+    _, V = torch.linalg.eigh(M.double() + 1e-12 * torch.eye(3, dtype=torch.float64, device=dev))
+    weak = V[..., :, 0].float()                                                                    # the weakest direction: a line's axis
+    mo = mass.float() * (kappa[..., 1] >= 2.0)                                                    # the line entities
+    srt, o = mo.sort(1, descending=True); ar = torch.arange(Q, device=dev)
+    ax1 = R[ar, o[:, 0]][:, :, 2]
+    if mo.shape[1] > 1:
+        ax2 = R[ar, o[:, 1]][:, :, 2]; nrm = torch.linalg.cross(ax1, ax2)
+        core = (srt[:, 1] >= 0.5 * srt[:, 0]) & (srt[:, 1] > 0.02) & (nrm.norm(dim=-1) > 0.3)
+        ref = torch.where(core[:, None], torch.nn.functional.normalize(nrm, dim=-1), ax1)
+    else:
+        ref = ax1
+    ang = torch.rad2deg(torch.acos((weak * ref).sum(-1).abs().clamp(max=1)))
+    v = (1 - (ang - angle[0]) / (angle[1] - angle[0])).clamp(0, 1)
+    return torch.where(srt[:, 0] > 0.02, v, torch.ones_like(v))

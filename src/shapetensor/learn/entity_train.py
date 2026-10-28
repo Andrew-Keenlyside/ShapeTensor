@@ -148,6 +148,9 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
     rm = rho.mean(-1, keepdim=True)                                                                # each query's mean density (its mass)
     n_uni = dirs.shape[2] - int(round(dirs.shape[2] * 0.5))                                        # sample_dirs: the uniform directions first
     m_t = mass.sum(-1)
+    if "e_ovis" in T:                                                                              # the orientation's visibility in the image (28 Oct):
+        v = T["e_ovis"].float()[..., None]                                                         # an erased lobe asks for flat at the same mass
+        rho_d = v * rho_d + (1 - v) * m_t[..., None]
     if "m" in ent:                                                                                 # where and which way apart: the mass from its own
         parts["mass"] = (torch.log(ent["m"].float() + MASS_EPS) - torch.log(m_t + MASS_EPS)).abs().mean()   # output; the density only its shape
         parts["density"] = density_shape_loss(ent["f"].float(), rho_d, m_t, n_uni)
@@ -387,11 +390,13 @@ class EntityPairBuffer:
     and the tree distances between the two windows' entities; drawn on demand into a small rotating buffer."""
 
     def __init__(self, n: int, size: int, device, gen: dict, seed0: int = 60_000_000, kinds=("shift", "modality"), n_points: int = 192,
-                 out_device=None, n0: int | None = None):
+                 out_device=None, n0: int | None = None, strength: float = 1.0):
         # ``device``: where the pairs are drawn (the CPU keeps the trainer's GPU free of the draws' many small kernels and
-        # syncs, which stalled it for minutes on a shared GPU); ``out_device``: where batches go (default ``device``)
+        # syncs, which stalled it for minutes on a shared GPU); ``out_device``: where batches go (default ``device``);
+        # ``strength``: the acquisition's, set by the trainer as its curriculum moves (28 Oct review: the pairs were drawn
+        # at full strength whatever the curriculum)
         self.size, self.device, self.gen, self.next, self.kinds, self.n_points = size, device, dict(gen or {}), seed0, kinds, n_points
-        self.out_device = out_device or device; self.cap = int(n)
+        self.out_device = out_device or device; self.cap = int(n); self.strength = float(strength)
         self.items = [self._make() for _ in range(min(n, n0 or n))]                               # ``n0``: a few now, the rest as refreshes come
 
     def _make(self):
@@ -401,7 +406,8 @@ class EntityPairBuffer:
         kind = self.kinds[self.next % len(self.kinds)]; seed = self.next; self.next += 1
         kw = {k: v for k, v in self.gen.items() if k not in ("crops_per_scene", "p_centre")}
         kw["canvas"] = max(kw.get("canvas", 128), 2 * self.size)
-        (s1, d1), (s2, d2), info = draw_pair((self.size,) * 3, seed=seed, device=self.device, kind=kind, crops_per_scene=4, entity_ctx=True, **kw)
+        (s1, d1), (s2, d2), info = draw_pair((self.size,) * 3, seed=seed, device=self.device, kind=kind, crops_per_scene=4, entity_ctx=True,
+                                             strength=self.strength, **kw)
         sh = torch.tensor(info.get("shift", [0, 0, 0]), device=self.device, dtype=torch.float32)
         m = TR.ENTITY["margin"]; n = self.n_points; dev = self.device
         lo = torch.clamp(sh, min=0) + m; hi = torch.clamp(sh + self.size, max=self.size) - 1 - m           # the overlap, crop 1's voxels
