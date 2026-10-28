@@ -183,6 +183,9 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
         if r is not None:
             for k in full:
                 full[k][qi, di] = r[k].float()
+        if getattr(dec, "gate", None) is not None:                                                 # gated density: g x the lobe + (1 - g) x flat
+            g = torch.sigmoid(dec.gate(enc).float()[..., 0]); fm = (full["f"] * ev).sum(1) / ev.sum(1).clamp_min(1)
+            full["f"] = g[:, None] * full["f"] + (1 - g[:, None]) * fm[:, None]; full["g"] = g
         full["evaluated"] = ev
         if mq is not None:
             full["m"] = mq.float()

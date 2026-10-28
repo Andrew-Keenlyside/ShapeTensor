@@ -1049,7 +1049,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    dens_same_norm: bool = False, own_objects: bool = False, bg_head: bool = False, orient_from_texture: bool = True,
                    obj_head: bool = False, mc_fibres: bool = False, oriented: int = 0, geometry_targets: bool = False, block_norm: int = 1,
                    odirect: int = 0, od_sigmas: list | None = None, split_head: bool = False, mass_vote: bool = False, overfit: int = 0,
-                   init_reset: str = "", ovis_targets: bool = True, od_norm: bool = False):
+                   init_reset: str = "", ovis_targets: bool = True, od_norm: bool = False, dens_vis_w: float = 0.0, dens_gate: bool = False):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -1097,6 +1097,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     from . import entity_train as _et
     _et.VOTE_OBJECTS = bool(vote_objects)                                                              # votes only for oriented owners
     _et.DENS_SAME_NORM = bool(dens_same_norm)                                                          # the density's shape: both sides' means alike
+    _et.DENS_VIS_WEIGHT = float(dens_vis_w)                                                            # ... weighted toward visible orientations
     _et.OWN_OBJECTS = bool(own_objects)                                                                # directions owned among oriented entities
     from . import generator as _gn
     _gn.ORIENT_FROM_TEXTURE = bool(orient_from_texture)                                                # orientation visibility from oriented texture
@@ -1127,7 +1128,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 z_vote=bool(z_vote), dir_sh=int(dir_sh), background_entity=bool(background_entity), ray=bool(ray),
                 region_density=bool(region_density), kappa_log=bool(kappa_log), vote_objects=bool(vote_objects), dens_same_norm=bool(dens_same_norm), own_objects=bool(own_objects), bg_head=bool(bg_head), orient_from_texture=bool(orient_from_texture), obj_head=bool(obj_head),
                 block_norm=int(block_norm), odirect=int(odirect), od_sigmas=list(od_sigmas) if od_sigmas else None, split_head=bool(split_head),
-                mass_vote=bool(mass_vote), od_norm=bool(od_norm), ovis_targets=bool(ovis_targets),
+                mass_vote=bool(mass_vote), od_norm=bool(od_norm), ovis_targets=bool(ovis_targets), dens_vis_w=float(dens_vis_w), dens_gate=bool(dens_gate),
                 mc_fibres=bool(mc_fibres), oriented=int(oriented), geometry_targets=bool(geometry_targets))
     skipped = {}                                                                                   # non-finite steps skipped
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
@@ -1406,6 +1407,8 @@ def main():
     ap.add_argument("--odirect", type=int, default=0, help="entities: the decoder's direct oriented path with this many bank directions (e.g. 256)")
     ap.add_argument("--od-norm", action="store_true", help="entities: the direct path also sees each level's energy along u relative to the strongest direction at the point")
     ap.add_argument("--no-ovis-targets", action="store_true", help="entities: the density targets at the generator's visibility, not the image's (entities.orientation_visibility)")
+    ap.add_argument("--dens-vis-w", type=float, default=0.0, help="entities: the density loss weighted per query by 1 + this x the orientation's visibility")
+    ap.add_argument("--dens-gate", action="store_true", help="entities: a visibility gate per query (trained on the image's orientation visibility); the lobe trained only where it shows")
     ap.add_argument("--od-sigmas", type=float, nargs="+", default=None, help="entities: the direct path's pooling levels (e.g. 2 4 6 8)")
     ap.add_argument("--split-head", action="store_true", help="entities: a head for the objects' occupancy by kind (oriented / isotropic; targets ori_t / iso_t)")
     ap.add_argument("--mass-vote", action="store_true", help="entities: a per-direction vote for the owner's mass")
@@ -1461,7 +1464,7 @@ def main():
                        region_dec=a.region_dec, where_first=a.where_first, z_vote=a.z_vote, dir_sh=a.dir_sh,
                        background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, region_density=not a.no_region_density,
                        kappa_log=a.kappa_log, vote_objects=a.vote_objects, dens_same_norm=a.dens_same_norm, own_objects=a.own_objects, bg_head=a.bg_head, orient_from_texture=not a.orient_from_contrast, obj_head=a.obj_head,
-                       block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote, od_norm=a.od_norm, ovis_targets=not a.no_ovis_targets,
+                       block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote, od_norm=a.od_norm, ovis_targets=not a.no_ovis_targets, dens_vis_w=a.dens_vis_w, dens_gate=a.dens_gate,
                        mc_fibres=a.mc_fibres, oriented=a.oriented, geometry_targets=a.geometry_targets, overfit=a.overfit, init_reset=a.init_reset)
         return
     if a.head == "lobes":

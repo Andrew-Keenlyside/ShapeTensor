@@ -114,11 +114,17 @@ def tree_distance(anc: torch.Tensor, i: torch.Tensor, j: torch.Tensor) -> torch.
     return (di + dj - 2 * (di - k)).float()
 
 
-def density_shape_loss(f: torch.Tensor, rho: torch.Tensor, m_t: torch.Tensor, n_uni: int) -> torch.Tensor:
+DENS_VIS_WEIGHT = 0.0               # the density loss weighted per query by 1 + this x the orientation's visibility (28 Oct: with
+                                    # visibility-aware targets the visible line queries were 7 % of the queries and the warm start
+                                    # went flat everywhere in 400 steps)
+
+
+def density_shape_loss(f: torch.Tensor, rho: torch.Tensor, m_t: torch.Tensor, n_uni: int, w_q: torch.Tensor | None = None) -> torch.Tensor:
     """The density's shape loss (its mass is the mass output's): ``f (B, Q, D)`` predicted and ``rho`` target densities
     at the sampled directions (the first ``n_uni`` uniform), ``m_t (B, Q)`` the target masses. Log L1 of the densities
     over their sphere means -- the prediction's estimated on its uniform directions, the target's exactly (its mass) or,
-    with :data:`DENS_SAME_NORM`, on the same directions; weighted toward the lobes with :data:`DENS_LOBE_WEIGHT`."""
+    with :data:`DENS_SAME_NORM`, on the same directions; weighted toward the lobes with :data:`DENS_LOBE_WEIGHT`, and per
+    query by ``w_q (B, Q)`` if given."""
     fbar = f[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-6) if n_uni > 0 else f.mean(-1, keepdim=True).clamp_min(1e-6)
     has = (m_t > MASS_EPS)[..., None].expand_as(f)
     tbar = rho[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-9) if (DENS_SAME_NORM and n_uni > 0) else m_t.clamp_min(1e-9)[..., None]
@@ -126,8 +132,10 @@ def density_shape_loss(f: torch.Tensor, rho: torch.Tensor, m_t: torch.Tensor, n_
     sh_p = torch.log(f / fbar + DENS_FLOOR); sh_t = torch.log(rel + DENS_FLOOR)
     if not bool(has.any()):
         return f.sum() * 0.0
-    if DENS_LOBE_WEIGHT > 0:
-        wd = (1 + DENS_LOBE_WEIGHT * rel).detach()
+    if DENS_LOBE_WEIGHT > 0 or w_q is not None:
+        wd = (1 + DENS_LOBE_WEIGHT * rel).detach() if DENS_LOBE_WEIGHT > 0 else torch.ones_like(rel)
+        if w_q is not None:
+            wd = wd * w_q.detach()[..., None]
         return ((sh_p - sh_t).abs() * wd)[has].sum() / wd[has].sum()
     return (sh_p - sh_t).abs()[has].mean()
 
@@ -148,12 +156,21 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
     rm = rho.mean(-1, keepdim=True)                                                                # each query's mean density (its mass)
     n_uni = dirs.shape[2] - int(round(dirs.shape[2] * 0.5))                                        # sample_dirs: the uniform directions first
     m_t = mass.sum(-1)
-    if "e_ovis" in T:                                                                              # the orientation's visibility in the image (28 Oct):
-        v = T["e_ovis"].float()[..., None]                                                         # an erased lobe asks for flat at the same mass
-        rho_d = v * rho_d + (1 - v) * m_t[..., None]
+    w_q = None; gate = ent.get("g")
+    if "e_ovis" in T:                                                                              # the orientation's visibility in the image (28 Oct)
+        v = T["e_ovis"].float()[..., None]
+        if gate is not None:                                                                       # gated: the lobe trained where the orientation
+            w_q = v[..., 0] + 0.02                                                                 # shows, the gate on the visibility itself
+            hq = m_t > MASS_EPS
+            parts["gate"] = (Fn.binary_cross_entropy(gate.float().clamp(1e-4, 1 - 1e-4), v[..., 0], reduction="none")[hq].mean()
+                             if bool(hq.any()) else gate.float().sum() * 0.0)
+        else:                                                                                      # one output: an erased lobe asks for flat
+            rho_d = v * rho_d + (1 - v) * m_t[..., None]                                           # at the same mass
+            if DENS_VIS_WEIGHT > 0:
+                w_q = 1 + DENS_VIS_WEIGHT * v[..., 0]
     if "m" in ent:                                                                                 # where and which way apart: the mass from its own
         parts["mass"] = (torch.log(ent["m"].float() + MASS_EPS) - torch.log(m_t + MASS_EPS)).abs().mean()   # output; the density only its shape
-        parts["density"] = density_shape_loss(ent["f"].float(), rho_d, m_t, n_uni)
+        parts["density"] = density_shape_loss(ent["f"].float(), rho_d, m_t, n_uni, w_q=w_q)
     else:
         eps = (DENS_FLOOR * rm).clamp_min(DENS_EPS)
         parts["density"] = (torch.log(ent["f"].float() + eps) - torch.log(rho_d + eps)).abs().mean()  # scale-free: shape at any mass
@@ -170,6 +187,8 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         share = contrib / rho.clamp_min(1e-9)[..., None]; best, owner = share.max(-1)
         owned = (best > 0.5) & (rho > OWN_REL * rm) & (rm > DENS_EPS)
     total = W["density"] * parts["density"] + W.get("mass", 0.0) * parts.get("mass", 0.0)
+    if "gate" in parts:
+        total = total + W.get("gate", 1.0) * parts["gate"]
     if W.get("lobe_mass", 0.0) > 0 and n_uni > 0:                                                 # each oriented population's share of the
         f_ = ent["f"].float(); fb = f_[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-6)       # density (its directions weighted by the
         tb = rho_d[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-9)                          # target's ownership), against the target's:

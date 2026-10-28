@@ -198,7 +198,7 @@ class EntityDecoder(nn.Module):
     def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8, unc: bool = False, mass_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False,
                  kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0,
-                 od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False):
+                 od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False, dens_gate: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -247,6 +247,13 @@ class EntityDecoder(nn.Module):
         # already normalised per level)
         self.odirect = int(odirect); self.od_sigmas = tuple(float(x) for x in od_sigmas); self.od_lv = len(self.od_sigmas)
         self.od_norm = bool(od_norm)
+        # ``dens_gate``: is the orientation visible at this point (a scalar per point, trained on the image-measured
+        # visibility): the density read out is g x the lobe + (1 - g) x flat, and the lobe is trained only where the
+        # orientation shows (28 Oct: with one output for both, the 93 % of near-flat targets pulled the lobes flat
+        # before the 7 % visible queries could teach them anything)
+        self.gate = None
+        if dens_gate:
+            self.gate = nn.Linear(hidden, 1); nn.init.zeros_(self.gate.weight); nn.init.zeros_(self.gate.bias)
         if self.odirect:
             self.od_net = nn.Sequential(nn.Linear(self.od_lv * (2 if self.od_norm else 1) + 1, 64), nn.SiLU(), nn.Linear(64, 32))
             self.od_dens = nn.Linear(32, 1); nn.init.zeros_(self.od_dens.weight); nn.init.zeros_(self.od_dens.bias)
@@ -385,6 +392,8 @@ class EntityDecoder(nn.Module):
         out = self.decode(p[:, :, None].expand(-1, -1, D, -1), Y, r, o, od, dens_c=dc)
         if self.mass is not None:
             out["m"] = self.mass_of(p)
+        if getattr(self, "gate", None) is not None:
+            out["g"] = torch.sigmoid(self.gate(p).float()[..., 0])                                  # (B, Q) the orientation's visibility
         return out
 
     def reset_kappa(self):
@@ -500,7 +509,7 @@ class PopulationNet(nn.Module):
                  dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False, oprobe: bool = False,
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
                  odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0,
-                 od_norm: bool = False):
+                 od_norm: bool = False, dens_gate: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -538,7 +547,7 @@ class PopulationNet(nn.Module):
                                      mass_head=bool(mass_head) and not mass_region, dens_sh=bool(dens_sh), dens_mlp=bool(dens_mlp),
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
                                      oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect),
-                                     od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote), od_norm=bool(od_norm))
+                                     od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote), od_norm=bool(od_norm), dens_gate=bool(dens_gate))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             # the background's occupancy (the isotropic remainder) at every voxel: the density's floor is background plus
@@ -612,7 +621,8 @@ class PopulationNet(nn.Module):
                    obj_head=bool(args.get("obj_head", False)), oriented=int(args.get("oriented", 0) or 0),
                    odirect=int(args.get("odirect", 0) or 0), split_head=bool(args.get("split_head", False)),
                    od_sigmas=tuple(args.get("od_sigmas") or (2.0, 4.0, 6.0)), mass_vote=bool(args.get("mass_vote", False)),
-                   block_norm=int(args.get("block_norm", 0) or 0), od_norm=bool(args.get("od_norm", False))) \
+                   block_norm=int(args.get("block_norm", 0) or 0), od_norm=bool(args.get("od_norm", False)),
+                   dens_gate=bool(args.get("dens_gate", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
