@@ -327,3 +327,25 @@ the lobe is good (oracle gate: readout 0.68x flat at visible queries); the reado
    visible <= 0.85x flat; invisible <= 0.010; gate AUC visible vs invisible >= 0.75.
 6. Then: stop the cluster job at a checkpoint, start a new run from it with the new heads fresh and difficulty at full.
    Fallback if the vis head can't separate: an image-only calibrated visibility target (E[v | ST features]).
+
+## Local pilots J-J6: the pedestal, not the gate (28 Oct, 12:15-16:45 ET)
+
+The cluster run was stopped (user, ~13:30 ET): nothing goes back until a local pilot beats flat. The machine rebooted at
+13:47 ET (scratchpad lost; local GPU 0 at bus 2B needs a reset, CUDA sees only the other card).
+
+| pilot | change | strength | readout vs flat (all queries) |
+|---|---|---|---|
+| J | two-part gate (vis BCE + amplitude via readout loss), lobe detached | 1.0 | = flat (amplitude -> 0) |
+| J2 | ... lobe trained through the readout too | 1.0 | = flat |
+| J3 | J at easy strength | 0.3 | 0.103 vs 0.104; vis AUC 0.78 |
+| J5 | share head (BCE on the line share) + 3-scalar calibrator | 0.3 | 0.130 vs 0.104 (worse) |
+| J6 | J5 + target without the background entity (`--dens-nobg`) | 0.3 | **0.538 vs 0.623 (-14 %)**, visible -22 % |
+
+Why J-J5 failed (gate_check factor tests on J3/J5, strength 0.3): the true visibility x a constant share is *worse* than
+flat; the readout's gain lives in the per-query share, and that is set by the background's mass at the query, which the
+model can't read (its background estimate correlates 0.34 with the truth; the true non-background fraction correlates
+0.84 with the line share). Without the background in the density's target (it has its own head) the line share at
+visible queries is ~0.7 and the visibility decides; a thresholded visibility head beat flat even before training (J3).
+
+J6 at full strength (trained at 0.3 only): 0.331 vs flat 0.267 overall, visible 0.880 vs 0.948; the oracle gate gains
+17 % there (40-50 % at 0.3). J7: J6 continued with the strength ramped 0.3 -> 1.0 over 2000 steps.
