@@ -529,11 +529,45 @@ def _template2d(n_side: int, device) -> torch.Tensor:
     return torch.stack([u.reshape(-1), w.reshape(-1)], 1), 2.0 / n_side
 
 
-def render_curves(cv: Canvas, c: Curves, max_points: float = 8e6):
-    """Sweep each curve's cross-section along it and splat the material (and the lumen contents)."""
+SWEEP_STEP = 0.7          # voxels: the largest step of a section's outer edge between swept samples (28 Oct: fat or
+                          # wandering curves stepped 2-3 voxels at their edges -- stripes across the fibres, rays of
+                          # single sections -- 29 % of the curves' volume at the training's settings)
+
+
+def _sweep_refine(c: Curves, step: float | None = None, kmax: int = 16) -> torch.Tensor:
+    """Samples per step each curve needs for its section's outer edge to move <= ``step`` voxels between samples (the
+    centreline's step plus the section's swing as the tangent turns): ``(N,)`` powers of two, <= ``kmax``."""
+    P = c.P; step = SWEEP_STEP if step is None else step
+    if P.shape[1] < 3:
+        return torch.ones(P.shape[0], device=P.device)
+    seg = (P[:, 1:] - P[:, :-1]).norm(dim=-1); T = tangents(P); dT = (T[:, 1:] - T[:, :-1]).norm(dim=-1)
+    a = 2 * c.rad / (1 + c.flat.clamp(0.02, 1.0)); a = torch.maximum(a[:, 1:], a[:, :-1])
+    k = torch.ceil((seg + a * dT).amax(1) / step).clamp(1, kmax)
+    return torch.exp2(torch.ceil(torch.log2(k)))
+
+
+def _upsample_curves(c: Curves, k: int) -> Curves:
+    """``c`` with ``k`` samples per step: positions on a Catmull-Rom spline through the samples (the tangent turns
+    smoothly between them), profiles linearly."""
+    N, S, _ = c.P.shape; t = torch.arange(k, device=c.P.device, dtype=torch.float32) / k
+    P = c.P; Pm = torch.cat([2 * P[:, :1] - P[:, 1:2], P, 2 * P[:, -1:] - P[:, -2:-1]], 1)
+    p0, p1, p2, p3 = (Pm[:, i:i + S - 1, None] for i in range(4)); tt = t.view(1, 1, k, 1)
+    Q = 0.5 * (2 * p1 + (p2 - p0) * tt + (2 * p0 - 5 * p1 + 4 * p2 - p3) * tt ** 2 + (3 * p1 - p0 - 3 * p2 + p3) * tt ** 3)
+    Pn = torch.cat([Q.reshape(N, (S - 1) * k, 3), P[:, -1:]], 1); w = t.view(1, 1, k)
+
+    def lin(v):
+        if v is None or v.dim() != 2 or v.shape[1] != S:
+            return v
+        return torch.cat([(v[:, :-1, None] * (1 - w) + v[:, 1:, None] * w).reshape(N, -1), v[:, -1:]], 1)
+    return Curves(**{f: Pn if f == "P" else lin(getattr(c, f)) for f in c.__dataclass_fields__})
+
+
+def render_curves(cv: Canvas, c: Curves, max_points: float = 8e6, refine: bool = True, _deformed: bool = False):
+    """Sweep each curve's cross-section along it and splat the material (and the lumen contents). ``refine``: curves
+    whose section's edge would step more than :data:`SWEEP_STEP` between samples are swept on a finer sampling."""
     P = c.P; N, S, _ = P.shape; dev = P.device
     moved = getattr(cv, "deform", None) is not None
-    if moved:                                                                   # the centreline deformed with the specimen; its
+    if moved and not _deformed:                                                 # the centreline deformed with the specimen; its
         T0 = tangents(P).reshape(-1, 3)                                         # section's area by det F / |F t| (the length takes
         P, Fp = cv.deform.forward(P.reshape(-1, 3)); P = P.view(N, S, 3)       # |F t|: volume by det F, as point splats and dense
         dF = torch.linalg.det(Fp).clamp_min(1e-3)                               # pulls; the section's own shear neglected; a frozen
@@ -541,6 +575,13 @@ def render_curves(cv: Canvas, c: Curves, max_points: float = 8e6):
         st = (dF / lam.clamp_min(0.05)).sqrt().clamp(0.3, 3.0).view(N, S)      # isotropic)
         c = Curves(**{**{f: getattr(c, f) for f in c.__dataclass_fields__}, "P": P, "rad": c.rad * st,
                       "wall": c.wall * st if c.wall is not None else None})
+    if refine:
+        k = _sweep_refine(c)
+        if bool((k > 1).any()):
+            for kb in torch.unique(k).tolist():
+                sub = curves_subset(c, k == kb)
+                render_curves(cv, sub if kb == 1 else _upsample_curves(sub, int(kb)), max_points, refine=False, _deformed=True)
+            return
     T = tangents(P); e1, e2 = rmf(P, T)
     ds = torch.zeros(N, S, device=dev)
     seglen = (P[:, 1:] - P[:, :-1]).norm(dim=-1)
@@ -914,7 +955,9 @@ class Scene:
             T = tangents(Pc); e1, e2 = rmf(Pc, T)
             tau = r.u(-0.03, 0.03); psi = tau * s * Lc
             amp = fibre.get("disp", r.u(0.3, 1.5) if FB.RELAX else 0.25)        # with the relaxation fibres may wander and intertwine;
-            disp = amp * sp * smooth1d(r.randn(N, S, 2), 30)                    # without it, within half a spacing: no overlaps
+            wmax = (30 * H) ** 2 / (4.9 * max(rf, 0.5) * Rb)                    # without it, within half a spacing: no overlaps; a
+            disp = min(amp * sp, wmax) * smooth1d(r.randn(N, S, 2), 30)         # fibre bends no tighter than ~4 radii (rms; 28 Oct: a
+                                                                                # fibre as wide as its bundle zig-zagged, folding its section)
             oo = o[:, None] + disp
             ox = oo[..., 0] * torch.cos(psi) - oo[..., 1] * torch.sin(psi); oy = oo[..., 0] * torch.sin(psi) + oo[..., 1] * torch.cos(psi)
             P = Pc + (Rs[None, :, None] * (ox[..., None] * e1 + oy[..., None] * e2))
@@ -1013,13 +1056,14 @@ class Scene:
             for c in g.curves:
                 rel = c.P - P0
                 h = rel @ n
-                k = torch.floor(h / w)
-                shift = k * (w + 2 * gap) + parity * (w + gap)
                 dist = (rel @ m_other).abs()                                 # in-plane distance from the other bundle's axis
                 taper = max(2.0 * w, 0.5 * R_other)
                 wt = ((R_other + rfm + taper - dist) / taper).clamp(0, 1)
                 wt = wt * wt * (3 - 2 * wt)                                  # smoothstep
                 wt = smooth1d(wt, 4.0) / smooth1d(torch.ones_like(wt), 4.0)
+                hc = (h * wt).sum(-1, keepdim=True) / wt.sum(-1, keepdim=True).clamp_min(1e-6)   # one slab per fibre: its place
+                k = torch.floor(hc / w)                                      # in the crossing (28 Oct: per sample, a fibre
+                shift = k * (w + 2 * gap) + parity * (w + gap)               # wandering over a slab's edge jumped 10-24 voxels)
                 c.P = c.P + (wt * shift)[..., None] * n
         self.record.setdefault("interleaved", []).append({"slab_vox": round(w, 1)})
 
@@ -3016,7 +3060,10 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     if ra.p(p_grain):                                                                          # unresolved microstructure under the tissue
         flat_ = img.flatten()[:: max(1, img.numel() // 100000)]
         q5, q95 = torch.quantile(flat_.float(), torch.tensor([0.05, 0.95], device=device))
-        amp = ra.lu(0.3, 8.0) * float(q95 - q5) / 4                                           # real 20 um HiP-CT: texture over faint structures (domain gap, 23 Oct)
+        amp = ra.lu(0.3, 0.3 + 3.7 * strength) * float(q95 - q5) / 4                          # real 20 um HiP-CT: texture over faint structures (domain gap, 23 Oct);
+                                                                                                # with the strength, at most the image's range (28 Oct: up to 2x
+                                                                                                # the range at any strength, under 80 % of crops, the density's
+                                                                                                # targets went unseen and its best answer was flat)
         tex_ = microstructure_texture(shape, ra, device) * amp
         img = img + (tex_ * M if M is not None else tex_)
         routes.append("grain")

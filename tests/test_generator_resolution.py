@@ -268,3 +268,20 @@ def test_the_inverse_map_is_found_wherever_the_canvas_is_valid():
         Xg = torch.stack(torch.meshgrid(*[torch.arange(64.0, device=DEV)] * 3, indexing="ij"), -1).reshape(-1, 3)
         res = (dfm.forward(dfm.src.reshape(-1, 3))[0] - Xg).norm(dim=-1).view(64, 64, 64)
         assert float(res[dfm.valid].max()) < 0.5 and float(dfm.valid.float().mean()) > 0.5
+
+
+def test_a_coarsely_sampled_fat_curve_is_swept_without_gaps(monkeypatch):
+    """A fat tube sampled every 3 voxels and bending (28 Oct: its section's edge stepped 2-3 voxels between samples --
+    stripes across the fibre, single sections as rays): swept on a finer sampling, its fill along it is even and
+    full; without the refinement it is striped."""
+    s = torch.arange(0, 64, 3.0, device=DEV); S = s.numel()
+    P = torch.stack([32 + 6 * torch.sin(s / 10), 32 + 0 * s, s], -1)[None]                     # (1, S, 3): along x, bending in z
+    c = SC.curves_like(P, torch.full((1, S), 8.0, device=DEV), None, obj=torch.tensor([1], device=DEV), seg=torch.tensor([1], device=DEV), contrast=1.0)
+    occ = {}
+    for name, step in (("refined", SC.SWEEP_STEP), ("coarse", 1e9)):
+        monkeypatch.setattr(SC, "SWEEP_STEP", step)
+        cv = SC.Canvas((64, 64, 64), DEV); SC.render_curves(cv, c); occ[name] = cv.finish()["occupancy"]
+    line = lambda o, dy: torch.stack([o[int(round(32 + 6 * math.sin(x / 10))), 32 + dy, x] for x in range(12, 52)])
+    cvar = lambda v: float(v.std() / v.mean())
+    assert cvar(line(occ["refined"], 6)) < 0.1 and cvar(line(occ["coarse"], 6)) > 2 * cvar(line(occ["refined"], 6))
+    assert float(line(occ["refined"], 0).mean()) > 0.95                                         # the core filled

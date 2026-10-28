@@ -1042,7 +1042,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    ray: bool = False, e_cross: float = 0.0, region_density: bool = True, kappa_log: bool = False, vote_objects: bool = False,
                    dens_same_norm: bool = False, own_objects: bool = False, bg_head: bool = False, orient_from_texture: bool = True,
                    obj_head: bool = False, mc_fibres: bool = False, oriented: int = 0, geometry_targets: bool = False, block_norm: int = 1,
-                   odirect: int = 0, od_sigmas: list | None = None, split_head: bool = False, mass_vote: bool = False):
+                   odirect: int = 0, od_sigmas: list | None = None, split_head: bool = False, mass_vote: bool = False, overfit: int = 0):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -1055,9 +1055,12 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     ``mass_region``: the mass is the region map's mean in the query's window (where, once), not a separate output;
     ``where_first``: steps of the "where" losses alone (region, mass, overall ODF, fraction, points), the "which way"
     losses (density shape, vote, concentration, descriptors, tree, cross-window, contrast) then ramped in over as many. The cluster machinery of :func:`train_lobes`: producer thread, CPU
-    workers, data parallel, checkpoints and ``--resume auto``, benchmark mode."""
+    workers, data parallel, checkpoints and ``--resume auto``, benchmark mode. ``overfit`` N: N fixed pairs at full
+    difficulty and strength (no new pairs, no window pairs), scored on themselves -- can the model fit them at all?"""
     from . import dataflow as DF
     from . import entity_train as ET
+    if overfit:
+        buffer, refresh, producer, cpu_workers, pairs, level0, strength0 = int(overfit), 0, False, 0, 0, 1.0, strength1
     from . import lobe_train as LT
     from . import losses as _losses
     from .model import poincare_dist
@@ -1095,7 +1098,9 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     cur_gen = lambda: {"scene": LT.difficulty_gen(level["v"], base)}
     def set_routes():
         global ROUTES
-        ROUTES = routes * (0.4 + 0.6 * level["v"]) if routes else 0.0
+        ramp_ = 1.0 if level0 >= 1.0 else min(1.0, max(0.0, (level["v"] - level0) / (1.0 - level0)))   # from none at the start (clean images
+        ROUTES = routes * ramp_ if routes else 0.0                                                         # first: the density formed only then,
+                                                                                                           # 27 Oct) to full with the difficulty
     main = rank == 0
     outd = Path(out); outd.mkdir(parents=True, exist_ok=True)
     logf = open(outd / "log.jsonl", "a") if main else None
@@ -1155,7 +1160,9 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     pbuf = ET.EntityPairBuffer(pairs, size, "cpu", LT.difficulty_gen(level["v"], base), seed0=60_000_000 + rank * 1_000_000 + start,
                                out_device=device, n0=2).start_async() if pairs else None             # drawn on the CPU, in a thread (see EntityPairBuffer)
     val = []
-    if main and not benchmark:
+    if overfit and main:
+        val = list(buf.items[:val_n]); torch.save([(x_.cpu() if torch.is_tensor(x_) else x_, {k: v.cpu() if torch.is_tensor(v) else v for k, v in t_.items()}) for x_, t_ in buf.items], outd / "overfit_items.pt")
+    elif main and not benchmark:
         val = [augment(*make(10_000_000 + i, size, device, strength1, {"scene": {**LT.difficulty_gen(1.0, base), "crops_per_scene": 1}}), torch.Generator().manual_seed(i))
                for i in range(val_n)]
     def evaluate():
@@ -1420,7 +1427,7 @@ def main():
                        background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, region_density=not a.no_region_density,
                        kappa_log=a.kappa_log, vote_objects=a.vote_objects, dens_same_norm=a.dens_same_norm, own_objects=a.own_objects, bg_head=a.bg_head, orient_from_texture=not a.orient_from_contrast, obj_head=a.obj_head,
                        block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote,
-                       mc_fibres=a.mc_fibres, oriented=a.oriented, geometry_targets=a.geometry_targets)
+                       mc_fibres=a.mc_fibres, oriented=a.oriented, geometry_targets=a.geometry_targets, overfit=a.overfit)
         return
     if a.head == "lobes":
         train_lobes(a.out, a.steps, a.size, a.batch, a.accum, a.buffer, a.refresh, a.lr, warmup=min(a.warmup, 300), margin=a.margin, val_n=a.val_n,
