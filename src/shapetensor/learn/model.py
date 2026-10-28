@@ -252,8 +252,12 @@ class EntityDecoder(nn.Module):
         # orientation shows (28 Oct: with one output for both, the 93 % of near-flat targets pulled the lobes flat
         # before the 7 % visible queries could teach them anything)
         self.gate = None
-        if dens_gate:
-            self.gate = nn.Linear(hidden, 1); nn.init.zeros_(self.gate.weight); nn.init.zeros_(self.gate.bias)
+        if dens_gate:                                                                             # its input: the point code and, with the
+            ng = hidden + (self.od_lv if self.odirect else 0)                                     # direct path, each level's energy contrast
+            self.gate = nn.Linear(ng, 1); nn.init.zeros_(self.gate.weight); nn.init.constant_(self.gate.bias, -3.0)   # (log max / mean over
+            if self.odirect:                                                                      # the bank: the classical cue, gain 0.5 from
+                with torch.no_grad():                                                             # the start (noise alone sums to ~2-4); a zero
+                    self.gate.weight[0, hidden:] = 0.5                                            # gate at lr 1e-4 had not moved in 500 steps)
         if self.odirect:
             self.od_net = nn.Sequential(nn.Linear(self.od_lv * (2 if self.od_norm else 1) + 1, 64), nn.SiLU(), nn.Linear(64, 32))
             self.od_dens = nn.Linear(32, 1); nn.init.zeros_(self.od_dens.weight); nn.init.zeros_(self.od_dens.bias)
@@ -383,18 +387,26 @@ class EntityDecoder(nn.Module):
             B, Q = points.shape[:2]
             o = torch.stack([self.oprobe_feats(feats, points[b][:, None].expand(-1, D, -1).reshape(-1, 3), dirs[b].reshape(-1, 3), b).view(Q, D, -1)
                              for b in range(B)])
-        od = None
+        od = None; ovs = None
         if getattr(self, "odirect", 0):
             B, Q = points.shape[:2]
             ov = getattr(feats, "od_v", None)                                                    # (sampled at the queries already, or here)
-            od = torch.stack([self.od_code(ov[b] if ov is not None else self.od_sample(feats, points[b], b), self.od_weights(dirs[b])) for b in range(B)])
+            ovs = [ov[b] if ov is not None else self.od_sample(feats, points[b], b) for b in range(B)]
+            od = torch.stack([self.od_code(ovs[b], self.od_weights(dirs[b])) for b in range(B)])
         dc = self.dens(p)[:, :, None].expand(-1, -1, D, -1) if self.dens is not None else None      # once per point, not per direction
         out = self.decode(p[:, :, None].expand(-1, -1, D, -1), Y, r, o, od, dens_c=dc)
         if self.mass is not None:
             out["m"] = self.mass_of(p)
         if getattr(self, "gate", None) is not None:
-            out["g"] = torch.sigmoid(self.gate(p).float()[..., 0])                                  # (B, Q) the orientation's visibility
+            out["g"] = self.gate_of(p, torch.stack(ovs) if ovs is not None else None)             # (B, Q) the orientation's visibility
         return out
+
+    def gate_of(self, p: torch.Tensor, ov: torch.Tensor | None) -> torch.Tensor:
+        """The visibility gate from point codes ``p (..., hidden)`` and the bank's energies there ``ov (..., L, Dd)``."""
+        if ov is not None:
+            ovf = ov.float(); odc = torch.log(ovf.amax(-1) / ovf.mean(-1).clamp_min(1e-6)).clamp(max=5.0)
+            p = torch.cat([p, odc.to(p.dtype)], -1)
+        return torch.sigmoid(self.gate(p).float()[..., 0])
 
     def reset_kappa(self):
         """The concentration outputs restarted at kappa ~1 (log space), e.g. after loading a ``softplus`` checkpoint."""

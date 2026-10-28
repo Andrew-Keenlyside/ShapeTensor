@@ -1137,7 +1137,10 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)
     rf = receptive_field(model)
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    gate_p = [p_ for n_, p_ in model.named_parameters() if ".gate." in n_]                          # the visibility gate at 10x the rate (its
+    groups = ([{"params": [p_ for n_, p_ in model.named_parameters() if ".gate." not in n_]}, {"params": gate_p, "lr_mult": 10.0}]   # BCE moved
+              if gate_p else model.parameters())                                                    # 0.693 -> 0.689 in 500 steps at 1e-4)
+    opt = torch.optim.AdamW(groups, lr=lr, weight_decay=1e-4)
     start = 0
     if resume == "auto":
         resume = str(outd / "model.pt") if (outd / "model.pt").exists() else None
@@ -1239,7 +1242,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
         prog = step / max(steps, 1)
         lr_now = lr * min(1.0, (step + 1) / warmup) * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * prog)))
         for pg in opt.param_groups:
-            pg["lr"] = lr_now
+            pg["lr"] = lr_now * pg.get("lr_mult", 1.0)
         opt.zero_grad(set_to_none=True); pa = {}; tot_v = 0.0; t_data = 0.0
         for mb in range(accum):
             if bench is not None:

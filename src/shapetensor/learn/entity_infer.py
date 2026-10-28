@@ -170,9 +170,9 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
         qi, di = torch.nonzero(ev, as_tuple=True)
         rr = dec.ray_pairs(feats, (p - off)[qi], dirs[di]) if (getattr(dec, "ray", False) and qi.numel()) else None
         oo = dec.oprobe_feats(feats, (p - off)[qi], dirs[di]) if (getattr(dec, "oprobe", False) and qi.numel()) else None
-        od = None
-        if getattr(dec, "odirect", 0) and qi.numel():                                             # the bank sampled once per point
-            od = dec.od_code(dec.od_sample(feats, p - off), dec.od_weights(dirs), pairs=(qi, di))
+        od = None; ovp = dec.od_sample(feats, p - off) if getattr(dec, "odirect", 0) else None  # the bank sampled once per point
+        if ovp is not None and qi.numel():
+            od = dec.od_code(ovp, dec.od_weights(dirs), pairs=(qi, di))
         dc = dec.dens(enc)[qi] if (getattr(dec, "dens", None) is not None and qi.numel()) else None   # (per point, then gathered)
         r = dec.decode(enc[qi], Y[di].to(enc.dtype), rr, oo, od, dens_c=dc) if qi.numel() else None
         full = {"f": torch.zeros(n, D, device=p.device), "z": torch.zeros(n, D, dec.emb, device=p.device),
@@ -184,7 +184,7 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
             for k in full:
                 full[k][qi, di] = r[k].float()
         if getattr(dec, "gate", None) is not None:                                                 # gated density: g x the lobe + (1 - g) x flat
-            g = torch.sigmoid(dec.gate(enc).float()[..., 0]); fm = (full["f"] * ev).sum(1) / ev.sum(1).clamp_min(1)
+            g = dec.gate_of(enc, ovp); fm = (full["f"] * ev).sum(1) / ev.sum(1).clamp_min(1)
             full["f"] = g[:, None] * full["f"] + (1 - g[:, None]) * fm[:, None]; full["g"] = g
         full["evaluated"] = ev
         if mq is not None:
