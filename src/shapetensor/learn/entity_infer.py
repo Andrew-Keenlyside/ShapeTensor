@@ -196,7 +196,7 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
             from .model import st_features
             stf = st_features(j6) if j6 is not None else None
             g = dec.gate_of(enc, ovp, stf); fm = (full["f"] * ev).sum(1) / ev.sum(1).clamp_min(1)
-            full["f"] = g[:, None] * full["f"] + (1 - g[:, None]) * fm[:, None]; full["g"] = g
+            full["f_lobe"] = full["f"]; full["f"] = g[:, None] * full["f"] + (1 - g[:, None]) * fm[:, None]; full["g"] = g
         full["evaluated"] = ev
         if mq is not None:
             full["m"] = mq.float()

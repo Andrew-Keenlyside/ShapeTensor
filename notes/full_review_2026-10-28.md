@@ -285,3 +285,24 @@ structure-tensor path at gain 12 the loss starts at +361 % (too sharp, no pedest
   on `~/runs/shapetensor/pilot_i`, 36 000 steps, val every 2000, checkpoints every 15 min, h_rt 12:00). Pilot I's
   own validations: share-head BCE 0.21 -> 0.186 over 500-3000; the lobe-only loss flat at ~1.58 from step 500 -- the
   gains after 500 are the share head's. The step-3000 evaluation on the training targets follows.
+
+## The gate has learned only the base rate (28 Oct, 11:40 ET)
+
+The 12-hour run's first submission ran at 2.5 s/step: 40 generator workers per rank on 4 ranks (160 processes x 2 threads)
+oversubscribed seymour2's 192 cores. Restarted from its 15:32 GMT checkpoint as job 7645528 with 20 workers per rank and
+32 000 steps (running from 11:34 ET; 12 h limit, so done by 23:34 ET at the latest).
+
+`gate_check.py` (scratchpad) on pilot I @ 3000, 10 full-strength crops, readout loss per subset:
+
+| readout | all | visible | partial | invisible | no line |
+|---|---|---|---|---|---|
+| flat | 0.074 | 0.355 | 0.217 | 0.004 | 0.065 |
+| learned gate | 0.101 | 0.329 | 0.207 | 0.046 | 0.093 |
+| oracle gate (s_t) | 0.062 | 0.243 | 0.185 | 0.004 | 0.065 |
+
+The gate sits at 0.03-0.04 on every subset (corr with s_t 0.09): it has learned the base rate, nothing more. The lobe is
+fine (with the oracle gate the readout beats flat by a third at visible queries); the readout is lost to the gate, which
+puts a small lobe everywhere, including invisible queries. Classical features don't predict s_t either (logistic BCE
+0.108 vs base 0.110), so the gate's target is the problem: s_t = v x share mixes the image-measured visibility with the
+line entities' mass share, which the image doesn't carry. Next: train the readout end to end (loss on the gated readout
+against the visibility-mixed target, gradients into gate and lobe), and/or let the gate regress v alone.
