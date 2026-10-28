@@ -263,3 +263,8 @@ structure-tensor path at gain 12 the loss starts at +361 % (too sharp, no pedest
   pieces are poor; the cluster pilot with fresh data does better on the lobe (-10 % at visible queries) and its
   weak piece is the share head. Where the tensor's axis is confident but wrong, nothing in the tensor says so: the
   share head needs the trunk (unfrozen from step 1000) or is fundamentally limited there.
+* Pilot I at step 500, axes at visible line queries (8 fresh crops, 226 queries): the model's peak axis is within 20
+  degrees of the target on 62 % (median 12), of the tensor's axis on 80 % (median 11); the tensor's own axis is
+  within 20 of the target on 73 % (median 9). So the lobe branch reads the axis (the structure-tensor path works);
+  the share head predicts ~0.08 everywhere (the base rate of v x share) -- it is the piece that does not discriminate,
+  which is why the lobes are weak where they should be strong and present where they should be absent.
