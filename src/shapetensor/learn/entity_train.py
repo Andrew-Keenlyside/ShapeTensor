@@ -114,6 +114,7 @@ def tree_distance(anc: torch.Tensor, i: torch.Tensor, j: torch.Tensor) -> torch.
     return (di + dj - 2 * (di - k)).float()
 
 
+DENS_READOUT_LOBE = False           # ... and the lobe trained through the readout too (it may soften where unsure)
 DENS_READOUT = False                # with the two-part gate: the gated readout trained end to end (28 Oct)
 DENS_SHARE = False                  # with the gate: its target is the *visible oriented share* (the line entities' mass over the
                                     # total, x the visibility) and the lobe is trained on the oriented part alone, weighted by that
@@ -171,7 +172,7 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
             gv = ent.get("gv", gate).float(); sel = hq & lq                                        # its axis shows, the gate's visibility head on
             parts["gate"] = (Fn.binary_cross_entropy(gv.clamp(1e-4, 1 - 1e-4), v[..., 0], reduction="none")[sel].mean()   # the image-measured v
                              if bool(sel.any()) else gv.sum() * 0.0)
-            f_ = ent["f"].float().detach(); fm_ = f_[:, :, :n_uni].mean(-1, keepdim=True); gg = gate.float()[..., None]
+            f_ = ent["f"].float() if DENS_READOUT_LOBE else ent["f"].float().detach(); fm_ = f_[:, :, :n_uni].mean(-1, keepdim=True); gg = gate.float()[..., None]
             parts["readout"] = density_shape_loss(gg * f_ + (1 - gg) * fm_, v * rho + (1 - v) * m_t[..., None], m_t, n_uni)
         elif gate is not None and DENS_SHARE:                                                      # the gate = the visible oriented share; the lobe
             line = (T["e_kappa"][..., 1] >= 2.0) & (mass > 0)                                      # = the oriented part alone, where it shows

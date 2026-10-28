@@ -488,7 +488,7 @@ class EntityDecoder(nn.Module):
         """The visibility gate from point codes ``p (..., hidden)``, the bank's energies there ``ov (..., L, Dd)`` and the
         structure-tensor features ``stf (..., 3)`` (zeros if not given)."""
         if ov is not None:
-            ovf = ov.float(); odc = torch.log(ovf.amax(-1) / ovf.mean(-1).clamp_min(1e-6)).clamp(max=5.0)
+            ovf = ov.float(); odc = torch.log(ovf.amax(-1).clamp_min(1e-12) / ovf.mean(-1).clamp_min(1e-6)).clamp(-5.0, 5.0)   # (blank: -inf -> NaN in an MLP)
             p = torch.cat([p, odc.to(p.dtype)], -1)
         p = torch.cat([p, (stf if stf is not None else torch.zeros(*p.shape[:-1], getattr(self, "gate_nst", 3), device=p.device)).to(p.dtype)], -1)
         if getattr(self, "gate2", False):
