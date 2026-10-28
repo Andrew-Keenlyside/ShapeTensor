@@ -250,7 +250,7 @@ class EntityDecoder(nn.Module):
                  dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False,
                  kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0,
                  od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False, dens_gate: bool = False, st_path: bool = False,
-                 iso_head: bool = False, gate2: bool = False):
+                 iso_head: bool = False, gate2: bool = False, gate_share: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -328,6 +328,13 @@ class EntityDecoder(nn.Module):
         # on the point code + the bank's contrast + the extended structure-tensor features -- the visibility (BCE on the
         # image-measured v) and an amplitude (trained only through the readout's loss); the readout's g = vis x amp
         self.gate2 = bool(gate2) and self.gate is not None; self.gate_nst = 7 if self.gate2 else 3
+        # ``gate_share`` (J3/J4, 28 Oct: the true visibility x a constant share is worse than flat -- the per-query line
+        # share carries the gain, and an amplitude trained only through the readout never found it): the second output
+        # regresses the line entities' share of the mass (BCE, every query: 0 where no line), and three scalars ``gcal``
+        # map the two logits (detached) to the readout's gate, trained by the readout's loss alone
+        self.gate_share = bool(gate_share) and self.gate2
+        if self.gate_share:
+            self.gcal = nn.Parameter(torch.tensor([0.0, 1.0, 1.0]))
         if self.gate2:
             ng = hidden + (self.od_lv if self.odirect else 0) + 7
             self.gate = nn.Sequential(nn.Linear(ng, 64), nn.SiLU(), nn.Linear(64, 2))
@@ -481,7 +488,9 @@ class EntityDecoder(nn.Module):
         if self.mass is not None:
             out["m"] = self.mass_of(p)
         if getattr(self, "gate", None) is not None:
-            out["g"], out["gv"] = self.gate_of(p, torch.stack(ovs) if ovs is not None else None, stf, parts=True)   # (B, Q) the readout's gate, its visibility
+            res = self.gate_of(p, torch.stack(ovs) if ovs is not None else None, stf, parts=True); out["g"], out["gv"] = res[0], res[1]
+            if len(res) > 2:
+                out["gs"] = res[2]                                                            # the line share's estimate
         return out
 
     def gate_of(self, p: torch.Tensor, ov: torch.Tensor | None, stf: torch.Tensor | None = None, parts: bool = False):
@@ -492,7 +501,11 @@ class EntityDecoder(nn.Module):
             p = torch.cat([p, odc.to(p.dtype)], -1)
         p = torch.cat([p, (stf if stf is not None else torch.zeros(*p.shape[:-1], getattr(self, "gate_nst", 3), device=p.device)).to(p.dtype)], -1)
         if getattr(self, "gate2", False):
-            o = self.gate(p).float(); vis = torch.sigmoid(o[..., 0]); g = vis * torch.sigmoid(o[..., 1])
+            o = self.gate(p).float(); vis = torch.sigmoid(o[..., 0])
+            if getattr(self, "gate_share", False):
+                c = self.gcal.float(); g = torch.sigmoid(c[0] + c[1] * o[..., 0].detach() + c[2] * o[..., 1].detach())
+                return (g, vis, torch.sigmoid(o[..., 1])) if parts else g
+            g = vis.detach() * torch.sigmoid(o[..., 1])   # (the readout's loss sets the amplitude only: through vis it pulled the visibility off its target, J3)
             return (g, vis) if parts else g
         g = torch.sigmoid(self.gate(p).float()[..., 0])
         return (g, g) if parts else g
@@ -617,7 +630,8 @@ class PopulationNet(nn.Module):
                  dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False, oprobe: bool = False,
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
                  odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0,
-                 od_norm: bool = False, dens_gate: bool = False, st_path: bool = False, iso_head: bool = False, gate2: bool = False):
+                 od_norm: bool = False, dens_gate: bool = False, st_path: bool = False, iso_head: bool = False, gate2: bool = False,
+                 gate_share: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -656,7 +670,7 @@ class PopulationNet(nn.Module):
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
                                      oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect),
                                      od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote), od_norm=bool(od_norm), dens_gate=bool(dens_gate),
-                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2))
+                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             # the background's occupancy (the isotropic remainder) at every voxel: the density's floor is background plus
@@ -732,7 +746,7 @@ class PopulationNet(nn.Module):
                    od_sigmas=tuple(args.get("od_sigmas") or (2.0, 4.0, 6.0)), mass_vote=bool(args.get("mass_vote", False)),
                    block_norm=int(args.get("block_norm", 0) or 0), od_norm=bool(args.get("od_norm", False)),
                    dens_gate=bool(args.get("dens_gate", False)), st_path=bool(args.get("st_path", False)), iso_head=bool(args.get("iso_head", False)),
-                   gate2=bool(args.get("gate2", False))) \
+                   gate2=bool(args.get("gate2", False)), gate_share=bool(args.get("gate_share", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":

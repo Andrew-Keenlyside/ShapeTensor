@@ -115,6 +115,8 @@ def tree_distance(anc: torch.Tensor, i: torch.Tensor, j: torch.Tensor) -> torch.
 
 
 DENS_READOUT_LOBE = False           # ... and the lobe trained through the readout too (it may soften where unsure)
+DENS_NOBG = False                   # the readout's target without the background entity (its mass is the bg head's; 28 Oct:
+                                    # the pedestal it set was the factor the image could not tell, corr 0.34)
 DENS_READOUT = False                # with the two-part gate: the gated readout trained end to end (28 Oct)
 DENS_SHARE = False                  # with the gate: its target is the *visible oriented share* (the line entities' mass over the
                                     # total, x the visibility) and the lobe is trained on the oriented part alone, weighted by that
@@ -168,12 +170,21 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
         if gate is not None and DENS_READOUT:                                                      # 28 Oct: the readout itself trained (g x lobe +
             line = (T["e_kappa"][..., 1] >= 2.0) & (mass > 0)                                      # (1 - g) x flat against the visibility-mixed
             lq = (mass * line).sum(-1) > 0.02                                                      # target at every query; the lobe detached
+            if DENS_NOBG and "e_bg" in T:                                                          # (the background left to its own head)
+                mass_r = mass * (~T["e_bg"].bool()).to(mass.dtype); rho_r = (mass_r[:, :, None] * pe).sum(-1); m_r = mass_r.sum(-1)
+            else:
+                mass_r, rho_r, m_r = mass, rho, m_t
+            hq = m_r > MASS_EPS
             rho_d = (contrib * line[:, :, None]).sum(-1); w_q = v[..., 0] * lq + 0.02              # there), the lobe on the oriented part where
             gv = ent.get("gv", gate).float(); sel = hq & lq                                        # its axis shows, the gate's visibility head on
             parts["gate"] = (Fn.binary_cross_entropy(gv.clamp(1e-4, 1 - 1e-4), v[..., 0], reduction="none")[sel].mean()   # the image-measured v
                              if bool(sel.any()) else gv.sum() * 0.0)
             f_ = ent["f"].float() if DENS_READOUT_LOBE else ent["f"].float().detach(); fm_ = f_[:, :, :n_uni].mean(-1, keepdim=True); gg = gate.float()[..., None]
-            parts["readout"] = density_shape_loss(gg * f_ + (1 - gg) * fm_, v * rho + (1 - v) * m_t[..., None], m_t, n_uni)
+            if "gs" in ent:                                                                         # the line share's head (every query with mass)
+                share_t = ((mass_r * line).sum(-1) / m_r.clamp_min(1e-9)).clamp(0, 1)
+                parts["gshare"] = (Fn.binary_cross_entropy(ent["gs"].float().clamp(1e-4, 1 - 1e-4), share_t, reduction="none")[hq].mean()
+                                   if bool(hq.any()) else ent["gs"].float().sum() * 0.0)
+            parts["readout"] = density_shape_loss(gg * f_ + (1 - gg) * fm_, v * rho_r + (1 - v) * m_r[..., None], m_r, n_uni)
         elif gate is not None and DENS_SHARE:                                                      # the gate = the visible oriented share; the lobe
             line = (T["e_kappa"][..., 1] >= 2.0) & (mass > 0)                                      # = the oriented part alone, where it shows
             share = ((mass * line).sum(-1) / m_t.clamp_min(1e-9)).clamp(0, 1); s_t = v[..., 0] * share
@@ -211,6 +222,8 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
     total = W["density"] * parts["density"] + W.get("mass", 0.0) * parts.get("mass", 0.0)
     if "gate" in parts:
         total = total + W.get("gate", 1.0) * parts["gate"]
+    if "gshare" in parts:
+        total = total + W.get("gate", 1.0) * parts["gshare"]
     if "readout" in parts:
         total = total + W.get("readout", 4.0) * parts["readout"]
     if W.get("lobe_mass", 0.0) > 0 and n_uni > 0:                                                 # each oriented population's share of the
