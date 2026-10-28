@@ -91,18 +91,54 @@ def draw_sequence(rng: np.random.Generator, mode: str) -> dict:
     return {}
 
 
+#: the HiP-CT profile's population contrast: |log density ratio| log-uniform in [lo, 1], lo from ``s0`` (strength 0) to
+#: ``s1`` (strength 1) -- calibrated 28 Oct on the classical reader (synthetic crops): see draw_material_hipct
+HIPCT_CONTRAST = {"s0": 0.3, "s1": 0.3}
+#: the HiP-CT profile's image formation: the Paganin low-pass (voxels) from ``paganin[0]`` to ``paganin[1]`` with the
+#: strength, the residual fringes' weight up to ``edge`` x strength, the background texture's modulation of its material
+#: from ``bg_mod`` (strength 0) to ``bg_mod`` + ``bg_mod_s`` (strength 1)
+HIPCT_FORMATION = {"paganin": (0.5, 2.0), "edge": 0.3, "bg_mod": 0.05, "bg_mod_s": 0.05}
+
+
+def draw_background_hipct(rng: np.random.Generator) -> dict:
+    """The HiP-CT profile's background material (fixed soft tissue): attenuation and phase shift tied (``delta / beta``
+    nearly constant in soft tissue: one electron density shows in both)."""
+    mu = float(math.exp(rng.uniform(math.log(0.3), math.log(1.5))))
+    return {"mu": mu, "delta": mu * float(math.exp(rng.uniform(-0.2, 0.2)))}
+
+
+def draw_material_hipct(rng: np.random.Generator, bg: dict, strength: float = 1.0) -> dict:
+    """A population's material against the HiP-CT background: a density ratio ``exp(+-c)``, ``c`` log-uniform in
+    [lo, 1], lo from :data:`HIPCT_CONTRAST` (``s0`` at strength 0 to ``s1`` at 1; both 0.3: at least ~35 % -- a floor of
+    0.03 at full strength put the classical reader's recoverable share at 0.14, below the default generator's 0.28, so
+    faint bundles are left to a later calibration); the phase shift follows the attenuation within ``10 % x strength``."""
+    sg = float(min(max(strength, 0.0), 1.0)); lo = HIPCT_CONTRAST["s0"] * (1 - sg) + HIPCT_CONTRAST["s1"] * sg
+    c = float(math.exp(rng.uniform(math.log(lo), 0.0))) * (1.0 if rng.random() < 0.5 else -1.0)
+    return {"mu": bg["mu"] * math.exp(c), "delta": bg["delta"] * math.exp(c + 0.1 * sg * float(rng.normal()))}
+
+
+def draw_sequence_hipct(rng: np.random.Generator, strength: float = 1.0) -> dict:
+    """The HiP-CT profile's reconstruction: mostly the Paganin-retrieved phase (a low-pass of delta, 0.5-2 voxels with the
+    strength), a little absorption, small residual edge fringes."""
+    sg = float(min(max(strength, 0.0), 1.0)); u = lambda a, b: float(rng.uniform(a, b))
+    lu = lambda a, b: float(math.exp(rng.uniform(math.log(a), math.log(b))))
+    F = HIPCT_FORMATION; p0, p1 = F["paganin"]
+    return {"w_abs": u(0, 0.3), "w_phase": u(0.7, 1.0), "paganin": lu(p0, p0 + (p1 - p0) * sg), "edge": u(0, F["edge"] * sg), "edge_sigma": lu(0.5, 1.5)}
+
+
 def form_image(mode: str, occ: torch.Tensor, tens: torch.Tensor, bg: torch.Tensor, mats: list, bgmat: dict, seq: dict,
-               contrasts=None, raw: bool = False, tex: torch.Tensor | None = None) -> torch.Tensor:
+               contrasts=None, raw: bool = False, tex: torch.Tensor | None = None, bg_mod: float = 0.25) -> torch.Tensor:
     """The image of populations with fractions ``occ (L, Z, Y, X)`` (summing to at most 1), tensors ``tens (L, 6, ...)``
     and materials ``mats`` over a background whose texture ``bg (Z, Y, X)`` (about zero mean, unit spread) modulates
     its material ``bgmat``; ``seq`` from :func:`draw_sequence`. Grey levels, about 0-255 (``raw``: the physical map).
-    ``tex (L, ...)``: a multiplicative texture of each population's material (its density varies inside it)."""
+    ``tex (L, ...)``: a multiplicative texture of each population's material (its density varies inside it); ``bg_mod`` how
+    much the background's texture modulates its material."""
     _to_grey_ = (lambda x: x) if raw else _to_grey
     rest = (1 - occ.sum(0)).clamp(0, 1)
     if tex is not None:                                                                            # texture inside each population: its
         occ = occ * tex                                                                            # material's density varies (SynthSeg's per-label
                                                                                                    # noise, anatomix's per-label textures)
-    tex = (1 + 0.25 * bg).clamp_min(0.05)                                                       # the background's material varies with its texture
+    tex = (1 + bg_mod * bg).clamp_min(0.05)                                                       # the background's material varies with its texture
     if mode == "additive":
         img = 128 + 30 * bg
         for k in range(occ.shape[0]):

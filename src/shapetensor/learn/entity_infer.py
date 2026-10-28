@@ -107,7 +107,7 @@ def features(model, x: torch.Tensor, voxel: float | None = None, voxel_um: float
     if getattr(getattr(model, "ent", None), "odirect", 0):                                        # the direct oriented path's energies
         from .model import with_oe
         fe = with_oe(fe, model.direct_levels(xb))
-    if getattr(getattr(model, "ent", None), "gate", None) is not None or getattr(getattr(model, "ent", None), "st_gain", None) is not None:
+    if getattr(getattr(model, "ent", None), "gate", None) is not None or getattr(getattr(model, "ent", None), "st_gain", None) is not None or getattr(getattr(model, "ent", None), "dens_ce", False):
         from .model import with_st6, st_products                                                  # the structure tensor (the gate's cue, the
         fe = with_st6(fe, st_products(xb))                                                        # direct path)
     return fe
@@ -178,7 +178,7 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
             od = dec.od_code(ovp, dec.od_weights(dirs), pairs=(qi, di))
         dc = dec.dens(enc)[qi] if (getattr(dec, "dens", None) is not None and qi.numel()) else None   # (per point, then gathered)
         st6 = getattr(feats, "st6", None); j6 = None; st_q = None
-        if st6 is not None and (getattr(dec, "gate", None) is not None or getattr(dec, "st_gain", None) is not None):
+        if st6 is not None and (getattr(dec, "gate", None) is not None or getattr(dec, "st_gain", None) is not None or getattr(dec, "dens_ce", False)):
             j6 = window_mean(st6[0], (p - off)[None].expand(6, -1, -1).contiguous(), s[None].expand(6, -1).contiguous()).T   # (n, 6)
             if getattr(dec, "st_gain", None) is not None and qi.numel():
                 from .model import st_matrix
@@ -197,6 +197,10 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
             stf = (st_features_ext(j6, s) if getattr(dec, "gate2", False) else st_features(j6)) if j6 is not None else None
             res = dec.gate_of(enc, ovp, stf, parts=True); g, gv = res[0], res[1]; fm = (full["f"] * ev).sum(1) / ev.sum(1).clamp_min(1); full["gv"] = gv
             full["f_lobe"] = full["f"]; full["f"] = g[:, None] * full["f"] + (1 - g[:, None]) * fm[:, None]; full["g"] = g
+        if getattr(dec, "dens_ce", False) and j6 is not None:                                       # the normalised density (dens_ce)
+            ce = dec.ce_density(enc, ovp, j6, s, dirs=dirs)
+            full["f_dir"] = full["f"]; full["f"] = torch.exp(ce["logq"]); full["logq"] = ce["logq"]
+            full["logq_g"] = ce["logq_g"]; full["w0"] = ce["w0"]
         full["evaluated"] = ev
         if mq is not None:
             full["m"] = mq.float()

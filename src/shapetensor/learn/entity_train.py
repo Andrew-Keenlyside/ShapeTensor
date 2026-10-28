@@ -115,6 +115,8 @@ def tree_distance(anc: torch.Tensor, i: torch.Tensor, j: torch.Tensor) -> torch.
 
 
 DENS_READOUT_LOBE = False           # ... and the lobe trained through the readout too (it may soften where unsure)
+DENS_CE = False                     # the density as a normalised distribution trained by cross-entropy against the
+                                    # non-background material's ODF on the model's grid (28 Oct structural review)
 DENS_NOBG = False                   # the readout's target without the background entity (its mass is the bg head's; 28 Oct:
                                     # the pedestal it set was the factor the image could not tell, corr 0.34)
 DENS_READOUT = False                # with the two-part gate: the gated readout trained end to end (28 Oct)
@@ -219,6 +221,24 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
     else:
         share = contrib / rho.clamp_min(1e-9)[..., None]; best, owner = share.max(-1)
         owned = (best > 0.5) & (rho > OWN_REL * rm) & (rm > DENS_EPS)
+    if DENS_CE and "logq_g" in ent:                                                                 # cross-entropy on the grid: the target the
+        from .model import fib_hemisphere                                                          # material's ODF without the background, no
+        lq_ = ent["logq_g"].float(); G_ = lq_.shape[-1]                                            # visibility mixing (what the image doesn't show
+        grid = fib_hemisphere(G_, dev)                                                             # the model says as spread)
+        mo = mass * (~T["e_bg"].bool()).to(mass.dtype) if "e_bg" in T else mass
+        pt = BG.pdf(grid.view(1, 1, G_, 1, 3), T["e_R"][:, :, None].float(), T["e_kappa"][:, :, None].float().clamp(max=DENS_KAPPA_MAX))
+        pt = (mo[:, :, None, :].float() * pt).sum(-1); m_o = mo.sum(-1).float()
+        ok = (m_o > MASS_EPS) & (pt.sum(-1) > 0)
+        pt = pt / pt.sum(-1, keepdim=True).clamp_min(1e-30)
+        lqd = lq_ + math.log(4 * math.pi / G_)                                                     # log of the grid point's probability
+        if bool(ok.any()):
+            kl = (pt * (torch.log(pt.clamp_min(1e-30)) - lqd)).sum(-1)
+            parts["density"] = kl[ok].mean()
+            parts["ce_gain"] = (pt * (lqd + math.log(G_))).sum(-1)[ok].mean().detach()             # over uniform, nats (logged)
+            parts["ce_oracle"] = (pt * torch.log((pt * G_).clamp_min(1e-30))).sum(-1)[ok].mean().detach()
+            parts["ce_w0"] = ent["w0"].float()[ok].mean().detach()
+        else:
+            parts["density"] = lq_.sum() * 0.0
     total = W["density"] * parts["density"] + W.get("mass", 0.0) * parts.get("mass", 0.0)
     if "gate" in parts:
         total = total + W.get("gate", 1.0) * parts["gate"]

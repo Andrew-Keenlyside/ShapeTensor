@@ -222,6 +222,16 @@ def st_features(j6: torch.Tensor) -> torch.Tensor:
     return torch.stack([1 - 3 * ev[..., 0] / tr, (ev[..., 1] - ev[..., 0]) / lmax, (ev[..., 2] - ev[..., 1]) / lmax], -1).float()
 
 
+CE_GRID = 256                       # the normalised density's grid (hemisphere; the density is antipodal)
+CE_LMAX = 8                         # its log-SH order
+
+
+def fib_hemisphere(n: int, device="cpu") -> torch.Tensor:
+    """``n`` near-uniform directions on the upper hemisphere (Fibonacci), ``(n, 3)`` in (z, y, x)."""
+    i = torch.arange(n, dtype=torch.float64) + 0.5; z = 1 - i / n; ph = math.pi * (3 - math.sqrt(5)) * i; r = torch.sqrt(1 - z ** 2)
+    return torch.stack([z, r * torch.sin(ph), r * torch.cos(ph)], 1).float().to(device)
+
+
 def st_features_ext(j6: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
     """:func:`st_features` and the eigenvalues' log ratios (l_mid / l_min, l_max / l_mid), the log gradient energy and the
     log window ``sigma (...)``, roughly unit scale: ``(..., 7)`` -- the cues that predict the visibility (28 Oct)."""
@@ -250,7 +260,7 @@ class EntityDecoder(nn.Module):
                  dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False,
                  kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0,
                  od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False, dens_gate: bool = False, st_path: bool = False,
-                 iso_head: bool = False, gate2: bool = False, gate_share: bool = False):
+                 iso_head: bool = False, gate2: bool = False, gate_share: bool = False, dens_ce: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -335,6 +345,26 @@ class EntityDecoder(nn.Module):
         self.gate_share = bool(gate_share) and self.gate2
         if self.gate_share:
             self.gcal = nn.Parameter(torch.tensor([0.0, 1.0, 1.0]))
+        # ``dens_ce`` (28 Oct structural review: the per-direction log-L1 is median-seeking -- under uncertainty its optimum
+        # is flat, and every gated readout collapsed to it): the density as a normalised distribution over directions,
+        # q(u) = w0 / 4 pi + (1 - w0) exp(l(u)) / Z, l = log-SH (order CE_LMAX) of the point code and its cues + the
+        # oriented bank's term + the structure tensor's -g (u^T M u - 1/3); Z on a fixed hemisphere grid (exact on it),
+        # trained by cross-entropy against the non-background material's ODF. At the start (zero heads) it is the
+        # classical structure-tensor reader over a floor.
+        self.dens_ce = bool(dens_ce)
+        if self.dens_ce:
+            from .sh import real_sh as _rsh, n_coef as _nc
+            g_ = fib_hemisphere(CE_GRID); self.register_buffer("ce_grid", g_, persistent=False)
+            self.register_buffer("ce_Y", _rsh(g_, CE_LMAX), persistent=False)
+            nf = hidden + (self.od_lv if self.odirect else 0) + 7
+            self.ce_sh = nn.Sequential(nn.Linear(nf, 128), nn.SiLU(), nn.Linear(128, _nc(CE_LMAX)))
+            self.ce_floor = nn.Sequential(nn.Linear(nf, 64), nn.SiLU(), nn.Linear(64, 3))           # floor, the tensor's and the bank's gains
+            for m_ in (self.ce_sh[2], self.ce_floor[2]):
+                nn.init.zeros_(m_.weight); nn.init.zeros_(m_.bias)
+            self.ce_od = nn.Linear(32, 1) if self.odirect else None
+            if self.ce_od is not None:
+                nn.init.zeros_(self.ce_od.weight); nn.init.zeros_(self.ce_od.bias)
+            self.ce_gain = nn.Parameter(torch.tensor(8.0))
         if self.gate2:
             ng = hidden + (self.od_lv if self.odirect else 0) + 7
             self.gate = nn.Sequential(nn.Linear(ng, 64), nn.SiLU(), nn.Linear(64, 2))
@@ -477,8 +507,8 @@ class EntityDecoder(nn.Module):
             ovs = [ov[b] if ov is not None else self.od_sample(feats, points[b], b) for b in range(B)]
             od = torch.stack([self.od_code(ovs[b], self.od_weights(dirs[b])) for b in range(B)])
         dc = self.dens(p)[:, :, None].expand(-1, -1, D, -1) if self.dens is not None else None      # once per point, not per direction
-        st6 = getattr(feats, "st6", None); stf = None; st_q = None
-        if st6 is not None and (getattr(self, "gate", None) is not None or getattr(self, "st_gain", None) is not None):
+        st6 = getattr(feats, "st6", None); stf = None; st_q = None; j6 = None
+        if st6 is not None and (getattr(self, "gate", None) is not None or getattr(self, "st_gain", None) is not None or getattr(self, "dens_ce", False)):
             B = points.shape[0]                                                                   # the query's structure tensor
             j6 = torch.stack([window_mean(st6[b], points[b][None].expand(6, -1, -1).contiguous(), sigma[b][None].expand(6, -1).contiguous()).T for b in range(B)])
             stf = st_features_ext(j6, sigma) if getattr(self, "gate2", False) else st_features(j6)   # (B, Q, 3 or 7)
@@ -491,6 +521,44 @@ class EntityDecoder(nn.Module):
             res = self.gate_of(p, torch.stack(ovs) if ovs is not None else None, stf, parts=True); out["g"], out["gv"] = res[0], res[1]
             if len(res) > 2:
                 out["gs"] = res[2]                                                            # the line share's estimate
+        if getattr(self, "dens_ce", False) and j6 is not None:                                    # the normalised density on the grid
+            ce = [self.ce_density(p[b], ovs[b] if ovs is not None else None, j6[b], sigma[b]) for b in range(p.shape[0])]
+            out["logq_g"] = torch.stack([c_["logq_g"] for c_ in ce]); out["w0"] = torch.stack([c_["w0"] for c_ in ce])
+        return out
+
+    def ce_density(self, p: torch.Tensor, ov: torch.Tensor | None, j6: torch.Tensor, sigma: torch.Tensor, dirs: torch.Tensor | None = None) -> dict:
+        """The normalised density (``dens_ce``) at points with codes ``p (N, hidden)``, bank energies ``ov (N, L, Dd)``,
+        window-mean gradient products ``j6 (N, 6)``, windows ``sigma (N,)``: ``logq_g (N, G)`` the log density (per
+        steradian) on the grid, ``w0 (N,)`` the uniform floor's weight, and ``logq (N, D)`` at ``dirs (D, 3)`` if given."""
+        from .sh import real_sh as _rsh
+        x = [p.float()]
+        if self.odirect:
+            if ov is not None:
+                ovf = ov.float(); x.append(torch.log(ovf.amax(-1).clamp_min(1e-12) / ovf.mean(-1).clamp_min(1e-6)).clamp(-5.0, 5.0))
+            else:
+                x.append(torch.zeros(p.shape[0], self.od_lv, device=p.device))
+        x.append(st_features_ext(j6, sigma)); x = torch.cat(x, -1)
+        wdt = self.ce_sh[0].weight.dtype
+        c = self.ce_sh(x.to(wdt)).float(); o3 = self.ce_floor(x.to(wdt)).float()
+        w0 = torch.sigmoid(o3[:, 0]); gs = torch.exp(o3[:, 1:2].clamp(-3.0, 1.5)); bs = torch.exp(o3[:, 2:3].clamp(-3.0, 3.0))   # per point (the overfit
+                                                                                                # test: one global sharpness and harmonics of
+                                                                                                # the code alone stalled at 13 % of the oracle)
+        Mn = st_matrix(j6)
+
+        def logit(U, Y_):
+            l_ = c @ Y_.T.float()
+            if self.ce_od is not None and ov is not None:
+                l_ = l_ + bs * self.ce_od(self.od_code(ov, self.od_weights(U))).float()[..., 0]
+            qd = torch.einsum("di,nij,dj->nd", U.float(), Mn, U.float())
+            return l_ - self.ce_gain.float() * gs * (qd - 1.0 / 3.0)
+
+        lg = logit(self.ce_grid, self.ce_Y)
+        logZ = torch.logsumexp(lg, 1, keepdim=True) + math.log(4 * math.pi / lg.shape[1])           # log of the integral of exp(l)
+        lw0 = torch.log(w0.clamp_min(1e-6))[:, None] - math.log(4 * math.pi); lw1 = torch.log1p(-w0.clamp(max=1 - 1e-6))[:, None]
+        mix = lambda l_: torch.logaddexp(lw0, lw1 + l_ - logZ)
+        out = {"logq_g": mix(lg), "w0": w0}
+        if dirs is not None:
+            out["logq"] = mix(logit(dirs.float(), _rsh(dirs.float(), CE_LMAX)))
         return out
 
     def gate_of(self, p: torch.Tensor, ov: torch.Tensor | None, stf: torch.Tensor | None = None, parts: bool = False):
@@ -631,7 +699,7 @@ class PopulationNet(nn.Module):
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
                  odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0,
                  od_norm: bool = False, dens_gate: bool = False, st_path: bool = False, iso_head: bool = False, gate2: bool = False,
-                 gate_share: bool = False):
+                 gate_share: bool = False, dens_ce: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -670,7 +738,7 @@ class PopulationNet(nn.Module):
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
                                      oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect),
                                      od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote), od_norm=bool(od_norm), dens_gate=bool(dens_gate),
-                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share))
+                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share), dens_ce=bool(dens_ce))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             # the background's occupancy (the isotropic remainder) at every voxel: the density's floor is background plus
@@ -746,7 +814,7 @@ class PopulationNet(nn.Module):
                    od_sigmas=tuple(args.get("od_sigmas") or (2.0, 4.0, 6.0)), mass_vote=bool(args.get("mass_vote", False)),
                    block_norm=int(args.get("block_norm", 0) or 0), od_norm=bool(args.get("od_norm", False)),
                    dens_gate=bool(args.get("dens_gate", False)), st_path=bool(args.get("st_path", False)), iso_head=bool(args.get("iso_head", False)),
-                   gate2=bool(args.get("gate2", False)), gate_share=bool(args.get("gate_share", False))) \
+                   gate2=bool(args.get("gate2", False)), gate_share=bool(args.get("gate_share", False)), dens_ce=bool(args.get("dens_ce", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
@@ -998,7 +1066,7 @@ class PopulationNet(nn.Module):
                 fe = with_scal((h0, h1, h), self.scalar_fields(x)) if getattr(self.ent, "oprobe", False) else (h0, h1, h)
                 if getattr(self.ent, "odirect", 0):
                     fe = with_odv(fe, self.direct_at(x, e_points.float())) if OD_AT_POINTS else with_oe(fe, self.direct_levels(x))
-                if getattr(self.ent, "gate", None) is not None or getattr(self.ent, "st_gain", None) is not None:   # the structure tensor
+                if getattr(self.ent, "gate", None) is not None or getattr(self.ent, "st_gain", None) is not None or getattr(self.ent, "dens_ce", False):   # the structure tensor
                     fe = with_st6(fe, st_products(x))                                            # (the gate's cue, the direct path)
                 out["ent"] = self.ent(fe, e_points.float(), e_sigma.float(), e_dirs, None if context is None else context.float())
             if self.region is not None:                                                         # the population region, every voxel

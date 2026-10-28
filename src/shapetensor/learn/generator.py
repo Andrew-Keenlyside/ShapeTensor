@@ -1055,11 +1055,27 @@ NEW_KEYS = ("slabs", "drift", "chatter", "lsstripes", "depth", "lowdose", "wedge
 MODALITIES["mixed"] = {k: (0.1 if k in ("wedge", "ctf", "lowdose") else 0.15 if k in NEW_KEYS else 0.35) for k in MODALITIES["hipct"]}
 CROSS_MIX = 0.08                   # every nuisance outside the chosen modality's profile is still drawn with this probability
 CROSS_KEY = {"wedge": 0.03, "ctf": 0.03, "lowdose": 0.03, "slabs": 0.03}   # the most destructive ones less often
+#: the HiP-CT-only profile (``nuisance(profile="hipct")``, opt-in from ``scene.draw_scene(profile="hipct")``; 28 Oct review):
+#: only what a synchrotron propagation phase-contrast scan of fixed tissue shows -- an isotropic PSF (0.5-1.2 voxels),
+#: low-pass (Paganin-filtered) noise instead of white Poisson / Gaussian, rings, residual edge fringes, stitching seams, a
+#: flat-field bias, monotone remaps and either polarity; no cross-mixing (no section, MRI, EM, fluorescence, cryo-ET
+#: effects, no anisotropic PSF, no thick slices). Strength 0: nearly clean; 1: the hardest plausible HiP-CT.
+HIPCT_PROFILE = {k: 0.0 for k in MODALITIES["hipct"]}
+HIPCT_PROFILE.update({"invert": 0.5, "bend": 0.5, "bias": 0.5, "rings": 0.6, "fringes": 0.7, "seams": 0.3})
+#: the HiP-CT profile's noise at full strength (fractions of the image's range): the low-pass part's sd drawn in
+#: [lo, hi], the white part's up to ``white``; scaled by the strength
+HIPCT_NOISE = {"lo": 0.005, "hi": 0.02, "white": 0.01}
+HIPCT_PSF = (0.5, 1.2)              # the HiP-CT profile's isotropic PSF sigma (voxels): from the first at strength 0 up to the second
+#: record keys the HiP-CT profile never writes (the removed nuisances; tests check them)
+HIPCT_REMOVED = ("misalign", "drift", "missing_sections", "chatter", "stain", "lsstripes", "depth", "cupping", "mosaic", "heavy_psf",
+                 "resolution", "gibbs", "ghosting", "ctf", "poisson_photons", "gaussian_sd", "rician_sd", "speckle", "lowdose", "wedge",
+                 "thick_slices", "streaks", "stripes", "zingers", "dust", "slice_jitter", "saturate", "slabs", "warp", "affine",
+                 "slice_profile", "tear", "fold", "ct_scan", "scan")
 
 
 def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, modality: str | None = None, warp: bool | None = None,
              fast: bool = False, hp_max: float | None = None, vis_opts: dict | None = None, affine: bool = False,
-             orient_from_texture: bool | None = None) -> dict:
+             orient_from_texture: bool | None = None, profile: str | None = None) -> dict:
     # ``strength`` (0-1) scales the probability and the magnitude of every nuisance that destroys information (PSF,
     # resolution, thick slices, k-space truncation, noise, artefacts); geometric and monotone remaps are not scaled
     """One draw of a modality's acquisition on a clean sample (``hipct`` / ``ct`` / ``mri`` / ``histology`` / ``em`` /
@@ -1089,9 +1105,14 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     lu = lambda a, b: float(math.exp(u(math.log(a), math.log(b))))
     names = list(MODALITIES); modality = modality or names[_int(0, len(names))]
     P = MODALITIES[modality]
+    hip = profile == "hipct"                                                                    # the HiP-CT-only profile (opt-in)
+    if hip:
+        modality, P = "hipct", HIPCT_PROFILE
     sg = float(min(max(strength, 0.0), 1.0))                                                     # 0: clean; 1: the full ranges (a training curriculum ramps it)
     KEEP = ("warp", "invert", "bend", "bias")                                                   # remaps that keep the information: not scaled by strength
     on = lambda key: u(0, 1) < max(P.get(key, 0.0), CROSS_KEY.get(key, CROSS_MIX)) * (1.0 if key in KEEP else sg)
+    if hip:                                                                                      # no cross-mixing
+        on = lambda key: u(0, 1) < P.get(key, 0.0) * (1.0 if key in KEEP else sg)
     img = s.image.clone().float(); Z, Y, X = img.shape; rec = {"modality": modality}
     occ = torch.stack([L.occupancy for L in s.layers]); T = torch.stack([L.tensor for L in s.layers])
     Dsc = torch.stack([L.desc if L.desc is not None else torch.zeros((3,) + tuple(img.shape), device=device) for L in s.layers])   # (K, 3, Z, Y, X)
@@ -1217,7 +1238,7 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
         vy = 1 - u(0.05, 0.2) * sg * ((py - Tp / 2).abs() / (Tp / 2)) ** 2; vx = 1 - u(0.05, 0.2) * sg * ((px - Tp / 2).abs() / (Tp / 2)) ** 2
         img = img * (vy[:, None] * vx[None, :])[None]; rec["mosaic"] = Tp
     # PSF (longer along the acquisition axis when anisotropic), resolution loss, k-space truncation, ghosting
-    sig = [lu(0.3, 0.3 + 1.7 * sg) for _ in range(3)]
+    sig = [lu(0.3, 0.3 + 1.7 * sg) for _ in range(3)] if not hip else [lu(HIPCT_PSF[0], HIPCT_PSF[0] + (HIPCT_PSF[1] - HIPCT_PSF[0]) * sg)] * 3   # HiP-CT: isotropic
     if on("heavy_psf"):                                                                          # a poor resolution: the PSF 1.5-3.5x wider
         k_ = lu(1.5, 1.5 + 2.0 * sg); sig = [min(v * k_, 6.0) for v in sig]; rec["heavy_psf"] = round(k_, 2)   # (to ~6 voxels; targets merge
     if on("aniso_psf"):                                                                          # what it cannot resolve: acquisition_blur)
@@ -1258,6 +1279,13 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
         Pn = lu(0.5, 20.0) / max(sg, 0.01) ** 2; rd = u(0.3, 2.0); off = u(0, 5)
         cnt = torch.poisson(((img - lo) / rng).clamp_min(0) * Pn, generator=g) + off + rd * torch.randn(img.shape, device=device, generator=g)
         img = lo + rng * (cnt - off) / Pn; rec["lowdose"] = (round(Pn, 2), round(rd, 2))
+    if hip and sg > 0:                                                                          # HiP-CT: low-pass noise (the Paganin filter's
+        cs = lu(0.6, 1.5); sd = u(HIPCT_NOISE["lo"], HIPCT_NOISE["lo"] + HIPCT_NOISE["hi"] * sg) * rng   # spectrum) and a little white noise
+        nz = gaussian(torch.randn(img.shape, device=device, generator=g), cs, truncate=3.0)
+        nz = nz / nz.std().clamp_min(1e-9)
+        sw = u(0.0, HIPCT_NOISE["white"]) * sg * rng
+        img = img + sd * nz + sw * torch.randn(img.shape, device=device, generator=g)
+        rec["corr_noise"] = (round(sd / rng * 255, 1), round(cs, 2), round(sw / rng * 255, 1))
     if on("wedge"):                                                                             # the missing wedge: beam along the axis, tilt axis the last in-plane
         th = u(40, 70); k0 = torch.fft.fftfreq(A, device=device).view(-1, 1, 1); k1 = torch.fft.fftfreq(B, device=device).view(1, -1, 1)
         keep = (k0.abs() <= math.tan(math.radians(th)) * k1.abs()) | (k0 == 0)                  # the planes reached by tilts up to +-th

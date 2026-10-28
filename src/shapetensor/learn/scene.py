@@ -2799,6 +2799,22 @@ def _extra_acquisition(img, layers, rng: Rng, modality: str, rec: dict, strength
     return img
 
 
+#: the HiP-CT profile's grain (unresolved microstructure) amplitude, in units of the image's 5-95 % range: drawn in
+#: [lo x strength, lo + span x strength] (0.1-0.4 at full strength, 0-0.1 at strength 0)
+HIPCT_GRAIN = {"lo": 0.1, "span": 0.3}
+
+
+def _hipct_acquisition(img, rng: Rng, rec: dict, strength: float = 1.0):
+    """The HiP-CT profile's extra artefact: local-tomography truncation (the scan's field of view inside the specimen:
+    low frequencies lost), its probability and depth scaled by the strength."""
+    sg = float(min(max(strength, 0.0), 1.0))
+    if rng.p(0.4 * sg):
+        s = rng.lu(10, 40); alpha = rng.u(0.1, 0.6) * sg
+        img = img - alpha * (gaussian(img, s) - img.mean())
+        rec["local_tomography"] = (round(s, 1), round(alpha, 2))
+    return img
+
+
 def _log_desc(d5: torch.Tensor) -> torch.Tensor:
     """The scene's 5 descriptors (size, wall in voxels; lumen fraction, flattening, angularity) as learned:
     ``log2(1 + size)``, the wall relative to the size, then the three fractions."""
@@ -2866,7 +2882,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
                p_texture: float = 0.5, p_merge: float = 0.25, p_boundary: float = 0.2, p_affine: float = 0.3, p_grain: float = 0.8,
                underlay_p: float = 0.4, p_sparse: float = 0.12, p_cutout: float = 0.15, entity_ctx: bool = False, cross_p: float = 0.0,
                p_centre: float = 0.0, deep_tree: bool = False, dense_p: float = 0.0, scene_seed: int | None = None,
-               fill_quota: tuple | None = None):
+               fill_quota: tuple | None = None, profile: str | None = None):
     """A training pair from an object scene, in the format of :func:`~shapetensor.learn.generator.draw`: ``(Sample,
     drawn)``. Scenes are rendered on a ``canvas``³ grid and ``crops_per_scene`` consecutive seeds share one (cut at
     different places), so a scene's cost is spread over its crops.
@@ -2893,6 +2909,15 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
       ``p_cutout`` -- chunks of tissue removed (:func:`cutout_mask`: blocks, holes, a knife's gap), the medium in their
       place and nothing to find there.
 
+    ``profile="hipct"`` (opt-in; None: everything above, unchanged): the acquisition is synchrotron HiP-CT only -- X-ray
+    phase-contrast image formation (tied attenuation and phase, a Paganin low-pass of 0.5-2 voxels, small residual
+    fringes; population contrast :data:`~shapetensor.learn.physics.HIPCT_CONTRAST`), no blends with other physics, no
+    orientation-dependent contrast, no per-population offsets (scramble); texture inside populations (at most 0.2), shared
+    intensities (merge) and the background's texture scaled by the strength; grain at 0.1-0.4 of the range (0-0.1 at
+    strength 0, :data:`HIPCT_GRAIN`); in :func:`~shapetensor.learn.generator.nuisance` an isotropic PSF, low-pass noise,
+    rings, fringes, seams and a bias (:data:`~shapetensor.learn.generator.HIPCT_PROFILE`); of the extra artefacts only
+    local-tomography truncation. Strength 0 is nearly clean. Batch-time routes: ``augment.PROFILE = "hipct"``.
+
     With ``entity_ctx``, ``drawn["entity_ctx"]`` holds what :func:`~shapetensor.learn.entities.entity_targets` needs: the
     canvas's (voxel, population, object) entries, its tree, the crop's origin / zoom, each population's layer, the warp.
 
@@ -2908,6 +2933,13 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     r = Rng(seed, device); ra = Rng(acq_seed if acq_seed is not None else seed + 31337, device)
     from .generator import MODALITIES
     names = list(MODALITIES); modality = modality or names[ra.i(0, len(names) - 1)]          # X-ray, MRI, histology, EM, fluorescence, cryo-ET, mixed
+    hip = profile == "hipct"; sg_ = float(min(max(strength, 0.0), 1.0))
+    if profile not in (None, "hipct"):
+        raise ValueError(f"unknown acquisition profile {profile!r}")
+    if hip:                                                                   # HiP-CT only: texture inside populations and shared
+        modality = "hipct"                                                    # intensities scale with the strength; no blends, no
+        p_texture, p_merge, p_scramble, p_blend, p_aniso = p_texture * sg_, 0.5 * p_merge * sg_, 0.0, 0.0, 0.0   # sin^2 contrast, no offsets
+                                                                              # (scramble) -- one phase map
     ext = [s_ * zoom for s_ in shape]
     assert all(e <= canvas for e in ext), "the zoomed crop must fit the canvas"
     o = list(crop) if crop is not None else [r.i(0, canvas - e) for e in ext]
@@ -3018,7 +3050,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     after = [cstore["occluded"][i] for i in range(len(layers))] if (entity_ctx and layers and not _gn.TARGETS_BUDGET) else [L.occupancy for L in layers]
     comp = (torch.stack([torch.where(p_ > 1e-6, a_ / p_.clamp_min(1e-6), torch.ones_like(p_)) for p_, a_ in zip(pre, after)])
             if (entity_ctx and layers) else None)                            # occlusion (and the volume budget if TARGETS_BUDGET), per population
-    mode = physics or (ra.np.choice(PHYS_BY_MODALITY[modality]) if ra.p(p_physics) else "additive")
+    mode = (physics or "xray") if hip else (physics or (ra.np.choice(PHYS_BY_MODALITY[modality]) if ra.p(p_physics) else "additive"))
     n_sh = len(layers) + len(extra)
     filled = sum((L.occupancy for L in shapes_[:n_sh]), torch.zeros(shape, device=device))
     occs = torch.stack([L.occupancy for L in shapes_[:n_sh]] + [torch.minimum(lum, (1 - filled).clamp_min(0))])
@@ -3026,7 +3058,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     texture = (bg - bg.mean()) / bg.std().clamp_min(1e-6)
     tex = None
     if ra.p(p_texture):                                                      # texture inside each population (its own grain and depth)
-        tex = torch.stack([(1 + ra.u(0.05, 0.5) * smooth_noise(shape, ra.lu(0.6, 6.0), ra.g, device)).clamp_min(0.05) if ra.p(0.7)
+        tex = torch.stack([(1 + (ra.u(0.05, 0.5) if not hip else ra.u(0.05, 0.05 + 0.15 * sg_)) * smooth_noise(shape, ra.lu(0.6, 6.0), ra.g, device)).clamp_min(0.05) if ra.p(0.7)
                            else torch.ones(shape, device=device) for _ in range(occs.shape[0])])
         routes_pre = ["texture"]
     else:
@@ -3049,11 +3081,18 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
                 if tex is not None:
                     out = out + c_eff * (tex[k] - 1) * L.occupancy
             return out + lum * lum_c
-        mats = [draw_material(ra.np, m) for _ in range(occs.shape[0])]; bgm = draw_material(ra.np, m, background=True)
+        if hip and m == "xray":                                               # tied attenuation and phase, contrast by strength
+            from .physics import draw_background_hipct, draw_material_hipct
+            bgm = draw_background_hipct(ra.np); mats = [draw_material_hipct(ra.np, bgm, sg_) for _ in range(occs.shape[0])]
+        else:
+            mats = [draw_material(ra.np, m) for _ in range(occs.shape[0])]; bgm = draw_material(ra.np, m, background=True)
         for k, t in merge.items():
             mats[k] = dict(bgm) if t == -1 else dict(mats[t])
             if t == -1:                                                      # the background material carries no orientation terms
                 mats[k].update({kk: vv for kk, vv in draw_material(ra.np, m).items() if kk not in bgm})
+        if hip and m == "xray":
+            from .physics import HIPCT_FORMATION as HF, draw_sequence_hipct
+            return form_image(m, occs, tens, texture, mats, bgm, draw_sequence_hipct(ra.np, sg_), tex=tex, bg_mod=HF["bg_mod"] + HF["bg_mod_s"] * sg_)
         return form_image(m, occs, tens, texture, mats, bgm, draw_sequence(ra.np, m), tex=tex)
     img_main = physics_image(mode)
     routes = [mode] + routes_pre
@@ -3077,7 +3116,8 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     if ra.p(p_grain):                                                                          # unresolved microstructure under the tissue
         flat_ = img.flatten()[:: max(1, img.numel() // 100000)]
         q5, q95 = torch.quantile(flat_.float(), torch.tensor([0.05, 0.95], device=device))
-        amp = ra.lu(0.3, 0.3 + 3.7 * strength) * float(q95 - q5) / 4                          # real 20 um HiP-CT: texture over faint structures (domain gap, 23 Oct);
+        amp = (ra.lu(0.3, 0.3 + 3.7 * strength) * float(q95 - q5) / 4 if not hip
+               else ra.u(HIPCT_GRAIN["lo"] * sg_, HIPCT_GRAIN["lo"] + HIPCT_GRAIN["span"] * sg_) * float(q95 - q5))   # HiP-CT: 0.1-0.4 of the range                          # real 20 um HiP-CT: texture over faint structures (domain gap, 23 Oct);
                                                                                                 # with the strength, at most the image's range (28 Oct: up to 2x
                                                                                                 # the range at any strength, under 80 % of crops, the density's
                                                                                                 # targets went unseen and its best answer was flat)
@@ -3090,12 +3130,13 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
         fill = med + sd * ra.randn(*shape) + tx * smooth_noise(shape, ra.lu(8, 30), ra.g, device)
         img = M * g0 + (1 - M) * fill
     rec["physics"] = mode; rec["routes"] = routes
-    img = _extra_acquisition(img, layers, ra, modality, rec, strength)
+    img = _extra_acquisition(img, layers, ra, modality, rec, strength) if not hip else _hipct_acquisition(img, ra, rec, strength)
     s = Sample(img, shapes_, bg, lab, st, 1.0, content, rec, R, budget=cstore.get("over") if entity_ctx else None)
     d = nuisance(s, seed=acq_seed if acq_seed is not None else seed, device=device, strength=strength, modality=modality, warp=False, fast=True, hp_max=12.0,
                  vis_opts={"per_layer_hp": True, "local_corr": True, "ladder": VIS_LADDER, "window_ladder": VIS_WINDOWS}, affine=False,   # (deformed
                                                                                                                                           # with the scene)
-                 orient_from_texture=True if "tissue" in sc.record else None)            # packed tissue: evidence from texture, not edges
+                 orient_from_texture=True if "tissue" in sc.record else None,            # packed tissue: evidence from texture, not edges
+                 profile=profile)
     if fill_rec is not None:
         d["record"]["crop_fill"] = fill_rec
     if medium is not None and ra.p(0.5):                                                       # the tissue's range stretched to the display, the medium

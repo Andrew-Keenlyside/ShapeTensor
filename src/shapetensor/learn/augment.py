@@ -47,6 +47,12 @@ P = {"lut": 0.7, "nonmono": 0.35, "spatial": 0.25, "gamma": 0.3, "unsharp": 0.3,
      "lsstripes": 0.08, "axial_psf": 0.12, "shot": 0.12, "slices": 0.12, "thin_slabs": 0.08}
 
 
+#: the batch-time routes' profile: None -- every route (above); "hipct" -- only what keeps a HiP-CT scan a HiP-CT scan
+#: (monotone transfer curves, gamma, a smooth gain / offset field, a little noise). Set by the trainer (opt-in).
+PROFILE = None
+HIPCT_ROUTES = ("lut", "gamma", "field", "noise")
+
+
 def random_lut(rng: np.random.Generator, monotone: bool, min_tv: float = 0.6, max_slope: float = 5.0, max_folds: int = 2):
     """Knots ``(xk, yk)`` of a random curve on [0, 1]: 2-8 inner knots; monotone (rising or falling) or not (at most
     ``max_folds`` changes of direction), its total variation at least ``min_tv`` (a curve that flattens the range would
@@ -422,9 +428,11 @@ def contrast_route(x: torch.Tensor, rng: np.random.Generator, strength: float = 
     rec = {} if rec is None else rec
     s = float(min(max(strength, 0.0), 1.0))
     on = lambda k: rng.random() < P[k] * s
+    if PROFILE == "hipct":                                                                         # opt-in: the HiP-CT routes only
+        on = lambda k: rng.random() < (P[k] if k in HIPCT_ROUTES else 0.0) * s
     y = x.float()
     if on("lut"):                                                                                  # a transfer function, possibly varying in space
-        mono = not (rng.random() < P["nonmono"])
+        mono = not (rng.random() < P["nonmono"]) or PROFILE == "hipct"
         L1 = random_lut(rng, mono)
         if on("spatial"):
             L2 = random_lut(rng, mono or rng.random() < 0.5)
