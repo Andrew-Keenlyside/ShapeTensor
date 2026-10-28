@@ -256,3 +256,10 @@ structure-tensor path at gain 12 the loss starts at +361 % (too sharp, no pedest
   (frozen until step 1000). Isolated harness: zeroing the pilot's density logit (`--reset-dens-logit`) made no
   difference (+95 % -> +52 % at 750 steps, plateau ~+60 %); a decomposition of the readout error (share vs lobe) is
   running.
+* Decomposition of the harness model's readout at visible queries (loss, flat 0.458): its share x its lobe 0.50; the
+  *true* share x its lobe 0.54 (its lobe is worse than the tensor lobe it started from: true share x tensor lobe
+  0.37); its share x the oracle lobe 0.33; true share x oracle lobe 0.24; true share x the whole oriented part 0.18.
+  Its share has median 0.08 against the true 0.23 and correlates -0.21 with it. On 8 crops with augmentation both
+  pieces are poor; the cluster pilot with fresh data does better on the lobe (-10 % at visible queries) and its
+  weak piece is the share head. Where the tensor's axis is confident but wrong, nothing in the tensor says so: the
+  share head needs the trunk (unfrozen from step 1000) or is fundamentally limited there.
