@@ -155,6 +155,7 @@ class Feats(tuple):
     scal = None
     oe = None
     od_v = None                                                                                  # the bank already sampled at the queries
+    st6 = None                                                                                   # the image's gradient products (B, 6, Z, Y, X)
 
 
 class Levels(list):
@@ -172,15 +173,39 @@ OD_STRIDES = None                                                               
 
 
 def with_scal(feats, scal) -> Feats:
-    f = Feats(tuple(feats)); f.scal = scal; f.oe = getattr(feats, "oe", None); return f
+    f = Feats(tuple(feats)); f.scal = scal; f.oe = getattr(feats, "oe", None); f.st6 = getattr(feats, "st6", None); return f
 
 
 def with_oe(feats, oe) -> Feats:
-    f = Feats(tuple(feats)); f.scal = getattr(feats, "scal", None); f.oe = oe; f.od_v = getattr(feats, "od_v", None); return f
+    f = Feats(tuple(feats)); f.scal = getattr(feats, "scal", None); f.oe = oe; f.od_v = getattr(feats, "od_v", None); f.st6 = getattr(feats, "st6", None); return f
 
 
 def with_odv(feats, od_v) -> Feats:
-    f = Feats(tuple(feats)); f.scal = getattr(feats, "scal", None); f.oe = getattr(feats, "oe", None); f.od_v = od_v; return f
+    f = Feats(tuple(feats)); f.scal = getattr(feats, "scal", None); f.oe = getattr(feats, "oe", None); f.od_v = od_v; f.st6 = getattr(feats, "st6", None); return f
+
+
+def with_st6(feats, st6) -> Feats:
+    f = Feats(tuple(feats)); f.scal = getattr(feats, "scal", None); f.oe = getattr(feats, "oe", None); f.od_v = getattr(feats, "od_v", None); f.st6 = st6; return f
+
+
+def st_products(x: torch.Tensor) -> torch.Tensor:
+    """The image's gradient products ``(B, 6, Z, Y, X)`` (zz, yy, xx, zy, zx, yx; gradients at sigma 1): their window
+    mean at a query is its structure tensor -- the classical cue the visibility gate reads (29 Oct)."""
+    from ..filters import gaussian
+    with torch.no_grad(), torch.autocast(x.device.type, enabled=False):
+        xf = x[:, 0].float()
+        gz = gaussian(xf, (1.0,) * 3, order=(1, 0, 0)); gy = gaussian(xf, (1.0,) * 3, order=(0, 1, 0)); gx = gaussian(xf, (1.0,) * 3, order=(0, 0, 1))
+        return torch.stack([gz * gz, gy * gy, gx * gx, gz * gy, gz * gx, gy * gx], 1)
+
+
+def st_features(j6: torch.Tensor) -> torch.Tensor:
+    """From window-mean gradient products ``(..., 6)``: the anisotropy ``1 - 3 l_min / tr``, the line-ness
+    ``(l_mid - l_min) / l_max`` and the planarity ``(l_max - l_mid) / l_max``: ``(..., 3)``."""
+    M = torch.stack([torch.stack([j6[..., 0], j6[..., 3], j6[..., 4]], -1), torch.stack([j6[..., 3], j6[..., 1], j6[..., 5]], -1),
+                     torch.stack([j6[..., 4], j6[..., 5], j6[..., 2]], -1)], -2).double()
+    ev = torch.linalg.eigvalsh(M + 1e-12 * torch.eye(3, dtype=torch.float64, device=j6.device)).clamp_min(0)
+    tr = ev.sum(-1).clamp_min(1e-30); lmax = ev[..., 2].clamp_min(1e-30)
+    return torch.stack([1 - 3 * ev[..., 0] / tr, (ev[..., 1] - ev[..., 0]) / lmax, (ev[..., 2] - ev[..., 1]) / lmax], -1).float()
 
 
 #: training: pool the direct path's bank only where the queries need it (z and y passes over the volume, the x pass at
@@ -252,12 +277,13 @@ class EntityDecoder(nn.Module):
         # orientation shows (28 Oct: with one output for both, the 93 % of near-flat targets pulled the lobes flat
         # before the 7 % visible queries could teach them anything)
         self.gate = None
-        if dens_gate:                                                                             # its input: the point code and, with the
-            ng = hidden + (self.od_lv if self.odirect else 0)                                     # direct path, each level's energy contrast
-            self.gate = nn.Linear(ng, 1); nn.init.zeros_(self.gate.weight); nn.init.constant_(self.gate.bias, -3.0)   # (log max / mean over
-            if self.odirect:                                                                      # the bank: the classical cue, gain 0.5 from
-                with torch.no_grad():                                                             # the start (noise alone sums to ~2-4); a zero
-                    self.gate.weight[0, hidden:] = 0.5                                            # gate at lr 1e-4 had not moved in 500 steps)
+        if dens_gate:                                                                             # its input: the point code; with the direct
+            ng = hidden + (self.od_lv if self.odirect else 0) + 3                                 # path each level's energy contrast (log max /
+            self.gate = nn.Linear(ng, 1); nn.init.zeros_(self.gate.weight); nn.init.constant_(self.gate.bias, -2.5)   # mean over the bank);
+            with torch.no_grad():                                                                 # and the query's structure tensor (anisotropy,
+                if self.odirect:                                                                  # line-ness, planarity: the cue the visibility
+                    self.gate.weight[0, hidden:hidden + self.od_lv] = 0.25                        # itself is measured from, 29 Oct), at
+                self.gate.weight[0, -3:-1] = 2.0                                                  # positive gains from the start
         if self.odirect:
             self.od_net = nn.Sequential(nn.Linear(self.od_lv * (2 if self.od_norm else 1) + 1, 64), nn.SiLU(), nn.Linear(64, 32))
             self.od_dens = nn.Linear(32, 1); nn.init.zeros_(self.od_dens.weight); nn.init.zeros_(self.od_dens.bias)
@@ -398,14 +424,21 @@ class EntityDecoder(nn.Module):
         if self.mass is not None:
             out["m"] = self.mass_of(p)
         if getattr(self, "gate", None) is not None:
-            out["g"] = self.gate_of(p, torch.stack(ovs) if ovs is not None else None)             # (B, Q) the orientation's visibility
+            st6 = getattr(feats, "st6", None); stf = None
+            if st6 is not None:                                                                   # the query's structure tensor
+                B = points.shape[0]
+                j6 = torch.stack([window_mean(st6[b], points[b][None].expand(6, -1, -1).contiguous(), sigma[b][None].expand(6, -1).contiguous()).T for b in range(B)])
+                stf = st_features(j6)                                                             # (B, Q, 3)
+            out["g"] = self.gate_of(p, torch.stack(ovs) if ovs is not None else None, stf)        # (B, Q) the orientation's visibility
         return out
 
-    def gate_of(self, p: torch.Tensor, ov: torch.Tensor | None) -> torch.Tensor:
-        """The visibility gate from point codes ``p (..., hidden)`` and the bank's energies there ``ov (..., L, Dd)``."""
+    def gate_of(self, p: torch.Tensor, ov: torch.Tensor | None, stf: torch.Tensor | None = None) -> torch.Tensor:
+        """The visibility gate from point codes ``p (..., hidden)``, the bank's energies there ``ov (..., L, Dd)`` and the
+        structure-tensor features ``stf (..., 3)`` (zeros if not given)."""
         if ov is not None:
             ovf = ov.float(); odc = torch.log(ovf.amax(-1) / ovf.mean(-1).clamp_min(1e-6)).clamp(max=5.0)
             p = torch.cat([p, odc.to(p.dtype)], -1)
+        p = torch.cat([p, (stf if stf is not None else torch.zeros(*p.shape[:-1], 3, device=p.device)).to(p.dtype)], -1)
         return torch.sigmoid(self.gate(p).float()[..., 0])
 
     def reset_kappa(self):
@@ -886,6 +919,8 @@ class PopulationNet(nn.Module):
                 fe = with_scal((h0, h1, h), self.scalar_fields(x)) if getattr(self.ent, "oprobe", False) else (h0, h1, h)
                 if getattr(self.ent, "odirect", 0):
                     fe = with_odv(fe, self.direct_at(x, e_points.float())) if OD_AT_POINTS else with_oe(fe, self.direct_levels(x))
+                if getattr(self.ent, "gate", None) is not None:                                  # the visibility gate's structure-tensor cue
+                    fe = with_st6(fe, st_products(x))
                 out["ent"] = self.ent(fe, e_points.float(), e_sigma.float(), e_dirs, None if context is None else context.float())
             if self.region is not None:                                                         # the population region, every voxel
                 out["region_logit"] = self.region_map(h0, h1, h); out["region"] = self.region_value(out["region_logit"])

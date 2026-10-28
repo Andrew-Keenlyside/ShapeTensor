@@ -107,6 +107,9 @@ def features(model, x: torch.Tensor, voxel: float | None = None, voxel_um: float
     if getattr(getattr(model, "ent", None), "odirect", 0):                                        # the direct oriented path's energies
         from .model import with_oe
         fe = with_oe(fe, model.direct_levels(xb))
+    if getattr(getattr(model, "ent", None), "gate", None) is not None:                            # the visibility gate's structure-tensor cue
+        from .model import with_st6, st_products
+        fe = with_st6(fe, st_products(xb))
     return fe
 
 
@@ -184,7 +187,11 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
             for k in full:
                 full[k][qi, di] = r[k].float()
         if getattr(dec, "gate", None) is not None:                                                 # gated density: g x the lobe + (1 - g) x flat
-            g = dec.gate_of(enc, ovp); fm = (full["f"] * ev).sum(1) / ev.sum(1).clamp_min(1)
+            from .model import st_features
+            st6 = getattr(feats, "st6", None); stf = None
+            if st6 is not None:
+                stf = st_features(window_mean(st6[0], (p - off)[None].expand(6, -1, -1).contiguous(), s[None].expand(6, -1).contiguous()).T)
+            g = dec.gate_of(enc, ovp, stf); fm = (full["f"] * ev).sum(1) / ev.sum(1).clamp_min(1)
             full["f"] = g[:, None] * full["f"] + (1 - g[:, None]) * fm[:, None]; full["g"] = g
         full["evaluated"] = ev
         if mq is not None:
