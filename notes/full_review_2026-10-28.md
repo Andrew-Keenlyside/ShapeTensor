@@ -242,3 +242,9 @@ structure-tensor path at gain 12 the loss starts at +361 % (too sharp, no pedest
   visibility) and the density read out as ``share x lobe + (1 - share)`` makes the pedestal a regression target
   instead of something the lobe branch has to discover under the shape loss. The lobe branch then only has to get
   the axis right, where the oracle says -65 % and the tensor's axis -17 % are available at visible queries.
+* **Share decomposition** (`--dens-share`, `6b9…`/`299a8a3` and after): in the isolated harness (fresh density path,
+  gate v3, structure-tensor path, 400 steps) the lobes *hold* for the first time -- peak/mean 2.0 at visible queries
+  throughout -- and the loss falls monotonically (+115 % -> +60 % against flat; the gate's loss 0.74 -> 0.14) where
+  every earlier form collapsed to flat within 150 steps. Not yet below flat; the trend is ~8 % per 100 steps late.
+  Pilot I = gate v3 + share + structure-tensor path + fresh density path + frozen trunk 1000 steps then 0.3x, density
+  weight 4, lr 3e-4, 3000 steps: local (09:23 ET) and cluster (queued; G and H suspended again).
