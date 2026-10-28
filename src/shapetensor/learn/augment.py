@@ -103,7 +103,7 @@ def missing_lines(x: torch.Tensor, rng: np.random.Generator, rec: dict) -> torch
             x[idx] = x.mean()
         else:                                                                                      # the neighbouring line repeated
             nb = list(idx); o = others[0]; s0 = max(0, p[0] - w); nb[o] = slice(s0, s0 + w)
-            src = x[tuple(nb)]
+            src = x[tuple(nb)].clone()                                                             # (at the edge it overlaps the line: an aliased write)
             if src.shape == x[idx].shape:
                 x[idx] = src
     rec["missing_lines"] = (ax, n, mode)
