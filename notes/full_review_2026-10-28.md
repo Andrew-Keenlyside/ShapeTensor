@@ -349,3 +349,30 @@ visible queries is ~0.7 and the visibility decides; a thresholded visibility hea
 
 J6 at full strength (trained at 0.3 only): 0.331 vs flat 0.267 overall, visible 0.880 vs 0.948; the oracle gate gains
 17 % there (40-50 % at 0.3). J7: J6 continued with the strength ramped 0.3 -> 1.0 over 2000 steps.
+
+## Structural review (28 Oct, evening): why every pilot ended at flat
+
+Three independent reviews (model/loss, targets/generator, AxonSynth); scripts in the session scratchpad.
+
+1. **The objective.** Per-direction log-L1 is median-seeking: when the target is a lobe with probability p and flat
+   otherwise, flat is the exact optimum for p below ~0.3-0.5 (CPU simulation with the trainer's own loss, perfect lobe,
+   calibrated gate: g* = 0 at p = 0.15; cross-entropy gives g* = p and always gains). At full strength p is ~0.15 and the
+   visibility AUC 0.58: J, J2, J7 collapsed to g = 0 as the loss asks. Our acceptance metric is improper in the same way.
+2. **Unobservable target components.** Visibility = "a classical structure tensor lands within 10 deg of the truth"
+   (penalises beating the tensor; the gate must guess the reader's error); the background pedestal (1 - occupancy,
+   phi ~ U(0.3, 0.8) independent of contrast: not identifiable). Under a median-seeking loss both push to flat.
+3. **Noisy normalisation.** Each query's density is normalised by its mean over 16 random directions: for a kappa-17
+   lobe its 5-95 % range is 0.014-3x; the loss is tail noise, and the lobe learns to be floor-free and needle-sharp.
+4. **Bugs (fixed now):** (a) crossing cores compared the tensor's *weakest* eigenvector with the plane normal (the
+   normal is the strongest): every core read v = 0; (b) with ORIENT_VIS off, the generator's `pass` left the presence t
+   on the orientation thresholds -- orientation discounted twice (median kappa2 8.6 -> 0.1; one crop 180 -> 0 line queries).
+5. **The full-strength generator is mostly not HiP-CT:** 8 modalities; blur dominates (recoverable 0.28 full, 0.48 with
+   blur off); anisotropic PSF, section effects, MRI/cryo-ET effects, reversed-polarity blends, white Poisson noise; image
+   formation not scaled by strength. A comment at scene.py (grain) cites real-HiP-CT domain-gap observations: to check
+   against the no-real-data rule.
+
+Direction: predict a normalised ODF (Bingham mixture + uniform, or exp of log-SH) of the non-background material,
+trained with cross-entropy against the un-mixed geometric target (no visibility mixing, no gate); evaluate by NLL gain
+over uniform, calibration, and axis error where confident; a HiP-CT-only nuisance profile as the main difficulty.
+AxonSynth (MICCAI-W 2026, AGPL) is light-sheet segmentation; its geometry engine synthspline (MIT) could give an
+independent synthetic test set and analytic-tangent ODF targets; its min-contrast rule is a precedent for capping difficulty.

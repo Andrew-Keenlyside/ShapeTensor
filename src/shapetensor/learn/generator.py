@@ -1355,6 +1355,9 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
         t_o = visibility(img, regs, [None if L.role == "isotropic" else 1.0 for L in s.layers], radii=[L.radius if L.role == "shape" else 1.0 for L in s.layers],
                          return_t=True, s_hp_max=hp_max, **{**(vis_opts or {}), "ladder": (1,)})
     ovis = torch.where(iso, torch.ones_like(t), ((t_o - ORIENTATION_T[0]) / (ORIENTATION_T[1] - ORIENTATION_T[0])).clamp(0, 1))
+    if not ORIENT_VIS:                                                                               # (28 Oct review: the ``pass`` above left the
+        ovis = torch.ones_like(t)                                                                    # presence t on the orientation thresholds -- a
+                                                                                                     # second discount under the image-measured one)
     if bool((present < 1).any()):                                                               # lost sections: the visibility window (sigma 5) would
         pm = gaussian(present.view(A, 1, 1), (1.5, 0.0, 0.0), truncate=3.0).view([-1 if b == ax else 1 for b in range(3)])   # bridge them; a gap of
         vis = torch.where(iso, vis, vis * pm[None]); ovis = torch.where(iso, ovis, ovis * pm[None])                            # 1-2 sections still is

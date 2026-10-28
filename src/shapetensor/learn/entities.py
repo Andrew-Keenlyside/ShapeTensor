@@ -390,6 +390,8 @@ def orientation_visibility(img: torch.Tensor, pts: torch.Tensor, sig: torch.Tens
                      torch.stack([j6[:, 4], j6[:, 5], j6[:, 2]], -1)], 1)
     _, V = torch.linalg.eigh(M.double() + 1e-12 * torch.eye(3, dtype=torch.float64, device=dev))
     weak = V[..., :, 0].float()                                                                    # the weakest direction: a line's axis
+    strong = V[..., :, 2].float()                                                                  # (at a crossing core the plane's normal is the
+                                                                                                    # strongest: 28 Oct review, every core read 0)
     mo = mass.float() * (kappa[..., 1] >= 2.0)                                                    # the line entities
     srt, o = mo.sort(1, descending=True); ar = torch.arange(Q, device=dev)
     ax1 = R[ar, o[:, 0]][:, :, 2]
@@ -399,6 +401,7 @@ def orientation_visibility(img: torch.Tensor, pts: torch.Tensor, sig: torch.Tens
         ref = torch.where(core[:, None], torch.nn.functional.normalize(nrm, dim=-1), ax1)
     else:
         ref = ax1
-    ang = torch.rad2deg(torch.acos((weak * ref).sum(-1).abs().clamp(max=1)))
+    ref_e = torch.where(core[:, None], strong, weak) if mo.shape[1] > 1 else weak
+    ang = torch.rad2deg(torch.acos((ref_e * ref).sum(-1).abs().clamp(max=1)))
     v = (1 - (ang - angle[0]) / (angle[1] - angle[0])).clamp(0, 1)
     return torch.where(srt[:, 0] > 0.02, v, torch.ones_like(v))
