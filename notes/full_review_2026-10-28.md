@@ -248,3 +248,11 @@ structure-tensor path at gain 12 the loss starts at +361 % (too sharp, no pedest
   every earlier form collapsed to flat within 150 steps. Not yet below flat; the trend is ~8 % per 100 steps late.
   Pilot I = gate v3 + share + structure-tensor path + fresh density path + frozen trunk 1000 steps then 0.3x, density
   weight 4, lr 3e-4, 3000 steps: local (09:23 ET) and cluster (queued; G and H suspended again).
+* **Pilot I (cluster, 2 H100, share form) at step 500 -- the first checkpoint below flat where the orientation shows**:
+  visible line queries loss 0.171 against flat's 0.190 (-10 %), lobes of peak/mean 2.12, correlation with the raw lobe
+  0.56 (58 % above 0.5). But it draws lobes at invisible queries too (peak/mean 2.21; loss 0.132 against 0.003), so
+  overall it is still worse than flat (0.139 / 0.048): the share head (BCE 0.76 -> 0.21) has not yet learnt to be
+  near zero where the tensor's axis is wrong -- which it cannot read from the tensor alone, so it needs the trunk
+  (frozen until step 1000). Isolated harness: zeroing the pilot's density logit (`--reset-dens-logit`) made no
+  difference (+95 % -> +52 % at 750 steps, plateau ~+60 %); a decomposition of the readout error (share vs lobe) is
+  running.
