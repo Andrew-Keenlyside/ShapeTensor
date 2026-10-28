@@ -268,3 +268,6 @@ structure-tensor path at gain 12 the loss starts at +361 % (too sharp, no pedest
   within 20 of the target on 73 % (median 9). So the lobe branch reads the axis (the structure-tensor path works);
   the share head predicts ~0.08 everywhere (the base rate of v x share) -- it is the piece that does not discriminate,
   which is why the lobes are weak where they should be strong and present where they should be absent.
+* Pilot H (cluster, gate v3 with the tensor cue, fresh density path, *without* the share form) finished 2000 steps:
+  gate BCE 0.74 -> 0.68 (the base-rate entropy again), lobe loss at visible queries 0.33 -> 0.31. Superseded by the
+  share form (pilot I): without a pedestal the lobe branch cannot win even where it reads the axis.
