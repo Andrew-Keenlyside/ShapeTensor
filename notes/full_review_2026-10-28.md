@@ -271,3 +271,7 @@ structure-tensor path at gain 12 the loss starts at +361 % (too sharp, no pedest
 * Pilot H (cluster, gate v3 with the tensor cue, fresh density path, *without* the share form) finished 2000 steps:
   gate BCE 0.74 -> 0.68 (the base-rate entropy again), lobe loss at visible queries 0.33 -> 0.31. Superseded by the
   share form (pilot I): without a pedestal the lobe branch cannot win even where it reads the axis.
+* Pilot I at step 1500 (trunk unfrozen from 1000): visible 0.167 (flat 0.190, -12 %; correlation 0.63), partial
+  0.101 (flat 0.104, below flat for the first time), invisible 0.064 (flat 0.003; was 0.132 at step 500), overall
+  0.083 (flat 0.048). Every subset improving; the share head is beginning to discriminate once the trunk trains.
+  Running to 3000.
