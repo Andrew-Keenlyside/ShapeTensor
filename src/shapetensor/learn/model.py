@@ -198,6 +198,20 @@ def st_products(x: torch.Tensor) -> torch.Tensor:
         return torch.stack([gz * gz, gy * gy, gx * gx, gz * gy, gz * gx, gy * gx], 1)
 
 
+def st_matrix(j6: torch.Tensor) -> torch.Tensor:
+    """Window-mean gradient products ``(..., 6)`` as the unit-trace structure tensor ``(..., 3, 3)``."""
+    M = torch.stack([torch.stack([j6[..., 0], j6[..., 3], j6[..., 4]], -1), torch.stack([j6[..., 3], j6[..., 1], j6[..., 5]], -1),
+                     torch.stack([j6[..., 4], j6[..., 5], j6[..., 2]], -1)], -2).float()
+    return M / M.diagonal(dim1=-2, dim2=-1).sum(-1).clamp_min(1e-30)[..., None, None]
+
+
+def st_quadratic(j6: torch.Tensor, dirs: torch.Tensor) -> torch.Tensor:
+    """``u^T M u`` for the unit-trace structure tensor of ``j6 (..., 6)`` at directions ``dirs (..., D, 3)``: ``(..., D)``
+    (0 along a clean line, 1/3 with no structure)."""
+    Mn = st_matrix(j6)
+    return torch.einsum("...di,...ij,...dj->...d", dirs.float(), Mn, dirs.float())
+
+
 def st_features(j6: torch.Tensor) -> torch.Tensor:
     """From window-mean gradient products ``(..., 6)``: the anisotropy ``1 - 3 l_min / tr``, the line-ness
     ``(l_mid - l_min) / l_max`` and the planarity ``(l_max - l_mid) / l_max``: ``(..., 3)``."""
@@ -223,7 +237,8 @@ class EntityDecoder(nn.Module):
     def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8, unc: bool = False, mass_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False,
                  kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0,
-                 od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False, dens_gate: bool = False):
+                 od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False, dens_gate: bool = False, st_path: bool = False,
+                 iso_head: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -276,6 +291,18 @@ class EntityDecoder(nn.Module):
         # visibility): the density read out is g x the lobe + (1 - g) x flat, and the lobe is trained only where the
         # orientation shows (28 Oct: with one output for both, the 93 % of near-flat targets pulled the lobes flat
         # before the 7 % visible queries could teach them anything)
+        # ``st_path``: the structure tensor in the query's own window, read along each direction (u^T M u, M normalised
+        # to unit trace) straight into the log density at a learnable gain, initialised at the classical reader
+        # (f ~ exp(-12 u^T M u): on visible queries ~40 % below flat, targets review). 29 Oct: the bank's line filters
+        # are 8 voxels long and pooled at sigma 2-8, the targets' visibility is at the query's window (sigma 1-4 for
+        # most queries) -- a fresh density path on the bank alone never left flat on 8 fixed crops.
+        self.st_gain = nn.Parameter(torch.tensor(12.0)) if st_path else None
+        # ``iso_head``: a per-point isotropic pedestal added to the density (29 Oct: at a visible query the dominant line
+        # entity holds a third of the mass, the rest is background and other populations -- the oracle lobe *on that
+        # pedestal* scores 65 % below flat, the lobe alone 3.6x above it; a multiplicative density cannot make a pedestal)
+        self.iso = None
+        if iso_head:
+            self.iso = nn.Linear(hidden, 1); nn.init.zeros_(self.iso.weight); nn.init.constant_(self.iso.bias, -1.3)
         self.gate = None
         if dens_gate:                                                                             # its input: the point code; with the direct
             ng = hidden + (self.od_lv if self.odirect else 0) + 3                                 # path each level's energy contrast (log max /
@@ -420,15 +447,17 @@ class EntityDecoder(nn.Module):
             ovs = [ov[b] if ov is not None else self.od_sample(feats, points[b], b) for b in range(B)]
             od = torch.stack([self.od_code(ovs[b], self.od_weights(dirs[b])) for b in range(B)])
         dc = self.dens(p)[:, :, None].expand(-1, -1, D, -1) if self.dens is not None else None      # once per point, not per direction
-        out = self.decode(p[:, :, None].expand(-1, -1, D, -1), Y, r, o, od, dens_c=dc)
+        st6 = getattr(feats, "st6", None); stf = None; st_q = None
+        if st6 is not None and (getattr(self, "gate", None) is not None or getattr(self, "st_gain", None) is not None):
+            B = points.shape[0]                                                                   # the query's structure tensor
+            j6 = torch.stack([window_mean(st6[b], points[b][None].expand(6, -1, -1).contiguous(), sigma[b][None].expand(6, -1).contiguous()).T for b in range(B)])
+            stf = st_features(j6)                                                                 # (B, Q, 3)
+            if getattr(self, "st_gain", None) is not None:
+                st_q = st_quadratic(j6, dirs)                                                     # (B, Q, D) u^T M u
+        out = self.decode(p[:, :, None].expand(-1, -1, D, -1), Y, r, o, od, dens_c=dc, st_q=st_q)
         if self.mass is not None:
             out["m"] = self.mass_of(p)
         if getattr(self, "gate", None) is not None:
-            st6 = getattr(feats, "st6", None); stf = None
-            if st6 is not None:                                                                   # the query's structure tensor
-                B = points.shape[0]
-                j6 = torch.stack([window_mean(st6[b], points[b][None].expand(6, -1, -1).contiguous(), sigma[b][None].expand(6, -1).contiguous()).T for b in range(B)])
-                stf = st_features(j6)                                                             # (B, Q, 3)
             out["g"] = self.gate_of(p, torch.stack(ovs) if ovs is not None else None, stf)        # (B, Q) the orientation's visibility
         return out
 
@@ -497,7 +526,7 @@ class EntityDecoder(nn.Module):
         return self.od_code(self.od_sample(feats, pts, b, chunk), self.od_weights(u)[:, None])[:, 0]
 
     def decode(self, p: torch.Tensor, Y: torch.Tensor, r: torch.Tensor | None = None, o: torch.Tensor | None = None,
-               od: torch.Tensor | None = None, dens_c: torch.Tensor | None = None) -> dict:
+               od: torch.Tensor | None = None, dens_c: torch.Tensor | None = None, st_q: torch.Tensor | None = None) -> dict:
         """The outputs from point encodings ``p (..., hidden)`` and direction bases ``Y (..., n_coef)`` (same leading
         shape): any set of (point, direction) pairs -- inference evaluates only where the total ODF has density."""
         from .bingham import rot6d_to_matrix
@@ -529,12 +558,19 @@ class EntityDecoder(nn.Module):
             y0 = y0 + self.odens(o).float()[..., 0]
         if getattr(self, "odirect", 0):
             y0 = y0 + self.od_dens(od).float()[..., 0]                                         # the direct path to the density
+        if getattr(self, "st_gain", None) is not None and st_q is not None:
+            y0 = y0 - self.st_gain.float() * (st_q.float() - 1.0 / 3.0)                         # the structure-tensor path (u^T M u, centred on
+                                                                                                # the isotropic 1/3: the lobe's mean stays ~ its
+                                                                                                # logit's, so its share against the pedestal
+                                                                                                # starts near the targets' third, not at 1 %)
         R = rot6d_to_matrix(y[..., 1 + e:7 + e]); zr = y[..., 1:1 + e]
         if getattr(self, "zv", None) is not None:
             a, c = R[..., :, 0].detach(), R[..., :, 2].detach()
             ax6 = lambda v: torch.stack([v[..., 0] ** 2, v[..., 1] ** 2, v[..., 2] ** 2, v[..., 0] * v[..., 1], v[..., 0] * v[..., 2], v[..., 1] * v[..., 2]], -1)
             zr = zr + self.zv(torch.cat([ax6(c), ax6(a)], -1) * 3.0)
         f = torch.exp(y0.clamp(-20.0, 12.0)) if getattr(self, "dens_log", False) else Fn.softplus(y0)
+        if getattr(self, "iso", None) is not None:
+            f = f + Fn.softplus(self.iso(p).float()[..., 0])                                   # the isotropic pedestal (per point)
         out = {"f": f, "z": poincare(zr), "R": R, "kappa": k, "desc": y[..., 9 + e:14 + e]}
         if self.unc:                                                                              # the vote's uncertainty: log variance of its error
             out["log_s2"] = y[..., 14 + e].clamp(-8.0, 8.0)
@@ -554,7 +590,7 @@ class PopulationNet(nn.Module):
                  dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False, oprobe: bool = False,
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
                  odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0,
-                 od_norm: bool = False, dens_gate: bool = False):
+                 od_norm: bool = False, dens_gate: bool = False, st_path: bool = False, iso_head: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -592,7 +628,8 @@ class PopulationNet(nn.Module):
                                      mass_head=bool(mass_head) and not mass_region, dens_sh=bool(dens_sh), dens_mlp=bool(dens_mlp),
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
                                      oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect),
-                                     od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote), od_norm=bool(od_norm), dens_gate=bool(dens_gate))
+                                     od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote), od_norm=bool(od_norm), dens_gate=bool(dens_gate),
+                                     st_path=bool(st_path), iso_head=bool(iso_head))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             # the background's occupancy (the isotropic remainder) at every voxel: the density's floor is background plus
@@ -667,7 +704,7 @@ class PopulationNet(nn.Module):
                    odirect=int(args.get("odirect", 0) or 0), split_head=bool(args.get("split_head", False)),
                    od_sigmas=tuple(args.get("od_sigmas") or (2.0, 4.0, 6.0)), mass_vote=bool(args.get("mass_vote", False)),
                    block_norm=int(args.get("block_norm", 0) or 0), od_norm=bool(args.get("od_norm", False)),
-                   dens_gate=bool(args.get("dens_gate", False))) \
+                   dens_gate=bool(args.get("dens_gate", False)), st_path=bool(args.get("st_path", False)), iso_head=bool(args.get("iso_head", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
@@ -919,8 +956,8 @@ class PopulationNet(nn.Module):
                 fe = with_scal((h0, h1, h), self.scalar_fields(x)) if getattr(self.ent, "oprobe", False) else (h0, h1, h)
                 if getattr(self.ent, "odirect", 0):
                     fe = with_odv(fe, self.direct_at(x, e_points.float())) if OD_AT_POINTS else with_oe(fe, self.direct_levels(x))
-                if getattr(self.ent, "gate", None) is not None:                                  # the visibility gate's structure-tensor cue
-                    fe = with_st6(fe, st_products(x))
+                if getattr(self.ent, "gate", None) is not None or getattr(self.ent, "st_gain", None) is not None:   # the structure tensor
+                    fe = with_st6(fe, st_products(x))                                            # (the gate's cue, the direct path)
                 out["ent"] = self.ent(fe, e_points.float(), e_sigma.float(), e_dirs, None if context is None else context.float())
             if self.region is not None:                                                         # the population region, every voxel
                 out["region_logit"] = self.region_map(h0, h1, h); out["region"] = self.region_value(out["region_logit"])

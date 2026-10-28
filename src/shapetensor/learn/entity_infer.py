@@ -107,9 +107,9 @@ def features(model, x: torch.Tensor, voxel: float | None = None, voxel_um: float
     if getattr(getattr(model, "ent", None), "odirect", 0):                                        # the direct oriented path's energies
         from .model import with_oe
         fe = with_oe(fe, model.direct_levels(xb))
-    if getattr(getattr(model, "ent", None), "gate", None) is not None:                            # the visibility gate's structure-tensor cue
-        from .model import with_st6, st_products
-        fe = with_st6(fe, st_products(xb))
+    if getattr(getattr(model, "ent", None), "gate", None) is not None or getattr(getattr(model, "ent", None), "st_gain", None) is not None:
+        from .model import with_st6, st_products                                                  # the structure tensor (the gate's cue, the
+        fe = with_st6(fe, st_products(xb))                                                        # direct path)
     return fe
 
 
@@ -177,7 +177,13 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
         if ovp is not None and qi.numel():
             od = dec.od_code(ovp, dec.od_weights(dirs), pairs=(qi, di))
         dc = dec.dens(enc)[qi] if (getattr(dec, "dens", None) is not None and qi.numel()) else None   # (per point, then gathered)
-        r = dec.decode(enc[qi], Y[di].to(enc.dtype), rr, oo, od, dens_c=dc) if qi.numel() else None
+        st6 = getattr(feats, "st6", None); j6 = None; st_q = None
+        if st6 is not None and (getattr(dec, "gate", None) is not None or getattr(dec, "st_gain", None) is not None):
+            j6 = window_mean(st6[0], (p - off)[None].expand(6, -1, -1).contiguous(), s[None].expand(6, -1).contiguous()).T   # (n, 6)
+            if getattr(dec, "st_gain", None) is not None and qi.numel():
+                from .model import st_matrix
+                Mn = st_matrix(j6)[qi]; u = dirs[di].float(); st_q = torch.einsum("ni,nij,nj->n", u, Mn, u)
+        r = dec.decode(enc[qi], Y[di].to(enc.dtype), rr, oo, od, dens_c=dc, st_q=st_q) if qi.numel() else None
         full = {"f": torch.zeros(n, D, device=p.device), "z": torch.zeros(n, D, dec.emb, device=p.device),
                 "R": torch.eye(3, device=p.device).expand(n, D, 3, 3).clone(), "kappa": torch.zeros(n, D, 2, device=p.device),
                 "desc": torch.zeros(n, D, 5, device=p.device)}
@@ -188,9 +194,7 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
                 full[k][qi, di] = r[k].float()
         if getattr(dec, "gate", None) is not None:                                                 # gated density: g x the lobe + (1 - g) x flat
             from .model import st_features
-            st6 = getattr(feats, "st6", None); stf = None
-            if st6 is not None:
-                stf = st_features(window_mean(st6[0], (p - off)[None].expand(6, -1, -1).contiguous(), s[None].expand(6, -1).contiguous()).T)
+            stf = st_features(j6) if j6 is not None else None
             g = dec.gate_of(enc, ovp, stf); fm = (full["f"] * ev).sum(1) / ev.sum(1).clamp_min(1)
             full["f"] = g[:, None] * full["f"] + (1 - g[:, None]) * fm[:, None]; full["g"] = g
         full["evaluated"] = ev

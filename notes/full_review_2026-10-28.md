@@ -205,3 +205,40 @@ GB; the generators (24 workers per rank) keep up at low difficulty (1.0 new pair
 * Cluster at 08:50 ET: every job of ours is suspended (E, F, the profile) or queued (G, H): the owning lab's queue
   pre-empts gpu.q on seymour2 and seymour1. The local A6000 (one pilot at a time beside the 15 GB calibrator job) is
   the only dependable resource; the 12-hour run has not been launched.
+* Pilot F at step 2000: fully flat (peak/mean 1.01; visible-query loss 0.189 against flat's 0.190; correlation 0.37).
+  Starting from the pilot's (wrong) lobes, the gated lobe branch goes flat and stays. G' / H (fresh density path)
+  are the remaining tests of the gate structure; the deciding number is the visible-query loss against flat's 0.190.
+
+### ~09:00 ET: why no lobe forms -- the pedestal (the isolated harness, `lobe_learn.py` / `oracle_check.py`)
+
+On the 8 fixed full-difficulty crops with the image-measured visibility (521 visible line queries), per-query density
+loss as the trainer computes it (the mixed targets):
+
+| prediction at visible queries | loss |
+|---|---|
+| flat | 0.458 |
+| the dominant line entity's lobe (its axis and kappa) alone | 1.664 |
+| ... mixed toward flat by v | 0.841 |
+| **that lobe on its pedestal**: share x lobe + (1 - share), share = the entity's mass share (median 0.33) | **0.162** |
+| ... mixed by v | 0.079 |
+| the structure tensor read along u, exp(-g u^T M u), g = 1.5 / 3 | 0.433 / 0.476 |
+| the same on the pedestal, g = 3 / 6 / 12 | 0.412 / 0.392 / 0.382 |
+
+So at a visible query the target is a lobe holding a *third* of the mass over background and other populations. A
+lobe alone -- however right -- is 3.6x worse than flat; the same lobe on its pedestal is 65 % better. The density is
+multiplicative (softplus of a sum of logits), so no path could make a pedestal: every lobe it tried cost more than
+flat, and flat was the optimum -- which is what every pilot found. Added: `--iso-head`, a per-point isotropic
+pedestal added to the density. The structure-tensor axis on the right pedestal reaches -17 % (the model has to learn
+a better axis than the tensor's for the remaining -48 %); `--st-path` gives it that axis as a start.
+Isolated learnability so far: a fresh density path on the bank alone stays flat (+-1 % over 400 steps); with the
+structure-tensor path at gain 12 the loss starts at +361 % (too sharp, no pedestal) and falls toward flat; at gain 3,
++69 % falling toward flat -- both consistent with the table.
+* Isolated learnability with the pedestal head and the structure-tensor path (gain 12, centred on 1/3): starts at
+  +100 % (peak/mean 1.69, the share wrong per query) and the optimiser again kills the lobe (+3 % by step 400,
+  peak/mean 1.00) rather than fix the share per point -- the share is not linearly readable from the pilot's point
+  code, and shrinking the lobe is the quickest descent. With the oracle share per query the same reader scores -17 %.
+* Conclusion for the next structural step: supervise the decomposition explicitly. The target's oriented share at
+  each query is known (the line entities' mass over the total); a **share head** trained on it (as the gate is on the
+  visibility) and the density read out as ``share x lobe + (1 - share)`` makes the pedestal a regression target
+  instead of something the lobe branch has to discover under the shape loss. The lobe branch then only has to get
+  the axis right, where the oracle says -65 % and the tensor's axis -17 % are available at visible queries.
