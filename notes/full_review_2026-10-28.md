@@ -306,3 +306,24 @@ puts a small lobe everywhere, including invisible queries. Classical features do
 0.108 vs base 0.110), so the gate's target is the problem: s_t = v x share mixes the image-measured visibility with the
 line entities' mass share, which the image doesn't carry. Next: train the readout end to end (loss on the gated readout
 against the visibility-mixed target, gradients into gate and lobe), and/or let the gate regress v alone.
+
+## Plan: make the density readout beat flat (28 Oct, 12:05 ET)
+
+Evidence: the gate (one linear layer, BCE on s_t = v x share) sits at the base rate; s_t is not predictable from the image
+(logistic corr 0.11), v alone at line queries is (corr 0.38, BCE 0.495 vs 0.534 base, with eigenvalue ratios and energy);
+the lobe is good (oracle gate: readout 0.68x flat at visible queries); the readout itself is never trained.
+
+1. Plumbing: `--curriculum-steps` (absolute; resume with a longer budget no longer resets difficulty); qsub WORKERS sized
+   from cores / (NGPU x THREADS).
+2. Model: the gate split into a visibility head (MLP hidden+feats -> 64 -> 1; feats: ST anisotropy/lineness/planarity,
+   log eigenvalue ratios, log energy, bank contrast per level, bank-vs-ST angle, log sigma) and an amplitude head (same
+   inputs + the visibility logit); readout g = vis x amp.
+3. Loss: vis BCE on v at line queries; the readout g x lobe.detach() + (1 - g) x mean(lobe) trained on the
+   visibility-mixed target over every query with mass (log-L1, unweighted); the lobe's own loss on the oriented part
+   weighted by v (not s_t). The s_t BCE goes.
+4. Tests: training readout == inference readout; isolated harness on 8 fixed crops (readout below flat in 300 steps);
+   local pilot from the cluster checkpoint, new heads fresh, 1500 steps, gate_check at 500/1000/1500.
+5. Acceptance (gate_check, 20 full-strength crops): readout below flat overall and at visible and partial queries;
+   visible <= 0.85x flat; invisible <= 0.010; gate AUC visible vs invisible >= 0.75.
+6. Then: stop the cluster job at a checkpoint, start a new run from it with the new heads fresh and difficulty at full.
+   Fallback if the vis head can't separate: an image-only calibrated visibility target (E[v | ST features]).
