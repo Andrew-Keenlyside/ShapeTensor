@@ -281,3 +281,7 @@ structure-tensor path at gain 12 the loss starts at +361 % (too sharp, no pedest
   queries" (kappa2 >= 2) in those evaluations were the subset the generator also called visible. Comparisons between
   models on them stand (same targets); the absolute counts do not. The scripts now match training; later numbers
   (pilot I at 3000 on) are on the training targets.
+* 11:08 ET: the 12-hour run submitted as a continuation of pilot I (`st_long12h`, job 7645499: 4 H100, `--resume auto`
+  on `~/runs/shapetensor/pilot_i`, 36 000 steps, val every 2000, checkpoints every 15 min, h_rt 12:00). Pilot I's
+  own validations: share-head BCE 0.21 -> 0.186 over 500-3000; the lobe-only loss flat at ~1.58 from step 500 -- the
+  gains after 500 are the share head's. The step-3000 evaluation on the training targets follows.
