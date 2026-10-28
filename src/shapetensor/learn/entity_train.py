@@ -114,6 +114,10 @@ def tree_distance(anc: torch.Tensor, i: torch.Tensor, j: torch.Tensor) -> torch.
     return (di + dj - 2 * (di - k)).float()
 
 
+DENS_SHARE = False                  # with the gate: its target is the *visible oriented share* (the line entities' mass over the
+                                    # total, x the visibility) and the lobe is trained on the oriented part alone, weighted by that
+                                    # share -- the pedestal becomes a regression target (29 Oct: at a visible query the lobe holds a
+                                    # third of the mass; a lobe branch asked to reproduce the pedestal too went flat every time)
 DENS_VIS_WEIGHT = 0.0               # the density loss weighted per query by 1 + this x the orientation's visibility (28 Oct: with
                                     # visibility-aware targets the visible line queries were 7 % of the queries and the warm start
                                     # went flat everywhere in 400 steps)
@@ -158,11 +162,18 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
     m_t = mass.sum(-1)
     w_q = None; gate = ent.get("g")
     if "e_ovis" in T:                                                                              # the orientation's visibility in the image (28 Oct)
-        v = T["e_ovis"].float()[..., None]
-        rho_d = v * rho_d + (1 - v) * m_t[..., None]                                               # an erased lobe asks for flat at the same mass
-        if gate is not None:                                                                       # gated: the lobe trained where the orientation
+        v = T["e_ovis"].float()[..., None]; hq = m_t > MASS_EPS
+        if gate is not None and DENS_SHARE:                                                        # the gate = the visible oriented share; the lobe
+            line = (T["e_kappa"][..., 1] >= 2.0) & (mass > 0)                                      # = the oriented part alone, where it shows
+            share = ((mass * line).sum(-1) / m_t.clamp_min(1e-9)).clamp(0, 1); s_t = v[..., 0] * share
+            rho_d = (contrib * line[:, :, None]).sum(-1); w_q = s_t + 0.02
+            parts["gate"] = (Fn.binary_cross_entropy(gate.float().clamp(1e-4, 1 - 1e-4), s_t, reduction="none")[hq].mean()
+                             if bool(hq.any()) else gate.float().sum() * 0.0)
+        else:
+            rho_d = v * rho_d + (1 - v) * m_t[..., None]                                           # an erased lobe asks for flat at the same mass
+        if gate is not None and not DENS_SHARE:                                                    # gated: the lobe trained where the orientation
             w_q = v[..., 0] + 0.02                                                                 # shows (partial credit for a partly visible one:
-            hq = m_t > MASS_EPS                                                                    # under the raw lobes the branch went flat by
+                                                                                                   # under the raw lobes the branch went flat by
                                                                                                    # step 2000, pilot D), the gate on the visibility
             parts["gate"] = (Fn.binary_cross_entropy(gate.float().clamp(1e-4, 1 - 1e-4), v[..., 0], reduction="none")[hq].mean()
                              if bool(hq.any()) else gate.float().sum() * 0.0)
