@@ -147,3 +147,46 @@ training loop), each asked for measurements, after the three stacked causes of t
   generator's orientation t-statistics are skipped (`generator.ORIENT_VIS` off: half the visibility cost). The splat's
   per-call `unique` and the three-window presence ladder are the next targets; on the cluster node (192 idle cores)
   the plan is 24 workers per rank.
+
+## Night of 28-29 Oct: the local-pilot loop (what trained, what did not)
+
+Evaluation throughout: `dens_eval.py` on 10 fresh full-strength crops -- the density loss against the visibility-aware
+targets (flat 0.044-0.052), the model's peak/mean at *visible* line queries (`e_ovis` > 0.5; target 4.6) and at
+invisible ones (< 0.2; target flat), the correlation with the raw lobe over directions.
+
+| pilot | change | result |
+|---|---|---|
+| warm stress, 400 steps | targets + generator fixes only | flat everywhere (1.10 / 1.02); loss 0.051, worse than flat |
+| C, 1000 steps (local) | lr 1e-4, visibility weight 4, density weight 4 | flat (1.01 / 1.01); loss 0.050 |
+| D, cluster, 4 H100 | **the visibility gate**, lr 1e-4 | step 500: lobes where visible (2.11, corr 0.66, 60 % > 0.5), flat where not (1.05) -- the first scene-trained density; step 2000: gone again (1.05, corr 0.24). The gate itself hardly learned (BCE 0.693 -> 0.685) |
+| E, cluster | gate fed the classical cue (energy contrast per level, positive init), gate lr x10 | running |
+| F, cluster | E + the trunk frozen 1000 steps then at 0.3x, the lobe on the visibility-mixed target, density weight 4 | running |
+
+Reading of D: the lobe branch, supervised only where the orientation shows, still went flat by step 2000 -- its lobes
+there are not accurate enough for the sharp raw targets (the basin: beyond ~25 degrees flat wins), and the trunk,
+driven by the other heads' 50x larger gradients, drifted from the features the pilot's density reading used. Hence F:
+partial credit (the mixed target) and a frozen trunk while the heads adapt.
+
+Cluster: `~/ShapeTensors` (rsync of the working tree), env `~/venvs/shapetensors` (conda python 3.12, torch 2.5.1
+cu124, numpy 2.2.6, scipy 1.14.1 -- the newest wheels need a newer glibc than CentOS 7's), `qsub.shapetensor_v3.sh`
+(`-pe gpu 4`, h100; STEPS / OUT / VAL_EVERY / CKPT_MIN / WORKERS / NGPU / LR / EXTRA_ARGS from `-v`). Benchmark on 4
+H100 (`--benchmark 30`): 1.12 s per step (data 0.26, forward + backward 0.67, optimiser 0.08), 7.1 samples/s/GPU, 15.6
+GB; the generators (24 workers per rank) keep up at low difficulty (1.0 new pairs per step) but not at full (0.2):
+40 per rank from pilot E on.
+
+### Status at 08:15 ET, 29 Oct (for the 9 am review)
+
+* The session was paused by a usage limit from ~02:15 to ~07:15 ET; no 12-hour cluster run was launched (the gate
+  pilots had not yet held their lobes, which was the condition).
+* Pilot F (local, gate v2 + frozen trunk + mixed lobe target + density weight 4) at step 1000: the gate learns at
+  last (BCE 0.915 -> 0.692 and falling), the lobe loss at visible queries halves (0.52 -> 0.26), but the lobes
+  themselves are nearly flat again (peak/mean 1.06 at visible queries, correlation 0.43, 46 % above 0.5; loss 0.0525
+  against flat 0.0476). Running to 2000.
+* Reading: the lobe branch starts from the pilot's lobes, which are *wrong* on these crops (its loss at visible
+  queries is above flat's), so the first thing it learns is to drop them; re-forming correct lobes from the bank has
+  to come after, and 1000-2000 steps at lr 1e-4 have not shown it. Next: per-subset losses (visible / partial /
+  invisible) to see whether any checkpoint beats flat where the orientation shows; if not, train the lobe branch
+  from scratch (no pilot lobes to unlearn) on the visibility-weighted loss alone first, then the rest.
+* Cluster: seymour2's gpu.q is subordinate to the owning lab's queue -- pilot E was suspended seconds after it
+  started and the profile job likewise; a 12-hour run there can be paused at any time (the trainer checkpoints
+  every 15 minutes and resumes, so paused is survivable; killed is not).

@@ -1050,7 +1050,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    obj_head: bool = False, mc_fibres: bool = False, oriented: int = 0, geometry_targets: bool = False, block_norm: int = 1,
                    odirect: int = 0, od_sigmas: list | None = None, split_head: bool = False, mass_vote: bool = False, overfit: int = 0,
                    init_reset: str = "", ovis_targets: bool = True, od_norm: bool = False, dens_vis_w: float = 0.0, dens_gate: bool = False,
-                   freeze_trunk: int = 0, trunk_lr: float = 1.0):
+                   freeze_trunk: int = 0, trunk_lr: float = 1.0, init_fresh: str = ""):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -1132,7 +1132,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 region_density=bool(region_density), kappa_log=bool(kappa_log), vote_objects=bool(vote_objects), dens_same_norm=bool(dens_same_norm), own_objects=bool(own_objects), bg_head=bool(bg_head), orient_from_texture=bool(orient_from_texture), obj_head=bool(obj_head),
                 block_norm=int(block_norm), odirect=int(odirect), od_sigmas=list(od_sigmas) if od_sigmas else None, split_head=bool(split_head),
                 mass_vote=bool(mass_vote), od_norm=bool(od_norm), ovis_targets=bool(ovis_targets), dens_vis_w=float(dens_vis_w), dens_gate=bool(dens_gate),
-                freeze_trunk=int(freeze_trunk), trunk_lr=float(trunk_lr),
+                freeze_trunk=int(freeze_trunk), trunk_lr=float(trunk_lr), init_fresh=init_fresh,
                 mc_fibres=bool(mc_fibres), oriented=int(oriented), geometry_targets=bool(geometry_targets))
     skipped = {}                                                                                   # non-finite steps skipped
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
@@ -1156,9 +1156,14 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     if init and not resume:
         ick = torch.load(init, map_location=device, weights_only=False)
         isd = ick["model"]
-        if init_reset:                                                                               # heads left at their fresh initialisation
+        hit_ = lambda pre: (lambda k: any(k == p or k.startswith(p + ".") or ("." + p + ".") in k for p in pre))
+        if init_fresh:                                                                               # heads left at their fresh initialisation
+            pre = [p.strip() for p in init_fresh.split(",") if p.strip()]; fresh = [k for k in isd if hit_(pre)(k)]   # (e.g. the density path:
+            isd = {k: v for k, v in isd.items() if k not in fresh}                                   # the pilot's lobes are wrong on scene crops
+            log(f"init: {len(fresh)} tensors fresh ({', '.join(fresh[:6])}{', ...' if len(fresh) > 6 else ''})")   # and were unlearnt first, 29 Oct)
+        if init_reset:                                                                               # heads at zero
             pre = [p.strip() for p in init_reset.split(",") if p.strip()]                            # (28 Oct review: the pilot's lattice ODF head
-            hit = lambda k: any(k == p or k.startswith(p + ".") or ("." + p + ".") in k for p in pre)   # was 93 % of the warm start's gradient)
+            hit = hit_(pre)                                                                          # was 93 % of the warm start's gradient)
             drop = [k for k in isd if hit(k)]; isd = {k: v for k, v in isd.items() if k not in drop}
             own = model.state_dict()
             with torch.no_grad():
@@ -1372,7 +1377,8 @@ def main():
     ap.add_argument("--refresh", type=int, default=1); ap.add_argument("--lr", type=float, default=3e-4); ap.add_argument("--margin", type=int, default=4)
     ap.add_argument("--val-n", type=int, default=32); ap.add_argument("--val-every", type=int, default=500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--strength0", type=float, default=0.15); ap.add_argument("--overfit", type=int, default=0); ap.add_argument("--resume")
-    ap.add_argument("--init-reset", default="", help="warm start: comma-separated heads left fresh, e.g. total (the lattice ODF head)")
+    ap.add_argument("--init-reset", default="", help="warm start: comma-separated heads put at zero, e.g. total (the lattice ODF head)")
+    ap.add_argument("--init-fresh", default="", help="warm start: comma-separated modules left at their fresh initialisation, e.g. ent.dens,ent.od_net,ent.od_dens")
     ap.add_argument("--warmup", type=int, default=500); ap.add_argument("--strength1", type=float, default=1.0)
     ap.add_argument("--axis-head", action="store_true", help="a committed axis output per slot and for the mixture (axis cost: target anisotropy x (1 - cos^2); review 8)")
     ap.add_argument("--sh-loss", default="batchnorm", choices=("batchnorm", "decoupled"), help="density loss: per-order error over the batch's energy, or magnitude + target-weighted angle per order over running energies (order 2 first)")
@@ -1482,7 +1488,7 @@ def main():
                        region_dec=a.region_dec, where_first=a.where_first, z_vote=a.z_vote, dir_sh=a.dir_sh,
                        background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, region_density=not a.no_region_density,
                        kappa_log=a.kappa_log, vote_objects=a.vote_objects, dens_same_norm=a.dens_same_norm, own_objects=a.own_objects, bg_head=a.bg_head, orient_from_texture=not a.orient_from_contrast, obj_head=a.obj_head,
-                       block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote, od_norm=a.od_norm, ovis_targets=not a.no_ovis_targets, dens_vis_w=a.dens_vis_w, dens_gate=a.dens_gate, freeze_trunk=a.freeze_trunk, trunk_lr=a.trunk_lr,
+                       block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote, od_norm=a.od_norm, ovis_targets=not a.no_ovis_targets, dens_vis_w=a.dens_vis_w, dens_gate=a.dens_gate, freeze_trunk=a.freeze_trunk, trunk_lr=a.trunk_lr, init_fresh=a.init_fresh,
                        mc_fibres=a.mc_fibres, oriented=a.oriented, geometry_targets=a.geometry_targets, overfit=a.overfit, init_reset=a.init_reset)
         return
     if a.head == "lobes":
