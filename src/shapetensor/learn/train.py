@@ -1101,6 +1101,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     _et.OWN_OBJECTS = bool(own_objects)                                                                # directions owned among oriented entities
     from . import generator as _gn
     _gn.ORIENT_FROM_TEXTURE = bool(orient_from_texture)                                                # orientation visibility from oriented texture
+    _gn.ORIENT_VIS = not bool(ovis_targets)                                                            # (not needed with the image-measured
+                                                                                                       # visibility: half the generator's visibility cost)
     _gn.TARGETS_FROM_GEOMETRY = bool(geometry_targets)                                                 # no visibility editing of the targets
     from . import fibres as _fb
     _fb.PACKING, _fb.RELAX = ("random", True) if mc_fibres else ("hex", False)                        # Monte Carlo random fibres (collisions resolved)
@@ -1174,7 +1176,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     cpu = None
     if cpu_workers > 0:
         state = {"HEAD": HEAD, "DESC_KEY": DESC_KEY, "SH_EXACT": SH_EXACT, "DESC_LMAX": DESC_LMAX, "QUERY": QUERY, "CACHE": None,
-                 "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC, "ENTITY": dict(ENTITY), "READ_KEEP": READ_KEEP, "NOT_ENTITY": NOT_ENTITY, "REGION_DENSITY": REGION_DENSITY, "OVIS_TARGETS": OVIS_TARGETS,
+                 "L.DESC_K": _losses.DESC_K, "L.DESC_NC": _losses.DESC_NC, "ENTITY": dict(ENTITY), "READ_KEEP": READ_KEEP, "NOT_ENTITY": NOT_ENTITY, "REGION_DENSITY": REGION_DENSITY, "OVIS_TARGETS": OVIS_TARGETS, "GN.ORIENT_VIS": _gn.ORIENT_VIS,
                  "GN.ORIENT_FROM_TEXTURE": bool(orient_from_texture), "GN.TARGETS_FROM_GEOMETRY": bool(geometry_targets), "ENTITY_DISPERSION": ENTITY_DISPERSION,
                  "FB.PACKING": _fb.PACKING, "FB.RELAX": _fb.RELAX}
         cpu = DF.CpuWorkers(cpu_workers, size, buf.next + 90_000_000, cfg, state, threads=cpu_threads)
@@ -1182,13 +1184,15 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                                out_device=device, n0=2, strength=strength(start)).start_async() if pairs else None   # drawn on the CPU, in a thread
     val = []                                                                                         # (see EntityPairBuffer)
     def make_val(i):                                                                                 # on a shared card an OOM here lost the run
-        for t_ in range(4):                                                                          # before its first step (28 Oct): retried
+        vg = {"scene": {**LT.difficulty_gen(1.0, base), "crops_per_scene": 1}}                       # before its first step (28 Oct): retried
+        for t_ in range(3):                                                                          # once, then drawn on the CPU
             try:
-                return make(10_000_000 + i, size, device, strength1, {"scene": {**LT.difficulty_gen(1.0, base), "crops_per_scene": 1}})
+                x_, t_v = make(10_000_000 + i, size, device if t_ < 2 else "cpu", strength1, vg)
+                return x_.to(device), {k: v.to(device) if torch.is_tensor(v) else v for k, v in t_v.items()}
             except torch.OutOfMemoryError:
-                if t_ == 3:
+                if t_ == 2:
                     raise
-                torch.cuda.empty_cache(); log(f"val crop {i}: GPU out of memory, retrying in 60 s"); time.sleep(60)
+                torch.cuda.empty_cache(); log(f"val crop {i}: GPU out of memory, {'retrying in 30 s' if t_ == 0 else 'drawing it on the CPU'}"); time.sleep(30 if t_ == 0 else 0)
     if overfit and main:
         val = list(buf.items[:val_n]); torch.save([(x_.cpu() if torch.is_tensor(x_) else x_, {k: v.cpu() if torch.is_tensor(v) else v for k, v in t_.items()}) for x_, t_ in buf.items], outd / "overfit_items.pt")
     elif main and not benchmark:

@@ -113,3 +113,37 @@ training loop), each asked for measurements, after the three stacked causes of t
    start grows `od_net`'s input channels with zeros, so it starts as the pilot did).
 5. Zero-initialised `od_dens` grows at ~lr per step (as the note said) but is not what blocks density; the receptive
    field of 182 voxels on 64-voxel crops is not either.
+
+## After the fixes: the warm start still went flat (stress run, 400 steps) -- and what was changed for it
+
+* **Stress run** (`warm_stress`: pilot3x warm start, the fixed generator, visibility-aware targets, full difficulty by
+  step 200): val density 0.474 -> 0.125, but on 12 fresh full-strength crops the model's density is flat (peak/mean
+  1.10 at visible line queries, 1.02 at invisible; correlation with the raw target 0.17) and its loss 0.051 is *worse*
+  than flat's 0.044. The pilot it started from reads the visible queries (peak/mean 4.1, correlation 0.61, 64 % above
+  0.5) but draws lobes everywhere (1.6 where the target is flat), so its loss is 0.356.
+* **Why.** (1) Under the new targets flat is nearly the global optimum: visible line queries are 7 % of the queries
+  with mass (310 of 4608), invisible 16 %, the rest non-line or partial. The cheapest descent from 0.356 is "flatten
+  everything"; re-forming lobes only where the image shows them means conditioning on the structure-tensor contrast,
+  slower than 400 steps and uphill from the flat basin. (2) The density gradient is swamped: at step 400 the total
+  gradient norm is 12.9 (clipped to 5) -- split_ori 9.2, split_iso 5.4, obj 3.9, mvote 2.2, vote 1.4, **density 0.26**.
+  (3) A fresh Adam at 3e-4 moves every weight by ~lr for the first steps, scrambling the trained density path.
+* **Structural change: a visibility gate** (`--dens-gate`): a scalar per query from the point code, trained with BCE on
+  `e_ovis`; the density read out is `g x lobe + (1 - g) x flat`; the lobe is trained only where the orientation shows
+  (per-query weight `v + 0.02`), so the lobe path never receives a "go flat" gradient -- flatness is the gate's job and
+  its target is explicit. Also `--dens-vis-w` (a per-query weight `1 + w v` on the single-output density) for the
+  tuning variant, `LR`, `WORKERS`, `THREADS` in the launcher, and the val set drawn on the CPU when the GPU is out of
+  memory (two pilots were lost to that on the shared card).
+* **Pilots** (2000 steps, full difficulty from step 1000): C = lr 1e-4, visibility weight 4, density weight 4 (tuning
+  of the single output); D = lr 1e-4 with the gate. Evaluated by `dens_eval.py` at steps 1000 and 2000.
+
+## Training speed (28 Oct, local A6000, 64 cores shared with another job)
+
+* 1.7-3.2 s per step at batch 4 x accum 2; the CPU workers deliver 0.2-0.7 new pairs per step against the target of
+  1 -- the data generation is the throughput limit, and on the cluster (4 ranks) the demand is 4x.
+* Profile of one worker draw (8 crops of one scene, CPU, under load): 89 s per crop. The scene render 300 s per scene
+  (`render_curves` -> `splat` 261 s: index_add 42, `torch.unique` 52, cat 21, Python 153), the **visibility
+  statistics 289 s per 8 crops** (36 s per crop: 13 049 Gaussian filterings -- presence and orientation t-statistics
+  at three windows for every layer), `entity_queries` 7.5 s per crop. Change: with the image-measured visibility the
+  generator's orientation t-statistics are skipped (`generator.ORIENT_VIS` off: half the visibility cost). The splat's
+  per-call `unique` and the three-window presence ladder are the next targets; on the cluster node (192 idle cores)
+  the plan is 24 workers per rank.

@@ -991,6 +991,7 @@ def visibility(img: torch.Tensor, regressors: torch.Tensor, units, radii=None, s
 
 
 PRESENCE_T = (3.0, 8.0)            # t range over which a layer's shapes go from undetected to detected (its mass)
+ORIENT_VIS = True                  # the generator's own orientation visibility (off: the trainer measures it on the image per query)
 ORIENTATION_T = (6.0, 18.0)        # t range over which their orientation goes from unrecoverable to recoverable (its tensor): set below a
 #: orientation visibility from the single-scale evidence (no high-pass ``ladder``) its range was calibrated on: the
 #: ladder credits a uniform band's interior as visible material at coarse scales -- material, not orientation -- and
@@ -1341,7 +1342,9 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
     iso = torch.tensor([L.role == "isotropic" for L in s.layers], device=device).view(-1, 1, 1, 1)
     vis = torch.where(iso, torch.ones_like(t), ((t - PRESENCE_T[0]) / (PRESENCE_T[1] - PRESENCE_T[0])).clamp(0, 1))
     t_o = t
-    if ORIENT_FROM_TEXTURE if orient_from_texture is None else orient_from_texture:                 # orientation: the layers' oriented texture
+    if not ORIENT_VIS:                                                                               # the orientation's visibility measured on the
+        pass                                                                                         # image at the queries instead (28 Oct)
+    elif ORIENT_FROM_TEXTURE if orient_from_texture is None else orient_from_texture:               # orientation: the layers' oriented texture
                                                                                                      # (``orient_from_texture``: per draw -- packed
                                                                                                      # tissue has no edges to credit, 27 Oct)
         tex = torch.stack([(occ[k] - gaussian(occ[k][None, None], max(1.5, 2.0 * float(L.radius)))[0, 0]) if L.role == "shape" else regs[k]
