@@ -275,3 +275,9 @@ structure-tensor path at gain 12 the loss starts at +361 % (too sharp, no pedest
   0.101 (flat 0.104, below flat for the first time), invisible 0.064 (flat 0.003; was 0.132 at step 500), overall
   0.083 (flat 0.048). Every subset improving; the share head is beginning to discriminate once the trunk trains.
   Running to 3000.
+* Evaluation caveat (11:00 ET): `dens_eval.py`, `axis_check.py`, `perf_image.py` drew their crops with the generator's
+  own orientation visibility on (the module default), which training switches off (`generator.ORIENT_VIS` False with
+  the image-measured targets) -- the generator's visibility softens the entities' kappa, so the "visible line
+  queries" (kappa2 >= 2) in those evaluations were the subset the generator also called visible. Comparisons between
+  models on them stand (same targets); the absolute counts do not. The scripts now match training; later numbers
+  (pilot I at 3000 on) are on the training targets.
