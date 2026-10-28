@@ -193,9 +193,9 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
             for k in full:
                 full[k][qi, di] = r[k].float()
         if getattr(dec, "gate", None) is not None:                                                 # gated density: g x the lobe + (1 - g) x flat
-            from .model import st_features
-            stf = st_features(j6) if j6 is not None else None
-            g = dec.gate_of(enc, ovp, stf); fm = (full["f"] * ev).sum(1) / ev.sum(1).clamp_min(1)
+            from .model import st_features, st_features_ext
+            stf = (st_features_ext(j6, s) if getattr(dec, "gate2", False) else st_features(j6)) if j6 is not None else None
+            g, gv = dec.gate_of(enc, ovp, stf, parts=True); fm = (full["f"] * ev).sum(1) / ev.sum(1).clamp_min(1); full["gv"] = gv
             full["f_lobe"] = full["f"]; full["f"] = g[:, None] * full["f"] + (1 - g[:, None]) * fm[:, None]; full["g"] = g
         full["evaluated"] = ev
         if mq is not None:

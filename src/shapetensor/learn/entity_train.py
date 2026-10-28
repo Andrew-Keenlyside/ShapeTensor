@@ -114,6 +114,7 @@ def tree_distance(anc: torch.Tensor, i: torch.Tensor, j: torch.Tensor) -> torch.
     return (di + dj - 2 * (di - k)).float()
 
 
+DENS_READOUT = False                # with the two-part gate: the gated readout trained end to end (28 Oct)
 DENS_SHARE = False                  # with the gate: its target is the *visible oriented share* (the line entities' mass over the
                                     # total, x the visibility) and the lobe is trained on the oriented part alone, weighted by that
                                     # share -- the pedestal becomes a regression target (29 Oct: at a visible query the lobe holds a
@@ -163,7 +164,16 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
     w_q = None; gate = ent.get("g")
     if "e_ovis" in T:                                                                              # the orientation's visibility in the image (28 Oct)
         v = T["e_ovis"].float()[..., None]; hq = m_t > MASS_EPS
-        if gate is not None and DENS_SHARE:                                                        # the gate = the visible oriented share; the lobe
+        if gate is not None and DENS_READOUT:                                                      # 28 Oct: the readout itself trained (g x lobe +
+            line = (T["e_kappa"][..., 1] >= 2.0) & (mass > 0)                                      # (1 - g) x flat against the visibility-mixed
+            lq = (mass * line).sum(-1) > 0.02                                                      # target at every query; the lobe detached
+            rho_d = (contrib * line[:, :, None]).sum(-1); w_q = v[..., 0] * lq + 0.02              # there), the lobe on the oriented part where
+            gv = ent.get("gv", gate).float(); sel = hq & lq                                        # its axis shows, the gate's visibility head on
+            parts["gate"] = (Fn.binary_cross_entropy(gv.clamp(1e-4, 1 - 1e-4), v[..., 0], reduction="none")[sel].mean()   # the image-measured v
+                             if bool(sel.any()) else gv.sum() * 0.0)
+            f_ = ent["f"].float().detach(); fm_ = f_[:, :, :n_uni].mean(-1, keepdim=True); gg = gate.float()[..., None]
+            parts["readout"] = density_shape_loss(gg * f_ + (1 - gg) * fm_, v * rho + (1 - v) * m_t[..., None], m_t, n_uni)
+        elif gate is not None and DENS_SHARE:                                                      # the gate = the visible oriented share; the lobe
             line = (T["e_kappa"][..., 1] >= 2.0) & (mass > 0)                                      # = the oriented part alone, where it shows
             share = ((mass * line).sum(-1) / m_t.clamp_min(1e-9)).clamp(0, 1); s_t = v[..., 0] * share
             rho_d = (contrib * line[:, :, None]).sum(-1); w_q = s_t + 0.02
@@ -171,7 +181,7 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
                              if bool(hq.any()) else gate.float().sum() * 0.0)
         else:
             rho_d = v * rho_d + (1 - v) * m_t[..., None]                                           # an erased lobe asks for flat at the same mass
-        if gate is not None and not DENS_SHARE:                                                    # gated: the lobe trained where the orientation
+        if gate is not None and not DENS_SHARE and not DENS_READOUT:                               # gated: the lobe trained where the orientation
             w_q = v[..., 0] + 0.02                                                                 # shows (partial credit for a partly visible one:
                                                                                                    # under the raw lobes the branch went flat by
                                                                                                    # step 2000, pilot D), the gate on the visibility
@@ -200,6 +210,8 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
     total = W["density"] * parts["density"] + W.get("mass", 0.0) * parts.get("mass", 0.0)
     if "gate" in parts:
         total = total + W.get("gate", 1.0) * parts["gate"]
+    if "readout" in parts:
+        total = total + W.get("readout", 4.0) * parts["readout"]
     if W.get("lobe_mass", 0.0) > 0 and n_uni > 0:                                                 # each oriented population's share of the
         f_ = ent["f"].float(); fb = f_[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-6)       # density (its directions weighted by the
         tb = rho_d[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-9)                          # target's ownership), against the target's:

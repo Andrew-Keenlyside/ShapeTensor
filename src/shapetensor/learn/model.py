@@ -222,6 +222,18 @@ def st_features(j6: torch.Tensor) -> torch.Tensor:
     return torch.stack([1 - 3 * ev[..., 0] / tr, (ev[..., 1] - ev[..., 0]) / lmax, (ev[..., 2] - ev[..., 1]) / lmax], -1).float()
 
 
+def st_features_ext(j6: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
+    """:func:`st_features` and the eigenvalues' log ratios (l_mid / l_min, l_max / l_mid), the log gradient energy and the
+    log window ``sigma (...)``, roughly unit scale: ``(..., 7)`` -- the cues that predict the visibility (28 Oct)."""
+    M = torch.stack([torch.stack([j6[..., 0], j6[..., 3], j6[..., 4]], -1), torch.stack([j6[..., 3], j6[..., 1], j6[..., 5]], -1),
+                     torch.stack([j6[..., 4], j6[..., 5], j6[..., 2]], -1)], -2).double()
+    ev = torch.linalg.eigvalsh(M + 1e-12 * torch.eye(3, dtype=torch.float64, device=j6.device)).clamp_min(1e-20)
+    r1 = torch.log(ev[..., 1] / ev[..., 0]).clamp(max=6.0) / 3; r2 = torch.log(ev[..., 2] / ev[..., 1]).clamp(max=6.0) / 3
+    le = ((torch.log(ev.sum(-1)) + 7.0) / 2).clamp(-3.0, 3.0)
+    ext = torch.stack([r1, r2, le, torch.log(sigma.double().clamp_min(1e-3))], -1).float()
+    return torch.cat([st_features(j6), ext], -1)
+
+
 #: training: pool the direct path's bank only where the queries need it (z and y passes over the volume, the x pass at
 #: the queries' trilinear corners; review 5 -- the levels are never stored): ``(B, Q, L, Dd)`` straight into the decoder
 OD_AT_POINTS = False
@@ -238,7 +250,7 @@ class EntityDecoder(nn.Module):
                  dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False,
                  kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0,
                  od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False, dens_gate: bool = False, st_path: bool = False,
-                 iso_head: bool = False):
+                 iso_head: bool = False, gate2: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -311,6 +323,17 @@ class EntityDecoder(nn.Module):
                 if self.odirect:                                                                  # line-ness, planarity: the cue the visibility
                     self.gate.weight[0, hidden:hidden + self.od_lv] = 0.25                        # itself is measured from, 29 Oct), at
                 self.gate.weight[0, -3:-1] = 2.0                                                  # positive gains from the start
+        # ``gate2`` (28 Oct: the one-layer gate on the visible oriented share sat at its base rate, corr 0.09 -- the
+        # product v x share is not in the image, v alone and the share alone partly are, corr 0.38 / 0.47): two heads
+        # on the point code + the bank's contrast + the extended structure-tensor features -- the visibility (BCE on the
+        # image-measured v) and an amplitude (trained only through the readout's loss); the readout's g = vis x amp
+        self.gate2 = bool(gate2) and self.gate is not None; self.gate_nst = 7 if self.gate2 else 3
+        if self.gate2:
+            ng = hidden + (self.od_lv if self.odirect else 0) + 7
+            self.gate = nn.Sequential(nn.Linear(ng, 64), nn.SiLU(), nn.Linear(64, 2))
+            nn.init.zeros_(self.gate[2].weight)
+            with torch.no_grad():
+                self.gate[2].bias.copy_(torch.tensor([-1.4, 0.0]))                               # vis ~0.2 (its base rate), amp 0.5
         if self.odirect:
             self.od_net = nn.Sequential(nn.Linear(self.od_lv * (2 if self.od_norm else 1) + 1, 64), nn.SiLU(), nn.Linear(64, 32))
             self.od_dens = nn.Linear(32, 1); nn.init.zeros_(self.od_dens.weight); nn.init.zeros_(self.od_dens.bias)
@@ -451,24 +474,28 @@ class EntityDecoder(nn.Module):
         if st6 is not None and (getattr(self, "gate", None) is not None or getattr(self, "st_gain", None) is not None):
             B = points.shape[0]                                                                   # the query's structure tensor
             j6 = torch.stack([window_mean(st6[b], points[b][None].expand(6, -1, -1).contiguous(), sigma[b][None].expand(6, -1).contiguous()).T for b in range(B)])
-            stf = st_features(j6)                                                                 # (B, Q, 3)
+            stf = st_features_ext(j6, sigma) if getattr(self, "gate2", False) else st_features(j6)   # (B, Q, 3 or 7)
             if getattr(self, "st_gain", None) is not None:
                 st_q = st_quadratic(j6, dirs)                                                     # (B, Q, D) u^T M u
         out = self.decode(p[:, :, None].expand(-1, -1, D, -1), Y, r, o, od, dens_c=dc, st_q=st_q)
         if self.mass is not None:
             out["m"] = self.mass_of(p)
         if getattr(self, "gate", None) is not None:
-            out["g"] = self.gate_of(p, torch.stack(ovs) if ovs is not None else None, stf)        # (B, Q) the orientation's visibility
+            out["g"], out["gv"] = self.gate_of(p, torch.stack(ovs) if ovs is not None else None, stf, parts=True)   # (B, Q) the readout's gate, its visibility
         return out
 
-    def gate_of(self, p: torch.Tensor, ov: torch.Tensor | None, stf: torch.Tensor | None = None) -> torch.Tensor:
+    def gate_of(self, p: torch.Tensor, ov: torch.Tensor | None, stf: torch.Tensor | None = None, parts: bool = False):
         """The visibility gate from point codes ``p (..., hidden)``, the bank's energies there ``ov (..., L, Dd)`` and the
         structure-tensor features ``stf (..., 3)`` (zeros if not given)."""
         if ov is not None:
             ovf = ov.float(); odc = torch.log(ovf.amax(-1) / ovf.mean(-1).clamp_min(1e-6)).clamp(max=5.0)
             p = torch.cat([p, odc.to(p.dtype)], -1)
-        p = torch.cat([p, (stf if stf is not None else torch.zeros(*p.shape[:-1], 3, device=p.device)).to(p.dtype)], -1)
-        return torch.sigmoid(self.gate(p).float()[..., 0])
+        p = torch.cat([p, (stf if stf is not None else torch.zeros(*p.shape[:-1], getattr(self, "gate_nst", 3), device=p.device)).to(p.dtype)], -1)
+        if getattr(self, "gate2", False):
+            o = self.gate(p).float(); vis = torch.sigmoid(o[..., 0]); g = vis * torch.sigmoid(o[..., 1])
+            return (g, vis) if parts else g
+        g = torch.sigmoid(self.gate(p).float()[..., 0])
+        return (g, g) if parts else g
 
     def reset_kappa(self):
         """The concentration outputs restarted at kappa ~1 (log space), e.g. after loading a ``softplus`` checkpoint."""
@@ -590,7 +617,7 @@ class PopulationNet(nn.Module):
                  dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False, oprobe: bool = False,
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
                  odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0,
-                 od_norm: bool = False, dens_gate: bool = False, st_path: bool = False, iso_head: bool = False):
+                 od_norm: bool = False, dens_gate: bool = False, st_path: bool = False, iso_head: bool = False, gate2: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -629,7 +656,7 @@ class PopulationNet(nn.Module):
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
                                      oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect),
                                      od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote), od_norm=bool(od_norm), dens_gate=bool(dens_gate),
-                                     st_path=bool(st_path), iso_head=bool(iso_head))
+                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             # the background's occupancy (the isotropic remainder) at every voxel: the density's floor is background plus
@@ -704,7 +731,8 @@ class PopulationNet(nn.Module):
                    odirect=int(args.get("odirect", 0) or 0), split_head=bool(args.get("split_head", False)),
                    od_sigmas=tuple(args.get("od_sigmas") or (2.0, 4.0, 6.0)), mass_vote=bool(args.get("mass_vote", False)),
                    block_norm=int(args.get("block_norm", 0) or 0), od_norm=bool(args.get("od_norm", False)),
-                   dens_gate=bool(args.get("dens_gate", False)), st_path=bool(args.get("st_path", False)), iso_head=bool(args.get("iso_head", False))) \
+                   dens_gate=bool(args.get("dens_gate", False)), st_path=bool(args.get("st_path", False)), iso_head=bool(args.get("iso_head", False)),
+                   gate2=bool(args.get("gate2", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
