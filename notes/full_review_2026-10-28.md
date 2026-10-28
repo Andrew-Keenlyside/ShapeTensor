@@ -190,3 +190,18 @@ GB; the generators (24 workers per rank) keep up at low difficulty (1.0 new pair
 * Cluster: seymour2's gpu.q is subordinate to the owning lab's queue -- pilot E was suspended seconds after it
   started and the profile job likewise; a 12-hour run there can be paused at any time (the trainer checkpoints
   every 15 minutes and resumes, so paused is survivable; killed is not).
+* Per-subset density loss (10 crops, seeds 140M; the mixed targets): at *visible* line queries flat costs 0.190, the
+  pilot 0.344 (its lobes are wrong there), D at step 500 0.181, F at step 1000 0.187; partial 0.104 / 0.414 / 0.107 /
+  0.103; invisible 0.003 / 0.335 / 0.050 / 0.010. So the gated models beat flat where the orientation shows, but by
+  2-5 % only, with lobes of peak/mean 1.1-1.4 against the mixed target's 2.45 -- the classical reader with the
+  target's own kappa reaches ~40 % below flat there (targets review), so the room exists and the model is not
+  reaching it. Pilot G: the density path fresh (`--init-fresh ent.dens,ent.od_net,ent.od_dens`) so nothing wrong has
+  to be unlearnt; local G' the same at lr 3e-4.
+* 08:50 ET: pilot F's gate converged to a constant (BCE 0.693 = output 0.5; its energy-contrast gains were being
+  driven down), so the energy contrast is a weak cue for the visibility. Gate v3 reads the query's own structure
+  tensor (anisotropy, line-ness, planarity: the cue the visibility is defined from) -- `st_products` on the image once,
+  `window_mean` at each query, in training and inference (`2331e2a`). Pilot H = gate v3 + fresh density path + frozen
+  trunk + density weight 4, lr 3e-4 (cluster, queued); local G' = the same with gate v2, running.
+* Cluster at 08:50 ET: every job of ours is suspended (E, F, the profile) or queued (G, H): the owning lab's queue
+  pre-empts gpu.q on seymour2 and seymour1. The local A6000 (one pilot at a time beside the 15 GB calibrator job) is
+  the only dependable resource; the 12-hour run has not been launched.
