@@ -159,15 +159,15 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
     w_q = None; gate = ent.get("g")
     if "e_ovis" in T:                                                                              # the orientation's visibility in the image (28 Oct)
         v = T["e_ovis"].float()[..., None]
+        rho_d = v * rho_d + (1 - v) * m_t[..., None]                                               # an erased lobe asks for flat at the same mass
         if gate is not None:                                                                       # gated: the lobe trained where the orientation
-            w_q = v[..., 0] + 0.02                                                                 # shows, the gate on the visibility itself
-            hq = m_t > MASS_EPS
+            w_q = v[..., 0] + 0.02                                                                 # shows (partial credit for a partly visible one:
+            hq = m_t > MASS_EPS                                                                    # under the raw lobes the branch went flat by
+                                                                                                   # step 2000, pilot D), the gate on the visibility
             parts["gate"] = (Fn.binary_cross_entropy(gate.float().clamp(1e-4, 1 - 1e-4), v[..., 0], reduction="none")[hq].mean()
                              if bool(hq.any()) else gate.float().sum() * 0.0)
-        else:                                                                                      # one output: an erased lobe asks for flat
-            rho_d = v * rho_d + (1 - v) * m_t[..., None]                                           # at the same mass
-            if DENS_VIS_WEIGHT > 0:
-                w_q = 1 + DENS_VIS_WEIGHT * v[..., 0]
+        elif DENS_VIS_WEIGHT > 0:                                                                  # one output
+            w_q = 1 + DENS_VIS_WEIGHT * v[..., 0]
     if "m" in ent:                                                                                 # where and which way apart: the mass from its own
         parts["mass"] = (torch.log(ent["m"].float() + MASS_EPS) - torch.log(m_t + MASS_EPS)).abs().mean()   # output; the density only its shape
         parts["density"] = density_shape_loss(ent["f"].float(), rho_d, m_t, n_uni, w_q=w_q)

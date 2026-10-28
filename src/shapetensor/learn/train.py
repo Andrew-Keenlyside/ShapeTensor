@@ -1049,7 +1049,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    dens_same_norm: bool = False, own_objects: bool = False, bg_head: bool = False, orient_from_texture: bool = True,
                    obj_head: bool = False, mc_fibres: bool = False, oriented: int = 0, geometry_targets: bool = False, block_norm: int = 1,
                    odirect: int = 0, od_sigmas: list | None = None, split_head: bool = False, mass_vote: bool = False, overfit: int = 0,
-                   init_reset: str = "", ovis_targets: bool = True, od_norm: bool = False, dens_vis_w: float = 0.0, dens_gate: bool = False):
+                   init_reset: str = "", ovis_targets: bool = True, od_norm: bool = False, dens_vis_w: float = 0.0, dens_gate: bool = False,
+                   freeze_trunk: int = 0, trunk_lr: float = 1.0):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -1131,16 +1132,24 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 region_density=bool(region_density), kappa_log=bool(kappa_log), vote_objects=bool(vote_objects), dens_same_norm=bool(dens_same_norm), own_objects=bool(own_objects), bg_head=bool(bg_head), orient_from_texture=bool(orient_from_texture), obj_head=bool(obj_head),
                 block_norm=int(block_norm), odirect=int(odirect), od_sigmas=list(od_sigmas) if od_sigmas else None, split_head=bool(split_head),
                 mass_vote=bool(mass_vote), od_norm=bool(od_norm), ovis_targets=bool(ovis_targets), dens_vis_w=float(dens_vis_w), dens_gate=bool(dens_gate),
+                freeze_trunk=int(freeze_trunk), trunk_lr=float(trunk_lr),
                 mc_fibres=bool(mc_fibres), oriented=int(oriented), geometry_targets=bool(geometry_targets))
     skipped = {}                                                                                   # non-finite steps skipped
     torch.manual_seed(seed); g = torch.Generator().manual_seed(seed * 1000 + rank)
     gd = torch.Generator(device=device).manual_seed(seed * 1000 + rank + 7) if str(device).startswith("cuda") else g
     model = PopulationNet.from_args(args).to(device)
     rf = receptive_field(model)
-    gate_p = [p_ for n_, p_ in model.named_parameters() if ".gate." in n_]                          # the visibility gate at 10x the rate (its
-    groups = ([{"params": [p_ for n_, p_ in model.named_parameters() if ".gate." not in n_]}, {"params": gate_p, "lr_mult": 10.0}]   # BCE moved
-              if gate_p else model.parameters())                                                    # 0.693 -> 0.689 in 500 steps at 1e-4)
-    opt = torch.optim.AdamW(groups, lr=lr, weight_decay=1e-4)
+    TRUNK = ("stem", "l0", "l1", "l2", "l3", "d1", "d2", "d3", "skip", "mix", "film")                  # the convolutional trunk (not the heads)
+    is_gate = lambda n_: ".gate." in n_; is_trunk = lambda n_: n_.split(".")[0] in TRUNK
+    gate_p = [p_ for n_, p_ in model.named_parameters() if is_gate(n_)]
+    trunk_p = [p_ for n_, p_ in model.named_parameters() if is_trunk(n_) and not is_gate(n_)]
+    rest_p = [p_ for n_, p_ in model.named_parameters() if not is_trunk(n_) and not is_gate(n_)]
+    groups = [{"params": rest_p}, {"params": trunk_p, "lr_mult": float(trunk_lr), "trunk": True}]   # the trunk: frozen for ``freeze_trunk``
+    if gate_p:                                                                                      # steps on a warm start, then at ``trunk_lr``
+        groups.append({"params": gate_p, "lr_mult": 10.0})                                         # x the rate (29 Oct: the other heads' gradients
+    opt = torch.optim.AdamW(groups, lr=lr, weight_decay=1e-4)                                       # eroded the pilot's density reading); the
+                                                                                                    # visibility gate at 10x (its BCE moved 0.693
+                                                                                                    # -> 0.685 in 2000 steps at 1e-4)
     start = 0
     if resume == "auto":
         resume = str(outd / "model.pt") if (outd / "model.pt").exists() else None
@@ -1242,7 +1251,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
         prog = step / max(steps, 1)
         lr_now = lr * min(1.0, (step + 1) / warmup) * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * prog)))
         for pg in opt.param_groups:
-            pg["lr"] = lr_now * pg.get("lr_mult", 1.0)
+            pg["lr"] = lr_now * pg.get("lr_mult", 1.0) * (0.0 if (pg.get("trunk") and step < freeze_trunk) else 1.0)
         opt.zero_grad(set_to_none=True); pa = {}; tot_v = 0.0; t_data = 0.0
         for mb in range(accum):
             if bench is not None:
@@ -1416,6 +1425,8 @@ def main():
     ap.add_argument("--no-ovis-targets", action="store_true", help="entities: the density targets at the generator's visibility, not the image's (entities.orientation_visibility)")
     ap.add_argument("--dens-vis-w", type=float, default=0.0, help="entities: the density loss weighted per query by 1 + this x the orientation's visibility")
     ap.add_argument("--dens-gate", action="store_true", help="entities: a visibility gate per query (trained on the image's orientation visibility); the lobe trained only where it shows")
+    ap.add_argument("--freeze-trunk", type=int, default=0, help="entities: the convolutional trunk frozen for this many steps (a warm start: the heads adapt first)")
+    ap.add_argument("--trunk-lr", type=float, default=1.0, help="entities: the trunk's learning rate as a multiple of --lr (after --freeze-trunk)")
     ap.add_argument("--od-sigmas", type=float, nargs="+", default=None, help="entities: the direct path's pooling levels (e.g. 2 4 6 8)")
     ap.add_argument("--split-head", action="store_true", help="entities: a head for the objects' occupancy by kind (oriented / isotropic; targets ori_t / iso_t)")
     ap.add_argument("--mass-vote", action="store_true", help="entities: a per-direction vote for the owner's mass")
@@ -1471,7 +1482,7 @@ def main():
                        region_dec=a.region_dec, where_first=a.where_first, z_vote=a.z_vote, dir_sh=a.dir_sh,
                        background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, region_density=not a.no_region_density,
                        kappa_log=a.kappa_log, vote_objects=a.vote_objects, dens_same_norm=a.dens_same_norm, own_objects=a.own_objects, bg_head=a.bg_head, orient_from_texture=not a.orient_from_contrast, obj_head=a.obj_head,
-                       block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote, od_norm=a.od_norm, ovis_targets=not a.no_ovis_targets, dens_vis_w=a.dens_vis_w, dens_gate=a.dens_gate,
+                       block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote, od_norm=a.od_norm, ovis_targets=not a.no_ovis_targets, dens_vis_w=a.dens_vis_w, dens_gate=a.dens_gate, freeze_trunk=a.freeze_trunk, trunk_lr=a.trunk_lr,
                        mc_fibres=a.mc_fibres, oriented=a.oriented, geometry_targets=a.geometry_targets, overfit=a.overfit, init_reset=a.init_reset)
         return
     if a.head == "lobes":
