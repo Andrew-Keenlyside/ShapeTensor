@@ -8,42 +8,51 @@ machinery to adding it.
 
 ## What the model is
 
-A contrast-, resolution- and artefact-agnostic **shape latent**, computed once per volume by a 3D CNN trunk. Any number
-of outputs can be read from it with a light query decoder at:
+A contrast-, resolution- and artefact-agnostic **shape latent**, computed once per volume by a 3D CNN trunk. Its job is
+to identify objects and how they group. A light, knob-conditioned query decoder reads any number of outputs from it.
+Populations are **hierarchical**, like clusters at different cut levels, not fixed semantic layers. A voxel may hold
+contributions from a sheet (for example a grey-white boundary), a vessel, several fibre populations, background and
+minor noise.
 
-- **x**: any point. The output voxel size is free, because the decoder is queried at continuous coordinates.
-- **sigma**: the spatial integration scale. This is the window whose contents are described, the equivalent of the
-  structure tensor's rho.
-- **tau**: the angular smoothing. It is an explicit knob, so ODF sharpness can be tuned independently of sigma.
+### Readout knobs (one latent pass, many outputs)
 
-Each query returns a **set of instances** present in its window: the bundles and objects whose material falls inside it.
-For each instance:
+| knob | meaning | how it is trained |
+|---|---|---|
+| **x** | any point, so any output voxel size | continuous queries |
+| **sigma** | the spatial window: how much tissue is described | random per query |
+| **g** | the grouping scale: the size of structure a population is (axons, then fascicles or bundles, then tracts) | the construction tree is cut at radius g, using `Tree.resolve` |
+| **tau** | the angular blur: sharp changes between neighbouring populations, or a smooth field between their ODFs | random per query; exact on log-SH by Funk-Hecke scaling per order, analytic on Bingham |
+| **L** | the ODF order per population | random truncation during training (nested SH), so any order up to L_max reads out well |
+
+The **g x L trade-off** is the user's choice at readout time:
+- one population of high order: g coarse, L = 8, which is a classical fibre ODF;
+- many populations of order 2, each just a direction and its anisotropy: g fine, L = 2;
+- anything in between, for example a fibre population of order 2 beside other populations.
+
+### Per query output
+
+A set of populations at the requested grouping scale, plus the remainder (background and noise). For each population:
 
 | output | form |
 |---|---|
 | existence | probability |
-| class | fibre, vessel, boundary / sheet, blob / cell, artefact / crystal |
-| volume fraction | its share of the window's material |
-| ODF | a Bingham distribution (frame R, concentrations kappa1 >= kappa2). Angular smoothing is analytic: kappa' = kappa tau / (kappa + tau) |
-| embedding | an instance code, so the same bundle can be grouped across queries for tracking and separation |
+| mass | its share of the window's material |
+| ODF | log-SH coefficients up to L, smoothed by tau (normalised and positive) |
+| descriptors | learned object attributes, supervised from construction: kind (line, sheet, blob), radius, hollow lumen, relative brightness, packing |
+| embedding | a population code, for grouping the same population across queries |
 
-It also returns the isotropic remainder's fraction, the unstructured background. A class's ODF is the sum over that
-class's instances of fraction x Bingham, so the fibre-only component of a voxel is a direct output. Context from the
-wider region informs which objects are present in the window.
-
-**Why Bingham per instance:** a single population within a window is close to unimodal. Bingham is exact for axial,
-anisotropically dispersed lobes, is closed under the angular-smoothing knob, and is compact (5 numbers). Multi-lobed
-structure comes from several instances, which is how crossings are represented and separated. For export, the class ODFs
-are projected to log-SH (order 6-8 keeps 100 % of the readout; see `full_review_2026-10-28.md`) and to standard SH for
-dMRI tools.
+"Fibre only" is a filter on the descriptors. Lumen, brightness and the rest are learned evidence that separates vessels
+from fibres. The fibre ODF of a voxel is the mass-weighted sum over the fibre-like populations. Context from the wider
+region informs which objects are present within the window.
 
 ## Targets (from construction only)
 
-For each query window: the instances whose material falls in the Gaussian window of width sigma. Each gets its instance
-id, class, mass, and a Bingham fitted to the tangent or orientation distribution of its geometry within the window. The
-existing `entity_targets` already computes per-entity Bingham fits. The targets carry **no visibility, presence or
+For each query window and grouping scale g: the construction tree's nodes resolved at radius g (`Tree.resolve`), whose
+material falls in the Gaussian window of width sigma. Each population gets its node id, descriptors from construction,
+mass, and its ODF: the mass-weighted mixture of its member objects' orientation distributions inside the window, as
+log-SH up to L. The existing `entity_targets` already gives per-entity tensors, Bingham fits and descriptors per node. The targets carry **no visibility, presence or
 classical-reader terms**. Whatever the image doesn't show, the model must express as uncertainty: broad lobes, a low
-existence probability or a high isotropic fraction. Targets are smoothed with the same tau as the query.
+existence probability or a high isotropic fraction. Targets are smoothed with the same tau and truncated to the same L as the query.
 
 ## Losses (proper and standard)
 
