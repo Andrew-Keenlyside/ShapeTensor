@@ -1,67 +1,54 @@
 # API and command line
 
-## The one call: `shapetensor`
+## The one call
 
 ```python
 import shapetensor as st
-vec = st.shapetensor(image, rho=10.0, sigma=1.0)                          # (3, Z, Y, X), (x, y, z)
-vecs, w = st.shapetensor(image, rho=10.0, multi=True, weights=True)       # (N, 3, Z, Y, X), (N, Z, Y, X)
-vec = st.structure_tensor(image, rho=10.0, excise=True)                   # the baseline
-out = st.population_field(image, rho=10.0)                                # everything (below)
+vec        = st.shapetensor(image, scale=10.0)                                            # (3, Z, Y, X), (x, y, z)
+vecs, w, l = st.shapetensor(image, scale=10.0, multi=True, weights=True, labels=True)     # (nmax, 3, Z, Y, X), (nmax, Z, Y, X), (nmax, Z, Y, X)
+vec        = st.structure_tensor(image, rho=10.0, excise=True)                            # the baseline
+out        = st.orientations(image, scale=10.0)                                           # everything (vectors in (z, y, x))
 ```
 
-`image` is a `(Z, Y, X)` numpy, cupy or torch array; the result is the same kind. `shapetensor.np` and
-`shapetensor.cp` force numpy or cupy. Keywords: `rho`, `sigma`, `multi`, `weights`, `tissue`, `order` (`"xyz"` /
-`"zyx"`), `engine`, `nmax`, `smooth`, `device`. What each does to the field: [parameters](parameters.md).
+`image` is a `(Z, Y, X)` numpy, cupy or torch array (or `(K, Z, Y, X)` channels); the result is the same kind.
+`shapetensor.np` and `shapetensor.cp` force numpy or cupy. Keywords: `scale`, `multi`, `weights`, `labels`, `order`
+(`"xyz"` / `"zyx"`), `spacing`, `device`, and every `Orientations` parameter ([parameters](parameters.md)).
 
-## The pipeline: `shapetensor.pipeline`
+## The chain: `shapetensor.field`
 
-| function | what |
+| | |
 |---|---|
-| `calibrate(volumes, tissue=None, *, engine, sigma, rho, smooth, margin, n_sample)` | fit the stage-2 readers on a block or a list of blocks → `Calibration` |
-| `apply(cal, volume, tissue=None, *, nmax, min_sep_deg, min_mask_share, iterations, spacing)` | stages 2–4 on a block → dict |
-| `population_field(volume, tissue=None, **calibration)` | both on one block |
-| `run_volume(src, dst, *, level, chunk, nmax, tissue_threshold, calibration_size, calibrate_chunks, min_bins, blend, multi, rank, world, **calibration)` | a whole zarr volume: every chunk calibrated on itself (the volume's as fallback), tensors ramp-blended across the chunk faces |
-
-`apply` returns, with vectors in (z, y, x): `modes (N, 3)`, `activation (N, Z, Y, X)`, `dirs (N, 3, Z, Y, X)` and
-`gap (N, Z, Y, X)` per population; `vec (3, Z, Y, X)`, `vec_gap`, `weight` (the single field); `vecs (N, 3, Z, Y, X)`,
-`weights` (the multi-vector field); `masks`, `tissue_mask`, `strongest`, `residual`, `tau`, `n_candidates`.
-`merge.export(path, out, voxel_mm)` writes it as a zarr group.
+| `Orientations(scale=10.0, **params)` | the parameters, all tied to `scale` |
+| `.lift(v)` | the lifted field `(n_dirs, z, y, x)` on the lattice |
+| `.null_floor(v, mask=None)` | the presence floor from the block's isotropic surrogate |
+| `.populations(v, floor="null", response=None, labels=True)` | stages 1–2 on the lattice: `N`, `mass`, `share`, `dirs_cells`, `presence`, `weight`, `fodf`, `sheet`, `labels_cells`, `table`, `floor`, `response`, `lift` |
+| `.field(pop, shape, labels=True, tensor=False)` | the field at every voxel: `vecs`, `weights`, `labels`, `vec`, `weight`, `N`, `sheet` (and `tensor`) |
+| `.run(v, floor="null", response=None)` | both (the lattice `N` / `sheet` become `N_cells` / `sheet_cells`) |
+| `orientations(image, spacing=None, **params)` | `run` on any array kind, with anisotropic voxels handled |
 
 ## The stages
 
 | module | contents |
 |---|---|
-| `shapetensor.features` | `make_engine(name)`: `anatomix_enc2` (default), `anatomix48`, `anatomix16`, `jet`, `intensity`; `cache.cached_features` |
-| `shapetensor.separate` | `SignatureDictionary`, `OrientationReadout`, `modes_from_density`, `unmix`, `nnls_batched`, `direction_gains`, `activation_null`, `population_masks`, `hemisphere` |
-| `shapetensor.tensors` | `population_tensor(image, activation, sigma, rho, excision)`, `layer_tensor`, `direction_and_gap` |
-| `shapetensor.merge` | `single_field(S, A)`, `multi_field(dirs, A)`, `export` |
+| `shapetensor.lift` | `hemisphere`, `shell_lags`, `direction_weights`, `lift`, `iso_surrogate`, `presence`, `response_profile`, `self_response`, `response_matrix`, `deconvolve`, `angular_smooth` |
+| `shapetensor.populations` | `momentum`, `peaks`, `ring_fraction`, `lobe_ring_ratio`, `lobe_shape`, `label_populations` |
+| `shapetensor.volume` | `run_volume(src, dst, level, chunk, tissue_threshold, calibration_size, calibration_origin, floor, response, rank, world, **params)`, `stitch_labels(dst)` |
 | `shapetensor.st` | `structure_tensor_3d`, `excised_structure_tensor_3d`, `excision_weights`, `eig_special_3d`, `structure_tensor`, `run_volume`, `spacing_ratio` |
-| `shapetensor.phantoms` | `build(name, seed, grid, tex, texture, **kw)` for `bundle`, `crossing`, `interface`; `Grid`, `TextureParams`, `truth_field`, `save`, `load` |
-| `shapetensor.validate` | `run(out_dir, seeds, sigma, rho, settings)` |
-| `shapetensor.tracking` | `track(dirs, mask, seeds, step, max_angle_deg, weights, min_weight)`, `density`, `endpoint_divergence`, `dice` |
-| `shapetensor.viz` | `dec_rgb`, `dec_activation_overlay`, `sticks`, `streamline_segments` |
-| `shapetensor.stats` | `real_crop_profile(path)`: the image statistics the phantom texture is matched to |
-| `shapetensor.archive` | the ODF / fixel and TCA routes, kept importable, not maintained |
+| `shapetensor.tracking` | `track(dirs, mask, seeds, step, max_angle_deg, weights, min_weight, headings)`, `density`, `endpoint_divergence` |
+| `shapetensor.phantoms` | `build(name, seed, grid, tex, texture, **kw)`: `bundle`, `crossing`, `interface`, `bend`, `band_crossing` (`t_junction`, `only_second`), `texture`; `Grid`, `TextureParams`, `truth_field` |
+| `shapetensor.validate` | `run(out_dir, seeds, cases, scale)`: the acceptance suite; `SETTINGS`, `tex_for`, `lattice_scores`, `identity_scores`, `tracking_scores` |
+| `shapetensor.viz` | `dec_rgb`, `identity_palette`, `identity_rgb`, … |
+| `shapetensor.pipeline`, `.separate`, `.tensors`, `.merge`, `.features`, `.dev` | the 0.2 pipeline (anatomix shape features, populations unmixed per block), unchanged and importable |
 
 ## Command line
 
+```bash
+shapetensor run <in.zarr> <out.zarr> [--level 0] [--scale 10] [--chunk 384 384 384] [--tissue-threshold T] [--rank 0 --world 1]
+shapetensor block <in.npy|zarr|tif|nii> <out.zarr> [--scale 10] [--spacing dz dy dx]
+shapetensor structure-tensor <in.zarr> <out.zarr> [--level 0] [--rho 10] [--sigma 1] [--arrays vec gap] [--float16]
+shapetensor validate [--out DIR] [--seeds 1] [--cases band,bend] [--scale 10]
+shapetensor phantom <bundle|crossing|interface|bend|band_crossing|texture> <out.npz> [--seed 0] [--cross-deg 60] [--t-junction]
+shapetensor demo                      # a 90° band crossing through the chain, tracked against the structure tensor
+shapetensor bench [--size 256]        # the structure tensor and the chain timed on this GPU
+shapetensor stats <in.ome.zarr> -o stats.json
 ```
-shapetensor run <in.zarr> <out.zarr> [--level 0] [--rho 10] [--sigma 1] [--chunk 192 192 192] [--nmax 3]
-                [--tissue-threshold T] [--calibration-size 256] [--calibration-origin z y x] [--volume-calibration] [--min-bins 12]
-                [--blend 32] [--no-multi] [--rank r --world n]
-shapetensor block <in.npy|in.zarr> <out.zarr> [--rho 10] [--sigma 1] [--voxel-mm 0.02]
-shapetensor structure-tensor <in.zarr> <out.zarr> [--level 0] [--rho 10] [--sigma 1] [--no-excise] [--chunk 256 256 256]
-shapetensor validate [--out validation] [--seeds 0 1 2] [--rho 10] [--settings calibrated]
-shapetensor phantom <bundle|crossing|interface> <out.npz> [--seed 0] [--angle 60] [--cross-deg 60] [--step 40]
-shapetensor demo [--out field.zarr] [--cross-deg 90]
-shapetensor bench [--size 192 256]
-shapetensor stats <in.ome.zarr> [--level 0] [--threshold T] -o stats.json
-```
-
-`run` and `block` take `--spacing dz dy dx`; `block` reads `.npy`, `.tif` / `.tiff` (tifffile), `.nii` / `.nii.gz`
-(nibabel) and zarr.
-
-`run` writes `vec (3, Z, Y, X)` in (x, y, z) as the `structure-tensor` package, `gap`, `weight` (in multiples of
-the chunk's null, zero where the volume has no data), and `vecs`, `weights`; `structure-tensor` writes `S`, `val`,
-`vec` (or the `--arrays` asked for) in that package's layout.

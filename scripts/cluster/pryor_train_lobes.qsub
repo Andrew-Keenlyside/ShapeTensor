@@ -1,0 +1,54 @@
+#!/bin/bash
+# The lobe-mixture model's training on pryor (UCL CS, SGE), N GPUs of one node, in the chunkreg container.
+# NOT submitted automatically: qsub only after an explicit go-ahead (cluster rules).
+#
+#   qsub -v SEED=0,STEPS=100000 scripts/cluster/pryor_train_lobes.qsub          # 4 H100s by default (-pe gpu 4)
+#   qsub -pe gpu 2 -l gpu=true,gpu_type=a40 -v ... scripts/cluster/pryor_train_lobes.qsub
+#
+# Training is purely synthetic (real volumes are for checks only, never a loss). Data never comes from the shared
+# filesystem during training: the shape library is copied to node-local $TMPDIR at the start. Pairs are made on each GPU by a background thread (exclusive-process cards: no
+# second process) and by CPU-only workers. A checkpoint every 20 min and at the soft time limit (s_rt -> SIGUSR1:
+# save, exit 99); a resubmission resumes (--resume auto). RESUBMIT=1 lets the job requeue itself on exit 99 -- off by
+# default: every submission is the user's call.
+#$ -N st_lobes
+#$ -l h_rt=48:00:00,s_rt=47:40:00
+#$ -l gpu=true,gpu_type=h100
+#$ -pe gpu 4
+#$ -l tmem=48G
+#$ -R y
+#$ -notify
+#$ -o /home/akeenlys/storage_main/bridge_project_data/logs/$JOB_NAME.$JOB_ID.log
+#$ -S /bin/bash
+#$ -cwd
+#$ -j y
+set -uo pipefail
+P=/home/akeenlys/storage_main/bridge_project_data
+ST=${ST:-$P/shapetensor}
+SRC=${SRC:-$ST/ShapeTensors}
+SIF=${SIF:-$P/containers/chunkreg.sif}
+SEED=${SEED:-0}; STEPS=${STEPS:-100000}
+OUT=${OUT:-$ST/runs/lobes_s${SEED}}
+NGPU=${NSLOTS:-1}
+CPU_WORKERS=${CPU_WORKERS:-$((2 * NGPU))}
+EXTRA=${EXTRA:-}
+export TMPDIR="${TMPDIR:-/tmp/st.$$}"; mkdir -p "$TMPDIR" "$OUT"
+echo "host $(hostname) gpus=${CUDA_VISIBLE_DEVICES:-?} ngpu=$NGPU sif=$SIF src=$SRC out=$OUT start $(date)"
+nvidia-smi --query-gpu=index,name,memory.total --format=csv
+# node-local data
+tar -xf "$ST/bundle/shape_library.tar" -C "$TMPDIR"
+RUNTIME=$(command -v apptainer || command -v singularity) || { echo "FATAL: no apptainer/singularity" >&2; exit 1; }
+"$RUNTIME" exec --nv -B "$TMPDIR:$TMPDIR" -B "$P:$P" \
+    --env PYTHONPATH="$SRC/src",SHAPETENSOR_SHAPES="$TMPDIR/shape_library",OMP_NUM_THREADS=4 \
+    "$SIF" /opt/venv/bin/python -m torch.distributed.run --standalone --nproc_per_node "$NGPU" \
+    -m shapetensor.learn.train --head lobes --out "$OUT" --seed "$SEED" --steps "$STEPS" --resume auto \
+    --size 128 --batch "${BATCH:-4}" --accum "${ACCUM:-4}" --buffer 256 --refresh 1 --margin "${MARGIN:-4}" \
+    --gate 0.85 --gate-max 3000 --aniso 1 600 --difficulty auto --level0 0.3 --lobes-J 6 \
+    --pairs 32 --pair-every 8 --contrast-every 2 --query 128 --strength1 1.0 \
+    --cpu-workers "$CPU_WORKERS" --cpu-threads 4 --ckpt-minutes 20 --val-n 32 --val-every 2000 \
+    --gen '{"scene": {"canvas": 256, "crops_per_scene": 8}}' $EXTRA
+rc=$?
+echo "exit $rc at $(date)"
+if [ "$rc" = 99 ] && [ "${RESUBMIT:-0}" = 1 ]; then
+    echo "resubmitting (RESUBMIT=1)"; qsub -v SEED="$SEED",STEPS="$STEPS",OUT="$OUT",EXTRA="$EXTRA",RESUBMIT=1 "$SRC/scripts/cluster/pryor_train_lobes.qsub"
+fi
+exit "$rc"

@@ -6,97 +6,180 @@
 
 # ShapeTensor
 
-Fibre orientation fields of high-resolution white-matter volumes (HiP-CT at 20 µm, serial histology, light-sheet)
-from a pretrained shape-feature space, on the GPU. One pipeline, four stages:
+**A model of the shape populations in any 3-D image.** Ask it about any point, at any scale, with as much context as
+you like, and it describes the populations of shapes there — fibres, membranes, boundaries, vessels, cells — each with
+its direction, its shape, its size and how much of it there is, through crossings and bends, whatever the modality.
+What to extract (fibres only, larger tubes, sheets, a sub-population) is your choice at inference, not the model's.
 
-1. **Shape features** — the block through a contrast-agnostic 3-D UNet (anatomix), read at the encoder layer
-   whose channels encode fibre orientation.
-2. **Separating populations in the shape space** — the orientation code is read without labels (the structure
-   tensor at confident sites is the teacher); the populations present are found, and every voxel is unmixed onto
-   their signatures: one **activation layer per population**, a full-volume image of that population's shape.
-3. **One tensor per population** — the image's structure tensor with the gradients weighted by the population's
-   activation.
-4. **Merging** — one vector per voxel from the merged population tensors, or every population's vector with its
-   activation as weight. No masks anywhere: the weights say where a population is present.
+> **Status (branch `population-model`, October 2026): in development.** The synthetic world, the training targets, a
+> fixed-scale network and an inference engine are built and tested (72 tests); training does not yet generalise
+> (it collapses to the dataset mean beyond a handful of samples — the first problem being worked on), and the
+> flexible-scale model below is designed, not built. The **classical chain** (0.3, below) works today and is the
+> baseline the model has to beat. The plan, blockers and feasibility tests: `notes/plan_foundation_model.md`.
 
-The classic structure tensor and its boundary-robust (*excised*) form are the baseline, at the same σ and ρ as
-every tensor in the pipeline, so every comparison is like for like.
+## Why
 
-<div align="center">
-<img src="docs/img/pipeline_overview.png" alt="the pipeline" width="100%" />
-<img src="docs/img/overview_S2146.png" alt="the pipeline on a HiP-CT block" width="100%" />
-</div>
+The structure tensor — the usual way to read orientation from an image — holds one axis per voxel. At a crossing it
+reports the bisector; at a boundary it is dragged into the plane of the step (a faint fibre crossing a grey/white
+boundary disappears); past the end of a bundle it keeps going on texture; it has no notion of scale beyond its
+window. A tracker following it switches bundle at every crossing. Learned feature models (anatomix and its kind) answer
+"what tissue, in what context", not "which populations pass here, which way, how big".
 
-The idea, and the same stages on a 192³ block of HiP-CT (S-21-46, 20 µm): the image, its voxels in the shape
-space, the two populations found there, their activation layers, each population's field, and the combined fields.
+## The model: a field you query
 
-## Install
+```
+populations(x, σ_A, B)
+```
+
+the populations within a Gaussian window of size `σ_A` centred at any point `x`, using image context up to `B`.
+
+- **`x` is continuous**: the output grid is yours — a lattice at `σ_A / 2`, a sub-voxel grid, points along a tract.
+- **`σ_A`, the description scale**, and **`B`, the context**, are inputs, not constants: describe fine structure with
+  a large context (to follow fibres through crossings, or to attempt sub-voxel orientations), or coarse structure with
+  a small one. Outside the trained ranges the model extrapolates and degrades.
+- **Every population is described continuously** — no categories:
+
+  | | |
+  |---|---|
+  | shape tensor (trace 1) | direction and shape: linear, planar, isotropic as continuous shares |
+  | mass | how much of it is in the window (visible volume fraction; a boundary: its step weight) |
+  | presence | whether it is there at all |
+  | radius | its cross-section scale |
+  | edge / ridge | a step between regions vs a thin structure |
+  | identity | which population it is, across the volume |
+
+- **You select at inference** with predicates — fibres = linear and radius ≤ 3 voxels; larger tubes = linear and
+  radius > 3; membranes = planar ridges; boundaries = edges — or find **sub-populations** as clusters of the
+  descriptors (thin among thick fibres, different cell types). Carry-forward along each population, bridging across
+  gaps, identities, the population-count (N) map and the field at every voxel then run on what you selected.
+- **Coarsening is exact in the shape space**: mass, mass × tensor and mass × radius add, so an output can be
+  re-described at any coarser scale by weighting each population over its neighbourhood — never mixing populations.
+- **Every output comes from the model's output**; the image is its input only.
+
+## How it is built
+
+**A synthetic world with exact labels** (`shapetensor/learn/generator.py`). Layered random shapes on anatomix-style
+backgrounds: lines, sheets, blobs, hollow tubes, crossing groups (interdigitated, at any angle, independent or
+bending together, dominant and faint populations), bends of chosen radius, cell stains and laminae, region boundaries.
+Labels are accumulated from what is rendered (each shape's tensor, volume, radius), so they match the image by
+construction. Each sample is then acquired as HiP-CT, lab CT, MRI or histology — elastic warps that move the labels,
+PSFs and resolution loss along a random acquisition axis, Poisson / Gaussian / Rician noise, rings, streaks, cupping,
+phase-contrast fringes, Gibbs ringing, ghosting, thick slices, section misalignment, stain variation, mosaic tiles,
+dust — mixed across modalities, with a strength knob for a curriculum. Each population's **visibility** is measured
+in the final image (the local t-statistic of its fit): it scales the population's mass (presence) and blends its
+tensor towards isotropic where the orientation cannot be recovered — the labels never ask for what the image does not
+show. To come: multiscale fascicles, branching trees, cells with processes, helices, weaves, foams, lamellae, oriented
+textures, real arrangements, more modalities (EM, light-sheet, OCT, polarised light), supersampled sub-voxel detail.
+
+**Targets** (`learn/targets.py`): each population pooled on its own (a bend broadens one population and never adds
+one), up to K = 6 per cell, merged only where the image cannot tell them apart.
+
+**The network** (`learn/model.py`; today fixed-scale: σ = 5 voxels, stride 4, 48-voxel context): strictly local,
+no normalisation layers (a volume in chunks equals one pass), anti-aliased, output slots of tensor, mass, presence and
+identity. **To build**: a multiscale encoder whose depth is gated by `B`, and a query decoder conditioned on `σ_A`.
+
+**Training** (`learn/train.py`, `learn/losses.py`): exact matching of predicted to target populations, per-degree
+balanced orientation costs, data generated on the fly with exact rotation/flip augmentation, a curriculum.
+
+**Inference** (`learn/engine.py`): populations read straight from the slots, carry-forward and bridging by walks that
+follow each population (round bends, never onto a crossing partner), the voxel field, whole volumes in chunks with
+exact halos.
+
+## Uses
+
+- **Tractography**: sampling and seeding from the selected populations' masses; one seed or node per population so
+  tracking passes through crossings; direction confidence from each population's coherence instead of the structure
+  tensor's FA (low at every crossing); angle limits from coherence, step lengths from radius and scale; identities to
+  keep streamlines on their population; boundary entry points and angles for endpoints; export as fixels or an FOD for
+  streamline tools.
+- **Registration**: contrast-invariant channels (fraction, radius, shape shares, N) and orientation-aware similarity
+  (tensors reoriented by the warp) — aligning tracts and laminae across modalities whose intensities disagree;
+  complementary to anatomix features for the coarse alignment.
+- **Maps**: N heatmaps (cortex: many weak populations; white matter: few strong), population masks, coherence (an
+  FA that is right at crossings), sub-population maps.
+
+## The classical chain (0.3): what works today
+
+Five classical stages, nothing trained, one scale parameter: the image's local autocorrelation read on a shell of lags
+(a field over positions × directions, where populations add), deconvolution and a presence floor from the block's own
+null, carry-forward of each direction along itself, identities, and the field at every voxel.
 
 ```bash
 git clone https://github.com/Andrew-Keenlyside/ShapeTensor.git && cd ShapeTensor
-pip install -e ".[anatomix]"       # torch (CUDA), numpy, scipy, zarr >= 3, matplotlib; anatomix + monai (weights from the HF hub)
+pip install -e .                   # torch (CUDA), numpy, scipy, zarr >= 3, numba, matplotlib
 ```
-
-## Use
 
 ```python
 import shapetensor as st
-
-vec     = st.shapetensor(image, rho=10.0)                               # (3, Z, Y, X): one direction per voxel, (x, y, z)
-vecs, w = st.shapetensor(image, rho=10.0, multi=True, weights=True)     # (N, 3, Z, Y, X) + (N, Z, Y, X): every population, by activation
-vec     = st.structure_tensor(image, rho=10.0)                          # the excised structure tensor: the baseline
-out     = st.population_field(image, rho=10.0)                          # modes, activation layers, both fields, masks, the null
+vec        = st.shapetensor(image, scale=10.0)                                             # (3, Z, Y, X): the strongest direction
+vecs, w, l = st.shapetensor(image, scale=10.0, multi=True, weights=True, labels=True)      # co-located vectors, weights, identities
+vec        = st.structure_tensor(image, rho=10.0)                                          # the excised structure tensor: the baseline
 ```
 
 ```bash
-shapetensor run brain.ome.zarr out.zarr --level 0 --rho 10        # a whole volume, chunked with halos, calibrated once
-shapetensor structure-tensor brain.ome.zarr st.zarr --rho 10      # the baseline in the structure-tensor package's layout
-shapetensor validate --out validation                              # the three phantoms at the texture of the real crop
+shapetensor run brain.ome.zarr field.zarr --level 0 --scale 10 --chunk 384 384 384
+shapetensor validate --out validation      # the phantoms and the tracking tests
 ```
 
-`image` is a `(Z, Y, X)` numpy, cupy or torch array of grey levels; the result comes back as the same kind.
-`rho` is the integration window in voxels (0.2 mm at 20 µm); `docs/parameters.md` shows what each parameter does to
-the field. Documentation: `mkdocs serve` or the `docs/` pages.
+On phantoms with texture matched to 20 µm HiP-CT (same tracker, seeds and limits on both fields; `docs/validation.md`):
 
-## What the phantoms show
+| phantom | measure | classical chain | structure tensor |
+|---|---|---|---|
+| band crossing 90° / 60° / 45° | streamlines through on their own band | 0.89 / 0.86 / 0.89 | 0.06 / 0.42 / 0.40 |
+| a bundle that ends in texture | streamlines continuing past the end | 0.02 | 0.40 |
+| intermixed crossing 90° | within 15° of their population | 0.99 | 0.10–0.22 |
+| bend of radius 0.3 mm | through the turn | 0.39 | 0.92 |
 
-Three phantoms with truth, at 20 µm with the texture matched to a real HiP-CT crop (20° of fibre dispersion within
-a population) — a single bundle, a 60° crossing and a bundle across a tissue step. Every figure in the package has
-the same columns: the image, the excised structure tensor, the shape space with the populations found in it, one
-activation layer per population, the shape tensor's single field, and the first vector of its multi-vector field.
+Its limits are what the model is for: on real HiP-CT it also reads the acquisition's own anisotropy (a population
+along the rotation axis in white matter, `docs/data.md`), tight bends are lost at the window scale, and its single
+scale parameter fixes the window. `docs/` documents the chain in full.
 
-<div align="center">
-<img src="docs/img/validation_calibrated.png" alt="validation" width="100%" />
-</div>
+## The model today (experimental API)
 
-- At a **tissue step** the plain structure tensor is dragged 35° into the boundary; the excision removes the
-  effect, and the pipeline inherits it (the excision is inside every population tensor).
-- At a **crossing** the structure tensor reports the bisector, 24° from either population. The pipeline finds the
-  two populations on every seed; the first vector of its multi-vector field is 11° from the nearest population at
-  the median, the stronger population's own tensor at each voxel. The pair is not resolved per voxel at this
-  dispersion: the second vector is indicative.
-- On a **single bundle**, and on the real block where the structure tensor is confident, the single field
-  reproduces the excised structure tensor.
+```python
+from shapetensor.learn.generator import draw
+from shapetensor.learn.targets import target
+from shapetensor.learn.engine import PopulationEngine
 
-The numbers are in `docs/validation.md`; the research behind every design decision, with all its numbers, in
-`notes/`.
+s, d = draw((96, 96, 96), seed=0, modality="hipct")      # a sample: clean layers, its acquisition, visibility maps
+t = target(s, d)                                          # its populations per lattice cell
+eng = PopulationEngine("model.pt")                        # a trained checkpoint (none yet generalises)
+out = eng.run(volume)                                     # N, directions, masses, sheets, the voxel field
+```
+
+```bash
+python -m shapetensor.learn.train --out run --steps 20000 --size 96      # training on the fly (A6000 / H100)
+python scripts/learn/examples.py                                         # the synthesis, labels and targets, by modality
+```
+
+**The lobe-mixture model on object scenes** (in development; `learn/scene.py`, `learn/physics.py`, `learn/lobes.py`,
+`learn/lobe_train.py`). Scenes of objects in physical units (bundles that interleave where they cross, trees,
+networks, dendrites, glands, tubules, sheets, foams, lamellae, fascicles, trabeculae, cells, epithelia, crystals),
+imaged through material physics (X-ray, dark-field, histology, polarised light, MRI); each cell's output is a set of
+Watson lobes -- axis, mass, signed concentration, five descriptors -- compared in harmonics with the exact density of
+the orientations present, plus an identity embedding, branch / endpoint maps and the shape fraction:
+
+```bash
+python -m shapetensor.learn.train --head lobes --out run --steps 3000 --size 96 --batch 2 --accum 8 \
+    --gate 0.85 --gate-max 500 --difficulty auto --pairs 16 --query 128 \
+    --real HIPCT.ome.zarr@0=20 --gen '{"scene": {"canvas": 192, "crops_per_scene": 8}}'
+python scripts/learn/capability_bank.py build --out banks          # fixed test sets per capability
+python scripts/learn/capability_bank.py score --bank banks --models run/model.pt
+python scripts/learn/real_validation.py --models run/model.pt      # HiP-CT vs SynthSeg, BigBrain vs its layers
+python scripts/learn/domain_gap.py --real HIPCT.ome.zarr@0         # real vs synthetic image statistics
+```
 
 ## Layout
 
 ```
 src/shapetensor/
-  __init__.py     shapetensor(), structure_tensor(), population_field()
-  features/       the engines: anatomix_enc2 (default), anatomix48, anatomix16, jet, intensity
-  separate.py     stage 2: the dictionary, the orientation readout, the unmixing, the null
-  tensors.py      stage 3: the population tensor
-  merge.py        stage 4: the single field, the multi-vector field, export
-  pipeline.py     calibrate / apply / population_field / run_volume
-  st.py           the structure tensor (plain, excised), eigen, the structure-tensor layout, run_volume
-  phantoms.py     bundle | crossing | interface, with truth
-  validate.py     the validation
-  tracking.py     a deterministic streamline tracker over multi-vector grids
-  viz.py, stats.py, filters.py, pca.py, cli.py
-  archive/        the ODF / fixel and TCA routes (importable, not maintained)
-tests/            pytest
-notes/            the research log, review and plans
+  learn/          the model: generator.py (the synthetic world), targets.py, model.py, losses.py, train.py, engine.py
+  lift.py, populations.py, field.py, volume.py      the classical chain (0.3)
+  validate.py, phantoms.py, tracking.py             phantoms with truth, the tracking suite
+  st.py           the structure tensor (plain, excised), whole volumes
+  artefacts.py, viz.py, stats.py, filters.py, cli.py
+  archive/, features/, dev.py, ...                  earlier routes (0.2, anatomix features)
+tests/            pytest: test_learn, test_targets, test_model, test_engine (the model); test_chain (the chain)
+docs/             the classical chain
+notes/            plan_foundation_model.md (this direction), plan_population_model.md (how we got here), research log
 ```

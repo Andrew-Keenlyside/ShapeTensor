@@ -1,33 +1,40 @@
 # The pipeline
 
-Four stages, one pair of scales. `sigma` (the derivative scale) and `rho` (the integration window) are used alike
-by the teacher of stage 2, by every population's tensor in stage 3 and by the baseline structure tensor the result is
-compared with, so every comparison is like for like.
-
-![pipeline overview](../img/pipeline_overview.png)
-
-![the pipeline on a HiP-CT block](../img/overview_S2146.png)
+Five stages on a lattice, then the field at every voxel. One scale: `scale` is the window σ in voxels, and the lags,
+the lattice step, the high-pass, the carry-forward reach and the trusted margin are all fractions or multiples of it.
 
 | stage | what it does | module |
 |---|---|---|
-| [1. Shape features](shape_features.md) | the block through a pretrained 3-D UNet, read at the encoder layer that encodes orientation | `shapetensor.features` |
-| [2. Separating populations](separating.md) | the shape space read without labels; the populations present; one activation layer per population | `shapetensor.separate` |
-| [3. One tensor per population](tensors.md) | the image's structure tensor weighted by the population's activation | `shapetensor.tensors` |
-| [4. Merging](merging.md) | one vector per voxel from the merged tensors, or every population's vector with its activation as weight | `shapetensor.merge` |
+| [1. The lift](lift.md) | the array as a field over positions × directions: its local lagged autocorrelation on a shell; the null; the response; the deconvolution | `shapetensor.lift` |
+| [2. Populations](populations.md) | lobes = populations (N from the data); sheets; carry-forward along each direction; identities | `shapetensor.populations` |
+| [3. The field](field.md) | the lifted field read at every voxel: single field, co-located vectors, weights, labels; whole volumes in chunks | `shapetensor.field`, `shapetensor.volume` |
 
-`shapetensor.pipeline` runs them: `calibrate` fits stage 2 on a block, `apply` runs stages 2–4 with a calibration,
-`population_field` does both on one block, `run_volume` runs a whole zarr volume chunk by chunk.
+`shapetensor.field.Orientations` runs stages 1–2 on a block (`populations`) and reads the field (`field`); `run` does
+both. `shapetensor.volume.run_volume` runs a whole zarr array chunk by chunk; `shapetensor.shapetensor()` is the one
+call.
+
+## Why a lift
+
+Every reading of local orientation is a reading of the local autocorrelation `C(l) = ⟨f(x) f(x + l)⟩` over a window.
+The structure tensor is `−½ ∇²C(0)`, its curvature at zero lag: a quadratic form, one axis of least change. Two
+populations crossing give a quadratic form whose least axis is their bisector; nothing in the tensor can say there
+were two. Read at a finite lag instead, as a function of the lag's direction, the autocorrelation keeps every
+population: structure along `d` is correlated along `d` at any lag and decorrelated across it, so each population is a
+ridge, and ridges add. That reading is the lift, and it is the whole reason the rest of the chain can be simple.
 
 ## What is and is not a parameter
 
-What each parameter does to the field, varied one at a time on the HiP-CT block: [parameters](../parameters.md).
+- The lattice step is `scale / 2.5` voxels (4 at the default): the window makes the lifted field smooth at that scale,
+  and the field is interpolated back to every voxel. `step=1` reads at every voxel at 64× the cost and no information.
+- The presence floor and the response are measured, not set: the floor on an isotropic surrogate of the block (its
+  own spectrum, random phases), the response on the block's own single-lobe positions. A whole volume shares one of
+  each, so chunks agree exactly.
+- The number of populations is capped by `nmax` (2) and their separation bounded below by `min_sep_deg` (30°); within
+  that, N is the data's. A further lobe must hold `rel` (0.3) of the strongest and `min_share` (0.15) of the position's
+  distribution.
+- The carry-forward reach is `2.4 scale` voxels (0.5 mm at 20 µm) and its Gaussian `1.2 scale`; momentum can be
+  switched off.
+- Excision leaves voxels whose coarse gradient exceeds 3× the median out of the correlation (the structure tensor's
+  boundary rule, carried over).
 
-- The feature layer is fixed by evidence (encoder block 2 is where orientation is a linear code; `notes/`).
-- The teacher is the excised structure tensor at the output `rho`; its confident sites are the top 30% by
-  orientation gap, stratified over orientation; the least oriented 30% give the background signature.
-- The feature average before any read-out is a 3³ box: the fibre texture's period at 20 µm is about 5 voxels, and
-  the activation of a rectified filter oscillates with that phase; the average integrates it (`smooth`).
-- The null `tau` is the activation a wrong population's signature reaches on single-population voxels; it is
-  calibrated on the block and exported with the field, never applied to the vectors.
-- A population is a mode of the window's orientation density that owns at least 5% of the tissue above the null;
-  up to `nmax` (3).
+See [parameters](../parameters.md) for the full list and what each does on the phantoms.

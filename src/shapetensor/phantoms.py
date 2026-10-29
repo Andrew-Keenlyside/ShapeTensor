@@ -1,9 +1,15 @@
-"""Three phantoms with truth, at 20 µm voxels with the texture calibrated to a real HiP-CT crop:
+"""Phantoms with truth, at 20 µm voxels with the texture calibrated to a real HiP-CT crop:
 
 * ``bundle`` — one fibre population (the clear-tissue floor),
 * ``crossing`` — two populations crossing at ``cross_deg`` (where a single tensor can only report the bisector),
 * ``interface`` — one population crossing a tissue step at 90 / 60 / 30° (where the structure tensor is dragged into
-  the plane of the boundary).
+  the plane of the boundary),
+* ``bend`` — three fascicles turning through 90° in grey-matter-level tissue (where a population defined by one
+  direction splits a single bundle); ``straight=True`` is its control, the same fascicles without the turn,
+* ``band_crossing`` — two straight fascicles crossing at ``cross_deg`` in grey-matter-level tissue (two populations
+  that must stay apart where they overlap and each stay whole on either side); ``t_junction`` stops the second at the
+  first, ``only_second`` leaves the stopped second alone (a free end),
+* ``texture`` — fibre-free texture: nothing to orient.
 
 Conventions. Arrays are ``(Z, Y, X)``; vectors are ``(z, y, x)``. Fibres are straight lines in x–z planes at random
 y (the tissue is extruded along y), splatted into a density that darkens the tissue, with a mixture of widths,
@@ -216,13 +222,138 @@ def interface(grid: Grid, tex: TextureParams, rng, step: float = 40.0, angles=(9
     return img, tr, {"step": step, "angles": list(angles), "z_mid_mm": z_mid}
 
 
-PHANTOMS = {"bundle": bundle, "crossing": crossing, "interface": interface}
+#: The bend phantom's layout, in mm on its own grid (core 192 x 32 x 192 voxels): the turns' common centre (z, x),
+#: the fascicles' inner radii and their width.
+BEND_GRID = Grid(core=(192, 32, 192))
+BEND_CENTRE, BEND_RADII, BEND_WIDTH = (1.0, 2.6), (0.3, 0.8, 1.3), 0.3
+
+
+def bend_geometry(grid: Grid, centre=BEND_CENTRE, radii=BEND_RADII, width=BEND_WIDTH, straight: bool = False):
+    """On the (Z, X) plane: ``fid`` (0 none, 1.. by radius), the fibres' tangent ``tan (Z, X, 2)`` as (dz, dx), the
+    position ``s`` (mm) along each fascicle's mid-line (negative on the way in, 0 to r·π/2 through the turn, beyond on
+    the way out) and ``bend`` (the quarter circles). Each fascicle runs up z, turns about ``centre`` and leaves along x;
+    ``straight``: the way-in arm continued through the block."""
+    Z, X = np.meshgrid(grid.coords(0), grid.coords(2), indexing="ij")
+    zc, xc = centre
+    fid = np.zeros(Z.shape, np.int8); tan = np.full(Z.shape + (2,), np.nan, np.float32)
+    s = np.full(Z.shape, np.nan, np.float32); bend = np.zeros(Z.shape, bool)
+    rad = np.hypot(Z - zc, xc - X); phi = np.arctan2(Z - zc, xc - X)
+    for k, r0 in enumerate(radii, 1):
+        r1, rm = r0 + width, r0 + width / 2
+        if straight:
+            band = (X >= xc - r1) & (X < xc - r0)
+            fid[band] = k; tan[band] = (1, 0); s[band] = Z[band] - zc
+            continue
+        arm_in = (Z < zc) & (X >= xc - r1) & (X < xc - r0)
+        arc = (Z >= zc) & (X <= xc) & (rad >= r0) & (rad < r1)
+        arm_out = (X > xc) & (Z >= zc + r0) & (Z < zc + r1)
+        fid[arm_in | arc | arm_out] = k
+        tan[arm_in] = (1, 0); tan[arm_out] = (0, 1)
+        tan[arc] = np.stack([np.cos(phi[arc]), np.sin(phi[arc])], -1)
+        s[arm_in] = Z[arm_in] - zc; s[arc] = rm * phi[arc]; s[arm_out] = rm * math.pi / 2 + (X[arm_out] - xc)
+        bend |= arc
+    return fid, tan, s, bend
+
+
+def _bend_path(r, z0, x1, step, centre, straight, z1):
+    """One fibre at radius ``r``: up z from ``z0``, the quarter circle, along x to ``x1`` (``straight``: up z to ``z1``):
+    ``(n, 2)`` (z, x) mm and its arc length."""
+    zc, xc = centre
+    if straight:
+        a = np.arange(z0, z1, step); p = np.stack([a, np.full_like(a, xc - r)], 1)
+    else:
+        a = np.arange(z0, zc, step); ph = np.arange(0, math.pi / 2, step / r); b = np.arange(xc, x1, step)
+        p = np.concatenate([np.stack([a, np.full_like(a, xc - r)], 1), np.stack([zc + r * np.sin(ph), xc - r * np.cos(ph)], 1),
+                            np.stack([np.full_like(b, zc + r), b], 1)])
+    return p, np.concatenate([[0], np.cumsum(np.linalg.norm(np.diff(p, axis=0), axis=1))])
+
+
+def bend(grid: Grid, tex: TextureParams, rng, centre=BEND_CENTRE, radii=BEND_RADII, width=BEND_WIDTH, straight: bool = False,
+         device="cuda"):
+    """Three fascicles ``width`` mm wide turning through 90° about ``centre`` (inner radii ``radii``) in grey-matter-level
+    tissue; ``straight``: the control without the turn. Each fibre takes a random radius in its fascicle and deviates
+    from it by the texture's dispersion (rotated about a random point of its path) and pitch, clipped to the fascicle.
+    Truth: ``dir1`` the tangent, ``npop`` 1 in the fascicles, ``region`` 2 in them and 1 elsewhere, and ``fid``, ``s``,
+    ``bend`` (see :func:`bend_geometry`)."""
+    sp = Splat(grid, tex, rng, device)
+    fid, tan, s, arc = bend_geometry(grid, centre, radii, width, straight)
+    zr, xr, yr = grid.coords(0), grid.coords(2), grid.coords(1)
+    step = 0.5 * grid.vox
+    disp, pitch = math.radians(tex.dispersion_deg), math.radians(tex.pitch_deg)
+    span = min(4.0, width / max(math.sin(disp), 1e-3))                 # a dispersed fibre's typical run inside the band
+    for k, r0 in enumerate(radii, 1):
+        region = fid == k
+        length = (zr[-1] - zr[0]) if straight else (centre[0] - zr[0]) + (r0 + width / 2) * math.pi / 2 + (xr[-1] - centre[1])
+        for _ in range(int(tex.density * width * (yr[-1] - yr[0]) * length / span)):
+            p, arcl = _bend_path(rng.uniform(r0, r0 + width), zr[0], xr[-1], step, centre, straight, zr[-1])
+            j = rng.integers(len(p)); a = rng.normal(0, disp); c, sn = math.cos(a), math.sin(a)
+            q = p - p[j]; q = np.stack([q[:, 0] * c - q[:, 1] * sn, q[:, 0] * sn + q[:, 1] * c], 1) + p[j]
+            y = rng.uniform(yr[0], yr[-1]) + (arcl - arcl[j]) * math.tan(rng.normal(0, pitch))
+            idx = np.round(np.stack([q[:, 0], y, q[:, 1]], 1) / grid.vox + np.array(grid.margin) - 0.5).astype(np.int64)
+            idx = idx[np.all((idx >= 0) & (idx < np.array(grid.shape)), axis=1)]
+            idx = idx[region[idx[:, 0], idx[:, 2]]]
+            if len(idx):
+                np.add.at(sp.dens[rng.choice(len(tex.widths), p=sp.probs)], (idx[:, 0], idx[:, 1], idx[:, 2]), np.float32(1.0))
+    tr = blank_truth(grid)
+    inside = fid > 0
+    tr["dir1"][inside] = np.stack([tan[inside][:, 0], np.zeros(int(inside.sum()), np.float32), tan[inside][:, 1]], 1)
+    tr["npop"][inside] = 1; tr["region"][~inside] = 1
+    tr.update({"fid": fid, "s": s, "bend": arc})
+    img = finish(grid, tex, np.where(inside, tex.levels["wm"], tex.levels["gm"]).astype(np.float32),
+                 np.where(inside, tex.amp, 0.0).astype(np.float32), sp.render(), rng)
+    return img, tr, {"centre_mm": list(centre), "radii_mm": list(radii), "width_mm": width, "straight": straight}
+
+
+def band_crossing(grid: Grid, tex: TextureParams, rng, cross_deg: float = 90.0, width: float = 0.4, t_junction: bool = False, device="cuda",
+                  only_second: bool = False):
+    """Two straight fascicles ``width`` mm wide through the core's centre, at 45 ± ``cross_deg`` / 2 (as ``crossing``),
+    in grey-matter-level tissue. Truth: ``dir1`` / ``dir2`` the two directions where each fascicle is (``dir1`` the only
+    one where a single fascicle is), ``npop`` 1 or 2, ``region`` 2 in the fascicles and 1 elsewhere, and the masks
+    ``band1`` / ``band2`` on the (Z, X) plane. ``t_junction``: the second fascicle stops at the first one's centre line
+    (a T: its fibres end inside the first band), and ``corridor2`` is the strip it would have continued along."""
+    a1, a2 = 45.0 + cross_deg / 2, 45.0 - cross_deg / 2
+    Z, X = np.meshgrid(grid.coords(0), grid.coords(2), indexing="ij")
+    zc, xc = grid.core_mm[0] / 2, grid.core_mm[2] / 2
+    bands, signed = [], []
+    for a in (a1, a2):
+        d = direction(a)
+        signed.append((Z - zc) * d[2] - (X - xc) * d[0])                                 # signed distance from the centre line
+        bands.append(np.abs(signed[-1]) < width / 2)
+    corridor2 = bands[1].copy()
+    if t_junction:
+        bands[1] = bands[1] & (signed[0] <= 0)
+    if only_second:                                                                           # a free end: the stopped second band alone in texture
+        bands[0] = np.zeros_like(bands[0])
+    sp = Splat(grid, tex, rng, device)
+    for a, m in zip((a1, a2), bands):
+        if m.any():
+            add_population(sp, a, 1.0, region2d=m)
+    tr = blank_truth(grid)
+    b1, b2 = bands
+    tr["dir1"][b1] = direction(a1); tr["dir1"][b2 & ~b1] = direction(a2); tr["dir2"][b1 & b2] = direction(a2)
+    tr["npop"][b1 | b2] = 1; tr["npop"][b1 & b2] = 2; tr["region"][~(b1 | b2)] = 1; tr["cross_deg"][b1 & b2] = cross_deg
+    tr.update({"band1": b1, "band2": b2, "corridor2": corridor2})
+    inside = b1 | b2
+    img = finish(grid, tex, np.where(inside, tex.levels["wm"], tex.levels["gm"]).astype(np.float32),
+                 np.where(inside, tex.amp, 0.0).astype(np.float32), sp.render(), rng)
+    return img, tr, {"cross_deg": cross_deg, "angles": [a1, a2], "width_mm": width, "t_junction": t_junction, "only_second": only_second}
+
+
+def texture(grid: Grid, tex: TextureParams, rng, level: str = "gm", device="cuda"):
+    """Fibre-free texture at the ``level`` grey value (the noise alone): nothing to orient. Truth ``npop`` 0."""
+    Z, X = grid.shape[0], grid.shape[2]
+    tr = blank_truth(grid); tr["region"][:] = 1
+    img = finish(grid, tex, np.full((Z, X), tex.levels[level], np.float32), np.zeros((Z, X), np.float32), torch.zeros(grid.shape, device=device), rng)
+    return img, tr, {"level": level}
+
+
+PHANTOMS = {"bundle": bundle, "crossing": crossing, "interface": interface, "bend": bend, "band_crossing": band_crossing, "texture": texture}
 
 
 def build(name: str, seed: int = 0, grid: Grid | None = None, tex: TextureParams | None = None, texture: float = 1.0, device="cuda", **kwargs):
     """``(image uint8 (Z, Y, X), truth, meta)`` of phantom ``name`` ("bundle", "crossing", "interface") at ``seed``;
     ``texture`` scales the fibre darkening (1 = the calibrated coherent-bundle level; the real crop lies at 0.25–0.5)."""
-    grid = grid or Grid(); tex = tex or TextureParams()
+    grid = grid or (BEND_GRID if name in ("bend", "band_crossing") else Grid()); tex = tex or TextureParams()
     if texture != 1.0:
         tex = TextureParams(**{**asdict(tex), "amp": tex.amp * texture})
     rng = np.random.default_rng([seed, sum(map(ord, name))])

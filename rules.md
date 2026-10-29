@@ -1,0 +1,477 @@
+# ShapeTensor — design rules
+
+The pipeline instructions and preferences Andrew has given (2026-10-15 to 2026-10-22). Three parts:
+
+1. **What you asked for, word for word**: your messages and multiple-choice answers, quoted exactly (typos kept),
+   grouped by topic, dated.
+2. **My interpretation**: your aims and use cases.
+3. **The implementation you want and its design**: each stage, with where the code on this branch stands
+   against it.
+
+When an instruction changes, add the new quote to part 1 and update parts 2 and 3. Newer instructions override older
+ones where they conflict; the conflicts I know of are listed at the end of part 3.
+
+---
+
+## 1. What you asked for, word for word
+
+### Aim and scope
+
+- 2026-10-16: "complete an in depth review of the concept of using TCA on shape features to extract a multivector
+  orientation field which accurately describes axonal bundles while avoiding boundary issues seen in structure tensor
+  at the edges of large tracts and grey white boundaries. [...] Consider how we can extract N distinct populations
+  without fixed k values, and how boundaries are extracted. come up with a recommended solution that creates the field
+  that could be used as an input for BRIDGE to improve streamline outputs in HiP-CT data. Heavy focus on validity,
+  proving validity in phantoms and using these to showcase where structure tensor fails. structure how this would be
+  run as a package effectively and computationally efficiently (idealy GPU on the cluster)."
+- 2026-10-16: "I know you dont think the space and single vector per divided populations cant work, but archive the
+  ODF and fixels, and work with me on the core ideas i have proposed. Keep to my pipeline and working towards getting
+  this to work, rather than changing the scope and shape of the project in ways i have not asked for"
+- 2026-10-21: "Once the current registration and label work is done, begin the testing, validation and debugging of
+  the new version of shape tensor 0.2, get to a solid working branch with relevant results. Also test resilience to
+  artifacts like streaks"
+- 2026-10-21: "Okay, push for a simplest fully correct pathway, as far as possible using classical mathematics rather
+  than black box models beyond anatomix."
+
+### The pipeline's stages
+
+- 2026-10-16: "for the pipeline in the docs, add a subpage explaining each stage: getting the shape features,
+  sperating in shape space, getting tensors from populations, and merging population vector fields"
+- 2026-10-16: "see I thought it clustered fibre populations on the shape space then ran TCA once per population?"
+- 2026-10-16: "Modular structure with changeable feature engine (compare options) and single Vs multitensor TCA
+  approaches."
+- 2026-10-20: "Is it possible to split the shape output, then tca per population? As a single population should have
+  a single orientation. The issue of multiple orientations is how to split or particion the shape space into multiple
+  spaces (not necessarily images or channels)"
+- 2026-10-20: "How would it be most correct to split the space into a tensor per detected population as a formulation
+  to pass to TCA or TNMF (not as an image channel, but the partioned raw shape space) based on the newest anatomix
+  model"
+- 2026-10-21: "Is population detection also local to a region around specific voxels? Im imagining a large processing
+  volume wihr overlap, shifting window for anatomix and fibre detection, smaller local kernel for smoothing, then per
+  voxel TCA to orientation. How are you suggesting smoothing is done? Does TCA allow this shape directed smoothing
+  inheritly in the solving?"
+
+### Populations: flexible N, sets of fibres, identities
+
+- 2026-10-16: "i want to see if there is a more flexible method of separating the space which actually finds N
+  populations passing through the voxel, not arbitatry rank R"
+- 2026-10-16: "is there a shape derived method currently used in TCA which is flexible up to N reasonable populations
+  of different shape?"
+- 2026-10-16: "i dont want it to be just masking the image by population, I want to pull the shape information from
+  this, I'm thinking this would appear more like gradients per population. it is seperate layers of information not
+  dividing the same one by a mask. both should be full image volumes representing their respective populations shape"
+- 2026-10-16: "how does this detect N fibre populations? test with 1,2,3 populations without specifying?"
+- 2026-10-17: "why three populations here? i am unhappy that this single fibre population is being split, why is this
+  and I dont like the arbitary choice of 3 populations, and that an N populations needs to be specified"
+- 2026-10-17: "is there a formulation which pulls out a set of fibres from the images rather than portions of the
+  image which hold a specific orientation? this is a useful phantom which identifies an issue"
+- 2026-10-18: "i thin the gobal reader means that it cant hold a population that changes orientation within the space
+  but locally is coherent"
+- 2026-10-18: "continue developing ideas untill it can work with both straight and turning fibre popualtions"
+- 2026-10-18: "one example shows separation of disconnected populations (90 degree second row), should there be a step
+  to concatinate similar populations together? run futher tests and experiments untill working well in all phantoms.
+  take as long as you need. once ready, test in real data of 20um cortex"
+- 2026-10-21: "I do really need the flexible N population adaptive separation, ideally with some local momentum
+  anisotropic smoothing. Make this a semi hard design requirement"
+- 2026-10-21: "Is it possible instead of strongest and second population to show as population 1,2,3,... rather than
+  per voxel rank, actually separate by fibre population?"
+
+### Smoothing and momentum
+
+- 2026-10-21: "How about anisotropic or shape aware smoothing of each population to extend their population shape
+  across the crossing? Can this be done in shape space?"
+- 2026-10-21 (multiple choice, momentum): "Tunable, use option 1. Maybe per population calibration (some populations
+  are straight, some are bending)" — option 1's text was "0.5 mm, follows bends: Bridges about 0.5 mm along each
+  population, with a small angular blur so curving populations are followed."
+
+### TCA
+
+- 2026-10-15: "i was reading about tensor component analysis (TCA) as a way of getting non-orthoginal components. Can
+  i use TCA to get a more accurate lowest gradient direction rather than if it were constrained to orthoginal tensor
+  axes?"
+- 2026-10-15: "i want to run TCA to get orientation from the fibre-only shape tensor"
+- 2026-10-16: "okay, keeping this as simple as possible, is it feasible for TCA from the shape to produce N fibres when
+  these vary between populations with seperate orientations as defined by shape?"
+- 2026-10-18: "can it be done with TCA from the activation populations as you were instructed to do?"
+- 2026-10-18: "so what about TCA on the separated shape embedding space rather than on gradients of split images -
+  since TCA can be done on non-square matrices? theory only"
+- 2026-10-18: "TCA for denoising data - can this property of TCA be applied here?
+  https://www.nature.com/articles/s41593-024-01626-2/figures/4"
+- 2026-10-18: "okay - build and test a basic version of this with rank and scale parameters."
+- 2026-10-20: "Run tests for the first formulation for TCA, avoid having to do any new training"
+- 2026-10-21 (multiple choice, primary separation): "Lag-TCA primary (Recommended)" — the option's text was
+  "Per-window TCA with a spatial-lag mode: N from rank selection, shape-directed smoothing inside the solve,
+  orientation from each component's lag factor. The current orientation-distribution model stays as the comparison."
+
+### Features (anatomix)
+
+- 2026-10-15: "can window size be used comparable to rho? so if I had rho of 6, then a window mirrored to 12? then
+  running structure tensor on the rho value on the fibre shape channels?"
+- 2026-10-16: "okay, 16-D full model is more valid so we'll work with its output."
+- 2026-10-16: "is there something you can do or finetune from earlier in the model which can encode population? is
+  there a way of extracting this information from other part of the shape space or anatomix outputs?"
+- 2026-10-20: "note that we will use dev-vit"
+- 2026-10-21: "Also small QC fig comparing old and new anatomix models (just image, space, RGB channels) in hipct data
+  voi"
+
+### Classical mathematics, models and calibration
+
+- 2026-10-21: "Okay, push for a simplest fully correct pathway, as far as possible using classical mathematics rather
+  than black box models beyond anatomix."
+- 2026-10-18: "Okay, the orientation readout should be pre-trained on some synthetic data like anatomix, not per
+  volume."
+- 2026-10-21 (multiple choice, synthetic directions as calibration targets): "Im not sure, préférences for self
+  supervision, but test and compare both"
+- 2026-10-21 (multiple choice, registered anatomical labels for presence): "No, stay label-free"
+- 2026-10-15 (standing directions from the handoff): "go step by step, no k-means, ignore segmentation/mask labels, use
+  the 20 µm S-21-46 crop, label prototypes as prototypes"
+- 2026-10-20: "also can we use TNMF clustering on the shape space?"
+
+### Tiling and artefacts
+
+- 2026-10-15: "make sure you account for padding around the data, make phantom larger then crop orrientations before
+  assessment"
+- 2026-10-19: "can anatomix be run as a sphere, not a cube to reduce the snapping to axis in some of its outputs?"
+- 2026-10-19: "what would be a fully correct solution to remove tiles"
+- 2026-10-21: "Look at tiling as a priority, aim to remove edge and block effects, maybe spherical regions test too?"
+- 2026-10-21: "Also test resilience to artifacts like streaks"
+
+### Resolution and generality
+
+- 2026-10-21 (multiple choice, output resolution): "Native resolution - this should be more generalised completely to
+  any array data input. Given a chunk make one or many vectors per voxel at native input Res. Test at multiple
+  resolutions"
+- 2026-10-21 (multiple choice, N and angle): "Tunable parameters, use option 2 default" — option 2's text was "N ≤ 2,
+  ≥ 30°: At most two populations, at least 30° apart: simpler, misses three-way crossings."
+- 2026-10-17: "test at different hipct image scales (2,10,20,50,100,200) for 2,10 use crops from i74 VOIs.
+  20,50,100,200 use crops of the deep brain from S-21-46."
+- 2026-10-16: "okay - so add a docs page on non-isotropic data and a page on bigbrain."
+
+### Weighting, masking and fallback
+
+- 2026-10-16: "also how is it defining where to put vectors (by masking)? optional export of strongest population and
+  union of all population masks (could be used instead of intensity threshold for defining node sampling mask in
+  BRIDGE down the line - save this idea but only build mask export now)"
+- 2026-10-17: "if no masking arg was used, in regions where masks intersect - use both, where one or no masks - use
+  strongest activated population."
+- 2026-10-21 (multiple choice, voxels matching nothing calibrated): "So I want a weighted, rather than thresholded
+  approach.  Sensitivity weighted single vector field and then threshold multi vector (is there a way to include
+  intensity correlation here?)"
+- 2026-10-21: "It looks  like it is making small regions of background in the white matter mask? Is it pulling out
+  multiple populations? Is population specific smoothing/momentum being done?"
+- 2026-10-22: "so that missed so much of the white matter coverage"
+- 2026-10-22: "what is the point of actually masking out here? is it just not to make background into orinetations?"
+
+### Crossings
+
+- 2026-10-17: "test also in crossing fibres where populations should be separated to check these methods still work"
+- 2026-10-21 (multiple choice, real crossings at 20 µm): "Unknown, design for both (Recommended)" — the option's text
+  was "Handle spatially interleaved fascicles (bridged by momentum) and voxel-level mixtures (resolved inside the
+  solve)."
+
+### Output, API and BRIDGE
+
+- 2026-10-16: "also no mention of BRIDGE in package, also make output to volume similar to
+  https://github.com/Skielex/structure-tensor so it could be subbed in where this is used in BRIDGE, then make sure it
+  can be run GPU only (as if H100 cluster)"
+- 2026-10-16: "why does ti output values? just vec = st.cp.shapetensor(image, kwargs (settings and modules)) make it
+  simple and not copying the structure tensor exactly but jsut that it outputs the vector field as a cp or np array.
+  just one simple codebox"
+- 2026-10-16 (multiple choice, N populations in BRIDGE): "Co-located vertices (Recommended)"; (where the package
+  lives): "Separate package + reader in BRIDGE (Recommended)"; (truth on real tissue): "Phantoms only".
+- 2026-10-17: "Integrate into selecting verices. allow a kwarg to allow orientation=shape_tensor. Also allow
+  mask=fibres (shape tensor mask), but default as intensity. Default structure tensor for now."
+- 2026-10-17: "this looks very intersting. use intensity mask."
+- 2026-10-21: "Option for full and fibre only or fast solve as pipeline arg"
+
+### Validation and quality control
+
+- 2026-10-16: "Heavy focus on validity, proving validity in phantoms and using these to showcase where structure
+  tensor fails."
+- 2026-10-21 (multiple choice, reference on real data): "No good metrics, visual QC, quantity in phantoms"
+- 2026-10-21: "Once run, run side by side to standard structure tensor only and show in 20um cortex hipct."
+- 2026-10-17: "can you make a phantom with a few fibres taking a 90 degree bend, then show how many and what activation
+  populations look like"
+- 2026-10-26 (external fibre simulators and dMRI test sets; plan `notes/plan_full_generator.md`): "maybe only use
+  DISCO as a test dataset" (DiSCo never enters training, the substrate bank, generator / target checks or model
+  selection).
+- 2026-10-26: "i dont need to simulate PLI images, but can we integrate similar styles of generators in our input
+  data (not nessecarily using these packages, just their concepts, to keep integration simple)" (fibre-architecture
+  concepts -- packing, collision relaxation, radial growth, dispersion, crowded growth, connectivity bundles --
+  reimplemented in `learn/fibres.py`; no external simulator installed; no PLI forward model work).
+- 2026-10-26: "make sure there is still non-fiberous or non orientated shape included in the models, so its not training to
+  think everything is fibres" (the Monte Carlo fibre options change bundles only; cells, granules, crystals, blobs,
+  sheets, foams and isotropic-only scenes stay in the mix; `scripts/learn/content_mix.py` measures the kind and
+  non-oriented shares with the options off and on, and any training run with them must keep the default family mix).
+- 2026-10-26/27 (framing): "take a look fundamentally at the overall structure in general terms - are we framing this
+  problem correctly for the model to solve? how are we handling an ill posed model, what are we assuming default
+  morphology is?"; "is this still the same single foundation model that has multiple downstream uses or does it
+  narrow the scope? can you test this new version as long as it remains the same style of foundation model"; "are
+  there any faster tests to check this is going in the right direction? i just think there are smaller tests before we
+  run multiple hours of work (also use USA ET)" (fast tests before long runs; times in US Eastern;
+  notes/framing_review_2026-10-27.md).
+- 2026-10-27: "what is famN or famO, you are using vague and non-descriptive label" (descriptive run names in messages
+  and notes; a lookup table in notes/framing_review_2026-10-27.md §7).
+- 2026-10-27: "these orientations shown for per voxel are terrible - the previous structure was far better" (the
+  voxel-first ownership idea dropped; the per-direction density at the query scale with the direct oriented path kept).
+
+### Figures
+
+- 2026-10-17: "for all figures, like real s2146 and bigbrain, show image, st, shape, activation images, shape tensor
+  single, multitensor"
+- 2026-10-17: "Do not use brightness activation, show full shape tensor in comparison to unweighted structure tensor"
+- 2026-10-17: "with the shape tensor rendering using opactiy with black baground, can you show some different rendering
+  options? can you show with and without activation weighting (just orientation DEC)"
+- 2026-10-21: "Can you show the current partitions the approaches draw in the latent space"
+- 2026-10-21: "What about region (3D blobs) annotations in the shape space rather than partitioning that runs out the
+  sides"
+- 2026-10-21: "Show latwnt space umap for the last 3.layers of anatomix do show how populations are more or less
+  detectable"
+
+### Compute
+
+- 2026-10-16: "whats making things run so slowly? structure tensor would be done very quickly"
+- 2026-10-16: "the main work is anatomix, split, then TCA? none of these should be particularly slow?"
+- 2026-10-21 (multiple choice, whole-brain budget): "Up to a day, everywhere"
+
+### The population model: data, outputs and training (2026-10-23 to 2026-10-24)
+
+- 2026-10-23: "once synthetic images are made, is there then additional augmentatio to make sure it is fully contast
+  agnostic even within modality - it seems like this is making catagories of synthetic image data, rather than truly
+  augmented data with multiple routes in?"
+- 2026-10-23: "add all of this additional augmentation plus things like missing line artifacts and small missing
+  blocks, would all of this make it more robust? give examples of input datasets generated by this"
+- 2026-10-23: "make sure this is robust to both dark and bight background"
+- 2026-10-23: "it should be optimised for cluster running"
+- 2026-10-23: "Review the generator, what are we missing? Do a wide search of biology images from different sources,
+  animal, scales, modalities and make a sense check multimodal dataset to see where we're failing at the moment"
+- 2026-10-23: "Including, brain, abdo, vascular, plants, animals, cells, subcellular of as many different types"
+- 2026-10-23: "Push to make all fixes in full,  make training chunks 128px regardless of resolution, what is the
+  current training chunk size. Also make sure that there are artifacts like cut out chunks, missing slices or slabs
+  too."
+- 2026-10-24: "Some hyper noisy patches are okay, that's realistic for real data too"
+- 2026-10-24: "Dont actually train on the collected bio image data, but use it to identify gaps in the synthetic
+  generator"
+- 2026-10-24: "Purely synthetic data for training, just check on bio image data"
+- 2026-10-24: "You can try locally with smaller chunks, then 128 for the h100. Try 64"
+- 2026-10-24: "Do we have a good way of dealing with things like x-ray reconstruction artifacts causing dark
+  boundaries at soft hard tissue boundaries, like streaks from bone and dark halos"
+- 2026-10-24: "Is there a good way of object or layer seperable SH odf outputs? I'm not opposed to odfs, in fact they
+  give the ability of multiple tuning from single inference (good!) but I think the crossing can be separated as a
+  problem, as objects (then forming sub and full populations) should be the seperable output? So single object, sub
+  and full population, and overall per voxel (at arbitrary grid) odfs should be a possible output. This should be the
+  overall goal, rather than separating from single odfs. What would need to change in generator and training or even
+  model structure for this to be possible?"
+- 2026-10-24: "Does this structure allow an object to be followed (pulled out as consistent layer) as it passes
+  through a larger volume (across context windows)?"
+- 2026-10-24: "Write an updated model structure plan to MD files and push. Then begin implementing changes, tests and
+  generator first, then begin very small pilot model training. Build the full code, then itterate on it as tests come
+  in. Run interim adversarial reviews on robustness and generalisability. Ideally run a pilot local test in the next
+  1-2 days ahead of a longer cluster run. Ask me any questions on design now, then push to fully implement the
+  working version (ready for large training). Focus on generator and training speed once correct and tested."
+- 2026-10-24, multiple choice: entity ODF "Bingham + SH render"; hierarchy "Arbitrary depth (parent tree)"; output
+  grid: "Specifying k seems to introduce non flexible arbitrary deciding at training, is there a more flexible
+  option?" then "Direction field + clustering"; the lobe head: "Replace it".
+
+### Working practice
+
+- 2026-10-15: "Go step by step and show me results before moving on to the open threads at the end of the handoff."
+- 2026-10-17: "prototype 1 and 2, compare in the phantom. work in shapetensor. include in docs only after we settle a
+  solution"
+- 2026-10-16: "name is ShapeTensor not tensors"
+- 2026-10-21: "Also you're using the wrong GitHub, it should be Andrew-Keenlyside not Andrew-k-k also remove Claude
+  contribution labels"
+- 2026-10-21: "Continue tests for shape tensor, make attribution changes for shape tensor only"
+- 2026-10-21: "I am okay with you building conda envs as long as they dont break any other envs"
+- 2026-10-21: "Can you just install it? What other useful tools have you not installed? I can help"
+
+---
+
+## 2. My interpretation: your aims and use cases
+
+**The aim.** A drop-in replacement for the structure tensor that gives BRIDGE a more faithful orientation field for
+HiP-CT brain data. Two structure-tensor failures matter most:
+
+- **Boundaries.** At the edges of large tracts and at the grey/white boundary, the structure tensor is dragged into the
+  plane of the boundary. The shape features (anatomix) should tell a fibre population apart from a boundary.
+- **Crossings and mixtures.** The structure tensor holds one direction per voxel, so where populations cross it reports
+  their bisector. You want **one or many vectors per voxel**, the number found by the data, with no fixed k, no
+  arbitrary rank and no k-means.
+
+**What "a population" means to you.** A *set of fibres*: a bundle that keeps one identity along its length, through
+bends and through the crossings it passes. It is not "the voxels that share an orientation". So:
+
+- a bundle turning 90° is one population, not three;
+- two disconnected pieces of the same bundle should be joined;
+- two crossing bundles stay two populations through their overlap;
+- populations are labelled 1, 2, 3, ... across space, not "strongest / second" per voxel.
+
+**How you see the method.** Your mental model: anatomix maps the image into a shape space. In that space, fibre
+populations are separable *as partitions of the raw shape space*: separate full-volume layers of shape information,
+not masks over one image. Each population has a single orientation, which TCA reads out, and the populations' vector
+fields are merged. Your expected processing layout:
+
+- large processing volumes with overlap;
+- a shifting window for anatomix and fibre detection;
+- a smaller local kernel for smoothing;
+- per-voxel TCA to orientation.
+
+Each population is smoothed along its own shape ("momentum"), so it carries across a crossing or a gap but does not
+run past a free end. Momentum should follow bends, and might be calibrated per population (straight vs bending).
+
+**Classical maths, few black boxes.** anatomix is the one learned component you accept. Everything after it should be
+classical and explainable (decompositions, statistics, geometry), not new networks trained per volume. Your wishes
+pull two ways:
+
+- per-volume self-calibration is out, and a synthetic pre-trained readout was suggested;
+- but you prefer self-supervision and want both compared.
+
+**Use cases.**
+
+1. Whole-brain HiP-CT at 20 µm (S-21-46; the cohort at 50 µm), chunked, on the cluster's GPUs, within a day per brain,
+   the full solve everywhere.
+2. Any array at its native resolution: the same code at 2-200 µm, isotropic or not, BigBrain too. One or many vectors
+   per voxel of the input.
+3. BRIDGE input: a vector field with the structure tensor's call shape (`vec = shapetensor(image, **kwargs)`, a NumPy
+   or CuPy array). Multiple populations enter BRIDGE as co-located vertices. BRIDGE itself is never mentioned in the
+   package. A population mask might later replace the intensity mask for BRIDGE's node sampling (idea saved, not built).
+4. Exploration and QC: figures that let you see each stage: image, structure tensor, shape space, activations / per-
+   population layers, single and multi-vector fields, the latent space (UMAP, region blobs rather than partitions that
+   run out the sides). Real data is judged visually; phantoms carry the numbers.
+
+**What you want from me in the work.**
+
+- Keep to your pipeline and make its stages work.
+- When a stage fails, change it from inside; don't swap in a different estimator or widen the scope.
+- Report negative results plainly.
+- Test validity first, on phantoms that show where the structure tensor fails.
+- Label prototypes as prototypes, and keep the docs for settled solutions.
+
+---
+
+**Added 2026-10-24.** The population model's goal is now separable entity outputs: at any point and scale, the
+objects present, their sub- and full populations at any depth, each with its own ODF, and the total ODF as their sum —
+from one inference, tunable afterwards. Objects must be followable across context windows. Training data are purely
+synthetic; collected real images only find the generator's gaps. Training crops are 128³ on the cluster (64³ locally).
+
+## 3. The implementation you want and its design
+
+### Requirements (semi-hard unless stated)
+
+| # | Requirement | Default / tunable |
+| --- | --- | --- |
+| R1 | Flexible, adaptive N per voxel, chosen by the data (no fixed k, no arbitrary rank, no k-means) | N ≤ 2, ≥ 30° apart; tunable |
+| R2 | Population-specific momentum: anisotropic smoothing along each population's own shape, bridging where it holds on both sides, never extending free ends, following bends | 0.5 mm; tunable; maybe per-population calibration |
+| R3 | Populations are sets of fibres with identities across space (one label through bends and crossings) | — |
+| R4 | Label-free on the analysed data: no anatomical labels or masks as method input | registered labels not used for presence |
+| R5 | Weighted, not thresholded: a sensitivity-weighted single vector field everywhere in tissue; thresholds only for the multi-vector field; an intensity-correlation weight | — |
+| R6 | Native resolution, general to any array chunk: one or many vectors per voxel at the input's resolution | tested at several resolutions |
+| R7 | Classical maths after anatomix; anatomix-dev-vit is the feature model | — |
+| R8 | No tile, block, edge or axis artefacts (overlap, spherical windows considered) | — |
+| R9 | Robust to HiP-CT artefacts (streaks, rings) | — |
+| R10 | Crossings: both spatially interleaved fascicles and voxel-level mixtures | — |
+| R11 | A solve argument: full (everywhere) / fibre (population solve only where fibre-like, weighted single field everywhere) / fast (coarse) | full |
+| R12 | GPU-only runnable; whole brain within a day; the structure tensor's call shape; no BRIDGE in the package | — |
+
+### The pipeline as you designed it
+
+1. **Shape features.** anatomix-dev-vit over overlapping windows (128³ tiles), blended so that no tile seams or patch
+   grid remain. This is the "large processing volume with overlap, shifting window".
+2. **Separation in shape space.** Detect the fibre populations present around each voxel and partition the *raw shape
+   space* into one part per population. These are full-volume layers of shape information, not masks over the image.
+   N is found per region and is not specified. Lag-TCA (TCA with a spatial-lag mode) is the chosen primary method:
+   - rank selection gives N;
+   - the lag factor gives each population's orientation and its own smoothing kernel;
+   - the orientation-distribution model is the comparison.
+3. **Tensor / orientation per population.** One orientation per population, by TCA on that population's part of the
+   shape space (not on gradients of masked images), per voxel.
+4. **Momentum.** Smooth each population along its own shape with a small local kernel. Bridge across crossings and
+   gaps where the population holds on both sides; follow bends; never extend a free end.
+5. **Merge.** Two fields from the populations:
+   - a sensitivity-weighted single vector field everywhere;
+   - a multi-vector field, thresholded, with population identities 1, 2, 3, ...
+   - Where populations intersect, use all of them; where there is one or none, use the strongest.
+   - The weights include intensity correlation.
+6. **Outputs.** `vec = shapetensor(image, **kwargs)` as a NumPy/CuPy array. Optional:
+   - the multi-vector field with per-population weights and labels;
+   - the strongest-population map;
+   - the union of population masks.
+   An OME-Zarr writer for whole volumes; a solve argument full / fibre / fast.
+
+### Where this branch stands (2026-10-22, after the overnight build)
+
+| Stage | Built | Against your design |
+| --- | --- | --- |
+| Lift (shape space) | `lift.py`: the array lifted to positions × directions by its local lagged autocorrelation on an integer-lag shell, on a lattice; null from the block's isotropic surrogate; response from the block itself; excision inside the correlation | The lift is the classical "shape space": it holds any number of populations and the structure tensor is its zero-lag moment. anatomix is not in the chain (optional engine for later presence weighting); R7 read as "classical after the embedding, embedding optional" |
+| Separation | `populations.peaks` after deconvolution: N per position from the data, N ≤ 2 and ≥ 30° by default (R1) | Meets R1; intermixed 90° crossing N2 0.96 with both within 15° at 0.95; 60° / 45° two lobes found (N2 0.89 / 0.65) but not both to 15° (0.36 / 0.34) |
+| Momentum | `populations.momentum`: along each direction, bridge where both sides hold, never extend a free end; 0.5 mm at 20 µm (R2) | Meets R2; per-population straight/bending calibration not built; the tightest bend (0.3 mm radius) is partly lost |
+| Identities | `populations.label_populations` + `volume.stitch_labels` across chunks (R3) | Meets R3 (one label through a bend, two through a crossing; leakage 4–15%) |
+| Weighting | presence weight (N-independent excess over the median) from the surrogate floor; single field never cut; multi-vector field thresholded (R5) | Meets R5 except the intensity-correlation weight (not built) |
+| Native resolution, generality | `field.py`: the field at every input voxel; `orientations(spacing=)` for anisotropic voxels; channels add; tested in unit tests (R6) | Meets R6 for 3-D; 2-D arrays not yet; multi-resolution phantom scores not yet |
+| Volume driver | `volume.run_volume`: chunks with a halo that reproduce a one-pass result exactly (shared floor and response), multi-process, label stitching (R12) | Meets R12; a solve argument full/fibre/fast (R11) not built |
+| Tracking (the aim) | `validate.py`: through-crossing on its own band 0.89/0.86/0.89 at 90/60/45° (structure tensor 0.06/0.42/0.40), switched 0.00–0.11 (0.55–0.65); T-junction and free end never extended (0.00 / 0.02 against the structure tensor's 0.40 past a free end); intermixed 90° crossing: streamlines stay on their population at 0.99 (0.10–0.22) | At or just under the 0.9 target; the tightest bend (0.3 mm radius) is the open case (0.39 vs 0.92); see docs/validation.md |
+| Resolution | voxel floors on the lags (≥ 2) and the high-pass (≥ 3) keep the chain working at 40 µm with `scale` 6 (bundle 0.96 / 2.2°, band 90 N2 0.82) | Meets R6's multi-resolution test for one step of 2× |
+| 2-D arrays | `orientations()` on a `(Y, X)` array: in-plane lags, a semicircle grid, vectors `(3, Y, X)` | Meets the "any array" claim for 2-D |
+| Artefacts | `scripts/artefacts_chain.py`: streaks up to 2× the fibre contrast cost 1–6° (structure tensor 2–16°); rings make the block a sheet (R9 partly) | Rings open |
+| Real data | the VOI run (`scripts/voi_cortex.py`): the lift reads the acquisition's z-anisotropy in low-coherence white matter (two thirds of first lobes near the rotation axis); remedies measured, none adopted as default (results log §35, docs/data.md) | **The open problem** |
+
+### The entity-field model (2026-10-24)
+
+Plan: `notes/plan_entity_field_model.md`. A direction-queried decoder `D(x, σ, u)` → density, hyperbolic tree embedding,
+Bingham vote and descriptors of the entity owning direction u; entities are clusters (no fixed K); Bingham entity ODFs
+rendered to SH; arbitrary-depth tree; overlap linking and seeded following across windows; the lobe head removed.
+Status: built (decoder, losses, training, inference, crossing mode, overlapping windows, deep trees); interim
+adversarial reviews applied; local pilot EP4 running (2026-10-24).
+
+Later instructions (2026-10-24, verbatim):
+- "Describe the theoretical bounds and limits of this model, what can the model not do inteherantly due to design?"
+  (answered; plan section 9).
+- "Based on limits defined, are there any additional easy wins you can identify?" and "Do any of the easy wins need
+  work included at this stage in generator or training?" (deep trees, sigma range, direction order 16, vote
+  uncertainty built as flags; inference wins built).
+- "Is there a current model you can quickly run in a phantom for me to sense check ?" and "Phantoms don't look quite
+  right, also show separated image layers" (scripts/learn/phantom_layers_entities.py: generator crossing phantoms
+  with ground-truth layers beside the model's separated layers).
+- "Mass is train tracking either side of the main populations (either side of bundle), I don't think this looks right";
+  "it seems previous version was learning to pull edge out, like structure tensor FA, not the actual population region"
+  (visibility ladder; mass output + shape-only density + region head; interfaces removed from the targets).
+- "so boundary does not need to be a specific object type, but we must still be able to pull out fibres that pass between
+  grey white boundaries" (interfaces are not material; fibres crossing a boundary stay entities; step phantom).
+- "i do want to be clear that we arent explicitly training the model on "fibre" or "sheet" but these are post hoc
+  selection from model outputs?" (yes: no class targets; all outputs continuous).
+- "before pushing this, do one more scoping lit review on AI models designed to detect fibre orientation and ODFs ... are
+  there any downstream applications we are missing?" (notes/lit_review_orientation_models.md).
+- "im imaginging a purely synthetic multistage approach - so composition (the operators you describe above), then
+  modality, then augmentation and warps and noise, then loss and artifacts ... not to be followed exactly, but there
+  should be a more combinatorial approach to get proper diversity of objects and mixing. I really want to push the
+  robustness." (2026-10-25; overnight to 07:00 ET: compositional generator, test each stage, then speed, local retrain,
+  wider phantoms and validation.)
+
+### Conflicts between instructions (for you to settle)
+
+1. **ODF / fixels archived (2026-10-16) vs the classical pathway (2026-10-21).** Resolved for now as: the lift is the
+   shape space the design asked for (positions × directions, holding N populations), the archived route was the
+   gradient-direction ODF with fixels as the output primitive; here the primitive is a population with an identity and a
+   carry-forward. The 0.3 README and docs describe it so. Your confirmation is still wanted.
+2. **anatomix as the feature space vs the chain reading intensity.** anatomix plays no part in the 0.3 chain; the
+   candidate role that remains is a presence / class weight (fibre vs vessel vs boundary) from synthetic references,
+   pluggable as an engine. Not built overnight.
+3. **Pre-trained readout (2026-10-18) vs preference for self-supervision (2026-10-21).** Read as: test and compare
+   both; no per-volume training.
+4. **Step by step (2026-10-15) vs "run futher tests and experiments untill working well in all phantoms. take as long
+   as you need" (2026-10-18).** Read as: run complete test suites autonomously, show results at decision points.
+5. **"archive the ODF and fixels" (2026-10-16) vs "I'm not opposed to odfs ... overall per voxel (at arbitrary grid)
+   odfs should be a possible output" (2026-10-24).** The newer instruction wins: ODFs are outputs again, now per entity
+   (object, populations at any depth) and in total.
+
+### Standing practice
+
+- Commit as Andrew-Keenlyside (noreply); no Claude attribution lines; history rewrites only where you authorise them
+  (done for ShapeTensor only).
+- "Also don't keep calling CI and GitHub tests on each commit (it's spamming my inbox)" (2026-10-24): commit locally,
+  push only occasionally in batches, with `[skip ci]` in the head commit message (tests.yml runs on every push).
+- Install into the shapetensors env, or build new conda envs, only without breaking other envs; dry-run first.
+- Prototypes are labelled as prototypes; the docs carry settled solutions only; figures and results go in the results
+  log and changelog.
+- Real data is judged by your visual QC beside the standard structure tensor (S-21-46 20 µm cortex VOI); numbers come
+  from phantoms. Each phantom has margins and the core is cropped before scoring.

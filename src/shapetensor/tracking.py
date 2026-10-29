@@ -19,7 +19,8 @@ REASONS = ("running", "mask", "angle", "absent", "max_steps")
 
 
 def track(dirs: torch.Tensor, mask: torch.Tensor, seeds: torch.Tensor, *, step: float = 0.5, max_angle_deg: float = 30.0,
-          max_steps: int = 1000, weights: torch.Tensor | None = None, min_weight: float = 0.0, device: str | None = None) -> dict:
+          max_steps: int = 1000, weights: torch.Tensor | None = None, min_weight: float = 0.0, device: str | None = None,
+          headings: torch.Tensor | None = None) -> dict:
     """``dirs (K, 3, nz, ny, nx)``, ``mask (nz, ny, nx)`` bool, ``seeds (N, 3)`` site coordinates (z, y, x). With
     ``weights (K, nz, ny, nx)`` (the activations of a no-mask multi-vector field) a vector is followed only where
     its weight is at least ``min_weight`` (the activation null ``tau`` is the natural choice).
@@ -50,10 +51,16 @@ def track(dirs: torch.Tensor, mask: torch.Tensor, seeds: torch.Tensor, *, step: 
     n_steps = torch.zeros((N, 2), dtype=torch.long, device=dev)
     reason = torch.zeros((N, 2), dtype=torch.long, device=dev)
     used2 = torch.zeros((N, 2), dtype=torch.long, device=dev)
-    # the first heading: the seed site's first fixel (seeds without one terminate at once)
+    # the first heading: the seed site's first fixel (seeds without one terminate at once), or the given ``headings``
+    # (N, 3), in which case the first step takes the seed site's fixel most aligned with it
     flat0, inside0 = at(P0)
-    h0 = Df[flat0, 0]                                                       # (N, 3)
-    ok0 = inside0 & Mf[flat0] & valid[flat0, 0]
+    if headings is None:
+        h0 = Df[flat0, 0]                                                   # (N, 3)
+        ok0 = inside0 & Mf[flat0] & valid[flat0, 0]
+    else:
+        h0 = headings.to(dev).float(); h0 = h0 / h0.norm(dim=1, keepdim=True).clamp_min(1e-12)
+        c0 = torch.where(valid[flat0], (Df[flat0] * h0[:, None]).sum(-1).abs(), torch.full((N, K), -1.0, device=dev))
+        ok0 = inside0 & Mf[flat0] & (c0.max(1).values > -0.5)
     for half, sgn in ((0, 1.0), (1, -1.0)):
         p = P0.clone(); h = sgn * h0
         active = ok0.clone()
