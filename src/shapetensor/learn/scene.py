@@ -798,6 +798,8 @@ MATRIX_P = 0.0                    # scenes with a matrix: the space around the f
 MATRIX_TYPES = ("neuropil", "cells")
 MATRIX_FILL = (0.3, 0.7)          # the matrix neuropil's share of the volume
 MATRIX_MAX_FIBRES = 120_000       # ... at most this many fibres per canvas
+UNRESOLVED_R = 1.5                # a matrix's fibres thinner than this (voxels) are unresolved: isotropic material, not their own directions
+ISO_SPREAD_DEG = math.degrees(math.asin(math.sqrt(2.0 / 3.0)))   # 54.74 deg: the spread at which a fibre's ellipse is I / 3
 MATRIX_R_MIN = 0.3                # the matrix's and ground's fibres no thinner (voxels): micro-fascicles at coarse voxels
 GROUND_FILL = 1.3                 # the ground's material per volume (over-filled: the composite scales each voxel back to one)
 MATRIX_TWO_P = 0.3                # two matrix kinds in one scene
@@ -2451,7 +2453,10 @@ class Scene:
         P = smooth_paths(start, r.unit(n), torch.full((n,), L, device=dev), S, torch.full((n,), r.lu(0.05, 0.4), device=dev), max(L / 4, 1.0), r)
         rad = torch.full((n, S), max(rf, 0.05), device=dev) * torch.exp(0.2 * r.randn(n, 1))
         cv = curves_like(P, rad, r, obj=self.ids(n, rad[:, 0]), seg=torch.zeros(n, dtype=torch.long, device=dev), contrast=self.contrast(10, 90))
-        out = [Group(name, "line", float(rad.median()), float(cv.contrast[0, 0]), curves=[cv])]
+        if fill is not None and (vox or rf < UNRESOLVED_R):                                     # unresolved, randomly directed: the
+            cv.spread = torch.full((n,), ISO_SPREAD_DEG, device=dev)                            # material's ODF is its population's,
+        out = [Group(name, "line", float(rad.median()), float(cv.contrast[0, 0]), curves=[cv])]   # isotropic (29 Oct): no voxel's own
+                                                                                                # few fibrils, which no image shows
         rs = r.lu(3, 8) / self.voxel_um
         if somata and 0.4 <= rs <= min(self.shape) / 6:                                                    # somata among the fibres
             m = int(min(400, r.u(0.2, 1.0) * np.prod(self.shape) / (40 * rs) ** 3 * 8 + 1))
