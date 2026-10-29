@@ -263,7 +263,7 @@ class EntityDecoder(nn.Module):
                  kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0,
                  od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False, dens_gate: bool = False, st_path: bool = False,
                  iso_head: bool = False, gate2: bool = False, gate_share: bool = False, dens_ce: bool = False,
-                 ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe_learned: int = 0):
+                 ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe_learned: int = 0, pop_seq: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -363,14 +363,17 @@ class EntityDecoder(nn.Module):
         # shows along it (the direct path's code). The ellipse then turns with the image by construction: from the point
         # code alone the head did not fit 8 crops once they were cube-transformed (29 Oct: 0.39 -> 0.40 in 150 steps,
         # 0.06 without the transforms; the direction-sampled heads learnt the axes from the same trunk)
-        self.pop_k = int(pop_k); self.pop_dir = int(pop_dir)
+        # ``pop_seq``: the slots filled in turn, each direction's score also given how much of it the earlier slots' ellipses
+        # already hold (u^T T_j u summed) and the slot's index: two alike peaks (a crossing) no longer go to every slot
+        # alike, so a slot need not average them into a disc (P2: crossings found 0 %)
+        self.pop_k = int(pop_k); self.pop_dir = int(pop_dir); self.pop_seq = bool(pop_seq)
         if self.pop_k:
             K_ = self.pop_k
             self.pop = nn.Sequential(nn.Linear(hidden, 256), nn.SiLU(), nn.Linear(256, 256), nn.SiLU(), nn.Linear(256, K_ * 8 + 1))
             nn.init.zeros_(self.pop[-1].weight); nn.init.zeros_(self.pop[-1].bias)
         if self.pop_k and self.pop_dir:
             assert self.odirect, "pop_dir reads the direct path (odirect)"
-            self.pop_u = nn.Sequential(nn.Linear(hidden + 32 + (64 if self.oprobe else 0), 128), nn.SiLU(), nn.Linear(128, 128), nn.SiLU(), nn.Linear(128, self.pop_k))
+            self.pop_u = nn.Sequential(nn.Linear(hidden + 32 + (64 if self.oprobe else 0) + ((1 + self.pop_k) if self.pop_seq else 0), 128), nn.SiLU(), nn.Linear(128, 128), nn.SiLU(), nn.Linear(128, self.pop_k))
             nn.init.zeros_(self.pop_u[-1].weight); nn.init.zeros_(self.pop_u[-1].bias)               # (uniform weights: isotropic at the start)
             self.register_buffer("pop_u_dirs", fib_hemisphere(self.pop_dir), persistent=False)
         self.dens_ce = bool(dens_ce); self.ce_no_st = bool(ce_no_st)                         # (no structure tensor: neither term nor cues)
@@ -581,10 +584,20 @@ class EntityDecoder(nn.Module):
             U, cu = pu; N = cu.shape[-2]
             h = torch.cat([p[..., None, :].expand(*p.shape[:-1], N, p.shape[-1]).to(cu.dtype), cu], -1)
             sharp = torch.exp(o[..., 2 * K_:3 * K_].clamp(-3, 3))[..., None, :] if POP_SHARPNESS else 1.0   # each slot's learned sharpness
-            w = torch.softmax(self.pop_u(h.to(self.pop_u[0].weight.dtype)).float() * sharp, -2)  # (..., Q, N, K) over the directions
             uu = U.float()[..., :, None] * U.float()[..., None, :]                                # (..., N, 3, 3)
-            T = torch.einsum("...qnk,...nij->...qkij", w, uu) if uu.dim() > 3 else torch.einsum("qnk,nij->qkij", w, uu)
-            return {"pop_exist": ex, "pop_share": sh, "pop_T": T}
+            mom = (lambda w_: torch.einsum("...qnk,...nij->...qkij", w_, uu)) if uu.dim() > 3 else (lambda w_: torch.einsum("qnk,nij->qkij", w_, uu))
+            if not getattr(self, "pop_seq", False):
+                w = torch.softmax(self.pop_u(h.to(self.pop_u[0].weight.dtype)).float() * sharp, -2)  # (..., Q, N, K) over the directions
+                return {"pop_exist": ex, "pop_share": sh, "pop_T": mom(w)}
+            held = torch.zeros(*h.shape[:-1], 1, device=h.device); Ts = []                         # (..., Q, N, 1): u^T T u of the slots so far
+            Ub = U.float() if uu.dim() > 3 else U.float()[None]
+            for k in range(K_):
+                hot = torch.zeros(*h.shape[:-1], K_, device=h.device); hot[..., k] = 1.0
+                lk = self.pop_u(torch.cat([h, held.to(h.dtype), hot.to(h.dtype)], -1).to(self.pop_u[0].weight.dtype)).float()[..., k:k + 1]
+                wk = torch.softmax(lk * (sharp[..., k:k + 1] if torch.is_tensor(sharp) else sharp), -2)   # (..., Q, N, 1)
+                Tk = mom(wk)[..., 0, :, :]; Ts.append(Tk)                                          # (..., Q, 3, 3)
+                held = held + torch.einsum("...ni,...qij,...nj->...qn", Ub, Tk if uu.dim() > 3 else Tk[None], Ub)[..., None].reshape(held.shape)
+            return {"pop_exist": ex, "pop_share": sh, "pop_T": torch.stack(Ts, -3)}
         c = o[..., 2 * K_:8 * K_].reshape(*o.shape[:-1], K_, 6)
         z = torch.zeros_like(c[..., 0]); dg = Fn.softplus(c[..., :3] + 0.5413) + 1e-3             # (softplus(0.5413) = 1: isotropic at the start)
         L = torch.stack([torch.stack([dg[..., 0], z, z], -1), torch.stack([c[..., 3], dg[..., 1], z], -1),
@@ -767,7 +780,7 @@ class PopulationNet(nn.Module):
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
                  odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0,
                  od_norm: bool = False, dens_gate: bool = False, st_path: bool = False, iso_head: bool = False, gate2: bool = False,
-                 gate_share: bool = False, dens_ce: bool = False, ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe_learned: int = 0):
+                 gate_share: bool = False, dens_ce: bool = False, ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe_learned: int = 0, pop_seq: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -806,7 +819,7 @@ class PopulationNet(nn.Module):
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
                                      oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect),
                                      od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote), od_norm=bool(od_norm), dens_gate=bool(dens_gate),
-                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st), pop_k=int(pop_k), pop_dir=int(pop_dir), oprobe_learned=int(oprobe_learned))
+                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st), pop_k=int(pop_k), pop_dir=int(pop_dir), oprobe_learned=int(oprobe_learned), pop_seq=bool(pop_seq))
             if oprobe_learned:                                                                       # the probe's learned fields: the finest
                 self.scal_learn = nn.Conv3d(c0, int(oprobe_learned), 1)                              # trunk level projected (scalars per voxel:
                                                                                                      # turning the image turns them)
@@ -886,7 +899,7 @@ class PopulationNet(nn.Module):
                    block_norm=int(args.get("block_norm", 0) or 0), od_norm=bool(args.get("od_norm", False)),
                    dens_gate=bool(args.get("dens_gate", False)), st_path=bool(args.get("st_path", False)), iso_head=bool(args.get("iso_head", False)),
                    gate2=bool(args.get("gate2", False)), gate_share=bool(args.get("gate_share", False)), dens_ce=bool(args.get("dens_ce", False)),
-                   ce_no_st=bool(args.get("ce_no_st", False)), pop_k=int(args.get("pop_k", 0) or 0), pop_dir=int(args.get("pop_dir", 0) or 0), oprobe_learned=int(args.get("oprobe_learned", 0) or 0)) \
+                   ce_no_st=bool(args.get("ce_no_st", False)), pop_k=int(args.get("pop_k", 0) or 0), pop_dir=int(args.get("pop_dir", 0) or 0), oprobe_learned=int(args.get("oprobe_learned", 0) or 0), pop_seq=bool(args.get("pop_seq", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":

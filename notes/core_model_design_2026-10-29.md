@@ -387,3 +387,32 @@ the window, against the every-slot-present answer.
   Hollow trees give too few single-line queries to score: their walls are sheets. Committed with the head fix.
 - **01:21** **Pilot P2** from scratch: fixed generator, `--pop-dir 96`, populations loss only, 1500 steps (about 1.6
   s/step).
+- **02:22** **P2 passed 3 of 6 criteria** (P1: 1 of 6). Evaluated at strength 0.3 unless noted:
+
+  | criterion | result | verdict |
+  |---|---|---|
+  | A: single-line axis | 50.0 deg vs structure tensor 45.3 (at strength 1.0: 41.2 vs 44.5) | FAIL |
+  | B: crossings, both found | 0 % | FAIL |
+  | C: existence F1 | 0.841 vs 0.760 | PASS |
+  | D: shape class / texture phantom isotropic | 60 % / 100 % | PASS |
+  | E: val_pop over training | flat (strength 1.0 held-out set) | FAIL |
+  | F: line-ness sd | 0.157 | PASS |
+
+  Phantom bundle axis: 8.9 deg (structure tensor 13.7).
+- **02:20-02:45** **Further structural fixes**, each tested on 8 cube-transformed clean crops (300 steps):
+  - **Line targets got averaged ellipses.** Predicted line-ness was 0.17 and the axis error 28 deg. The matching
+    weighted ellipse cost by share, while the loss weights every population equally. As a result, line and isotropic
+    targets swapped slots between like queries.
+    - Fix: the matching now uses the loss's weights. Line targets 0.42 -> 0.35, isotropic 0.056 -> 0.012.
+    - A learned per-slot sharpness was added: axis error 25 -> 23 deg.
+  - **A learned-field probe** (trunk channels sampled along each direction) brought no gain at this budget. It is off
+    by default.
+  - **The bank is not the limit.** Its strongest direction lies 15-31 deg from line targets (median, by pooling
+    level).
+- **02:34** **Long run L1** started from scratch with the P2 configuration plus these fixes: 11000 steps, about 2.3
+  s/step on the shared card. Gated at step 1500 by `acceptance.py` (750 vs 1500); the run stops if the gate fails.
+- **02:45** **Crossings (B = 0 %) look structural.** Each slot scores each direction independently from the same
+  features, so two similar peaks go to every slot alike and a slot averages them into a disc.
+  - Fix (`--pop-seq`): slots are filled in turn, and each direction's score also sees how much of it the earlier slots
+    hold (explaining away).
+  - Unit-tested for rotation and batching; being tested on crossings now.
