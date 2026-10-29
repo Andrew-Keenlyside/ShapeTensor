@@ -184,7 +184,7 @@ code, the scene geometry, today's target bug fixes, the evaluation script struct
 6. **Context size.** 64³ crops against 128³ for tract-scale grouping (the receptive field is 182 voxels).
 7. **Loss balance** across heads, and the held-out sets: an independent generator (synthspline) and the phantoms.
 
-## Answers from the user (29 Oct 2026, 22:00 ET)
+## Answers from the user (28 Oct 2026, 22:00 ET)
 
 1. **Windows are in voxels,** like the structure tensor's rho, and arbitrary during training. They are converted from
    the known voxel size at use.
@@ -222,7 +222,7 @@ code, the scene geometry, today's target bug fixes, the evaluation script struct
 Still open: whether real data may be used for hyperparameter choice or early stopping; the real-crop provenance of the
 phantoms' texture parameters and the generator's grain comment.
 
-## Implementation plan: per-object second-order ODFs (29 Oct 2026, 23:15 ET)
+## Implementation plan: per-object second-order ODFs (28 Oct 2026, 23:15 ET)
 
 **Framing.**
 - **Per voxel, per object:** the second moment of the object's local material directions, with its own spread drawn at
@@ -271,7 +271,7 @@ phantoms' texture parameters and the generator's grain comment.
   - figures: synthetic truth against model, phantoms with a fanning case added, and the construction figure.
 - **E. Per-object set head**, once D passes.
 
-## Fixes for the remaining issues (29 Oct 2026, 23:45 ET)
+## Fixes for the remaining issues (28 Oct 2026, 23:45 ET)
 
 | # | issue | cause (diagnosed) | fix |
 |---|---|---|---|
@@ -289,7 +289,7 @@ phantoms' texture parameters and the generator's grain comment.
 - **6:** brute-force permutations are exact and cheap at K = 4. More than 4 populations in one window are rare (under 1 % measured). Their mass goes to "other" and is reported. A summed-tensor total is deliberately not trained, since it hides crossings.
 - **Order:** 4 and 1 first (targets), then 3, 5, 6; figures and tests after each.
 
-## Overnight plan and acceptance criteria (fixed before the pilot, 30 Oct 2026, 00:10 ET)
+## Overnight plan and acceptance criteria (fixed before the pilot, 29 Oct 2026, 00:10 ET)
 
 ### Remaining work before the pilot
 1. **Fix 3:** per-strand objects in unresolved bundles, and clustered objects in texture fields (in progress).
@@ -332,7 +332,7 @@ voxels. Targets are each query's populations from construction.
 slot), because most windows hold 3-4 populations including small fragments. It now scores populations with >= 10 % of
 the window, against the every-slot-present answer.
 
-## Overnight log (30 Oct 2026)
+## Overnight log (night of 28-29 Oct 2026, times ET)
 
 - **23:35** Pilot P1 (from scratch, populations head, generator before the rendering fixes) started as a baseline: about
   2 s/step, 1500 steps.
@@ -347,3 +347,43 @@ the window, against the every-slot-present answer.
   pass condition: the image structure tensor within 20 deg of the true axis (median) per line family at strength 0.
 - **Figures:** near-isotropic populations (mostly background) are drawn as small grey spheres, so oriented populations
   stand out.
+- **00:49** **P1 failed 5 of 6 criteria** (A 55.1 deg vs the structure tensor's 45.3; B 0 %; C passed; D 58 %; E and F
+  failed). Every predicted ellipse was isotropic. The ellipse loss sat at its starting value (0.165) for all 1500 steps,
+  and the head's ellipse weights barely moved (mean |w| 0.003), while the vote head reached 6 deg on the same trunk.
+- **01:00** **Diagnosis**, each step a short test:
+  - *Overfit, 8 fixed clean crops, populations loss only:* the ellipse loss stayed at 0.40, so the head could not fit
+    even its own training data.
+  - *Targets checked:* every target has trace 1, there is no half-precision underflow, and 32-55 % of populations are
+    line-like.
+  - *A fresh head on the trained net's frozen features:* 0.39 -> 0.09, so the loss and the head's maths are sound.
+  - *The trainer's step replicated and ablated:*
+
+    | variant | ellipse loss after 150-200 steps |
+    |---|---|
+    | full | 0.40 |
+    | no augmentation | 0.06 |
+    | no cube transform (contrast routes on) | 0.08 |
+    | no contrast routes (cube transform on) | 0.41 |
+
+    The cube transform rotates targets and query points consistently with the image (checked in 48 of 48 draws). So
+    the head simply could not read orientation from the point code once crops were turned. This is the same failure
+    noted on 27 Oct for the density path, which is why that path reads the image along each direction.
+  - **Fix (`--pop-dir 96`):** each slot's ellipse is the second moment of learned weights over 96 hemisphere directions
+    (randomly rotated in training). Each direction is scored from the point code and the direct path's code along it,
+    so the ellipse turns with the image by construction (unit test). Under the cube transform: 0.39 -> 0.26 in 150
+    steps.
+  - **Loss:** every real population's ellipse is now weighted equally (no longer by share).
+- **01:10** **Generator rendering fixes done** (separate agent). Image structure tensor vs true axis, single-line
+  queries, strength 0:
+
+  | family | before | after |
+  |---|---|---|
+  | bundle | 3.3 deg | 3.0 deg |
+  | unresolved bundle | 25.8 deg | 4.5 deg |
+  | fascicles | 16.5 deg | 3.2 deg |
+  | network | 37.2 deg | 9.3 deg |
+  | texture | 29.5 deg | 16.0 deg |
+
+  Hollow trees give too few single-line queries to score: their walls are sheets. Committed with the head fix.
+- **01:21** **Pilot P2** from scratch: fixed generator, `--pop-dir 96`, populations loss only, 1500 steps (about 1.6
+  s/step).

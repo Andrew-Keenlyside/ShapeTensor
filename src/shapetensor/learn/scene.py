@@ -242,7 +242,7 @@ class Curves:
     phi: torch.Tensor | None = None
     density: torch.Tensor | None = None
     fibre_r: torch.Tensor | None = None    # descriptor: the constituents' radius (voxels) when the curve is an unresolved bundle
-    fibril: torch.Tensor | None = None     # (N, 3) longitudinal fibrils inside the section (30 Oct): density depth, period (voxels), phase
+    fibril: torch.Tensor | None = None     # (N, 3) longitudinal fibrils inside the section (29 Oct): density depth, period (voxels), phase
     spread: torch.Tensor | None = None     # (N,) each curve's own spread angle (degrees): its material ODF (1 - e) t t^T + e (I - t t^T) / 2,
                                            # e = sin^2 spread (29 Oct); hollow walls are sheets of material instead
 
@@ -767,7 +767,7 @@ TEXTURE_CLUSTERS = (32, 128)      # a texture field's objects: its strands group
                                   # about one per 100 strands, within these bounds); None: the field one object (before 29 Oct)
 STRAND_OBJECTS = True             # an unresolved bundle's strands (and its smooth partial volume) each an object under the bundle
                                   # (29 Oct); False: all of them the bundle's one object
-P_VISIBLE_STRANDS = 0.8           # 30 Oct: unresolved bundles' and packed tissue's strands carry most of their material (streaks
+P_VISIBLE_STRANDS = 0.8           # 29 Oct: unresolved bundles' and packed tissue's strands carry most of their material (streaks
                                   # along the fibres at strength 0), resolved fibres each their own contrast; the rest faint
 P_TISSUE = 0.5                    # scenes of packed tissue (Scene.tissue: fibres wall to wall), where the voxel size suits
 P_GREY_TISSUE = 0.25              # of those, grey-matter-like (sparse turning fibres among dense cells and neuropil)
@@ -952,7 +952,7 @@ class Scene:
             ph = rng.rand(N, 1) * 6.28
             rad = rad * (1 + rng.u(0.2, 0.8) * torch.relu(torch.sin(2 * math.pi * s[None] / lam + ph)) ** 2)
         con = None
-        if rng.p(P_VISIBLE_STRANDS):                                        # 30 Oct: each fibre its own material density (packed fibres
+        if rng.p(P_VISIBLE_STRANDS):                                        # 29 Oct: each fibre its own material density (packed fibres
             kw["density"] = 1 - rng.u(0.2, 0.5) * rng.rand(N)              # touching still show as fibres, under any physics) and, when
             if float(rad.mean()) >= 1.5:                                    # thick, longitudinal fibrils inside (streaks along the axis)
                 kw["fibril"] = torch.stack([torch.full((N,), rng.u(0.3, 0.7), device=self.device), torch.full((N,), rng.lu(1.5, 4.0), device=self.device),
@@ -1080,7 +1080,7 @@ class Scene:
         else:                                                               # unresolved fibres: the bundle's partial volume
             from . import fibres as FB
             phi_ = r.u(0.3, 0.8); one = lambda v: torch.tensor([v], device=self.device)
-            vis_ = r.p(P_VISIBLE_STRANDS)                                     # 30 Oct: most draws show their strands (streaks along the
+            vis_ = r.p(P_VISIBLE_STRANDS)                                     # 29 Oct: most draws show their strands (streaks along the
             beta = float(fibre["texture"]) if "texture" in fibre else (r.u(0.6, 0.95) if vis_ else (r.u(0.1, 0.5) if r.p(P_UNRESOLVED_TEXTURE) else 0.0))   # fibres)
             tube = bid
             if STRAND_OBJECTS:                                              # the smooth partial volume: one more child of the bundle
@@ -2072,7 +2072,7 @@ class Scene:
                         g.curves.append(curves_like(P, rad, r, obj=obj, seg=torch.full((N,), pid, device=dev), contrast=p["contrast"]))
                     else:                                                                           # strands of the partial volume, drawn as a
                         vis_ = r.p(P_VISIBLE_STRANDS)                                               # field: their centrelines' material and
-                        beta = r.u(0.6, 0.95) if vis_ else r.u(0.2, 0.5)                            # (30 Oct: mostly visible streaks)
+                        beta = r.u(0.6, 0.95) if vis_ else r.u(0.2, 0.5)                            # (29 Oct: mostly visible streaks)
                         seg = (P[:, 1:] - P[:, :-1]).norm(dim=-1).sum()                              # direction splatted and blurred by their
                         fill = max(float(seg) * math.pi * re * re / max(float(p["mask"].sum()), 1.0), 0.05)   # radius (soft-edged, as a
                         xi = torch.exp((r.u(0.3, 0.7) if vis_ else r.u(0.15, 0.5)) * r.randn(N)); xi = xi / xi.mean()   # group of fine fibres is; the swept
@@ -2830,7 +2830,7 @@ def render_scene(canvas, scene_seed: int, device, voxel_um=None, families=None, 
         while len(_CACHE) >= CACHE_SCENES:                                  # a few scenes (training draws and paired renders interleave)
             _CACHE.pop(next(iter(_CACHE)))
         sc = Scene(canvas, scene_seed, device, voxel_um, content).build(families, n_groups, layout_p, underlay_p, cross_p, deep_tree, dense_p)
-        st = style or str(sc.r.np.choice(["flat", "regions", "tissue", "cells"], p=BG_STYLE_P))   # 30 Oct: compartments a minority
+        st = style or str(sc.r.np.choice(["flat", "regions", "tissue", "cells"], p=BG_STYLE_P))   # 29 Oct: compartments a minority
         bgp = background(tuple(canvas), st, sc.r.g, device, 1.0, content, nprng=sc.r.np, natural=True)
         dw, da = (p_warp > 0 and sc.r.p(p_warp)), (p_affine > 0 and sc.r.p(p_affine))
         sc.deform = Deform(tuple(canvas), sc.r, dw, da, device, cfg=DEFORM_LEGACY if legacy_deform else None) if (dw or da) else None
@@ -3024,11 +3024,11 @@ HIPCT_GRAIN = {"lo": 0.1, "span": 0.3}
 
 
 BG_TEX_NORM = 40.0                # grey levels: the background's texture is normalised by max(its spread, this) before it modulates
-                                  # the background material (30 Oct)
+                                  # the background material (29 Oct)
 
 
 def _material_contrast(mat: dict, bg: dict, ra: "Rng", stain: bool = False) -> dict:
-    """A population's material made to stand out (30 Oct): with probability :data:`P_VISIBLE_STRANDS` its largest relative
+    """A population's material made to stand out (29 Oct): with probability :data:`P_VISIBLE_STRANDS` its largest relative
     difference from the background material (over the keys both carry, the background's nonzero ones) is raised to at
     least 0.3-1.0; a background stain (``stain``) is brought within 10-30 % of the background (a stain, not the brightest
     thing there)."""
@@ -3111,8 +3111,8 @@ def _trim_paths(P: torch.Tensor) -> torch.Tensor:
 #: never showed (27 Oct: oriented fill median 0 % of a crop, 8 % of crops over 70 %).
 FILL_STRATA = ((0.7, 1.01), (0.3, 0.7), (0.03, 0.3), (0.0, 0.03))
 #: the training's default quota (train.py passes it with the scene generator)
-FILL_QUOTA = (0.35, 0.35, 0.2, 0.1)   # 30 Oct: was (0.3, 0.3, 0.2, 0.2)
-BG_STYLE_P = (0.4, 0.15, 0.25, 0.2)   # the scene background's style: flat, regions (compartments), tissue, cells (30 Oct; was uniform)
+FILL_QUOTA = (0.35, 0.35, 0.2, 0.1)   # 29 Oct: was (0.3, 0.3, 0.2, 0.2)
+BG_STYLE_P = (0.4, 0.15, 0.25, 0.2)   # the scene background's style: flat, regions (compartments), tissue, cells (29 Oct; was uniform)
 CENTRE_FILL = 0.3                     # a centred crop is moved (within a third of the crop) to hold at least this much object material
 
 
@@ -3224,7 +3224,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
             if dfm is not None:                                               # where the deformation took it
                 P0 = next((g_.centre_pt_def for g_ in sc.groups if getattr(g_, "centre_pt", None) is P0 and hasattr(g_, "centre_pt_def")), P0)
             o = [int(min(max(round(float(P0[a]) - e / 2 + r.u(-e / 6, e / 6)), 0), canvas - e)) for a, e in enumerate(ext)]; centred = True
-            if "_objfill" not in ren:                                         # 30 Oct: the crop holds the populations' material --
+            if "_objfill" not in ren:                                         # 29 Oct: the crop holds the populations' material --
                 ren["_objfill"] = sum((res_["occupancy"].float() for res_ in ren["groups"]), torch.zeros((canvas,) * 3, device=device)).clamp(0, 1)
             ofill = lambda oc: float(ren["_objfill"][tuple(slice(a, a + e) for a, e in zip(oc, ext))].mean())
             if ofill(o) < CENTRE_FILL:                                        # moved within a third of the crop toward more of it
@@ -3332,7 +3332,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     filled = sum((L.occupancy for L in shapes_[:n_sh]), torch.zeros(shape, device=device))
     occs = torch.stack([L.occupancy for L in shapes_[:n_sh]] + [torch.minimum(lum, (1 - filled).clamp_min(0))])
     tens = torch.stack([L.tensor for L in shapes_[:n_sh]] + [eye6(device).view(6, 1, 1, 1).expand(6, *shape) / 3])
-    texture = (bg - bg.mean()) / bg.std().clamp_min(1e-6 if hip else BG_TEX_NORM)          # 30 Oct: the background's texture as strong as
+    texture = (bg - bg.mean()) / bg.std().clamp_min(1e-6 if hip else BG_TEX_NORM)          # 29 Oct: the background's texture as strong as
                                                                                               # it is (a flat background's 2-grey-level noise
                                                                                               # was normalised to full strength)
     tex = None
@@ -3365,7 +3365,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
             bgm = draw_background_hipct(ra.np); mats = [draw_material_hipct(ra.np, bgm, sg_) for _ in range(occs.shape[0])]
         else:
             mats = [draw_material(ra.np, m) for _ in range(occs.shape[0])]; bgm = draw_material(ra.np, m, background=True)
-            nl_ = len(layers)                                                 # 30 Oct: most populations stand out from the background,
+            nl_ = len(layers)                                                 # 29 Oct: most populations stand out from the background,
             mats = [_material_contrast(mats[k], bgm, ra, stain=(nl_ <= k < n_sh)) if k < n_sh else mats[k] for k in range(len(mats))]   # stains faint
         for k, t in merge.items():
             mats[k] = dict(bgm) if t == -1 else dict(mats[t])

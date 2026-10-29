@@ -677,7 +677,7 @@ def background(shape, style: str, g: torch.Generator, device, scale: float = 1.0
     ``tissue`` (two or three broad regions -- grey/white matter -- with texture), ``cells`` (a cell stain: small blobs,
     dark or bright, their density optionally laminar along a random direction). Returns the image, the label map, the
     region means, and the extra layers the style brings (the cells as a blob population). With ``nprng`` (a numpy
-    generator) every scalar is drawn on the CPU: no device synchronisation. ``natural`` (the scene generator, 30 Oct):
+    generator) every scalar is drawn on the CPU: no device synchronisation. ``natural`` (the scene generator, 29 Oct):
     compartments larger (15-50 voxels), their contrast a spread of 10-60 grey levels about a common level (was 40-210),
     their edges softened by 1-2 voxels and textured inside; tissue regions likewise (spread 15-80)."""
     if nprng is not None:
