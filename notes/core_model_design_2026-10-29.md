@@ -416,3 +416,41 @@ the window, against the every-slot-present answer.
   - Fix (`--pop-seq`): slots are filled in turn, and each direction's score also sees how much of it the earlier slots
     hold (explaining away).
   - Unit-tested for rotation and batching; being tested on crossings now.
+- **03:01-03:08** **L1 stopped** (it would fail B by construction). **Long run L2** from scratch with `--pop-seq`:
+  11000 steps. It was restarted once at step 114 to lengthen it, resuming from its checkpoint.
+- **03:20** **Figure fix.** `scripts/figure_generator_inplane.py` shows each family in the plane of its fibres.
+  - **The targets follow the fibres:** the bundle's ellipses are lines along it, eigenvalues [0, 0, 1], 20-35 % of the
+    window.
+  - **The old figures misled.** The isotropic background, scaled by its larger share, was drawn as a sphere that hid
+    the line inside it. Isotropic glyphs are now small.
+- **04:21** **L2 failed the gate at step 1500** (A, B, E; C, D, F passed).
+
+  | measure | L2 at step 1500 | P2 |
+  |---|---|---|
+  | A: single-line axis | 59.8 deg (structure tensor 43.8) | — |
+  | D: shape class | 73 % | 60 % |
+  | phantom crossings, both found | 6-30 % | ~0 % |
+  | phantom bundle axis | 42 deg (structure tensor 13.6) | 8.9 deg |
+
+  The bundle regression is not the un-annealed learning rate: P2 at step 831 already had 10.7 deg, while L2 had 31.7
+  deg at step 912. So one of L2's structural changes (matching weights, sharpness, sequential slots) costs
+  single-line orientation. The run was stopped by the gate.
+- **04:25** **Readability scan** (`readability.py`, no model; the structure tensor only as an outside reader).
+  Structure tensor vs the true axis at the evaluation's single-line queries:
+
+  | strength | median error | by modality |
+  |---|---|---|
+  | 0 | 2.1 deg | — |
+  | 0.1 | 12.6 deg | — |
+  | 0.3 | 32 deg | histology 16, CT 64, cryo-ET 50 |
+  | 0.6 | 44 deg | — |
+  | 1.0 | 40 deg | MRI 36, histology 60 |
+
+  Much of the moderate-to-full-strength data shows no orientation at a 3-voxel window. Two consequences:
+  - The proper score teaches hedging there.
+  - Criterion E, measured on the trainer's full-strength validation set, can barely move.
+
+  One full-strength CT crop posterised to 3 grey levels and still passed the signal floor (correlation is
+  contrast-blind).
+- **04:32** **Pilot P3** (1500 steps, from scratch): L2's structure with the share-weighted matching restored
+  (`--pop-match-share`), to isolate the cause of the regression.
