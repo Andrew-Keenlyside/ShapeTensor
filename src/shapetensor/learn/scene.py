@@ -3090,6 +3090,46 @@ BG_TEX_NORM = 40.0                # grey levels: the background's texture is nor
                                   # the background material (29 Oct)
 
 
+ADD_CONTRAST = {"ground": (3.0, 10.0), "matrix": (8.0, 25.0), "fore": (40.0, 120.0)}   # additive: grey levels against the role beneath
+ROLE_CONTRAST = {"ground": (0.02, 0.08), "matrix": (0.05, 0.20), "fore": (0.30, 1.00)}   # relative to the role beneath (29 Oct)
+
+
+def _contrast_to(mat: dict, ref: dict, want: float, at_least: bool = False) -> dict:
+    """``mat`` moved along its difference from ``ref`` so that its largest relative difference (over the keys both carry,
+    ``ref``'s nonzero ones) is ``want`` (or at least ``want``)."""
+    keys = [k for k, v in mat.items() if k in ref and not isinstance(v, (bool, str))]
+    arr = lambda v: np.atleast_1d(np.asarray(v, dtype=float))
+    nz = [k for k in keys if np.any(arr(ref[k]) != 0)]
+    if not nz:
+        return mat
+    rel = max(float(np.max(np.abs(arr(mat[k]) - arr(ref[k])) / np.maximum(np.abs(arr(ref[k])), 1e-3))) for k in nz)
+    if rel < 1e-6:                                                                              # identical: push one key apart
+        k0 = nz[0]; out = dict(mat); b = arr(ref[k0]); nv = b * (1 + want)
+        out[k0] = float(nv[0]) if np.ndim(mat[k0]) == 0 else type(mat[k0])(nv.tolist()) if isinstance(mat[k0], (list, tuple)) else nv
+        return out
+    if at_least and rel >= want:
+        return mat
+    scale = want / rel; out = dict(mat)
+    for k in nz:
+        b, v = arr(ref[k]), arr(mat[k]); nv = b + scale * (v - b)
+        nv = np.where(b > 0, np.maximum(nv, 0.02 * b), nv)                                      # (densities stay positive)
+        out[k] = float(nv[0]) if np.ndim(mat[k]) == 0 else type(mat[k])(nv.tolist()) if isinstance(mat[k], (list, tuple)) else nv
+    return out
+
+
+def _role_materials(mats: list, bgm: dict, roles: list, ra: "Rng") -> list:
+    """Each population's material set against the role beneath it (:data:`ROLE_CONTRAST`): the ground faintly against
+    the medium, the matrix weakly against the ground, the foreground clearly (at least) against the matrix -- so a
+    scene built of objects shows its foreground over a textured matrix, as tissue does."""
+    out = list(mats); first = lambda r_: next((out[k] for k, x in enumerate(roles) if x == r_), None)
+    for role, ref_of in (("ground", lambda: bgm), ("matrix", lambda: first("ground") or bgm), ("fore", lambda: first("matrix") or first("ground") or bgm)):
+        lo, hi = ROLE_CONTRAST[role]
+        for k, x in enumerate(roles):
+            if x == role:
+                out[k] = _contrast_to(out[k], ref_of(), ra.u(lo, hi), at_least=(role == "fore"))
+    return out
+
+
 def _material_contrast(mat: dict, bg: dict, ra: "Rng", stain: bool = False) -> dict:
     """A population's material made to stand out (29 Oct): with probability :data:`P_VISIBLE_STRANDS` its largest relative
     difference from the background material (over the keys both carry, the background's nonzero ones) is raised to at
@@ -3351,6 +3391,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
                   torch.ones(shape, dtype=torch.bool, device=device), g_.contrast, occupancy=occ.clone(), tensor=tens.clone())
         L.desc = torch.stack([d5[0], d5[2], d5[4]])                          # the layer descriptors: thickness, hollowness, angularity
         L.desc5 = d5.clone(); L.cmap = cm[0]; L.name = g_.name
+        L.mrole = "ground" if g_.name == "ground" else ("matrix" if getattr(g_, "matrix", False) else "fore")
         group_layer[-1] = len(layers); layers.append(L)
     shapes_ = layers + extra
     lum = _crop(ren["lumen"].float(), sl, zoom); lum_c = _crop(ren["lumen"].float() * ren["lumen_c"].float(), sl, zoom) / lum.clamp_min(1e-9)
@@ -3385,6 +3426,15 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
         rec["boundary"] = (round(float(1 - M.mean()), 2), kind)
     pre = [L.occupancy.clone() for L in layers] if entity_ctx else None
     cstore = {}
+    if sc.record.get("matrix"):                                              # additive contrast by role (grey levels, 29 Oct)
+        sgn = lambda: 1 if ra.p(0.5) else -1
+        c_g = sgn() * ra.u(*ADD_CONTRAST["ground"]); c_m = c_g + sgn() * ra.u(*ADD_CONTRAST["matrix"])
+        for L in layers:
+            role = getattr(L, "mrole", "fore")
+            c_new = c_g if role == "ground" else c_m + (sgn() * ra.u(*ADD_CONTRAST["matrix"]) * 0.3 if role == "matrix" else sgn() * ra.u(*ADD_CONTRAST["fore"]))
+            if abs(L.contrast) > 1e-6:
+                L.cmap = L.cmap * (c_new / L.contrast)
+            L.contrast = c_new
     img = _composite(bg, R, shapes_, device, store=cstore)                   # normalises the occupancies, adds the interface and isotropic states
     from . import generator as _gn
     after = [cstore["occluded"][i] for i in range(len(layers))] if (entity_ctx and layers and not _gn.TARGETS_BUDGET) else [L.occupancy for L in layers]
@@ -3427,6 +3477,11 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
         if hip and m == "xray":                                               # tied attenuation and phase, contrast by strength
             from .physics import draw_background_hipct, draw_material_hipct
             bgm = draw_background_hipct(ra.np); mats = [draw_material_hipct(ra.np, bgm, sg_) for _ in range(occs.shape[0])]
+            if mtx:
+                mats = _role_materials(mats, bgm, [getattr(L, "mrole", "fore") for L in layers] + ["other"] * (len(mats) - len(layers)), ra)
+        elif mtx:                                                             # a scene of objects: each role against the one beneath
+            mats = [draw_material(ra.np, m) for _ in range(occs.shape[0])]; bgm = draw_material(ra.np, m, background=True)
+            mats = _role_materials(mats, bgm, [getattr(L, "mrole", "fore") for L in layers] + ["other"] * (len(mats) - len(layers)), ra)
         else:
             mats = [draw_material(ra.np, m) for _ in range(occs.shape[0])]; bgm = draw_material(ra.np, m, background=True)
             nl_ = len(layers)                                                 # 29 Oct: most populations stand out from the background,
@@ -3458,7 +3513,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
         nl = int(lab.max()) + 1; reg = torch.tensor([ra.u(-40, 40) for _ in range(nl)], device=device)[lab]
         img_main = g0 + off + reg; routes.append("scramble")
     img = img_main
-    if ra.p(p_grain):                                                                          # unresolved microstructure under the tissue
+    if not mtx and ra.p(p_grain):                                                              # unresolved microstructure under the tissue
         flat_ = img.flatten()[:: max(1, img.numel() // 100000)]
         q5, q95 = torch.quantile(flat_.float(), torch.tensor([0.05, 0.95], device=device))
         amp = (ra.lu(0.3, 0.3 + 3.7 * strength) * float(q95 - q5) / 4 if not hip
