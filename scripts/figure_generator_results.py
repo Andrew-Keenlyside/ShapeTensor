@@ -67,11 +67,19 @@ for seed in seeds:
     cen = torch.stack([px[keep] % 64, px[keep] // 64], -1).cpu().numpy()
     T6 = (Vo[keep] / Wo[keep][:, None]).cpu().numpy(); shk = share[keep].cpu().numpy()
     img0 = (d["image"].float() / 255)[z0].cpu().numpy(); img3 = (d3["image"].float() / 255)[z0].cpu().numpy()
-    rows.append((seed, d["record"].get("modality"), d["record"].get("matrix"), img0, img3, role_map.reshape(64, 64, 3).clip(0, 1), cen, T6, shk))
+    # the ideal single vector: each voxel's total ODF (every object's ellipse, weighted by its material), its main axis
+    Wv = torch.zeros(64 * 64, device=dev).index_add_(0, pix, w[sl]); Vv = torch.zeros(64 * 64, 6, device=dev).index_add_(0, pix, v[sl][:, :6])
+    t6 = Vv / Wv.clamp_min(1e-9)[:, None]
+    M = torch.stack([torch.stack([t6[:, 0], t6[:, 3], t6[:, 4]], -1), torch.stack([t6[:, 3], t6[:, 1], t6[:, 5]], -1), torch.stack([t6[:, 4], t6[:, 5], t6[:, 2]], -1)], -2)
+    ev, E = torch.linalg.eigh(M.double()); ev = ev.float(); ax_ = E[:, :, 2].float()                # (z, y, x) main axis
+    cl = ((ev[:, 2] - ev[:, 1]) / ev[:, 2].clamp_min(1e-9)).clamp(0, 1) * (Wv > 0.05)
+    dec = ax_[:, [2, 1, 0]].abs() * (Wv > 0.05)[:, None]                                            # R = x, G = y, B = z
+    dec_raw = dec.view(64, 64, 3).cpu().numpy(); dec_w = (dec * cl[:, None]).view(64, 64, 3).cpu().numpy()
+    rows.append((seed, d["record"].get("modality"), d["record"].get("matrix"), img0, img3, role_map.reshape(64, 64, 3).clip(0, 1), cen, T6, shk, dec_raw, dec_w))
     SC._scene_cache().clear(); torch.cuda.empty_cache(); print(seed, "ok", d["record"].get("modality"), d["record"].get("matrix"), flush=True)
 
-fig, axs = plt.subplots(len(rows), 4, figsize=(17, 4.4 * len(rows))); axs = np.atleast_2d(axs)
-for r_, (seed, mod, mat, img0, img3, rm, cen, T6, shk) in enumerate(rows):
+fig, axs = plt.subplots(len(rows), 6, figsize=(25.5, 4.4 * len(rows))); axs = np.atleast_2d(axs)
+for r_, (seed, mod, mat, img0, img3, rm, cen, T6, shk, dec_raw, dec_w) in enumerate(rows):
     norm = lambda x: np.clip((x - np.percentile(x, 1)) / max(np.percentile(x, 99) - np.percentile(x, 1), 1e-6), 0, 1)
     axs[r_, 0].imshow(norm(img0), cmap="gray"); axs[r_, 0].set_title(f"seed {seed}: clean render ({mod}; matrix {', '.join(mat or [])})", fontsize=9)
     axs[r_, 1].imshow(norm(img3), cmap="gray"); axs[r_, 1].set_title(f"same scene, strength {STR:g}", fontsize=9)
@@ -80,6 +88,8 @@ for r_, (seed, mod, mat, img0, img3, rm, cen, T6, shk) in enumerate(rows):
     if len(cen):
         draw_tensors(axs[r_, 3], cen, T6, 0.62 * STEP, view="z", scale=np.sqrt(shk))
     axs[r_, 3].set_title(f"target per voxel: the {TOP} objects with most material, each its own ellipse", fontsize=9)
+    axs[r_, 4].imshow(np.clip(dec_raw, 0, 1)); axs[r_, 4].set_title("ideal single vector: main axis of each voxel's total ODF\n(DEC, R x, G y, B z; unweighted)", fontsize=9)
+    axs[r_, 5].imshow(np.clip(dec_w, 0, 1)); axs[r_, 5].set_title("the same, brightness = line-ness\n(isotropic background dark)", fontsize=9)
     for a_ in axs[r_]:
         a_.set_xticks([]); a_.set_yticks([]); a_.set_xlim(-0.5, 63.5); a_.set_ylim(63.5, -0.5)
 fig.suptitle("Generator: scenes built of objects (foreground over a matrix over a ground), each object with its own ODF", fontsize=12)
