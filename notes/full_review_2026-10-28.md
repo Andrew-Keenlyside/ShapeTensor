@@ -376,3 +376,30 @@ trained with cross-entropy against the un-mixed geometric target (no visibility 
 over uniform, calibration, and axis error where confident; a HiP-CT-only nuisance profile as the main difficulty.
 AxonSynth (MICCAI-W 2026, AGPL) is light-sheet segmentation; its geometry engine synthspline (MIT) could give an
 independent synthetic test set and analytic-tangent ODF targets; its min-contrast rule is a precedent for capping difficulty.
+
+## 29 Oct evening: the cross-entropy density, first figures (short tests from here on)
+
+Pilot M (cross-entropy density, no structure tensor anywhere, HiP-CT profile, 1200 steps from J6), scored on 48 held-out
+full-strength crops of the same profile, gain over uniform in nats:
+
+| method | all | visible line | crossing core | invisible line | no line |
+|---|---|---|---|---|---|
+| structure tensor (fitted) | 0.201 | 0.653 | 0.081 | -0.063 | 0.078 |
+| pilot M | 0.307 | 0.855 | 0.138 | 0.061 | 0.095 |
+| oracle | 1.172 | 1.726 | 0.954 | 1.337 | 0.571 |
+
+Phantoms (`scripts/eval_phantoms.py`, texture 0.25 / 0.5 / 1.0):
+- **Bundle axis error:** M 15 / 12 / 7 deg against the tensor's 34 / 14 / 9.
+- **90 deg crossings, both axes within 15 deg:** M 4 / 20 / 45 %; the tensor 0 % by construction.
+- **Fibre-free texture:** M's median peak/mean is 1.5 against the tensor's 1.1, so it claims orientation where none exists.
+
+On the universal generator, which it never saw, M is poor:
+- below the tensor at strength 1.0;
+- hedged blobs on MRI-like crops, confident lobes on pure-noise cryo-ET.
+
+Figures: `scripts/figure_odf_glyphs.py` (synthetic and phantoms), `scripts/figure_training_variety.py` (contact sheets).
+
+The generator gap the figures show: training content is mostly clean, separable objects. Real data, as the user puts it,
+is often "oriented noise at various scales" with confounding gradients. An oriented-texture-field family is being
+added. The next step is a short test (at most 30 min): train from M on the universal generator plus that family, then
+the same four figures (training sheet, synthetic glyphs, phantoms, HiP-CT), before anything longer.
