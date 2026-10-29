@@ -1514,11 +1514,12 @@ def _nuisance_once(s: Sample, seed: int = 0, device="cuda", strength: float = 1.
         lo, hi = _quantile(img, 0.001), _quantile(img, 0.999); rng = max(hi - lo, 1e-3)
         x = ((img - lo) / rng).clamp(0, 1); x0 = x
         if onx("fold_lut"):
-            f = u(1.0, 1.0 + 3.0 * sg); ph = u(0, 2 * math.pi); w = u(0.5, 1.0)
+            f = u(1.0, 1.0 + 3.0 * sg); ph = u(0, 2 * math.pi); w = u(0.5, 1.0) * sg             # (29 Oct: its weight by the strength too)
             x = w * (0.5 + 0.5 * torch.sin(2 * math.pi * f * x + ph)) + (1 - w) * x; rec["fold_lut"] = (round(f, 2), round(w, 2))
         if onx("local_reversal"):
             m_ = gaussian(x, lu(3, 12)); fld = torch.tanh(u(1, 4) * smooth_noise((A, B, C), lu(8, 30), g, device))
-            x = m_ + fld * (x - m_); rec["local_reversal"] = True
+            fld = 1 - sg * (1 - fld)                                                             # (29 Oct: by the strength, as every
+            x = m_ + fld * (x - m_); rec["local_reversal"] = True                                # destructive nuisance; was full at any)
         if onx("clip"):
             a_, b_ = u(0, 0.3 * sg), u(0, 0.3 * sg); x = x.clamp(_quantile(x, a_), _quantile(x, 1 - b_)); rec["clip"] = (round(a_, 2), round(b_, 2))
         if onx("posterise"):

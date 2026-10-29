@@ -2436,7 +2436,9 @@ class Scene:
         r = self.r; dev = self.device
         rf = max(min(r.lu(0.1, 1.5) / self.voxel_um, min(self.shape) / 16), r_min)               # nm scenes: a neurite fills the view, no wider
         L = r.lu(20, 200) / self.voxel_um
-        if vox or (fill is not None and L < 3):                                                 # in voxels: fibrils or micro-fascicles
+        if vox:                                                                                 # the ground: fibrils wide and long enough
+            rf = max(r.lu(0.35, 0.5), r_min); L = r.lu(40, 80)                                  # to fill the canvas evenly within the cap
+        elif fill is not None and L < 3:                                                        # a matrix at coarse voxels: micro-fascicles
             rf = max(r.lu(0.15, 0.45), r_min); L = r.lu(8, 40)
         if L < 3:
             return None
