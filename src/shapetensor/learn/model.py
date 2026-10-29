@@ -367,7 +367,7 @@ class EntityDecoder(nn.Module):
             nn.init.zeros_(self.pop[-1].weight); nn.init.zeros_(self.pop[-1].bias)
         if self.pop_k and self.pop_dir:
             assert self.odirect, "pop_dir reads the direct path (odirect)"
-            self.pop_u = nn.Sequential(nn.Linear(hidden + 32, 128), nn.SiLU(), nn.Linear(128, 128), nn.SiLU(), nn.Linear(128, self.pop_k))
+            self.pop_u = nn.Sequential(nn.Linear(hidden + 32 + (64 if self.oprobe else 0), 128), nn.SiLU(), nn.Linear(128, 128), nn.SiLU(), nn.Linear(128, self.pop_k))
             nn.init.zeros_(self.pop_u[-1].weight); nn.init.zeros_(self.pop_u[-1].bias)               # (uniform weights: isotropic at the start)
             self.register_buffer("pop_u_dirs", fib_hemisphere(self.pop_dir), persistent=False)
         self.dens_ce = bool(dens_ce); self.ce_no_st = bool(ce_no_st)                         # (no structure tensor: neither term nor cues)
@@ -544,7 +544,13 @@ class EntityDecoder(nn.Module):
             pu = None
             if getattr(self, "pop_dir", 0):
                 U = self.pop_quadrature(points.shape[0], points.device)                              # (B, N, 3)
-                pu = (U, torch.stack([self.od_code(ovs[b], self.od_weights(U[b])) for b in range(points.shape[0])]))
+                cu = torch.stack([self.od_code(ovs[b], self.od_weights(U[b])) for b in range(points.shape[0])])
+                if getattr(self, "oprobe", False):                                                   # and the learned probe along each
+                    Q_, N_ = points.shape[1], U.shape[1]
+                    ou = torch.stack([self.oprobe_feats(feats, points[b][:, None].expand(-1, N_, -1).reshape(-1, 3), U[b][None].expand(Q_, -1, -1).reshape(-1, 3), b).view(Q_, N_, -1)
+                                      for b in range(points.shape[0])])
+                    cu = torch.cat([cu, ou.to(cu.dtype)], -1)
+                pu = (U, cu)
             out.update(self.populations(p, pu))
         if getattr(self, "dens_ce", False) and j6 is not None:                                    # the normalised density on the grid
             ce = [self.ce_density(p[b], ovs[b] if ovs is not None else None, j6[b], sigma[b]) for b in range(p.shape[0])]

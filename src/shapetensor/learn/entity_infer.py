@@ -200,7 +200,11 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
         if getattr(dec, "pop_k", 0):                                                                # the populations (pop_k)
             pu = None
             if getattr(dec, "pop_dir", 0):
-                U = dec.pop_quadrature(1, p.device)[0]; pu = (U, dec.od_code(ovp, dec.od_weights(U)))
+                U = dec.pop_quadrature(1, p.device)[0]; cu = dec.od_code(ovp, dec.od_weights(U))
+                if getattr(dec, "oprobe", False):
+                    ou = dec.oprobe_feats(feats, (p - off)[:, None].expand(-1, U.shape[0], -1).reshape(-1, 3), U[None].expand(n, -1, -1).reshape(-1, 3))
+                    cu = torch.cat([cu, ou.view(n, U.shape[0], -1).to(cu.dtype)], -1)
+                pu = (U, cu)
             full.update(dec.populations(enc, pu))
         if getattr(dec, "dens_ce", False) and j6 is not None:                                       # the normalised density (dens_ce)
             ce = dec.ce_density(enc, ovp, j6, s, dirs=dirs)
