@@ -475,3 +475,32 @@ the window, against the every-slot-present answer.
   - `--probe-scale`: the probe's offsets follow the window;
   - `--e-line`: a line-stratified share of queries;
   - evaluation at extra windows (`WINDOWS`) and duplicate-slot pairs.
+- **11:10-12:10** **Sequential-slot variants**, 8-crop test (`scripts/replicate_pops.py`, 300 steps, cube-transformed):
+
+  | variant | line axis | crossings found | duplicate pairs / query | existence |
+  |---|---|---|---|---|
+  | mode 1 (claims u^T T u) | 18.3 deg | 10 % | 0.07 | learns |
+  | mode 2, free matching | 14.7 deg | 23 % | 0.01 | stuck at 0.69 (pilot P4a) |
+  | mode 2, rank order (tie 0.1) | 23.6 deg | 3 % | 1.04 | learns |
+  | mode 2, rank order (tie 0.3) | 19.5 deg | 14 % | 0.16 | learns |
+  | mode 2, soft (share x 4) | diverged | | | |
+  | **mode 3, free matching** | **15.9 deg** | **19 %** | **0.02** | from share |
+
+  - **Mode 2 with free matching, existence stuck.** The early stick-breaking shares are alike, so matching is by
+    ellipse alone. Which slot gets a target is then unpredictable, so per-slot existence can only learn the mean, and
+    the background took 0.78 of the window (true 0.64).
+  - **Rank order makes slots hedge.** With near-equal top shares, the best squared-loss answer is their average in
+    both slots, which is duplication.
+  - **Mode 3** removes the existence output: a slot exists when its share passes 3 %.
+- **11:00-11:50** **Tests: the 16 failures triaged.**
+  - **7 new, from the generator changes.** Six were tests written before the per-object semantics or the
+    visible-strand knob, and were updated. One was a real bug: `curves_like` without a generator.
+  - **9 older (failing before 28 Oct).**
+    - Updated to the approved semantics: blobs (shape, not isotropic material); vessel walls (sheets); entity totals
+      (without interface sheets).
+    - Expected failures, with reasons: the legacy lattice generator's saturation and face fall-off; the lattice
+      cells' 0.55-voxel offset; tortuosity capped by the no-folding limit.
+- **12:09** Queue (`scripts/pilot_queue.sh`):
+  - **P4:** mode 3, free matching.
+  - **P5:** P4 + bank widths 0.6/1.5/3, learned probe fields scaled by the window, 30 % line-stratified queries.
+  - Two pilots cannot share the 48 GB card: validation draws fell back to the CPU.
