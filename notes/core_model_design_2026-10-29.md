@@ -1,5 +1,11 @@
 # Core model design (29 Oct 2026)
 
+**Scope.** ShapeTensor is a general computer-vision model. It maps any array of intensities to a separable latent from
+which object-specific orientations, and groupings of objects at any size, can be read. It is not a biology model. The lab
+applies it to welds, materials and non-biological fibres as well as tissue. Biological images, HiP-CT above all, are the
+primary *test*, not the scope. Training data is built "like the world": natural image histograms, smooth flowing curves,
+objects and their groupings. The loss is only ever computed on synthetic images. Real images are used only for validation.
+
 The agreed core, after a day of density pilots that failed for structural reasons (see
 `full_review_2026-10-28.md`, the structural-review section). The guiding rules: **established methods only**
 (SynthSeg / anatomix-style domain randomisation, DETR-style set prediction, proper scoring rules); **targets from
@@ -65,7 +71,23 @@ existence probability or a high isotropic fraction. Targets are smoothed with th
 - **Instance embedding:** a discriminative pull/push loss across the queries of a crop (De Brabandere et al. 2017).
 - No gates, no readout tricks, no curricula beyond a standard warm-up.
 
-## Data (SynthSeg-style)
+## Data (SynthSeg-style, deliberately broad)
+
+The generator must keep widening, in geometry and in corruption. The current modality and artefact list (X-ray / CT,
+EM, MRI, light microscopy, ...) is a proof of concept for teams in those fields, not an exhaustive list.
+
+- **Geometry already in place:** bundles, trees, networks, helices, sheets, foams, porous media, cells, crystals, radial
+  forms, plywood layering, lattices, honeycombs, jigsaws, and compositional populations (about half of all draws).
+- **Geometry to add, materials:**
+  - weld microstructure: columnar and dendritic grains growing from a fusion boundary, and orientation fields across a
+    heat-affected zone;
+  - fibre-reinforced composites: unidirectional and woven tows, laminates with ply angles, short-fibre composites with
+    random orientation distributions;
+  - polycrystalline grain maps with texture;
+  - cracks, voids and wood.
+- **Corruptions to add:** speckle (ultrasound, OCT), beam hardening, scatter and metal streaks (CT), photon-starvation
+  streaks, dead and hot pixels, compression artefacts, motion blur, stitching seams, resampling artefacts, quantisation,
+  saturation and clipping, and non-stationary noise.
 
 - **Geometry:** the scene generator (bundles, packed fibres, vessels, sheets, blobs, crossings, fanning), plus fibres
   from synthspline (MIT licence) through an adapter. Every object carries an instance id and a class. Orientations are
@@ -76,7 +98,18 @@ existence probability or a high isotropic fraction. Targets are smoothed with th
 - **Contrast (extra):** the physics renderers (X-ray phase contrast, EM, light sheet and others, including the HiP-CT
   profile) are used as random alternative renderings in some of the crops.
 
-## Evaluation
+## Evaluation (what adoption will be judged on)
+
+1. **Phantoms with known truth where the structure tensor fails and the model succeeds:**
+   - crossings at 30-90 deg;
+   - parallel structures closer than the tensor's window;
+   - curving and fanning;
+   - low-contrast texture;
+   - sheets against lines;
+   - fine fibres inside bundles, read at several grouping scales.
+2. **HiP-CT against paired diffusion MRI** of the same specimens, at matched scale (validation outside training).
+
+Also:
 
 - **Synthetic hold-outs** from our generator and from synthspline. Report per class and per instance:
   - the ODF cross-entropy gain over uniform;
