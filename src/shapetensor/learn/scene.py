@@ -39,8 +39,8 @@ import torch
 import torch.nn.functional as Fn
 
 from ..filters import gaussian
-from .generator import (Layer, Sample, _composite, background, eye6, layer_density, line_tensor, nuisance, render_layer,
-                        sheet_tensor, smooth_noise)
+from .generator import (Layer, Sample, _composite, background, companion_field, direction_field, eye6, layer_density, line_tensor,
+                        nuisance, render_layer, sheet_tensor, smooth_noise)
 from .physics import BY_MODALITY as PHYS_BY_MODALITY, MODES as PHYS_MODES, _to_grey, draw_material, draw_sequence, form_image
 
 
@@ -739,11 +739,13 @@ FAMILY_SCALE = {"bundle": (0.005, 200), "tree": (0.5, 3000), "network": (0.3, 10
                 "plywood": (0.01, 20), "fascicles": (0.5, 500), "trabecular": (2, 1000), "tubules": (0.3, 30), "epithelium": (0.1, 15),
                 "dendrite": (0.05, 10), "gland": (0.5, 60), "neuron": (0.2, 10), "neuropil": (0.005, 30), "organelles": (0.002, 0.3),
                 "compartments": (0.002, 0.2), "myelin": (0.003, 1.0), "nuclei": (0.005, 3), "myofibrils": (0.005, 1.0), "alveoli": (1, 500),
-                "jigsaw": (0.1, 5), "honeycomb": (0.05, 30), "xylem": (0.5, 60), "lattice": (0.05, 50), "organs": (100, 5000), "granules": (0.01, 60), "tissue": (0.05, 200)}
+                "jigsaw": (0.1, 5), "honeycomb": (0.05, 30), "xylem": (0.5, 60), "lattice": (0.05, 50), "organs": (100, 5000), "granules": (0.01, 60), "tissue": (0.05, 200),
+                "texture": (1e-4, 1e5)}           # oriented texture: at every scale
 SCALE_FALLOFF = 0.6               # decades: the width of the fall-off outside a family's range (a Gaussian in log10 voxel size)
 SCALE_FLOOR = 0.02                # never zero: a family out of its range still turns up now and then (generalisation)
 P_UNRESOLVED_TEXTURE = 0.85       # unresolved bundles drawn with strand texture (the rest a smooth partial-volume tube)
 P_TORTUOUS = 0.25                 # bundles whose path meanders on a short correlation length (5-15 voxels; curvature 0.03-0.08 / voxel)
+TEXTURE_MAX_STRANDS = 60_000      # the texture family's strands per population (cost: ~S x this points splatted)
 P_TISSUE = 0.5                    # scenes of packed tissue (Scene.tissue: fibres wall to wall), where the voxel size suits
 P_GREY_TISSUE = 0.25              # of those, grey-matter-like (sparse turning fibres among dense cells and neuropil)
 P_NARROW = 0.5                    # crossing angles drawn at 8-40 deg (else 5-90): narrow crossings oversampled
@@ -789,7 +791,8 @@ class Scene:
                 "tubules": 0.04, "epithelium": 0.03, "dendrite": 0.02, "gland": 0.02, "neuron": 0.03, "neuropil": 0.03,
                 "organelles": 0.05, "compartments": 0.05, "myelin": 0.04, "nuclei": 0.04, "myofibrils": 0.03, "alveoli": 0.03,
                 "jigsaw": 0.02, "honeycomb": 0.03, "xylem": 0.02, "lattice": 0.03, "organs": 0.05, "granules": 0.04,
-                "compose": 1.5}                    # compositional populations (learn/compose.py): about half of all populations
+                "compose": 1.5,                    # compositional populations (learn/compose.py): about half of all populations
+                "texture": 1.0}                    # oriented texture fields (29 Oct): ~25 % of the populations
 
     def __init__(self, shape, seed: int, device="cuda", voxel_um: float | None = None, content: str = "general"):
         self.shape = tuple(shape); self.device = device; self.r = Rng(seed, device); self.seed = seed
@@ -2203,6 +2206,115 @@ class Scene:
         frac = ((Mc & cov[None]).flatten(1).sum(1).float() / vol).tolist()
         return torch.cat([pad(p_) for p_ in paths]), torch.cat(pids), frac
 
+    # ---- oriented texture fields (29 Oct): orientation as a statistical property of a dense texture
+    def _texture_field(self) -> torch.Tensor:
+        """A smooth orientation field ``(3, Z, Y, X)``: 1-4 control directions at random points blended by Gaussian
+        weights (signs aligned to the first), plus a random smooth warp of the directions."""
+        r = self.r; dev = self.device; shp = self.shape
+        X = torch.stack(torch.meshgrid(*(torch.arange(n, device=dev, dtype=torch.float32) for n in shp), indexing="ij"), 0)
+        K = r.i(1, 4); w = r.lu(20, 80); d0 = r.unit(); v = torch.zeros((3,) + shp, device=dev)
+        for k in range(K):
+            c = r.rand(3) * torch.tensor(shp, device=dev, dtype=torch.float32); d = d0 if k == 0 else r.unit()
+            d = d if float(d @ d0) >= 0 else -d
+            v += torch.exp(-0.5 * ((X - c.view(3, 1, 1, 1)) ** 2).sum(0) / w ** 2)[None] * d.view(3, 1, 1, 1)
+        v = v / v.norm(dim=0, keepdim=True).clamp_min(1e-6)
+        a = r.u(0.0, 0.7)                                                                        # the warp of the directions
+        if a > 0:
+            v = v + a * direction_field(shp, r.lu(8, 40), r.g, dev)
+        return v / v.norm(dim=0, keepdim=True).clamp_min(1e-6)
+
+    def _trace(self, seeds: torch.Tensor, f: torch.Tensor, delta: torch.Tensor, h: float, S: int) -> torch.Tensor:
+        """Streamlines ``(N, S, 3)`` through ``seeds (N, 3)`` along the field ``f (3, Z, Y, X)`` (both ways, step ``h``),
+        each strand's direction offset by its own ``delta (N, 3)`` (its dispersion about the field)."""
+        sz = torch.tensor(self.shape, device=seeds.device, dtype=torch.float32)
+        def at(q):
+            g = (2 * q / (sz - 1).clamp_min(1) - 1).flip(-1).view(1, 1, 1, -1, 3)
+            return Fn.grid_sample(f[None], g, mode="bilinear", padding_mode="border", align_corners=True)[0, :, 0, 0].T
+        half = (S - 1) // 2; out = [seeds]
+        for sgn in (1.0, -1.0):
+            q = seeds.clone(); prev = None; pts = []
+            for _ in range(half if sgn > 0 else S - 1 - half):
+                d = at(q) + delta
+                d = d / d.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+                if prev is None:
+                    d = d * sgn
+                else:
+                    d = torch.where(((d * prev).sum(-1, keepdim=True) < 0), -d, d)
+                q = q + h * d; prev = d; pts.append(q)
+            if sgn > 0:
+                out = out + pts
+            else:
+                out = pts[::-1] + out
+        return torch.stack(out, 1)
+
+    def _texture_population(self, f: torch.Tensor, mask: torch.Tensor, rec: dict):
+        """One texture population: strands (width 0.5-4 voxels, elongation 2-20 -- at least 4 voxels long --, per-strand
+        dispersion 2-15 deg (a per-strand direction offset of that rms per component), random
+        packing) traced along ``f`` from seeds in ``mask``, splatted as a field (:meth:`_strand_field`); one object,
+        its tensor the strands' own directions (the field plus their dispersion)."""
+        r = self.r; dev = self.device; shp = self.shape
+        width = r.lu(0.5, 4.0); re = width / 2; elong = r.lu(2, 20)
+        L = max(4.0, min(width * elong, 0.5 * max(shp))); phi = r.lu(0.03, 0.6); spread = math.radians(r.lu(2, 15))   # (shorter than ~4
+                                                                                                 # voxels a strand renders as a blob)
+        vol = float(mask.sum())
+        if vol < 64:
+            return None
+        per = math.pi * re * re * L
+        N = int(max(20, min(TEXTURE_MAX_STRANDS, phi * vol / per)))
+        h = max(0.5, L / 24); S = max(3, int(round(L / h)) + 1)
+        idx = torch.nonzero(mask > 0.5)
+        if idx.shape[0] == 0:
+            return None
+        seeds = idx[torch.randint(0, idx.shape[0], (N,), generator=r.g, device=dev)].float() + r.rand(N, 3) - 0.5
+        delta = spread * r.randn(N, 3)
+        P = self._trace(seeds, f, delta, h, S)
+        dens = (phi * vol / (N * per)) * torch.exp(0.3 * r.randn(N)).clamp(0.3, 3.0)
+        dens = dens.clamp(0.02, 0.7)                                                             # (a blurred strand's peak ~1.4 dens)
+        occ_s, ten_s = self._strand_field(P, re, dens)
+        T = torch.where((occ_s > 1e-6)[None], ten_s / occ_s.clamp_min(1e-6)[None], line_tensor(f.movedim(0, -1)).movedim(-1, 0))
+        T = T / T[:3].sum(0, keepdim=True).clamp_min(1e-6)
+        occ = occ_s * mask
+        q99 = float(torch.quantile(occ[mask > 0.5][:: max(1, int((mask > 0.5).sum()) // 200_000)], 0.99)) if bool((mask > 0.5).any()) else 0.0
+        if q99 > 0.9:
+            occ = occ * (0.9 / q99)
+        occ = occ.clamp(0, 1)
+        on = (occ > 1e-4).float(); desc = torch.zeros((5,) + shp, device=dev); desc[0] = re * on
+        contrast = self.contrast(5, 100); oid = self.ids(1, max(re, 0.25))
+        rec.setdefault("pops", []).append({"width": round(width, 2), "elong": round(elong, 1), "phi": round(phi, 3), "spread_deg": round(math.degrees(spread), 1),
+                                           "strands": N, "contrast": round(contrast, 1)})
+        g = Group("texture", "line", re, contrast, dense=[(occ, T, desc, contrast, torch.full(shp, int(oid[0]), device=dev, dtype=torch.long))])
+        return g
+
+    def texture(self):
+        """Oriented texture fields: orientation as a statistical property of a dense, fibre-like texture -- a smooth
+        orientation field (control directions, smooth interpolation, a random warp), strands of 0.5-4 voxels and
+        elongation 2-20 along it with their own dispersion, packing from clear to barely above the background; over
+        the whole crop or a region; sometimes 2-3 superposed fields at 35-90 degrees (one population each: two or three
+        lobes), sometimes a field turning sharply across a boundary (two populations, complementary masks). Each field is
+        one population with one object: its target is the strands' own direction distribution."""
+        r = self.r; dev = self.device; shp = self.shape
+        region = torch.ones(shp, device=dev)
+        if r.p(0.5):                                                                            # a region, not the whole canvas
+            region = (smooth_noise(shp, r.lu(15, 50), r.g, dev) > r.u(-0.8, 0.5)).float()
+            region = gaussian(region, 1.0)
+        d1 = self._texture_field(); rec = {}
+        u_ = r.u(0, 1)
+        if u_ < 0.35:                                                                           # superposed fields
+            k = 2 if r.p(0.7) else 3
+            fields = [d1] + [companion_field(d1, r.u(35, 90), r.lu(15, 60), r.g, dev) for _ in range(k - 1)]
+            masks = [region] * k; rec["mode"] = f"superposed{k}"
+        elif u_ < 0.55:                                                                         # a sharp turn across a boundary
+            d2 = companion_field(d1, r.u(30, 90), r.lu(15, 60), r.g, dev)
+            X = torch.stack(torch.meshgrid(*(torch.arange(n, device=dev, dtype=torch.float32) for n in shp), indexing="ij"), 0)
+            c = self.centre_point(); nrm = r.unit()
+            sd = ((X - c.view(3, 1, 1, 1)) * nrm.view(3, 1, 1, 1)).sum(0) + r.u(0, 8) * smooth_noise(shp, r.lu(10, 40), r.g, dev)
+            m = torch.sigmoid(sd / 0.7); fields = [d1, d2]; masks = [region * m, region * (1 - m)]; rec["mode"] = "boundary"
+        else:
+            fields, masks = [d1], [region]; rec["mode"] = "single"
+        out = [g for g in (self._texture_population(f_, m_, rec) for f_, m_ in zip(fields, masks)) if g is not None]
+        self.record["families"].append({"texture": rec})
+        return out or None
+
     def neuropil(self):
         """Neuropil: dense, short, tortuous thin fibres (axons and dendrites, 0.1-1.5 um radius) in random directions and
         small somata (3-8 um), filling the canvas -- resolvable at a micron or two, partial-volume texture at 20 um;
@@ -2960,6 +3072,8 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     log2(1 + size), relative wall, lumen fraction, flattening, angularity), ``desc_um``, ``points`` (branch points,
     endpoints), ``recoverability``, ``parents``, the voxel size and the physics."""
     sid = seed // max(1, crops_per_scene) if scene_seed is None else int(scene_seed)            # ``scene_seed``: another crop of that scene
+    if profile == "hipct":                                                    # the HiP-CT profile: no oriented-texture family (29 Oct)
+        families = {**(families if families is not None else {**Scene.FAMILIES, "tissue": 1.0}), "texture": 0.0}
     if profile == "hipct" and p_warp == 0.6 and p_affine == 0.5:              # the HiP-CT profile keeps the deformation of before
         p_warp, p_affine = 0.5, 0.3                                           # 29 Oct (the defaults' widening is the universal path's)
     sc, ren, bgp, st = render_scene((canvas,) * 3, 7_000_000 + sid, device, voxel_um, families, n_groups, layout_p, content, style, underlay_p, cross_p, deep_tree, dense_p,

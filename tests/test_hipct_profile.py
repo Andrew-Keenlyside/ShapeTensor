@@ -24,6 +24,7 @@ def test_hipct_profile_draws_only_hipct_nuisances(i):
     psf = r["psf"]
     assert len(set(psf)) == 1 and GN.HIPCT_PSF[0] - 1e-6 <= psf[0] <= GN.HIPCT_PSF[1] + 0.01
     assert not [k for k in GN.EXTREME_P if k in r], r                                              # the universal path's wider pool: never here
+    assert not [f for f in r.get("families", []) if "texture" in f], r                             # nor the oriented-texture family
     dfm = r.get("deform")                                                                          # the deformation of before 29 Oct
     if dfm:
         assert set(dfm.get("warp_kinds") or []) <= {"smooth"} and not any(dfm.get("shift") or [])

@@ -23,7 +23,7 @@ import shapetensor.learn.train as TR
 TR.HEAD, TR.SH_EXACT, TR.DESC_KEY, TR.DESC_LMAX, TR.QUERY = "entities", 8, "descriptors5", 0, None; TR.set_background_entity(True)
 TR.ENTITY["p_cross"] = 0.2
 import shapetensor.learn.generator as G
-G.ORIENT_FROM_TEXTURE = True; G.ORIENT_VIS = False
+G.ORIENT_FROM_TEXTURE = True; G.ORIENT_VIS = False; G.TARGETS_FROM_GEOMETRY = os.environ.get("GEOM", "1") == "1"   # targets from construction only
 from shapetensor.learn import scene as SC, entity_infer as EI, lobe_train as LT, bingham as BG, entity_train as ET
 from shapetensor.learn.model import PopulationNet, fib_hemisphere, st_products, st_matrix, window_mean, CE_GRID
 
