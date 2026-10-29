@@ -25,6 +25,8 @@ from odf_render import draw_tensors
 out = sys.argv[1]; seeds = [int(x) for x in sys.argv[2:]]; dev = "cuda"; STR = float(os.environ.get("STRENGTH", 0.3))
 torch.cuda.set_per_process_memory_fraction(float(os.environ.get("MEMFRAC", 0.45)))
 SC.MATRIX_P = 1.0
+if os.environ.get("R_MIN"):
+    TR.ENTITY["r_min"] = float(os.environ["R_MIN"])                                           # the resolution rule's floor (voxels)
 if os.environ.get("MATRIX"):
     SC.MATRIX_TYPES = tuple(os.environ["MATRIX"].split(","))
 gen = LT.difficulty_gen(0.6, dict(canvas=128, crops_per_scene=8, cross_p=0.5, p_centre=0.5, deep_tree=True, fill_quota=SC.FILL_QUOTA))
@@ -88,12 +90,27 @@ for seed in seeds:
     t_iso = ((T6q[:, :3] - 1 / 3).abs().sum(-1) < 0.05)                                            # (isotropic entities, e.g. the ground)
     big = sha > 0.05; on_g = ((pa // 64) % STEP == STEP // 2) & ((pa % 64) % STEP == STEP // 2) & big
     cen = torch.stack([pa[on_g] % 64, pa[on_g] // 64], -1).cpu().numpy(); T6 = T6q[on_g].cpu().numpy(); shk = sha[on_g].cpu().numpy()
-    hue = torch.frac(oa.float() * 0.618034); cols = torch.tensor(plt.cm.hsv(hue.cpu().numpy())[:, :3], device=dev, dtype=torch.float32)
-    lum = torch.where(sha > 0.02, 0.35 + 0.65 * torch.frac(oa.float() * 0.381966), torch.zeros_like(sha))   # (neighbours apart)
-    objcol = torch.zeros(64 * 64, 3, device=dev).index_add_(0, pa, sha[:, None] * cols * lum[:, None]).view(64, 64, 3).cpu().numpy()
-    nobj = torch.zeros(64 * 64, device=dev).index_add_(0, pa, (sha >= 0.02).float()).view(64, 64).cpu().numpy()
+    rcol = lambda ids: torch.tensor(np.stack([np.random.default_rng(int(i) * 7919 + 13).uniform(0.15, 1.0, 3) for i in ids.tolist()]) if len(ids) else np.zeros((0, 3)),
+                                    device=dev, dtype=torch.float32)                                # a random colour per object
+    tree = ctx["tree"]; ent_group = lambda n_: tree.group[n_.clamp(max=tree.n - 1)] * (n_ < tree.n) + (-1) * (n_ >= tree.n)
+    role_of_g = {g_: rl for g_, rl in roles.items()}
+    fg_g = torch.tensor([g_ for g_, rl in role_of_g.items() if rl == "fore"] or [-99], device=dev)
+    # (a) construction: every foreground object as built
+    mfo = torch.isin(grp[sl], fg_g); key_c = obj[sl][mfo] * 4096 + pix[mfo]
+    uc, invc = torch.unique(key_c, return_inverse=True)
+    Wc = torch.zeros(len(uc), device=dev).index_add_(0, invc, w[sl][mfo]); pc, oc = uc % 4096, uc // 4096
+    uo, invo = torch.unique(oc, return_inverse=True); colc = rcol(uo)[invo]
+    cons = torch.zeros(64 * 64, 3, device=dev).index_add_(0, pc, Wc[:, None] * colc)
+    cons = (cons / torch.zeros(64 * 64, device=dev).index_add_(0, pc, Wc).clamp_min(1.0)[:, None]).view(64, 64, 3).cpu().numpy()
+    n_cons = int(len(uo))
+    # (b) training targets: the separate entities at each voxel after the resolution rule, foreground only
+    eg = ent_group(oa); fge = torch.isin(eg, fg_g) & (sha > 0.02)
+    ue, inve = torch.unique(oa[fge], return_inverse=True); cole = rcol(ue)[inve]
+    objcol = torch.zeros(64 * 64, 3, device=dev).index_add_(0, pa[fge], sha[fge][:, None] * cole).view(64, 64, 3).cpu().numpy()
+    n_ent = int(len(ue))
+    nobj = torch.zeros(64 * 64, device=dev).index_add_(0, pa[fge], torch.ones_like(sha[fge])).view(64, 64).cpu().numpy()
     top1 = torch.zeros(64 * 64, device=dev).scatter_reduce_(0, pa, sha, reduce="amax").view(64, 64).cpu().numpy()
-    rows.append((seed, d["record"].get("modality"), d["record"].get("matrix"), img0, img3, role_map.reshape(64, 64, 3).clip(0, 1), cen, T6, shk, dec_raw, dec_w, objcol, nobj, top1))
+    rows.append((seed, d["record"].get("modality"), d["record"].get("matrix"), img0, img3, role_map.reshape(64, 64, 3).clip(0, 1), cen, T6, shk, dec_raw, dec_w, objcol, nobj, (cons, n_cons, n_ent)))
     SC._scene_cache().clear(); torch.cuda.empty_cache(); print(seed, "ok", d["record"].get("modality"), d["record"].get("matrix"), flush=True)
 
 MASS = bool(os.environ.get("MASS"))
@@ -102,11 +119,11 @@ for r_, (seed, mod, mat, img0, img3, rm, cen, T6, shk, dec_raw, dec_w, objcol, n
   if MASS:                                                                                         # the mass targets
     norm = lambda x: np.clip((x - np.percentile(x, 1)) / max(np.percentile(x, 99) - np.percentile(x, 1), 1e-6), 0, 1)
     axs[r_, 0].imshow(norm(img0), cmap="gray"); axs[r_, 0].set_title(f"seed {seed}: clean render ({mod})", fontsize=9)
-    axs[r_, 1].imshow(np.clip(objcol, 0, 1)); axs[r_, 1].set_title("mass targets: every object its own colour,\nbrightness = its share of the voxel", fontsize=9)
-    im_ = axs[r_, 2].imshow(nobj, cmap="viridis", vmin=0, vmax=max(4, float(nobj.max()))); plt.colorbar(im_, ax=axs[r_, 2], fraction=0.046)
-    axs[r_, 2].set_title(f"objects per voxel (share >= 2 %): median {np.median(nobj):.0f}, max {nobj.max():.0f}", fontsize=9)
-    im_ = axs[r_, 3].imshow(top1, cmap="magma", vmin=0, vmax=1); plt.colorbar(im_, ax=axs[r_, 3], fraction=0.046)
-    axs[r_, 3].set_title("the largest object's share of each voxel", fontsize=9)
+    cons, n_cons, n_ent = top1
+    axs[r_, 1].imshow(np.clip(cons, 0, 1)); axs[r_, 1].set_title(f"construction: {n_cons} foreground objects as built,\neach a random colour, brightness = its material", fontsize=9)
+    axs[r_, 2].imshow(np.clip(objcol, 0, 1)); axs[r_, 2].set_title(f"training targets: {n_ent} separate foreground entities\n(after the resolution rule), each a random colour, by share", fontsize=9)
+    im_ = axs[r_, 3].imshow(nobj, cmap="viridis", vmin=0, vmax=max(3, float(nobj.max()))); plt.colorbar(im_, ax=axs[r_, 3], fraction=0.046)
+    axs[r_, 3].set_title(f"foreground entities per voxel (share >= 2 %): max {nobj.max():.0f}", fontsize=9)
     axs[r_, 4].imshow(norm(img0), cmap="gray", alpha=0.35)
     if len(cen):
         draw_tensors(axs[r_, 4], cen, T6, 0.62 * STEP, view="z", scale=np.sqrt(shk))
