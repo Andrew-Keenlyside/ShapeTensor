@@ -396,3 +396,20 @@ def test_ct_scan_streaks_come_from_the_content():
     assert y0.shape == img.shape and float(torch.corrcoef(torch.stack([y0.flatten(), img.flatten()]))[0, 1]) > 0.85
     rec = {}; y1 = scan(img.clone(), Rng(2, DEV), rec, 1.0)
     assert torch.isfinite(y1).all() and "ct_scan" in rec
+
+
+def test_thin_fibres_splatted_keep_their_volume_and_orientation(monkeypatch):
+    """A sub-voxel fibre splatted along its centreline (fast path) holds the swept fibre's material and orientation."""
+    from shapetensor.learn import scene as SC_
+    S = 120; xs = torch.linspace(4, 60, S, device=DEV)
+    P = torch.stack([torch.full_like(xs, 32.0), 32 + 6 * torch.sin(xs / 9), xs], -1)[None]
+    out = {}
+    for name, thr in (("thin", 1.0), ("swept", 0.0)):
+        monkeypatch.setattr(SC_, "THIN_SPLAT_R", thr)
+        c = SC_.curves_like(P, torch.full((1, S), 0.4, device=DEV), SC_.Rng(0, DEV), obj=torch.tensor([1], device=DEV), seg=torch.tensor([1], device=DEV), contrast=50.0)
+        cv = SC_.Canvas((64, 64, 64), DEV); SC_.render_curves(cv, c); out[name] = cv.finish()
+    va, vb = float(out["thin"]["occupancy"].sum()), float(out["swept"]["occupancy"].sum())
+    assert abs(va - vb) / vb < 0.05, (va, vb)
+    m = out["thin"]["occupancy"] > 0.05
+    ta, tb = out["thin"]["tensor"][:, m].T.float(), out["swept"]["tensor"][:, m].T.float()
+    assert float((ta - tb).abs().max()) < 0.1

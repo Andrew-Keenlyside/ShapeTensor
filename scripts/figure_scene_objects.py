@@ -3,7 +3,8 @@ the objects holding the most material in one slice, each object alone -- its mat
 its own elliptical ODF there -- then all objects together, the scene's per-voxel target (every object's ellipse at the
 voxel, scaled by its share of the voxel's material) and the clean render. Synthetic only.
 
-    PYTHONPATH=src python scripts/figure_scene_objects.py OUT.png [SEED] [N_OBJECTS]   (env LEVEL, STRENGTH)
+    PYTHONPATH=src python scripts/figure_scene_objects.py OUT.png [SEED] [N_PANELS]   (env LEVEL, STRENGTH; MATRIX=neuropil,cells:
+    scenes with a matrix of those kinds; BY_POP=1: one panel per population, every object's own ellipse at each voxel)
 """
 import os
 import sys
@@ -24,6 +25,9 @@ from odf_render import draw_tensors
 
 out = sys.argv[1]; seed = int(sys.argv[2]) if len(sys.argv) > 2 else 210_000_000; NOBJ = int(sys.argv[3]) if len(sys.argv) > 3 else 7
 dev = "cuda"; LEV = float(os.environ.get("LEVEL", 0.6))
+if os.environ.get("MATRIX"):
+    SC.MATRIX_P = 1.0; SC.MATRIX_TYPES = tuple(os.environ["MATRIX"].split(",")); SC.MATRIX_TWO_P = 1.0 if "," in os.environ["MATRIX"] else 0.0
+BY_POP = bool(os.environ.get("BY_POP"))
 torch.cuda.set_per_process_memory_fraction(float(os.environ.get("MEMFRAC", 0.3)))
 gen = LT.difficulty_gen(LEV, dict(canvas=128, crops_per_scene=8, cross_p=0.5, p_centre=0.5, deep_tree=True, fill_quota=SC.FILL_QUOTA))
 s, d = SC.draw_scene((64,) * 3, seed=seed, device=dev, strength=float(os.environ.get("STRENGTH", 0.0)), entity_ctx=True, **gen)
@@ -52,6 +56,23 @@ def obj_fields(mask):
     return W.view(64, 64), V.view(64, 64, 6)
 
 
+def table(mask):
+    """Every (object, voxel) of the slice among the entries in ``mask``: voxel (n,), object (n,), material (n,), tensor sum (n, 6)."""
+    m = mask & sl; pix = P[m, 1] * 64 + P[m, 2]; key = obj[m] * 4096 + pix
+    u, inv = torch.unique(key, return_inverse=True)
+    W = torch.zeros(len(u), device=dev).index_add_(0, inv, w[m]); V = torch.zeros(len(u), 6, device=dev).index_add_(0, inv, v[m, :6])
+    return u % 4096, u // 4096, W, V
+
+
+def table_glyphs(ax, mask, step, Wtot):
+    """Each object's own ellipse at the grid voxels, scaled by its share of the voxel's material ``Wtot (64 * 64,)``."""
+    pix, o_, W, V = table(mask)
+    y, x = pix // 64, pix % 64; on = (y % step == step // 2) & (x % step == step // 2) & (W > 0.02)
+    if bool(on.any()):
+        sh = (W[on] / Wtot[pix[on]].clamp_min(1e-6)).clamp(0, 1)
+        draw_tensors(ax, torch.stack([x[on], y[on]], -1).cpu().numpy(), (V[on] / W[on][:, None]).cpu().numpy(), 0.62 * step, view="z", scale=sh.sqrt().cpu().numpy())
+
+
 def name_of(o):
     g_ = int(grp[obj == o][0]); L = layers[gl[g_]] if 0 <= g_ < len(gl) and gl[g_] < len(layers) else None
     return f"{getattr(L, 'name', None) or (L.role if L else '?')} ({L.kind if L else '?'})"
@@ -69,28 +90,41 @@ def glyphs(ax, W, V, step=2, share=None):
 ncol = max(NOBJ, 3) + 0
 fig, axs = plt.subplots(2, max(NOBJ, 4), figsize=(4.2 * max(NOBJ, 4), 8.8)); axs = np.atleast_2d(axs)
 img = (d["image"].float() / 255)[z0].cpu().numpy()
-for j, o in enumerate(top):
+if BY_POP:                                                                                       # one panel per population
+    g_ids, g_inv = torch.unique(grp[sl], return_inverse=True)
+    g_mass = torch.zeros(len(g_ids), device=dev).index_add_(0, g_inv, w[sl])
+    pops = g_ids[g_mass.argsort(descending=True)[:NOBJ]].tolist()
+    for j, g_ in enumerate(pops):
+        ax = axs[0, j]; Wg, _ = obj_fields(grp == g_)
+        ax.imshow(Wg.clamp(0, 1).cpu().numpy(), cmap="gray", vmin=0, vmax=1, alpha=0.5)
+        objs = torch.unique(obj[sl & (grp == g_)]).tolist()
+        table_glyphs(ax, grp == g_, 2, Wg.reshape(-1))
+        L = layers[gl[g_]] if 0 <= g_ < len(gl) and gl[g_] < len(layers) else None
+        mt = " [matrix]" if (L is not None and getattr(s, "record", {}) and getattr(L, "name", "") in ("neuropil", "somata", "membranes", "nuclei") and d["record"].get("matrix")) else ""
+        ax.set_title(f"population: {getattr(L, 'name', None) or '?'} ({L.kind if L else '?'}){mt}, {len(objs)} objects\neach object's own ellipse at each voxel (by its share)", fontsize=9)
+else:
+  for j, o in enumerate(top):
     W, V = obj_fields(obj == o); ax = axs[0, j]
     ax.imshow(W.clamp(0, 1).cpu().numpy(), cmap="gray", vmin=0, vmax=1, alpha=0.5); glyphs(ax, W, V)
     ax.set_title(f"object {o}: {name_of(o)}\nits material and its own ellipse at each voxel", fontsize=9)
 # all objects together, coloured per object
-ax = axs[1, 0]; rgb = np.zeros((64, 64, 3)); cm = plt.cm.tab20
-for k, o in enumerate(torch.unique(obj[sl]).tolist()):
-    W, _ = obj_fields(obj == o); rgb += np.clip(W.cpu().numpy(), 0, 1)[..., None] * np.array(cm(k % 20)[:3])
+ax = axs[1, 0]; cm = plt.cm.tab20
+pix, o_, Wt, _ = table(torch.ones_like(obj, dtype=torch.bool))
+col = torch.tensor(np.array([cm(k % 20)[:3] for k in range(20)]), device=dev, dtype=torch.float32)[o_ % 20]
+rgb = torch.zeros(64 * 64, 3, device=dev).index_add_(0, pix, Wt.clamp(0, 1)[:, None] * col).view(64, 64, 3).cpu().numpy()
 ax.imshow(np.clip(rgb, 0, 1)); ax.set_title(f"all {len(torch.unique(obj[sl]))} objects in this slice (one colour each)", fontsize=9)
 # the scene's per-voxel target: every object's ellipse at the voxel, scaled by its share of the voxel's material
 ax = axs[1, 1]; ax.imshow(img, cmap="gray", alpha=0.4)
 Wall, _ = obj_fields(torch.ones_like(obj, dtype=torch.bool))
-for o in torch.unique(obj[sl]).tolist():
-    W, V = obj_fields(obj == o); glyphs(ax, W, V, step=3, share=(W / Wall.clamp_min(1e-6)).clamp(0, 1).cpu().numpy())
+table_glyphs(ax, torch.ones_like(obj, dtype=torch.bool), 3, Wall.reshape(-1))
 ax.set_title("scene target, per voxel: every object's ellipse there,\nscaled by its share of the voxel's material", fontsize=9)
 ax = axs[1, 2]; ax.imshow(img, cmap="gray"); ax.set_title(f"clean render (strength {os.environ.get('STRENGTH', '0')}), modality {d['record'].get('modality')}", fontsize=9)
 for ax in axs.ravel():
     ax.set_xticks([]); ax.set_yticks([]); ax.set_xlim(-0.5, 63.5); ax.set_ylim(63.5, -0.5)
 for ax in axs[1, 3:]:
     ax.axis("off")
-for ax in axs[0, len(top):]:
+for ax in axs[0, (len(pops) if BY_POP else len(top)):]:
     ax.axis("off")
 fig.suptitle(f"One synthetic scene, object by object from construction (seed {seed}, slice z = {z0}; no window: each voxel's own ODFs; "
              f"needle = line, disc = sheet; colour = direction, R x, G y, B z)", fontsize=11)
-fig.tight_layout(rect=(0, 0, 1, 0.95)); fig.savefig(out, dpi=80); print("saved", out, "| objects", [(o, name_of(o)) for o in top])
+fig.tight_layout(rect=(0, 0, 1, 0.95)); fig.savefig(out, dpi=80); print("saved", out, "| matrix", d["record"].get("matrix"), "| modality", d["record"].get("modality"), "| style", d["record"].get("style"))

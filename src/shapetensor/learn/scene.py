@@ -614,6 +614,31 @@ def _upsample_curves(c: Curves, k: int) -> Curves:
     return Curves(**{f: Pn if f == "P" else lin(getattr(c, f)) for f in c.__dataclass_fields__})
 
 
+THIN_SPLAT_R = 0.5                 # curves thinner than this (voxels, solid, no lumen) are splatted along their centreline, one point
+                                   # per sample carrying the section's area (the trilinear splat spreads it): a dense matrix of
+                                   # sub-voxel fibres in seconds (29 Oct; the swept section cost 16-36 points per sample)
+
+
+def _render_thin(cv: Canvas, c: Curves, moved: bool):
+    """Thin solid curves: each centreline sample splatted with the volume pi a b ds, its own material ellipse and the
+    descriptors the swept path gives a solid fibre."""
+    P = c.P; N, S, _ = P.shape; dev = P.device
+    T = tangents(P)
+    ds = torch.zeros(N, S, device=dev); seglen = (P[:, 1:] - P[:, :-1]).norm(dim=-1)
+    ds[:, 1:] += 0.5 * seglen; ds[:, :-1] += 0.5 * seglen
+    f = c.flat.clamp(0.02, 1.0); a = 2 * c.rad / (1 + f); b = f * a
+    dens = (c.density if c.density is not None else torch.ones(N, device=dev))[:, None]
+    W = (math.pi * a * b * ds * dens).reshape(-1)
+    ci = torch.arange(N, device=dev)[:, None].expand(N, S).reshape(-1); Tf = T.reshape(-1, 3)
+    tt = spread_tensor(Tf, spread_e(c.spread[ci])) if c.spread is not None else line_tensor(Tf)
+    size = (0.5 * (a + b)).reshape(-1) if c.fibre_r is None else c.fibre_r[ci]
+    z = torch.zeros_like(size)
+    desc = torch.stack([size, z, z, (b / a.clamp_min(1e-9)).reshape(-1), ((c.sexp - 2) / (c.sexp + 2)).clamp(0, 1).reshape(-1)], 1)
+    V = torch.cat([tt, desc, c.contrast.reshape(-1)[:, None]], 1)
+    keep = W > 0
+    cv.splat(P.reshape(-1, 3)[keep], W[keep], V[keep], obj=c.obj[ci][keep], moved=moved)
+
+
 def render_curves(cv: Canvas, c: Curves, max_points: float = 8e6, refine: bool = True, _deformed: bool = False):
     """Sweep each curve's cross-section along it and splat the material (and the lumen contents). ``refine``: curves
     whose section's edge would step more than :data:`SWEEP_STEP` between samples are swept on a finer sampling."""
@@ -627,6 +652,12 @@ def render_curves(cv: Canvas, c: Curves, max_points: float = 8e6, refine: bool =
         st = (dF / lam.clamp_min(0.05)).sqrt().clamp(0.3, 3.0).view(N, S)      # isotropic)
         c = Curves(**{**{f: getattr(c, f) for f in c.__dataclass_fields__}, "P": P, "rad": c.rad * st,
                       "wall": c.wall * st if c.wall is not None else None})
+    thin = (c.rad.amax(1) < THIN_SPLAT_R) & (c.wall.amax(1) <= 0) & (c.lumen_c.abs().amax(1) <= 0)
+    if bool(thin.any()):                                                        # sub-voxel fibres: their centreline splatted (29 Oct)
+        _render_thin(cv, curves_subset(c, thin), moved)
+        if bool(thin.all()):
+            return
+        c = curves_subset(c, ~thin); P = c.P; N, S, _ = P.shape
     if refine:
         k = _sweep_refine(c)
         if bool((k > 1).any()):
@@ -761,6 +792,15 @@ FAMILY_SCALE = {"bundle": (0.005, 200), "tree": (0.5, 3000), "network": (0.3, 10
 SCALE_FALLOFF = 0.6               # decades: the width of the fall-off outside a family's range (a Gaussian in log10 voxel size)
 SCALE_FLOOR = 0.02                # never zero: a family out of its range still turns up now and then (generalisation)
 P_UNRESOLVED_TEXTURE = 0.85       # unresolved bundles drawn with strand texture (the rest a smooth partial-volume tube)
+MATRIX_P = 0.0                    # scenes with a matrix: the space around the families filled with objects (neuropil, cells) that
+                                  # carry their own ODFs, instead of a painted background and free textures (29 Oct; off until
+                                  # adopted -- figures and tests set it)
+MATRIX_TYPES = ("neuropil", "cells")
+MATRIX_FILL = (0.3, 0.7)          # the matrix neuropil's share of the volume
+MATRIX_MAX_FIBRES = 250_000       # ... at most this many fibres per canvas
+MATRIX_R_MIN = 0.3                # the matrix's and ground's fibres no thinner (voxels): micro-fascicles at coarse voxels
+GROUND_FILL = 1.3                 # the ground's material per volume (over-filled: the composite scales each voxel back to one)
+MATRIX_TWO_P = 0.3                # two matrix kinds in one scene
 P_TORTUOUS = 0.25                 # bundles whose path meanders on a short correlation length (5-15 voxels; curvature 0.03-0.08 / voxel)
 TEXTURE_MAX_STRANDS = 60_000      # the texture family's strands per population (cost: ~S x this points splatted)
 TEXTURE_CLUSTERS = (32, 128)      # a texture field's objects: its strands grouped into compact patches (k-means on the seeds;
@@ -2382,25 +2422,30 @@ class Scene:
         self.record["families"].append({"texture": rec})
         return out or None
 
-    def neuropil(self):
+    def neuropil(self, fill: float | None = None, name: str = "neuropil", r_min: float = 0.0, somata: bool = True):
         """Neuropil: dense, short, tortuous thin fibres (axons and dendrites, 0.1-1.5 um radius) in random directions and
         small somata (3-8 um), filling the canvas -- resolvable at a micron or two, partial-volume texture at 20 um;
-        isotropic in aggregate, locally oriented where a fibre is resolved."""
+        isotropic in aggregate, locally oriented where a fibre is resolved. ``fill``: the fibres' share of the canvas's volume
+        (the matrix, 29 Oct: dense, as neuropil is; at most :data:`MATRIX_MAX_FIBRES` fibres); default, a sparse underlay.
+        ``r_min``: no fibre thinner (voxels): at coarse voxels each is then a micro-fascicle of unresolved neurites, still one
+        object with its own ODF. ``name``: the population's name; ``somata``: somata among the fibres."""
         r = self.r; dev = self.device
-        rf = min(r.lu(0.1, 1.5) / self.voxel_um, min(self.shape) / 16)                         # nm scenes: a neurite fills the view, no wider
+        rf = max(min(r.lu(0.1, 1.5) / self.voxel_um, min(self.shape) / 16), r_min)               # nm scenes: a neurite fills the view, no wider
         L = r.lu(20, 200) / self.voxel_um
         if L < 3:
             return None
         L = min(L, 0.5 * max(self.shape))
         n = int(min(700, r.u(0.3, 1.0) * 700, 1.5 * np.prod(self.shape) / (math.pi * rf * rf * L) + 1))   # thick neurites (nm scales): about 1.5 canvases of them
+        if fill is not None:                                                                    # the matrix: this share of the volume
+            n = int(min(MATRIX_MAX_FIBRES, fill * np.prod(self.shape) / (math.pi * max(rf, 0.05) ** 2 * L) + 1))
         S = max(8, int(L / H))
         start = r.rand(n, 3) * torch.tensor(self.shape, device=dev, dtype=torch.float32)
         P = smooth_paths(start, r.unit(n), torch.full((n,), L, device=dev), S, torch.full((n,), r.lu(0.05, 0.4), device=dev), max(L / 4, 1.0), r)
         rad = torch.full((n, S), max(rf, 0.05), device=dev) * torch.exp(0.2 * r.randn(n, 1))
         cv = curves_like(P, rad, r, obj=self.ids(n, rad[:, 0]), seg=torch.zeros(n, dtype=torch.long, device=dev), contrast=self.contrast(10, 90))
-        out = [Group("neuropil", "line", float(rad.median()), float(cv.contrast[0, 0]), curves=[cv])]
+        out = [Group(name, "line", float(rad.median()), float(cv.contrast[0, 0]), curves=[cv])]
         rs = r.lu(3, 8) / self.voxel_um
-        if 0.4 <= rs <= min(self.shape) / 6:                                                    # somata among the fibres
+        if somata and 0.4 <= rs <= min(self.shape) / 6:                                                    # somata among the fibres
             m = int(min(400, r.u(0.2, 1.0) * np.prod(self.shape) / (40 * rs) ** 3 * 8 + 1))
             C = r.rand(m, 3) * torch.tensor(self.shape, device=dev, dtype=torch.float32)
             A = _rot(r, m) @ torch.diag_embed(torch.stack([torch.full((m,), rs, device=dev)] * 2 + [torch.full((m,), rs * r.u(1.0, 1.6), device=dev)], 1))
@@ -2658,6 +2703,13 @@ class Scene:
             nb = r.i(1, 2) if line_sheet else r.i(2, 3); chosen = chosen[:max(0, n - nb)] + ["bundle"] * nb
             self.record["crossing_scene"] = nb + (2 if line_sheet else 0)
         chosen.sort(key=lambda k: order.get(k, 5))
+        mat = []
+        if not iso and MATRIX_P > 0 and r.p(MATRIX_P):                          # the matrix (29 Oct): the tissue around the
+            mat = [str(m_) for m_ in r.np.choice(MATRIX_TYPES, size=2 if r.p(MATRIX_TWO_P) else 1, replace=False)]   # families, built
+            self.record["matrix"] = mat                                         # of objects with their own ODFs (no painted
+            if "cells" in mat:                                                  # background); cells first, so fibres avoid them
+                for g_ in (self.cells() or []):
+                    g_.matrix = True; self.groups.append(g_)
         bundles = []
         from .compose import population as _compose_population
         for name in chosen:
@@ -2714,7 +2766,17 @@ class Scene:
                 for g_ in (gb if isinstance(gb, list) else [gb] if gb is not None else []):
                     g_.cross = (c, e1, ax); g_.centre_pt = c; self.groups.append(g_)
                 self.record["line_sheet_deg"] = round(math.degrees(beta), 1)
-        if not iso and (families is None or families.get("neuropil", self.FAMILIES["neuropil"]) > 0) and r.p(underlay_p * scale_weight("neuropil", self.voxel_um)):
+        if "neuropil" in mat:                                                   # neuropil: drawn first, so what lies in it
+            gs = [g_ for g_ in (self.neuropil(fill=r.u(*MATRIX_FILL), r_min=MATRIX_R_MIN) or [])]   # displaces it (it fills the space between)
+            for g_ in gs:
+                g_.matrix = True
+            self.groups[0:0] = gs
+        if mat and GROUND_FILL > 0:                                             # the ground: fine fibrils filling the volume under
+            gs = [g_ for g_ in (self.neuropil(fill=GROUND_FILL, name="ground", r_min=MATRIX_R_MIN, somata=False) or [])]   # everything,
+            for g_ in gs:                                                       # drawn first (all else displaces it): no voxel of
+                g_.matrix = True                                                # the specimen without material and an ODF
+            self.groups[0:0] = gs; self.record["ground"] = True
+        elif not iso and (families is None or families.get("neuropil", self.FAMILIES["neuropil"]) > 0) and r.p(underlay_p * scale_weight("neuropil", self.voxel_um)):
             gs = self.neuropil()                                                       # the underlay
             for g_ in (gs or []):
                 self.groups.append(g_)
@@ -2830,7 +2892,8 @@ def render_scene(canvas, scene_seed: int, device, voxel_um=None, families=None, 
         while len(_CACHE) >= CACHE_SCENES:                                  # a few scenes (training draws and paired renders interleave)
             _CACHE.pop(next(iter(_CACHE)))
         sc = Scene(canvas, scene_seed, device, voxel_um, content).build(families, n_groups, layout_p, underlay_p, cross_p, deep_tree, dense_p)
-        st = style or str(sc.r.np.choice(["flat", "regions", "tissue", "cells"], p=BG_STYLE_P))   # 29 Oct: compartments a minority
+        st = style or ("flat" if sc.record.get("matrix") else str(sc.r.np.choice(["flat", "regions", "tissue", "cells"], p=BG_STYLE_P)))   # (a matrix:
+                                                                            # the structure is its objects', the background plain)
         bgp = background(tuple(canvas), st, sc.r.g, device, 1.0, content, nprng=sc.r.np, natural=True)
         dw, da = (p_warp > 0 and sc.r.p(p_warp)), (p_affine > 0 and sc.r.p(p_affine))
         sc.deform = Deform(tuple(canvas), sc.r, dw, da, device, cfg=DEFORM_LEGACY if legacy_deform else None) if (dw or da) else None
@@ -3332,11 +3395,12 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     filled = sum((L.occupancy for L in shapes_[:n_sh]), torch.zeros(shape, device=device))
     occs = torch.stack([L.occupancy for L in shapes_[:n_sh]] + [torch.minimum(lum, (1 - filled).clamp_min(0))])
     tens = torch.stack([L.tensor for L in shapes_[:n_sh]] + [eye6(device).view(6, 1, 1, 1).expand(6, *shape) / 3])
-    texture = (bg - bg.mean()) / bg.std().clamp_min(1e-6 if hip else BG_TEX_NORM)          # 29 Oct: the background's texture as strong as
+    mtx = bool(sc.record.get("matrix"))                                     # a matrix: no free texture (structure only from objects)
+    texture = (bg - bg.mean()) / bg.std().clamp_min(1e-6 if (hip and not mtx) else BG_TEX_NORM)          # 29 Oct: the background's texture as strong as
                                                                                               # it is (a flat background's 2-grey-level noise
                                                                                               # was normalised to full strength)
     tex = None
-    if ra.p(p_texture):                                                      # texture inside each population (its own grain and depth)
+    if not mtx and ra.p(p_texture):                                          # texture inside each population (its own grain and depth)
         tex = torch.stack([(1 + (ra.u(0.05, 0.5) if not hip else ra.u(0.05, 0.05 + 0.15 * sg_)) * smooth_noise(shape, ra.lu(0.6, 6.0), ra.g, device)).clamp_min(0.05) if ra.p(0.7)
                            else torch.ones(shape, device=device) for _ in range(occs.shape[0])])
         routes_pre = ["texture"]
