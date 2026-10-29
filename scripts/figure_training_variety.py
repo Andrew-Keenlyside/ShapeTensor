@@ -34,6 +34,8 @@ for i in range(nr * nc):
     if i >= N:
         continue
     u = float(rng.random()); st = u; lv = 0.4 + 0.6 * u                                               # as --strength-mix draws them
+    if os.environ.get("STRENGTH"):                                                                  # (env STRENGTH: every crop at that strength)
+        st = float(os.environ["STRENGTH"])
     d = None
     for k in range(4):                                                                              # an occasional draw asks for tens of GB
         try:                                                                                        # (the trainer retries too): the next seed

@@ -672,12 +672,14 @@ def interface(R: torch.Tensor, sigma: float = 1.5):
     return torch.where(mag[None] > 1e-6, gr / mag.clamp_min(1e-9)[None], ez), w
 
 
-def background(shape, style: str, g: torch.Generator, device, scale: float = 1.0, content: str = "general", nprng=None):
+def background(shape, style: str, g: torch.Generator, device, scale: float = 1.0, content: str = "general", nprng=None, natural: bool = False):
     """The background before the layers: ``regions`` (anatomix: a random label map, an intensity per label),
     ``tissue`` (two or three broad regions -- grey/white matter -- with texture), ``cells`` (a cell stain: small blobs,
     dark or bright, their density optionally laminar along a random direction). Returns the image, the label map, the
     region means, and the extra layers the style brings (the cells as a blob population). With ``nprng`` (a numpy
-    generator) every scalar is drawn on the CPU: no device synchronisation."""
+    generator) every scalar is drawn on the CPU: no device synchronisation. ``natural`` (the scene generator, 30 Oct):
+    compartments larger (15-50 voxels), their contrast a spread of 10-60 grey levels about a common level (was 40-210),
+    their edges softened by 1-2 voxels and textured inside; tissue regions likewise (spread 15-80)."""
     if nprng is not None:
         u = lambda a, b: float(nprng.uniform(a, b))
         ri = lambda a, b: int(nprng.integers(a, b))
@@ -689,12 +691,21 @@ def background(shape, style: str, g: torch.Generator, device, scale: float = 1.0
     if style == "flat":                                                                        # a uniform background (feasibility tests)
         lab = torch.zeros(shape, dtype=torch.long, device=device); R = torch.full(shape, u(70, 190), device=device)
         img = R + 2 * smooth_noise(shape, 1.0, g, device)
+    elif style == "regions" and natural:
+        nl = ri(3, 9); lab = label_map(shape, nl, u(15, 50) * scale, g, device); mid = u(70, 190); spn = lu(10, 60)
+        R = (mid + spn * (torch.rand(nl, device=device, generator=g) - 0.5))[lab]; R = gaussian(R, u(1.0, 2.0))
+        img = R + u(4, 15) * smooth_noise(shape, u(1.0, 3.0) * scale, g, device) + u(2, 8) * smooth_noise(shape, u(4.0, 10.0) * scale, g, device)
     elif style == "regions":
         nl = ri(3, 9); lab = label_map(shape, nl, u(6, 25) * scale, g, device)
         R = (40 + 170 * torch.rand(nl, device=device, generator=g))[lab]; img = R + 6 * smooth_noise(shape, 2.0 * scale, g, device)
     elif style == "tissue":
         nl = ri(2, 4); lab = label_map(shape, nl, u(25, 60) * scale, g, device)
-        R = (60 + 150 * torch.rand(nl, device=device, generator=g))[lab]; img = R + u(8, 25) * smooth_noise(shape, u(1.0, 3.0) * scale, g, device)
+        if natural:
+            mid = u(70, 190); spn = lu(15, 80)
+            R = (mid + spn * (torch.rand(nl, device=device, generator=g) - 0.5))[lab]; R = gaussian(R, u(1.0, 2.0))
+        else:
+            R = (60 + 150 * torch.rand(nl, device=device, generator=g))[lab]
+        img = R + u(8, 25) * smooth_noise(shape, u(1.0, 3.0) * scale, g, device)
     else:                                                                                      # cells: a blob population on a flat background
         lab = torch.zeros(shape, dtype=torch.long, device=device); R = torch.full(shape, u(70, 190), device=device)
         img = R + 5 * smooth_noise(shape, 1.0, g, device)
@@ -705,7 +716,8 @@ def background(shape, style: str, g: torch.Generator, device, scale: float = 1.0
         cells = gaussian((n > u(0.8, 1.6)).float(), 0.8 * scale).clamp(0, 1)
         r = 1.2 * scale
         L = Layer("blob", direction_field(shape, 8.0, g, device), r, r, 0.0, torch.ones(shape, dtype=torch.bool, device=device),
-                  u(50, 140) * (1 if u(0, 1) < 0.35 else -1), occupancy=cells, tensor=eye6(device).view(6, 1, 1, 1).expand(6, *shape) / 3)
+                  (u(15, 60) if natural else u(50, 140)) * (1 if u(0, 1) < 0.35 else -1), occupancy=cells,   # (natural: a stain, not
+                  tensor=eye6(device).view(6, 1, 1, 1).expand(6, *shape) / 3)                                # the brightest thing there)
         L.desc = torch.tensor([r, 0.0, 0.0], device=device).view(3, 1, 1, 1) * (cells > 0)[None]
         extra.append(L)
     return img, lab, R, extra
