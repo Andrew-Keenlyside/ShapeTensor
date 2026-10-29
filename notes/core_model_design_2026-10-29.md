@@ -147,3 +147,39 @@ code, the scene geometry, today's target bug fixes, the evaluation script struct
    - The fibre ODF must beat the fitted structure tensor at every query kind, including crossing cores.
    - Matched-instance axis error must improve with training.
    - Then the cluster.
+
+## Open questions (29 Oct 2026)
+
+**For the user and collaborators (context only you have):**
+1. **Physical scale.** Which voxel sizes and windows matter? Is sigma in µm, which needs the voxel size at inference, or
+   in voxels? Which sigma matches a dMRI voxel for the HiP-CT validation?
+2. **Hierarchy semantics.** Should the grouping levels be set by physical size (radius), by construction groups, or by
+   both? Where does a strand stop being an instance and become texture inside a population?
+3. **Descriptors.** Which object attributes do downstream users need (lumen, brightness, radius, shape kind, tortuosity,
+   packing), for fibre/vessel filtering, vascular work and registration?
+4. **Outputs.** SH convention (MRtrix / DIPY), normalisation (amplitude = volume fraction?), fixels, file formats
+   (OME-Zarr, NIfTI), and inference throughput for whole-organ volumes.
+5. **Validation data.** Which paired HiP-CT / dMRI specimens, their registration quality and resolution; any manual
+   annotations; which phantom metrics reviewers will expect.
+6. **Baselines beyond the structure tensor:** multi-scale tensor, Fourier / OrientationJ-style methods, optimally
+   oriented flux, Frangi, existing deep-learning tools.
+7. **Non-biological domains to add first:** composites, foams, wood, fibre-packing simulators the lab already has.
+8. **Compute.** Cluster budget and limits (pryor's seymour2 jobs get pre-empted), and model-size limits.
+9. **Real-data boundaries.** Is real data off-limits for hyperparameter choice and early stopping too? The phantoms'
+   texture parameters and a generator grain comment cite a real HiP-CT crop: keep or remove?
+10. **Heads to keep or retire.** Which current heads (tree, votes, regions, contrast) does anything downstream depend
+    on?
+
+**Technical, to settle by short tests:**
+1. **The texture case.** Does the density learn from the oriented-texture family, and stop claiming orientation in
+   isotropic texture?
+2. **Set prediction.** The number of slots K, the matching cost, stability, and how the grouping knob g interacts with
+   the set.
+3. **Angular smoothing tau is not exact on log-SH or Bingham.** Convolution acts on the linear-domain ODF: per-order
+   Funk-Hecke scaling is exact only for linear SH, and Bingham convolved with Watson is only approximately Bingham.
+   Simplest: condition the head on tau and train against tau-smoothed targets (learned, not analytic).
+4. **Resolution agnosticism.** Voxel-size conditioning against multi-resolution training; sigma and g in physical
+   units.
+5. **The trunk.** Keep the current trunk, or use a standard 3D U-Net as in anatomix, which is easier to defend.
+6. **Context size.** 64³ crops against 128³ for tract-scale grouping (the receptive field is 182 voxels).
+7. **Loss balance** across heads, and the held-out sets: an independent generator (synthspline) and the phantoms.
