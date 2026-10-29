@@ -115,6 +115,7 @@ def tree_distance(anc: torch.Tensor, i: torch.Tensor, j: torch.Tensor) -> torch.
 
 
 DENS_READOUT_LOBE = False           # ... and the lobe trained through the readout too (it may soften where unsure)
+POP_MIN_SHARE = 0.02                # a target population's smallest share of the window (smaller: pooled into "other")
 DENS_CE = False                     # the density as a normalised distribution trained by cross-entropy against the
                                     # non-background material's ODF on the model's grid (28 Oct structural review)
 DENS_NOBG = False                   # the readout's target without the background entity (its mass is the bg head's; 28 Oct:
@@ -148,6 +149,48 @@ def density_shape_loss(f: torch.Tensor, rho: torch.Tensor, m_t: torch.Tensor, n_
             wd = wd * w_q.detach()[..., None]
         return ((sh_p - sh_t).abs() * wd)[has].sum() / wd[has].sum()
     return (sh_p - sh_t).abs()[has].mean()
+
+
+def _t6_mat(t6: torch.Tensor) -> torch.Tensor:
+    """(..., 6) (zz, yy, xx, zy, zx, yx) -> (..., 3, 3), trace 1."""
+    M = torch.stack([torch.stack([t6[..., 0], t6[..., 3], t6[..., 4]], -1), torch.stack([t6[..., 3], t6[..., 1], t6[..., 5]], -1),
+                     torch.stack([t6[..., 4], t6[..., 5], t6[..., 2]], -1)], -2)
+    return M / M.diagonal(dim1=-2, dim2=-1).sum(-1).clamp_min(1e-9)[..., None, None]
+
+
+def population_targets(T: dict, K: int):
+    """Each query's K largest entities by share of the window's material: ``share (B, Q, K)`` (0 for empty slots),
+    ``ellipse (B, Q, K, 3, 3)``, ``valid (B, Q, K)``, ``other (B, Q)`` the rest's share, ``has (B, Q)`` any material."""
+    m = (T["e_mass"].float() * T["e_vis"].float()).clamp_min(0) * (T["e_node"] >= 0)
+    tot = m.sum(-1, keepdim=True); sh = m / tot.clamp_min(1e-9)
+    o = sh.argsort(-1, descending=True)[..., :K]
+    s = sh.gather(-1, o); valid = s > POP_MIN_SHARE; s = s * valid
+    E = _t6_mat(T["e_T6"].float().gather(2, o[..., None].expand(*o.shape, 6)))
+    return s, E, valid, (1 - s.sum(-1)).clamp_min(0), tot[..., 0] > MASS_EPS
+
+
+def population_loss(ent: dict, T: dict) -> dict:
+    """Set prediction against :func:`population_targets`: each query's slots matched to its targets by the cheapest of
+    all K! orderings (exact; K = 4 -> 24), then existence BCE + share L1 (with "other") + share-weighted squared
+    Frobenius distance of the ellipses (minimised by the conditional mean). No direction grid."""
+    import itertools
+    ex, sh, PT = ent["pop_exist"].float(), ent["pop_share"].float(), ent["pop_T"].float()
+    K = ex.shape[-1]
+    s, E, valid, other, has = population_targets(T, K)
+    dT = ((PT[..., :, None, :, :] - E[..., None, :, :, :]) ** 2).sum((-1, -2))                   # (B, Q, K slots, K targets)
+    cost = s[..., None, :] * dT + (sh[..., :K, None] - s[..., None, :]).abs() + (ex[..., :, None] - valid[..., None, :].float()).abs()
+    perms = torch.tensor(list(itertools.permutations(range(K))), device=ex.device)                  # (P, K)
+    ck = cost[..., torch.arange(K, device=ex.device)[None, :].expand_as(perms), perms].sum(-1)      # (B, Q, P)
+    match = perms[ck.argmin(-1)]                                                                     # (B, Q, K): the target of each slot
+    s_m = s.gather(-1, match); v_m = valid.gather(-1, match).float()
+    E_m = E.gather(2, match[..., None, None].expand(*match.shape, 3, 3))
+    if not bool(has.any()):
+        z = ex.sum() * 0.0
+        return {"pop": z}
+    l_ex = Fn.binary_cross_entropy(ex.clamp(1e-4, 1 - 1e-4), v_m, reduction="none").mean(-1)[has].mean()
+    l_sh = ((sh[..., :K] - s_m).abs().sum(-1) + (sh[..., K] - other).abs())[has].mean()
+    l_T = (s_m * ((PT - E_m) ** 2).sum((-1, -2))).sum(-1)[has].mean()
+    return {"pop": l_ex + l_sh + 4.0 * l_T, "pop_exist": l_ex.detach(), "pop_share": l_sh.detach(), "pop_T": l_T.detach()}
 
 
 def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, margin: int = 4, g: torch.Generator | None = None):
@@ -239,7 +282,11 @@ def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, mar
             parts["ce_w0"] = ent["w0"].float()[ok].mean().detach()
         else:
             parts["density"] = lq_.sum() * 0.0
+    if "pop_exist" in ent:                                                                       # the populations head (set prediction)
+        parts.update(population_loss(ent, T))
     total = W["density"] * parts["density"] + W.get("mass", 0.0) * parts.get("mass", 0.0)
+    if "pop" in parts:
+        total = total + W.get("pop", 4.0) * parts["pop"]
     if "gate" in parts:
         total = total + W.get("gate", 1.0) * parts["gate"]
     if "gshare" in parts:

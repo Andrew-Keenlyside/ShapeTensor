@@ -270,3 +270,60 @@ phantoms' texture parameters and the generator's grain comment.
   - from scratch against a warm start on a balanced strength mix;
   - figures: synthetic truth against model, phantoms with a fanning case added, and the construction figure.
 - **E. Per-object set head**, once D passes.
+
+## Fixes for the remaining issues (29 Oct 2026, 23:45 ET)
+
+| # | issue | cause (diagnosed) | fix |
+|---|---|---|---|
+| 1 | a rendered structure without targets | region-interface layers are rendered but excluded from targets (`NOT_ENTITY`) | each interface becomes a boundary-sheet entity: planar ODF (I - nn^T)/2 with n = the region's gradient direction, mass = the boundary's sharpness (gradient magnitude). Interiors stay plain tissue. `INTERFACE_SHEETS` in train.py; NOT_ENTITY elsewhere unchanged |
+| 2 | "fascicles" all isotropic | the family is skipped when the scene's voxel size is outside its scale range, leaving only background; the figure did not check | the figures confirm the family is in the scene record, and draw at a voxel size inside its range |
+| 3 | unresolved bundles are one object | strands share the bundle's object id | each strand becomes its own object (leaf under the bundle). Texture-field strands are grouped into local clusters (objects under the field) to keep the entry count bounded |
+| 4 | the acquisition seed changes the scene | sparse labelling, the specimen edge and cut-outs draw from the acquisition stream | draw them from a geometry stream tied to the scene seed and crop; acquisition keeps only appearance draws |
+| 5 | full corruption can erase a scene | no control on surviving signal | measure the corrupted image's correlation with the clean render (after a small blur). Below a floor, redraw the acquisition at half strength with probability 0.8, so about a fifth of hopeless crops remain for robustness |
+| 6 | the density head uses a direction grid and a kappa cap | a cross-entropy grid head | a set head: K = 4 population slots per query, each with existence, mass share (softmax with an "other" slot) and a trace-1 ellipse (Cholesky, positive by construction). Targets are the top-4 entities by mass, the rest pooled. Matching by brute-force minimum over the 24 slot permutations on the GPU (exact for K = 4). Loss: existence BCE, mass L1, and mass-weighted squared Frobenius distance on the ellipses (minimised by the conditional mean, so proper). No grid, no cap |
+
+**Review.**
+- **1:** a boundary is a real, rendered sheet, consistent with the vessel-wall rule. Its mass is a surface density, not a volume. Acceptable for a target share, documented.
+- **3:** per-strand objects can be thousands for texture fields, so they are clustered there. Unresolved bundles have about 200-400 strands, which is fine.
+- **5:** the threshold is a heuristic. It is logged per crop so its rate can be tuned. It never touches targets.
+- **6:** brute-force permutations are exact and cheap at K = 4. More than 4 populations in one window are rare (under 1 % measured). Their mass goes to "other" and is reported. A summed-tensor total is deliberately not trained, since it hides crossings.
+- **Order:** 4 and 1 first (targets), then 3, 5, 6; figures and tests after each.
+
+## Overnight plan and acceptance criteria (fixed before the pilot, 30 Oct 2026, 00:10 ET)
+
+### Remaining work before the pilot
+1. **Fix 3:** per-strand objects in unresolved bundles, and clustered objects in texture fields (in progress).
+2. **`scripts/eval_populations.py`:** held-out synthetic sets plus phantoms, scored on the populations head against the
+   fitted structure tensor and trivial baselines, with the metrics below.
+3. **`scripts/figure_populations.py`:** truth against model as stacked ellipses, on synthetic crops and phantoms.
+4. **Unit tests,** then commit.
+5. **The pilot,** from scratch (no warm start), at most 1 h:
+   - universal generator with every fix;
+   - strength and difficulty mixed per step;
+   - populations head (K = 4);
+   - old density loss off;
+   - construction-only targets.
+
+### Pilot acceptance criteria (gate to the long run)
+Measured on 32 held-out crops (universal generator at strength 0.3 and at 1.0) and on the phantoms. Windows of 3
+voxels. Targets are each query's populations from construction.
+
+| # | what | criterion |
+|---|---|---|
+| A | orientation | median axis error of the matched population at single-line queries (one line population with share >= 0.6), strength 0.3: <= the fitted structure tensor's |
+| B | crossings | queries with two line populations (each share >= 0.2, >= 45 deg apart): both axes found within 15 deg by slots with existence > 0.5 in >= 25 % (strength 0.3); the structure tensor: 0 % |
+| C | populations | existence F1 (slots against target populations) >= 0.6; share error <= 0.8 x that of the trivial "one population takes everything" answer |
+| D | morphology | shape class of matched populations (line / sheet / isotropic, from eigenvalues) correct >= 60 % (chance ~33 %); fibre-free texture phantom: the dominant population's line-ness < 0.4 at >= 60 % of points |
+| E | learning trend | validation population loss at the end <= 0.8 x its value after warm-up; A-D better at the end than at the halfway checkpoint |
+| F | no collapse | predicted existence rate within a factor of 2 of the target's; line-ness of predicted ellipses varies (sd > 0.1) |
+
+**Outcomes.**
+- **All pass:** the longest local run that ends before 09:00 ET, checkpointed, scored on the same metrics at intervals.
+- **Any fail:** diagnose with the figures and fix the *structure or the data* (not the hyperparameters), then another
+  pilot of at most 1 h.
+
+**Stretch targets for the long run:**
+- A at <= 0.7 x the structure tensor;
+- B >= 40 % (and >= 40 % at the 90 deg phantom crossing);
+- C F1 >= 0.75;
+- D >= 75 %.

@@ -261,7 +261,7 @@ class EntityDecoder(nn.Module):
                  kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0,
                  od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False, dens_gate: bool = False, st_path: bool = False,
                  iso_head: bool = False, gate2: bool = False, gate_share: bool = False, dens_ce: bool = False,
-                 ce_no_st: bool = False):
+                 ce_no_st: bool = False, pop_k: int = 0):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -352,6 +352,14 @@ class EntityDecoder(nn.Module):
         # oriented bank's term + the structure tensor's -g (u^T M u - 1/3); Z on a fixed hemisphere grid (exact on it),
         # trained by cross-entropy against the non-background material's ODF. At the start (zero heads) it is the
         # classical structure-tensor reader over a floor.
+        # ``pop_k``: the populations head -- K slots per query, each an existence, a share of the window's material (a
+        # softmax with one more "other" slot) and a trace-1 elliptical ODF (Cholesky, so positive by construction), read
+        # from the learned point code alone
+        self.pop_k = int(pop_k)
+        if self.pop_k:
+            K_ = self.pop_k
+            self.pop = nn.Sequential(nn.Linear(hidden, 256), nn.SiLU(), nn.Linear(256, 256), nn.SiLU(), nn.Linear(256, K_ * 8 + 1))
+            nn.init.zeros_(self.pop[-1].weight); nn.init.zeros_(self.pop[-1].bias)
         self.dens_ce = bool(dens_ce); self.ce_no_st = bool(ce_no_st)                         # (no structure tensor: neither term nor cues)
         if self.dens_ce:
             from .sh import real_sh as _rsh, n_coef as _nc
@@ -522,10 +530,25 @@ class EntityDecoder(nn.Module):
             res = self.gate_of(p, torch.stack(ovs) if ovs is not None else None, stf, parts=True); out["g"], out["gv"] = res[0], res[1]
             if len(res) > 2:
                 out["gs"] = res[2]                                                            # the line share's estimate
+        if getattr(self, "pop_k", 0):
+            out.update(self.populations(p))
         if getattr(self, "dens_ce", False) and j6 is not None:                                    # the normalised density on the grid
             ce = [self.ce_density(p[b], ovs[b] if ovs is not None else None, j6[b], sigma[b]) for b in range(p.shape[0])]
             out["logq_g"] = torch.stack([c_["logq_g"] for c_ in ce]); out["w0"] = torch.stack([c_["w0"] for c_ in ce])
         return out
+
+    def populations(self, p: torch.Tensor) -> dict:
+        """The populations at points with codes ``p (..., hidden)``: ``pop_exist (..., K)`` probabilities,
+        ``pop_share (..., K + 1)`` shares of the window's material (the last: everything else), ``pop_T (..., K, 3, 3)``
+        trace-1 elliptical ODFs in (z, y, x)."""
+        K_ = self.pop_k; o = self.pop(p.to(self.pop[0].weight.dtype)).float()
+        ex = torch.sigmoid(o[..., :K_]); sh = torch.softmax(torch.cat([o[..., K_:2 * K_], o[..., -1:]], -1), -1)
+        c = o[..., 2 * K_:8 * K_].reshape(*o.shape[:-1], K_, 6)
+        z = torch.zeros_like(c[..., 0]); dg = Fn.softplus(c[..., :3] + 0.5413) + 1e-3             # (softplus(0.5413) = 1: isotropic at the start)
+        L = torch.stack([torch.stack([dg[..., 0], z, z], -1), torch.stack([c[..., 3], dg[..., 1], z], -1),
+                         torch.stack([c[..., 4], c[..., 5], dg[..., 2]], -1)], -2)
+        T = L @ L.transpose(-1, -2); T = T / T.diagonal(dim1=-2, dim2=-1).sum(-1).clamp_min(1e-9)[..., None, None]
+        return {"pop_exist": ex, "pop_share": sh, "pop_T": T}
 
     def ce_density(self, p: torch.Tensor, ov: torch.Tensor | None, j6: torch.Tensor, sigma: torch.Tensor, dirs: torch.Tensor | None = None) -> dict:
         """The normalised density (``dens_ce``) at points with codes ``p (N, hidden)``, bank energies ``ov (N, L, Dd)``,
@@ -702,7 +725,7 @@ class PopulationNet(nn.Module):
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
                  odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0,
                  od_norm: bool = False, dens_gate: bool = False, st_path: bool = False, iso_head: bool = False, gate2: bool = False,
-                 gate_share: bool = False, dens_ce: bool = False, ce_no_st: bool = False):
+                 gate_share: bool = False, dens_ce: bool = False, ce_no_st: bool = False, pop_k: int = 0):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -741,7 +764,7 @@ class PopulationNet(nn.Module):
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
                                      oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect),
                                      od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote), od_norm=bool(od_norm), dens_gate=bool(dens_gate),
-                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st))
+                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st), pop_k=int(pop_k))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             # the background's occupancy (the isotropic remainder) at every voxel: the density's floor is background plus
@@ -818,7 +841,7 @@ class PopulationNet(nn.Module):
                    block_norm=int(args.get("block_norm", 0) or 0), od_norm=bool(args.get("od_norm", False)),
                    dens_gate=bool(args.get("dens_gate", False)), st_path=bool(args.get("st_path", False)), iso_head=bool(args.get("iso_head", False)),
                    gate2=bool(args.get("gate2", False)), gate_share=bool(args.get("gate_share", False)), dens_ce=bool(args.get("dens_ce", False)),
-                   ce_no_st=bool(args.get("ce_no_st", False))) \
+                   ce_no_st=bool(args.get("ce_no_st", False)), pop_k=int(args.get("pop_k", 0) or 0)) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":

@@ -1152,7 +1152,7 @@ HIPCT_REMOVED = ("misalign", "drift", "missing_sections", "chatter", "stain", "l
                  "slice_profile", "tear", "fold", "ct_scan", "scan")
 
 
-def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, modality: str | None = None, warp: bool | None = None,
+def _nuisance_once(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, modality: str | None = None, warp: bool | None = None,
              fast: bool = False, hp_max: float | None = None, vis_opts: dict | None = None, affine: bool = False,
              orient_from_texture: bool | None = None, profile: str | None = None) -> dict:
     # ``strength`` (0-1) scales the probability and the magnitude of every nuisance that destroys information (PSF,
@@ -1561,3 +1561,34 @@ def draw(shape=(128, 128, 128), seed: int = 0, device="cuda", modality: str | No
     content = {"mri": "mri", "histology": "histology"}.get(modality, "general")
     s = sample(shape, seed=seed, device=device, content=content, **kw)
     return s, nuisance(s, seed=seed, device=device, modality=modality, strength=strength)
+
+
+#: the share of the clean render's structure an acquisition must keep (|correlation| of the lightly blurred images);
+#: below it the acquisition is redrawn at half strength with probability ``SIGNAL_REDRAW``, so most crops keep some
+#: signal while a minority of hopeless ones stay for robustness. The targets are never affected.
+SIGNAL_FLOOR = 0.15
+SIGNAL_REDRAW = 0.8
+
+
+def _signal_corr(clean: torch.Tensor, img: torch.Tensor) -> float:
+    a = gaussian(clean.float()[None, None], 1.0)[0, 0].flatten(); b = gaussian(img.float()[None, None], 1.0)[0, 0].flatten()
+    a = a - a.mean(); b = b - b.mean()
+    return float((a * b).sum() / ((a.norm() * b.norm()).clamp_min(1e-9)))
+
+
+def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, **kw) -> dict:
+    """:func:`_nuisance_once`, with a floor on the structure that survives: where the corrupted image keeps almost
+    nothing of the clean render, the acquisition is usually redrawn at half the strength (twice at most)."""
+    d = _nuisance_once(s, seed=seed, device=device, strength=strength, **kw)
+    if SIGNAL_FLOOR <= 0 or getattr(s, "image", None) is None:
+        return d
+    rng = np.random.default_rng(seed + 555); st = strength; tries = 0
+    c = abs(_signal_corr(s.image, d["image"]))
+    while c < SIGNAL_FLOOR and tries < 2 and rng.random() < SIGNAL_REDRAW:
+        st *= 0.5; tries += 1
+        d = _nuisance_once(s, seed=seed + 7919 * tries, device=device, strength=st, **kw)
+        c = abs(_signal_corr(s.image, d["image"]))
+    d["record"]["signal_corr"] = round(c, 3)
+    if tries:
+        d["record"]["signal_redraw"] = (tries, round(st, 3))
+    return d
