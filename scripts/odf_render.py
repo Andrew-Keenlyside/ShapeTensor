@@ -62,9 +62,10 @@ def draw_tensors(ax, centres, T6_zyx, size: float, view: str = "z", scale=None):
         zz, yy, xx, zy, zx, yx = [float(a) for a in t]
         T = np.array([[xx, yx, zx], [yx, yy, zy], [zx, zy, zz]])                                 # (x, y, z)
         T = T / max(np.trace(T), 1e-12)
-        lam, V = np.linalg.eigh(T); lam = np.clip(lam, 0.04 * lam.max(), None)
+        lam, V = np.linalg.eigh(T); iso = lam[0] / max(lam[2], 1e-12) > 0.6                   # near isotropic: a small grey sphere
+        lam = np.clip(lam, 0.04 * lam.max(), None)
         M = V @ np.diag(lam / lam.max()) @ V.T
-        sc = size * (1.0 if scale is None else float(scale[i]))
+        sc = size * (1.0 if scale is None else float(scale[i])) * (0.55 if iso else 1.0)
         p = (v @ M.T) * sc
         tri = p[faces]
         nrm = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]); nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-12
@@ -73,7 +74,7 @@ def draw_tensors(ax, centres, T6_zyx, size: float, view: str = "z", scale=None):
         front = (nrm @ view_dir) < 0.25
         shade = 0.45 + 0.55 * np.clip(nrm @ _LIGHT, 0, 1)
         dirc = np.abs(tri.mean(1)); dirc /= np.linalg.norm(dirc, axis=1, keepdims=True) + 1e-12
-        col = np.clip(dirc * shade[:, None], 0, 1)
+        col = np.clip((np.full_like(dirc, 0.62) if iso else dirc) * shade[:, None], 0, 1)
         for tt, cc, dd in zip(tri[front], col[front], tri[front][:, :, depth].mean(1)):
             polys.append(np.stack([cx + tt[:, cols], cy + tt[:, rows]], 1)); colours.append(cc); depths.append(dd)
     if polys:
