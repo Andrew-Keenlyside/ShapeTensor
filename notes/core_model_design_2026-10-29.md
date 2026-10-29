@@ -331,3 +331,19 @@ voxels. Targets are each query's populations from construction.
 *Amendment before the pilot ran (00:35 ET):* C's first form was met by an untrained model (F1 0.89 from predicting every
 slot), because most windows hold 3-4 populations including small fragments. It now scores populations with >= 10 % of
 the window, against the every-slot-present answer.
+
+## Overnight log (30 Oct 2026)
+
+- **23:35** Pilot P1 (from scratch, populations head, generator before the rendering fixes) started as a baseline: about
+  2 s/step, 1500 steps.
+- **23:50** Generator phantom check (`scripts/check_generator_orientation.py`): the **targets follow the true
+  centrelines** (bundle 0 deg, fascicles 4.5 deg, network 5.5 deg median). **The images often don't show them:**
+  - flat polygonal compartments dominate crops;
+  - crops often miss the family;
+  - unresolved bundles and fascicles render as smooth fills;
+  - the clean image's structure tensor is 73 deg from a bundle's true axis.
+
+  Rendering fixes are in progress (strand texture visible, crops centred on material, compartments a minority). The
+  pass condition: the image structure tensor within 20 deg of the true axis (median) per line family at strength 0.
+- **Figures:** near-isotropic populations (mostly background) are drawn as small grey spheres, so oriented populations
+  stand out.
