@@ -183,3 +183,41 @@ code, the scene geometry, today's target bug fixes, the evaluation script struct
 5. **The trunk.** Keep the current trunk, or use a standard 3D U-Net as in anatomix, which is easier to defend.
 6. **Context size.** 64³ crops against 128³ for tract-scale grouping (the receptive field is 182 voxels).
 7. **Loss balance** across heads, and the held-out sets: an independent generator (synthspline) and the phantoms.
+
+## Answers from the user (29 Oct 2026, 22:00 ET)
+
+1. **Windows are in voxels,** like the structure tensor's rho, and arbitrary during training. They are converted from
+   the known voxel size at use.
+2. **"Angular smoothing" is spatial pooling, not blurring an ODF's shape.** The ODF at each sample point describes the
+   orientations present in a larger region. Small values give sharp spatial changes between neighbouring populations, as
+   a small-rho structure tensor does; large values give gradual transitions. There is still one ODF per sample point.
+   *Consequence:* this is the window (rho) knob. The ODF target is the mass-weighted orientation distribution of
+   material within a Gaussian window of that width, which is what the window knob already does. **The separate
+   shape-blur knob tau is dropped.**
+3. **Grouping levels follow structure.**
+   - An object is a single fibre, or the finest unit the resolution allows.
+   - Coarser levels group objects into sub-populations (2-3 fibres), then larger parts of a tract, then the whole tract.
+   - Objects may cross and overlap in space, and groups may overlap in space.
+   - At a given level, **each object belongs to exactly one group:** groups partition the objects, and no two groups
+     claim the same object. This is a nested partition, which is the construction tree. To decide or test.
+4. **Outputs are plain arrays:** array in, array out.
+   - A multi-channel SH array per voxel, with another axis per population or object for per-population readouts.
+   - Chunked or OME-Zarr scaling comes later, in bridge, as anatomix plus chunkreg does today.
+   - Fixels are post-processing after the ODFs.
+   - The SH convention is ours to choose and document; MRtrix3's real even basis is a sensible default, with a
+     converter.
+5. **Validation:**
+   - paired 20 µm HiP-CT and 600 µm ex vivo dMRI of the same hemisphere, already registered (post-validation only);
+   - phantoms for known cases: crossing and fanning fibres.
+   - Baselines: dMRI and the structure tensor only.
+6. **Non-biological domains:** dense, varied texture first. Foams and other domains come after an initial model works
+   well on biological data.
+7. **Compute:**
+   - a shared 8 x H100 cluster; single- or multi-day runs on at most 3 GPUs (up to 4-6 at most);
+   - UCL and MIT compute only for well-proven final models, for example if 10-50 M parameters prove necessary;
+   - the current model has 3.9 M.
+8. **Heads:** nothing relies on the current heads, so they can change freely.
+9. **Technical questions are answered by tests on pilot models** once those exist.
+
+Still open: whether real data may be used for hyperparameter choice or early stopping; the real-crop provenance of the
+phantoms' texture parameters and the generator's grain comment.
