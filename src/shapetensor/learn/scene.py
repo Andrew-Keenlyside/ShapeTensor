@@ -2753,7 +2753,7 @@ class Scene:
         volume), each its own ODF along its path; their density varies smoothly across the field, so neighbouring
         fibres share it and the field shows as streaks along its direction (an unresolved system's visible texture)."""
         r = self.r; dev = self.device; shp = torch.tensor(self.shape, device=dev, dtype=torch.float32)
-        rf = r.lu(0.15, 1.2); L = r.lu(15, 60); fill = r.u(0.05, 0.25)
+        rf = r.lu(0.15, 1.2); L = r.lu(15, 60); fill = r.u(0.10, 0.35)
         n = int(min(FIBRE_FIELD_MAX, fill * float(np.prod(self.shape)) / (math.pi * rf * rf * L) + 1))
         if n < 10:
             return None
@@ -2767,7 +2767,7 @@ class Scene:
         cv = curves_like(P, rad, r, obj=self.ids(n, rad[:, 0]), seg=torch.zeros(n, dtype=torch.long, device=dev), contrast=contrast)
         nz = smooth_noise(self.shape, r.lu(2.0, 6.0), r.g, dev)
         mid = P[:, S // 2].long().clamp(min=torch.zeros(3, dtype=torch.long, device=dev), max=(shp - 1).long())
-        cv.density = (1 + r.u(0.3, 0.8) * nz[mid[:, 0], mid[:, 1], mid[:, 2]]).clamp(0.1, 2.0)
+        cv.density = (1 + r.u(0.5, 1.0) * nz[mid[:, 0], mid[:, 1], mid[:, 2]]).clamp(0.05, 2.5)
         g = Group("fibre field", "line", rf, contrast, curves=[cv]); g.faint = bool(faint)
         self.record["families"].append({"fibre field": {"fibres": n, "radius_vox": round(rf, 2), "fill": round(fill, 2)}})
         return g
@@ -3262,11 +3262,11 @@ BG_TEX_NORM = 40.0                # grey levels: the background's texture is nor
                                   # the background material (29 Oct)
 
 
-ADD_CONTRAST = {"ground": (3.0, 10.0), "matrix": (8.0, 25.0), "faint": (12.0, 35.0), "fore": (40.0, 120.0)}   # additive: grey levels against the role beneath
+ADD_CONTRAST = {"ground": (3.0, 10.0), "matrix": (8.0, 25.0), "faint": (20.0, 50.0), "fore": (40.0, 120.0)}   # additive: grey levels against the role beneath
 FORE_MAX_REL = 1.5                # a foreground material at most this far from the matrix's (relative): one population never dwarfs the
                                   # rest, which 8-bit display then squeezes into a few grey levels (fluorescence, histology: 29 Oct)
 INTRINSIC_NOISE = (0.02, 0.10)    # scenes of objects: noise at any strength, a share of the image's 5-95 % range (blurred 0.4-1 voxel)
-ROLE_CONTRAST = {"ground": (0.02, 0.08), "matrix": (0.05, 0.20), "faint": (0.10, 0.30), "fore": (0.30, 1.00)}   # relative to the role beneath (29 Oct)
+ROLE_CONTRAST = {"ground": (0.02, 0.08), "matrix": (0.05, 0.20), "faint": (0.20, 0.50), "fore": (0.30, 1.00)}   # relative to the role beneath (29 Oct)
 
 
 def _contrast_to(mat: dict, ref: dict, want: float, at_least: bool = False, at_most: float | None = None) -> dict:

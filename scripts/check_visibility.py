@@ -39,7 +39,7 @@ for i in range(N):
         o = hp(occ)
         c = float(torch.corrcoef(torch.stack([o, img]))[0, 1].abs()) if float(o.std()) > 1e-6 else 0.0
         by_role[role].append(c); by_mod[(mod, role)].append(c)
-        if role == "fore":
+        if role in ("fore", "faint"):
             fore_tot += float(occ.sum()); fore_inv += float(occ.sum()) * (c < 0.1)
     if fore_tot > 0:
         inv_fore.append(fore_inv / fore_tot)
@@ -47,11 +47,12 @@ for i in range(N):
     print(f"scene {i}: {mod}", flush=True)
 q = lambda v: f"median {np.median(v):.2f} (25 % {np.percentile(v, 25):.2f}, share < 0.1: {np.mean(np.array(v) < 0.1) * 100:.0f} %, n {len(v)})"
 print("\nvisibility, |corr(population, image)|, high-passed:")
-for role in ("fore", "matrix", "ground"):
+for role in ("fore", "faint", "matrix", "ground"):
     if by_role[role]:
         print(f"  {role:7s} {q(by_role[role])}")
-print("\nforeground by modality:")
-for (mod, role), v in sorted(by_mod.items()):
-    if role == "fore":
-        print(f"  {mod:12s} {q(v)}")
+for rl in ("fore", "faint"):
+    print(f"\n{rl} by modality:")
+    for (mod, role), v in sorted(by_mod.items()):
+        if role == rl:
+            print(f"  {mod:12s} {q(v)}")
 print(f"\nshare of foreground material in invisible populations (|corr| < 0.1): median {np.median(inv_fore) * 100:.0f} %, mean {np.mean(inv_fore) * 100:.0f} % over {len(inv_fore)} scenes")

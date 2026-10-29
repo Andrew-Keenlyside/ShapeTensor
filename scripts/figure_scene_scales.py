@@ -1,6 +1,7 @@
 """Targets at several scales of collections, one scene per row: the image; the objects alone (scale 0) and collections of
 objects up to 4 and 16 voxels across, each entity a random colour, brightness its share of the voxel (the trainer's own
-targets at every voxel of the middle slice, no window; the isotropic ground and matrix left dark); and the ideal
+targets at every voxel of the middle slice, no window; foreground and faint fibre systems; the isotropic ground and matrix
+left dark); and the ideal
 direction (the main axis of each voxel's total ODF, colour = axis, brightness = line-ness). Scenes built of objects.
 
     PYTHONPATH=src python scripts/figure_scene_scales.py OUT.png SEED [SEED ...]   (env SCALES, default 0,4,16)
@@ -35,7 +36,7 @@ for seed in seeds:
     except torch.OutOfMemoryError:
         SC._scene_cache().clear(); torch.cuda.empty_cache(); print(seed, "out of memory"); continue
     ctx = d["entity_ctx"]; tree = ctx["tree"]; gl = list(ctx["group_layer"]); z0 = 32
-    fore = torch.tensor([g_ for g_ in range(len(gl)) if 0 <= gl[g_] < len(s.layers) and getattr(s.layers[gl[g_]], "mrole", "fore") == "fore"] or [-9], device=dev)
+    fore = torch.tensor([g_ for g_ in range(len(gl)) if 0 <= gl[g_] < len(s.layers) and getattr(s.layers[gl[g_]], "mrole", "fore") in ("fore", "faint")] or [-9], device=dev)
     yy, xx = torch.meshgrid(torch.arange(64, device=dev), torch.arange(64, device=dev), indexing="ij")
     qp = torch.stack([torch.full_like(yy, z0), yy, xx], -1).reshape(-1, 3).float(); sg = torch.full((qp.shape[0],), 0.5, device=dev)
     panels = []

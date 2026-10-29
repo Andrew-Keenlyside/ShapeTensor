@@ -894,9 +894,10 @@ def _shift2d(x: torch.Tensor, dy: int, dx: int) -> torch.Tensor:
 #: destructive nuisance), the max of the default here and the modality's entry in :data:`EXTREME_MOD`. Never drawn under
 #: the HiP-CT profile.
 #: 29 Oct: the strength each modality's whole profile is drawn at, per unit of the requested strength -- calibrated so a
-#: profile keeps >= ~0.85 of the clean image (|corr|, scripts/check_artefact_strength.py MODALITY=1) at 0.3 and ~0.5 at 1.0
-#: (uncalibrated: 0.67-0.89 at 0.3, 0.19-0.44 at 1.0)
-MOD_STRENGTH = {"mri": 0.45, "histology": 0.5, "cryoet": 0.5, "ct": 0.6, "em": 0.55, "fluorescence": 0.45, "hipct": 0.75, "mixed": 0.55}
+#: profile keeps >= ~0.85 of the clean image's local structure (|corr|, scripts/check_artefact_strength.py MODALITY=1) at 0.3 and
+#: ~0.5-0.6 at 1.0 where it went below
+MOD_STRENGTH = {"fluorescence": 0.7, "ct": 0.85, "histology": 0.85, "mri": 0.9, "mixed": 0.75, "em": 0.75, "cryoet": 0.75, "hipct": 1.0}   # (measured on local structure, a bias field's shading not counted;
+                                                                             # the rest at 1: they keep >= 0.95 at 0.3 and ~0.5-0.9 at 1.0)
 EXTREME_P = {"bh_streaks": 0.05, "scatter": 0.06, "metal": 0.04, "us_speckle": 0.08, "oct_speckle": 0.05, "oriented_noise": 0.15,
              "motion": 0.10, "slice_motion": 0.08, "fold_lut": 0.10, "posterise": 0.08, "clip": 0.08, "local_reversal": 0.08}
 EXTREME_MOD = {"ct": {"bh_streaks": 0.3, "scatter": 0.3, "metal": 0.15}, "hipct": {"bh_streaks": 0.1, "scatter": 0.2, "metal": 0.05},

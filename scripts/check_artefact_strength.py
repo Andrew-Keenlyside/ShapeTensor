@@ -30,7 +30,8 @@ xkeys = sorted(G.EXTREME_P.keys()); x0 = dict(G.EXTREME_P)
 if EXT:
     G.EXTREME_MOD = {}
 gen = LT.difficulty_gen(0.6, dict(canvas=128, crops_per_scene=8, cross_p=0.5, p_centre=0.5, deep_tree=True, fill_quota=SC.FILL_QUOTA))
-blur = lambda x: gaussian(x.float()[None, None], 1.0)[0, 0].flatten()
+blur = lambda x: (lambda b: (b - gaussian(b[None, None], 6.0)[0, 0]).flatten())(gaussian(x.float()[None, None], 1.0)[0, 0])   # local structure:
+                                                                                                   # smooth shading (a bias field) removed
 corr = lambda a, b: float(torch.corrcoef(torch.stack([a, b]))[0, 1].abs())
 res = {k: {S: [] for S in STR} for k in ([m_ for m_ in G.MODALITIES if not m_.startswith("_")] if MOD else sorted(G.EXTREME_P.keys()) if os.environ.get("EXTREME") else keys)}
 for i in range(N):
