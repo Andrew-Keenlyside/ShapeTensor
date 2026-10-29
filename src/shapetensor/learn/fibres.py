@@ -30,7 +30,7 @@ GAP = 0.1                         # clearance between fibres (voxels) the relaxa
 
 
 def random_section(fvf: float, r_mean: float, k_shape: float, Rb: float, rng: np.random.Generator, max_n: int = 400,
-                   tries: int = 20000) -> tuple[np.ndarray, np.ndarray]:
+                   tries: int = 20000, clip: tuple = (0.4, 2.5)) -> tuple[np.ndarray, np.ndarray]:
     """Fibre centres ``(n, 2)`` in a disc of radius ``Rb`` and radii ``(n,)`` (voxels), drawn by random sequential addition:
     radii gamma (shape ``k_shape``, mean ``r_mean``, clipped to 0.4-2.5x), each placed at a uniform random point where it
     clears every fibre already placed, until the area fraction reaches ``fvf``, ``max_n`` fibres or ``tries`` darts. Random
@@ -40,7 +40,7 @@ def random_section(fvf: float, r_mean: float, k_shape: float, Rb: float, rng: np
     for _ in range(max(1, tries // batch)):
         if filled / area >= fvf or len(R) >= max_n:
             break
-        r = np.clip(rng.gamma(k_shape, r_mean / k_shape, batch), 0.4 * r_mean, 2.5 * r_mean)
+        r = np.clip(rng.gamma(k_shape, r_mean / k_shape, batch), clip[0] * r_mean, clip[1] * r_mean)
         rho = np.sqrt(rng.uniform(0, 1, batch)) * np.maximum(Rb - r, 0); th = rng.uniform(0, 2 * np.pi, batch)
         P = np.stack([rho * np.cos(th), rho * np.sin(th)], 1)
         for p, rr in zip(P, r):                                               # sequential within the batch (exact: no overlaps)

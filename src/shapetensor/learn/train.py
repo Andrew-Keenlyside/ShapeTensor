@@ -43,7 +43,7 @@ TKEYS = ("slots", "mass", "kind", "layer", "fraction", "classes", "size", "size_
 HALF = ("slots", "mass", "fraction", "classes", "size")
 QKEYS = ("q_points", "q_sigma", "q_sh", "sh_t")
 LKEYS = ("identity_t", "points_t", "voxel", "fraction")    # the lobe model's extra targets
-EKEYS = ("e_points", "e_sigma", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa", "e_gnode", "region_t", "iface_t", "bg_t", "e_bg",
+EKEYS = ("e_points", "e_sigma", "e_level", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa", "e_gnode", "region_t", "iface_t", "bg_t", "e_bg",
          "ori_t", "iso_t", "e_ovis")   # the entity model's
 HEAD = "slots"                     # "slots" | "lobes" (set by train())
 DESC_KEY = "descriptors"           # the drawn descriptors the descriptor densities use ("descriptors5": the scenes' five)
@@ -222,8 +222,10 @@ def set_background_entity(on: bool = True):
 
 #: the entity targets' sampling: query points per crop, scales (crop voxels, log-uniform), entities kept per query, the
 #: resolution rule (an object is its own entity when its radius >= max(r_min, c_sig * sigma)), padded tree sizes
-ENTITY = {"n_points": 384, "sigma": (1.0, 12.0), "emax": 8, "r_min": 1.5, "c_sig": 0.5, "u_max": 1536, "d_max": 16, "margin": 2, "p_tissue": 0.7,
-          "p_cross": 0.2, "p_line": 0.0}   # p_line (29 Oct): a share of the queries on line-kind layers' material (the rest of
+LEVELS = (0, 1, 2, 99)            # grouping levels drawn per query: objects, one or two steps up their groups, the population
+ENTITY = {"n_points": 384, "sigma": (1.0, 12.0), "emax": 8, "r_min": 1.5, "c_sig": 0.5, "u_max": 4096, "d_max": 16, "margin": 2, "p_tissue": 0.7,
+          "p_cross": 0.2, "p_line": 0.0, "levels": None}   # levels (29 Oct): None, the resolution rule; "object", every query at its
+                                             # objects; "random", each query at a grouping level drawn from LEVELS   # p_line (29 Oct): a share of the queries on line-kind layers' material (the rest of
                                              # p_tissue on any object's: blobs and cells took most of it)
 
 
@@ -282,12 +284,19 @@ def entity_queries(s, d: dict, size: int, seed: int, device, points: torch.Tenso
     lo, hi = E["sigma"]; sig = torch.exp(math.log(lo) + torch.rand(n, generator=g, device=device) * math.log(hi / lo))
     if points is not None:
         pts, sig = points.float(), sigma.float(); n = pts.shape[0]
+    lv = None                                                                                       # the grouping level of each query
+    if E.get("levels") == "object":
+        lv = torch.zeros(n, dtype=torch.long, device=device)
+    elif isinstance(E.get("levels"), int):                                                          # one level for every query
+        lv = torch.full((n,), int(E["levels"]), dtype=torch.long, device=device)
+    elif E.get("levels") == "random":
+        lv = torch.tensor(LEVELS, device=device)[torch.randint(0, len(LEVELS), (n,), generator=g, device=device)]
     vis, ov = d.get("visibility"), d.get("orientation_visibility")
     K = d["occupancy"].shape[0]
     full = lambda x: None if x is None else (x.float().view(-1, 1, 1, 1).expand(K, *d["occupancy"].shape[1:]) if x.dim() == 1 else x.float())
     t = entity_targets(ctx["entries"], ctx["tree"], ctx["canvas_shape"], ctx["origin"], ctx["zoom"], (size,) * 3, pts, sig, grid=ctx["grid"],
                        vis=full(vis), group_layer=ctx["group_layer"], r_min=E["r_min"], c_sig=E["c_sig"], emax=emax,
-                       mask=ctx.get("mask"), keep=ctx.get("keep"), ovis=full(ov), sig_acq=acquisition_blur(d.get("record", {})), comp=ctx.get("comp"))
+                       mask=ctx.get("mask"), keep=ctx.get("keep"), ovis=full(ov), sig_acq=acquisition_blur(d.get("record", {})), comp=ctx.get("comp"), level=lv)
     tree = ctx["tree"]; node = t["node"]; live = node >= 0
     anc = tree.ancestors(torch.unique(node[live])) if bool(live.any()) else torch.zeros(0, 1, dtype=torch.long, device=device)
     U = torch.unique(torch.cat([anc[anc >= 0], torch.zeros(1, dtype=torch.long, device=device)]))   # the root always (the dense entities' parent)
@@ -347,7 +356,8 @@ def entity_queries(s, d: dict, size: int, seed: int, device, points: torch.Tenso
     e_bg = (gnode[..., None] == bg_g).any(-1) & (e_node >= 0)                                          # the background's entity (no object)
     out = {"e_points": pts, "e_sigma": sig, "e_node": e_node.int(), "e_mass": mass.half(), "e_vis": evis.half(),
            "e_T6": T6.half(), "e_desc": desc.half(), "e_anc": e_anc, "e_n": torch.tensor(U.numel() + nd, device=device),
-           "e_R": R.float(), "e_kappa": Kp.float(), "e_gnode": torch.where(e_node >= 0, gnode, torch.full_like(gnode, -1)), "e_bg": e_bg}
+           "e_R": R.float(), "e_kappa": Kp.float(), "e_gnode": torch.where(e_node >= 0, gnode, torch.full_like(gnode, -1)), "e_bg": e_bg,
+           "e_level": lv if lv is not None else torch.full((pts.shape[0],), -1, dtype=torch.long, device=device)}
     if OVIS_TARGETS and "image" in d:
         from .entities import orientation_visibility
         out["e_ovis"] = orientation_visibility(d["image"].float() / 255, pts, sig, R, Kp, (mass * evis).clamp_min(0) * live).half()

@@ -65,6 +65,19 @@ class Tree:
             node = torch.where(up, self.parent[node], node)
         return node
 
+    def lift(self, node: torch.Tensor, level: torch.Tensor) -> torch.Tensor:
+        """Each node moved ``level`` steps up its chain of parents (per item; 0: the object itself), never past its
+        population: the grouping level (29 Oct) -- objects, the groups they form (fibre -> fascicle -> bundle, nucleus
+        -> cell), the population -- in place of the resolution rule."""
+        level = torch.as_tensor(level, device=node.device).expand_as(node).long()
+        for k in range(int(self.depth.max()) + 1):
+            par = self.parent[node]
+            up = (k < level) & (par >= 0) & (self.kind[node] == KIND_OBJECT)
+            if not bool(up.any()):
+                break
+            node = torch.where(up, par, node)
+        return node
+
     def ancestors(self, nodes: torch.Tensor) -> torch.Tensor:
         """``(n, D)`` the chain from each node up to the root (itself first), padded with -1."""
         D = int(self.depth.max()) + 1; out = torch.full((nodes.numel(), D), -1, dtype=torch.long, device=nodes.device)
@@ -163,7 +176,7 @@ def _pulled(points: torch.Tensor, grid: torch.Tensor | None, shape):
 def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, points: torch.Tensor, sigma: torch.Tensor, grid=None,
                    vis: torch.Tensor | None = None, group_layer=None, r_min: float = 1.5, c_sig: float = 0.5, emax: int = 8,
                    bin_size: int = 2, mask: torch.Tensor | None = None, keep: torch.Tensor | None = None, m_min: float = 1e-3,
-                   ovis: torch.Tensor | None = None, alone_is_object: bool = True, sig_acq: float = 0.0, share_keep: float = 0.2,
+                   ovis: torch.Tensor | None = None, alone_is_object: bool = True, sig_acq: float = 0.0, share_keep: float = 0.2, level=None,
                    comp: torch.Tensor | None = None) -> dict:
     """The entities at query ``points (Q, 3)`` (output crop voxels) and scales ``sigma (Q,)`` (crop voxels).
 
@@ -244,10 +257,13 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     d2 = ((rc[ri] - xp[qi]) ** 2).sum(1); sg = sigma[qi]
     g = torch.exp(-0.5 * d2 / sg ** 2) * (d2 <= (3 * sg) ** 2)
     # the resolved entity of each pair, then sums per (query, entity)
-    thr = zf * torch.clamp(c_sig * torch.sqrt(sg ** 2 + (2 * float(sig_acq)) ** 2), min=r_min)
-    node = tree.resolve(rleaf[ri], thr)
     gw = g * rw[ri]
-    if alone_is_object:                                                                         # a merged entity holding one object here is that object
+    if level is not None:                                                                       # the grouping level (per query): objects
+        node = tree.lift(rleaf[ri], torch.as_tensor(level, device=dev).expand(Q)[qi])            # as they are, or their groups -- no
+    else:                                                                                       # resolution rule
+        thr = zf * torch.clamp(c_sig * torch.sqrt(sg ** 2 + (2 * float(sig_acq)) ** 2), min=r_min)
+        node = tree.resolve(rleaf[ri], thr)
+    if alone_is_object and level is None:                                                                         # a merged entity holding one object here is that object
         node = _single_object(qi, node, rleaf[ri], gw / (zf ** 3 * (2 * math.pi * sg ** 2) ** 1.5), m_min, tree.n)
     vl = torch.ones_like(gw); ol = None
     if group_layer is not None and (vis is not None or ovis is not None):

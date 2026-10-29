@@ -802,6 +802,9 @@ UNRESOLVED_R = 1.5                # a matrix's fibres thinner than this (voxels)
 ISO_SPREAD_DEG = math.degrees(math.asin(math.sqrt(2.0 / 3.0)))   # 54.74 deg: the spread at which a fibre's ellipse is I / 3
 MATRIX_R_MIN = 0.3                # the matrix's and ground's fibres no thinner (voxels): micro-fascicles at coarse voxels
 GROUND_FILL = 1.3                 # the ground's material per volume (over-filled: the composite scales each voxel back to one)
+SIZE_CLIP = (0.2, 5.0)            # scenes of objects: a bundle's fibre radii, gamma about the mean, clipped to these multiples
+NP_SIZE_SIGMA = 0.5               # ... the matrix neuropil's fibre widths, log-normal spread
+CELL_SIZE_SIGMA = 0.35            # ... the matrix cells' sizes, log-normal spread (clipped to 0.5-2x)
 MATRIX_TWO_P = 0.3                # two matrix kinds in one scene
 P_TORTUOUS = 0.25                 # bundles whose path meanders on a short correlation length (5-15 voxels; curvature 0.03-0.08 / voxel)
 TEXTURE_MAX_STRANDS = 60_000      # the texture family's strands per population (cost: ~S x this points splatted)
@@ -1057,9 +1060,11 @@ class Scene:
         if rf >= 0.45:                                                      # resolved fibres
             from . import fibres as FB
             nmax = int(fibre.get("max_fibres", 250 if FB.RELAX else 400)); radii = None
-            if FB.PACKING == "random":                                          # Monte Carlo: dart throwing with gamma radii (no lattice)
-                fvf = r.u(0.15, 0.45) if FB.RELAX else r.u(0.35, 0.6)                # with the relaxation: room for a crossing
-                C_, R_ = FB.random_section(fvf, rf, r.u(4, 12), Rb, r.np, max_n=nmax)   # bundle to pass between the fibres
+            if FB.PACKING == "random" or MATRIX_P > 0:                          # Monte Carlo: dart throwing with gamma radii (no lattice);
+                fvf = r.u(0.15, 0.45) if FB.RELAX else r.u(0.35, 0.6)                # with the relaxation: room for a crossing bundle
+                wide = MATRIX_P > 0                                                 # scenes of objects (29 Oct): sizes spread far, a
+                C_, R_ = FB.random_section(fvf, rf, r.lu(1.5, 5.0) if wide else r.u(4, 12), Rb, r.np, max_n=nmax,   # bundle's fibres from
+                                           clip=SIZE_CLIP if wide else (0.4, 2.5))   # far below a voxel to several voxels
                 o = torch.tensor(C_ / Rb, dtype=torch.float32, device=self.device); radii = torch.tensor(R_, dtype=torch.float32, device=self.device)
                 sp = 2.4 * rf / Rb
             else:                                                               # packed on a jittered hexagonal section
@@ -1823,16 +1828,24 @@ class Scene:
         n_c = int(min(4000, 2.5 * np.prod(self.shape) / dmin ** 3))
         C = r.rand(n_c, 3) * torch.tensor(self.shape, device=dev, dtype=torch.float32)
         D = torch.cdist(C, C); earlier = torch.ones_like(D, dtype=torch.bool).tril(-1)
-        C = C[~((D < dmin) & earlier).any(1)]                                # random placement, a candidate dropped if it hits an earlier one
+        if any_scale:                                                       # the matrix (29 Oct): each cell its own size, 0.5-2x,
+            scl = torch.exp(CELL_SIZE_SIGMA * r.randn(n_c)).clamp(0.5, 2.0)      # placed clear of the others for their sizes
+            reach = 1.05 * rc * max(1.0, elong) * scl
+            ok_ = ~((D < reach[:, None] + reach[None]) & earlier).any(1); C = C[ok_]; cell_scale = scl[ok_]
+        else:
+            ok_ = ~((D < dmin) & earlier).any(1); C = C[ok_]; cell_scale = None
         keep = r.rand(C.shape[0]) < r.u(0.3, 1.0)
         if self.depth is not None:                                          # laminar density
             bd = torch.tensor(self.band_density, device=dev)[self.band_of(C)]
             keep = keep & (r.rand(C.shape[0]) < bd)
-        C = C[keep]; C = C[torch.randperm(C.shape[0], generator=r.g, device=dev)[:700]]; n = C.shape[0]   # shuffled before the cap
+        perm_ = torch.randperm(int(keep.sum()), generator=r.g, device=dev)[:700]
+        C = C[keep][perm_]; n = C.shape[0]                                  # shuffled before the cap
+        cell_scale = cell_scale[keep][perm_] if cell_scale is not None else None
         if n == 0:
             return None
         Rm = _rot(r, n) if r.p(0.5) else _rot(r, 1).expand(n, 3, 3)
-        ax = torch.stack([torch.ones(n, device=dev), torch.ones(n, device=dev), torch.full((n,), elong, device=dev)], 1) * rc * torch.exp(0.12 * r.randn(n, 1)).clamp(max=1.12)
+        ax = torch.stack([torch.ones(n, device=dev), torch.ones(n, device=dev), torch.full((n,), elong, device=dev)], 1) * rc * (
+            cell_scale[:, None] if cell_scale is not None else torch.exp(0.12 * r.randn(n, 1)).clamp(max=1.12))
         out = self._cell_groups(C, Rm, ax, rc)
         self.record["families"].append({"cells": {"n": n, "radius_vox": round(rc, 2), "elongation": round(elong, 2)}})
         return out
@@ -2451,7 +2464,7 @@ class Scene:
         S = max(8, int(L / H))
         start = r.rand(n, 3) * torch.tensor(self.shape, device=dev, dtype=torch.float32)
         P = smooth_paths(start, r.unit(n), torch.full((n,), L, device=dev), S, torch.full((n,), r.lu(0.05, 0.4), device=dev), max(L / 4, 1.0), r)
-        rad = torch.full((n, S), max(rf, 0.05), device=dev) * torch.exp(0.2 * r.randn(n, 1))
+        rad = torch.full((n, S), max(rf, 0.05), device=dev) * torch.exp((NP_SIZE_SIGMA if fill is not None else 0.2) * r.randn(n, 1)).clamp(0.3, 3.0)
         cv = curves_like(P, rad, r, obj=self.ids(n, rad[:, 0]), seg=torch.zeros(n, dtype=torch.long, device=dev), contrast=self.contrast(10, 90))
         if fill is not None and (vox or rf < UNRESOLVED_R):                                     # unresolved, randomly directed: the
             cv.spread = torch.full((n,), ISO_SPREAD_DEG, device=dev)                            # material's ODF is its population's,

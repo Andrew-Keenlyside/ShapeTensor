@@ -383,7 +383,7 @@ def cube_tensor6(v: torch.Tensor, perm, flips) -> torch.Tensor:
     return torch.stack([v[..., idx[(perm[j], perm[k])]] * (sgn[j] * sgn[k]) for j, k in SYM], -1)
 
 
-ENTITY_STATIC = ("e_sigma", "e_node", "e_mass", "e_vis", "e_desc", "e_anc", "e_depth", "e_n", "e_kappa", "e_gnode", "e_ovis")
+ENTITY_STATIC = ("e_sigma", "e_level", "e_node", "e_mass", "e_vis", "e_desc", "e_anc", "e_depth", "e_n", "e_kappa", "e_gnode", "e_ovis")
 
 
 def augment(image: torch.Tensor, tgt: dict, g: torch.Generator | None = None):

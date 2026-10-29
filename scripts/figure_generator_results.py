@@ -25,6 +25,7 @@ from odf_render import draw_tensors
 out = sys.argv[1]; seeds = [int(x) for x in sys.argv[2:]]; dev = "cuda"; STR = float(os.environ.get("STRENGTH", 0.3))
 torch.cuda.set_per_process_memory_fraction(float(os.environ.get("MEMFRAC", 0.45)))
 SC.MATRIX_P = 1.0
+TR.ENTITY["u_max"] = 60_000                                                                     # (every voxel of a slice queried: all its objects kept)
 if os.environ.get("R_MIN"):
     TR.ENTITY["r_min"] = float(os.environ["R_MIN"])                                           # the resolution rule's floor (voxels)
 if os.environ.get("MATRIX"):
@@ -81,7 +82,11 @@ for seed in seeds:
     # spatial averaging), after the resolution rule (objects thinner than the resolution merged into their population)
     yy_, xx_ = torch.meshgrid(torch.arange(64, device=dev), torch.arange(64, device=dev), indexing="ij")
     qp = torch.stack([torch.full_like(yy_, z0), yy_, xx_], -1).reshape(-1, 3).float()
+    TR.ENTITY["levels"] = 0                                                                        # objects as they are (no resolution rule)
     tq = TR.entity_queries(s, d, 64, 0, dev, points=qp, sigma=torch.full((qp.shape[0],), 0.5, device=dev))
+    TR.ENTITY["levels"] = 1                                                                        # one step up: the groups objects form
+    tq1 = TR.entity_queries(s, d, 64, 0, dev, points=qp, sigma=torch.full((qp.shape[0],), 0.5, device=dev))
+    TR.ENTITY["levels"] = None
     live = tq["e_node"] >= 0; mq = (tq["e_mass"].float() * tq["e_vis"].float()).clamp_min(0) * live
     shq = mq / mq.sum(-1, keepdim=True).clamp_min(1e-9)
     qi_, ei_ = torch.nonzero(live, as_tuple=True)
@@ -108,22 +113,34 @@ for seed in seeds:
     ue, inve = torch.unique(oa[fge], return_inverse=True); cole = rcol(ue)[inve]
     objcol = torch.zeros(64 * 64, 3, device=dev).index_add_(0, pa[fge], sha[fge][:, None] * cole).view(64, 64, 3).cpu().numpy()
     n_ent = int(len(ue))
+    live1 = tq1["e_node"] >= 0; m1 = (tq1["e_mass"].float() * tq1["e_vis"].float()).clamp_min(0) * live1
+    sh1 = m1 / m1.sum(-1, keepdim=True).clamp_min(1e-9); q1, e1_ = torch.nonzero(live1, as_tuple=True)
+    o1 = tq1["e_gnode"][q1, e1_].long().clamp_min(0); s1 = sh1[q1, e1_]; f1 = torch.isin(ent_group(o1), fg_g) & (s1 > 0.02)
+    u1, inv1 = torch.unique(o1[f1], return_inverse=True)
+    grpcol = (torch.zeros(64 * 64, 3, device=dev).index_add_(0, q1[f1], s1[f1][:, None] * rcol(u1)[inv1]).view(64, 64, 3).cpu().numpy(), int(len(u1)))
     nobj = torch.zeros(64 * 64, device=dev).index_add_(0, pa[fge], torch.ones_like(sha[fge])).view(64, 64).cpu().numpy()
     top1 = torch.zeros(64 * 64, device=dev).scatter_reduce_(0, pa, sha, reduce="amax").view(64, 64).cpu().numpy()
-    rows.append((seed, d["record"].get("modality"), d["record"].get("matrix"), img0, img3, role_map.reshape(64, 64, 3).clip(0, 1), cen, T6, shk, dec_raw, dec_w, objcol, nobj, (cons, n_cons, n_ent)))
+    rows.append((seed, d["record"].get("modality"), d["record"].get("matrix"), img0, img3, role_map.reshape(64, 64, 3).clip(0, 1), cen, T6, shk, dec_raw, dec_w, objcol, nobj, (cons, n_cons, n_ent, grpcol)))
     SC._scene_cache().clear(); torch.cuda.empty_cache(); print(seed, "ok", d["record"].get("modality"), d["record"].get("matrix"), flush=True)
 
 MASS = bool(os.environ.get("MASS"))
+if os.environ.get("SIMPLE"):                                                                       # one scene, four large panels
+    seed, mod, mat, img0, img3, rm, cen, T6, shk, dec_raw, dec_w, objcol, nobj, (cons, n_cons, n_ent, (grp_img, n_grp)) = rows[0]
+    norm = lambda x: np.clip((x - np.percentile(x, 1)) / max(np.percentile(x, 99) - np.percentile(x, 1), 1e-6), 0, 1)
+    fig, axs = plt.subplots(1, 4, figsize=(20, 5.6))
+    for a_, im_, t_ in zip(axs, (norm(img0), np.clip(objcol / max(float(objcol.max()), 1e-6), 0, 1), np.clip(grp_img / max(float(grp_img.max()), 1e-6), 0, 1), np.clip(dec_w, 0, 1)),
+                           ("image", f"objects ({n_ent}), one colour each", f"groups ({n_grp}), one level up", "ideal direction (colour = axis)")):
+        a_.imshow(im_, cmap="gray" if im_.ndim == 2 else None, interpolation="nearest"); a_.set_title(t_, fontsize=13); a_.set_xticks([]); a_.set_yticks([])
+    fig.tight_layout(); fig.savefig(out, dpi=90); print("saved", out); sys.exit(0)
 fig, axs = plt.subplots(len(rows), 6, figsize=(25.5, 4.4 * len(rows))); axs = np.atleast_2d(axs)
 for r_, (seed, mod, mat, img0, img3, rm, cen, T6, shk, dec_raw, dec_w, objcol, nobj, top1) in enumerate(rows):
   if MASS:                                                                                         # the mass targets
     norm = lambda x: np.clip((x - np.percentile(x, 1)) / max(np.percentile(x, 99) - np.percentile(x, 1), 1e-6), 0, 1)
     axs[r_, 0].imshow(norm(img0), cmap="gray"); axs[r_, 0].set_title(f"seed {seed}: clean render ({mod})", fontsize=9)
-    cons, n_cons, n_ent = top1
+    cons, n_cons, n_ent, (grp_img, n_grp) = top1
     axs[r_, 1].imshow(np.clip(cons, 0, 1)); axs[r_, 1].set_title(f"construction: {n_cons} foreground objects as built,\neach a random colour, brightness = its material", fontsize=9)
-    axs[r_, 2].imshow(np.clip(objcol, 0, 1)); axs[r_, 2].set_title(f"training targets: {n_ent} separate foreground entities\n(after the resolution rule), each a random colour, by share", fontsize=9)
-    im_ = axs[r_, 3].imshow(nobj, cmap="viridis", vmin=0, vmax=max(3, float(nobj.max()))); plt.colorbar(im_, ax=axs[r_, 3], fraction=0.046)
-    axs[r_, 3].set_title(f"foreground entities per voxel (share >= 2 %): max {nobj.max():.0f}", fontsize=9)
+    axs[r_, 2].imshow(np.clip(objcol, 0, 1)); axs[r_, 2].set_title(f"targets, object level: {n_ent} foreground objects\n(no resolution rule), each a random colour, by share", fontsize=9)
+    axs[r_, 3].imshow(np.clip(grp_img, 0, 1)); axs[r_, 3].set_title(f"targets, one level up: {n_grp} groups\n(fibres -> fascicle / bundle, nucleus -> cell)", fontsize=9)
     axs[r_, 4].imshow(norm(img0), cmap="gray", alpha=0.35)
     if len(cen):
         draw_tensors(axs[r_, 4], cen, T6, 0.62 * STEP, view="z", scale=np.sqrt(shk))
