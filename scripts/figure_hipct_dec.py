@@ -1,5 +1,5 @@
 """One HiP-CT crop, its middle slice six ways: the image; the model's populations as stacked elliptical ODFs; DEC maps
-(R = x, G = y, B = z; brightness = line-ness) of the predominant fibre population, of the first, second and third
+(R = |x|, G = |y|, B = |z| of the axis, unweighted) of the predominant fibre population, of the first, second and third
 populations by share, and of the structure tensor's line axis (the benchmark). Real data: viewing only.
 
     PYTHONPATH=src python scripts/figure_hipct_dec.py VOLUME.ome.zarr OUT.png --centre Z Y X --ckpt MODEL.pt
@@ -43,18 +43,19 @@ ex, sh, T = r["pop_exist"].float(), r["pop_share"][:, :-1].float(), r["pop_T"].f
 ev, V = torch.linalg.eigh(T.double()); ev = ev.float().flip(-1); ax = V[..., :, -1].float()     # descending eigenvalues; line axis (z, y, x)
 lin = ((ev[..., 0] - ev[..., 1]) / ev[..., 0].clamp_min(1e-9)).clamp(0, 1)
 on = ex > 0.5
-dec = lambda v, b: (np.abs(v[..., [2, 1, 0]]) * b[..., None]).reshape(a.crop, a.crop, 3)          # (z, y, x) -> RGB = (x, y, z)
+dec = lambda v, b: (np.abs(v[..., [2, 1, 0]]) * (b[..., None] > 0)).reshape(a.crop, a.crop, 3)    # (z, y, x) -> RGB = (x, y, z), unweighted
+                                                                                                   # (black: no such population)
 
 shs = torch.where(on, sh, torch.full_like(sh, -1.0)); order = shs.argsort(-1, descending=True)     # populations by share
 ar = torch.arange(pts.shape[0], device=dev)
 fib = torch.where(on & (lin > 0.3), sh, torch.full_like(sh, -1.0)); kf = fib.argmax(-1); has_f = fib.max(-1).values > 0
-pre = dec(ax[ar, kf].cpu().numpy(), (lin[ar, kf] * has_f).cpu().numpy())
-pops = [dec(ax[ar, order[:, j]].cpu().numpy(), (lin[ar, order[:, j]] * (shs[ar, order[:, j]] > 0)).cpu().numpy()) for j in range(3)]
+pre = dec(ax[ar, kf].cpu().numpy(), has_f.float().cpu().numpy())
+pops = [dec(ax[ar, order[:, j]].cpu().numpy(), (shs[ar, order[:, j]] > 0).float().cpu().numpy()) for j in range(3)]
 
 j6 = window_mean(st_products(x[None, None])[0], pts[None].expand(6, -1, -1).contiguous(), sig[None].expand(6, -1).contiguous()).T
 sev, sV = torch.linalg.eigh(st_matrix(j6).double()); sev = sev.float()
 st_lin = ((sev[:, 1] - sev[:, 0]) / sev[:, 2].clamp_min(1e-12)).clamp(0, 1)
-st_dec = dec(sV[..., :, 0].float().cpu().numpy(), st_lin.cpu().numpy())
+st_dec = dec(sV[..., :, 0].float().cpu().numpy(), np.ones(pts.shape[0]))
 
 img = x[z, y0:y0 + a.crop, x0:x0 + a.crop].cpu().numpy()
 g = np.arange(2, a.crop, 4); sel = (yy.ravel() % 4 == 2) & (xx.ravel() % 4 == 2)
@@ -77,5 +78,5 @@ inside = U ** 2 + W ** 2 <= 1; lg[..., 0], lg[..., 1] = np.abs(U), np.abs(W); lg
 axs[1, 3].imshow(lg); axs[1, 3].set_title("DEC key: R = x (left-right), G = y (up-down), B = z (through)", fontsize=10)
 for ax_ in axs.ravel():
     ax_.set_xticks([]); ax_.set_yticks([])
-fig.suptitle(f"{a.label}  |  model step {ck.get('step')}, window {a.window:g} voxels; brightness = line-ness", fontsize=12)
+fig.suptitle(f"{a.label}  |  model step {ck.get('step')}, window {a.window:g} voxels; RGB = |axis| (unweighted); black = no such population", fontsize=12)
 fig.tight_layout(rect=(0, 0, 1, 0.96), h_pad=2.5); fig.savefig(a.out, dpi=80); print("saved", a.out)
