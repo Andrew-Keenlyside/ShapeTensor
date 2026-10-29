@@ -169,27 +169,34 @@ def population_targets(T: dict, K: int):
     return s, E, valid, (1 - s.sum(-1)).clamp_min(0), tot[..., 0] > MASS_EPS
 
 
-def population_loss(ent: dict, T: dict) -> dict:
-    """Set prediction against :func:`population_targets`: each query's slots matched to its targets by the cheapest of
-    all K! orderings (exact; K = 4 -> 24), then existence BCE + share L1 (with "other") + share-weighted squared
-    Frobenius distance of the ellipses (minimised by the conditional mean). No direction grid."""
+def population_match(ent: dict, T: dict) -> dict:
+    """Each query's slots matched to its target populations (:func:`population_targets`) by the cheapest of all K!
+    orderings (exact; K = 4 -> 24 on the GPU): the targets, ``match (B, Q, K)`` the target of each slot, and the matched
+    ``s_m`` shares, ``v_m`` validity, ``E_m`` ellipses."""
     import itertools
     ex, sh, PT = ent["pop_exist"].float(), ent["pop_share"].float(), ent["pop_T"].float()
     K = ex.shape[-1]
     s, E, valid, other, has = population_targets(T, K)
-    dT = ((PT[..., :, None, :, :] - E[..., None, :, :, :]) ** 2).sum((-1, -2))                   # (B, Q, K slots, K targets)
+    dT = ((PT[..., :, None, :, :] - E[..., None, :, :, :]) ** 2).sum((-1, -2))                   # (..., K slots, K targets)
     cost = s[..., None, :] * dT + (sh[..., :K, None] - s[..., None, :]).abs() + (ex[..., :, None] - valid[..., None, :].float()).abs()
     perms = torch.tensor(list(itertools.permutations(range(K))), device=ex.device)                  # (P, K)
-    ck = cost[..., torch.arange(K, device=ex.device)[None, :].expand_as(perms), perms].sum(-1)      # (B, Q, P)
-    match = perms[ck.argmin(-1)]                                                                     # (B, Q, K): the target of each slot
-    s_m = s.gather(-1, match); v_m = valid.gather(-1, match).float()
-    E_m = E.gather(2, match[..., None, None].expand(*match.shape, 3, 3))
+    ck = cost[..., torch.arange(K, device=ex.device)[None, :].expand_as(perms), perms].sum(-1)      # (..., P)
+    match = perms[ck.argmin(-1)]
+    return {"s": s, "E": E, "valid": valid, "other": other, "has": has, "match": match, "s_m": s.gather(-1, match),
+            "v_m": valid.gather(-1, match).float(), "E_m": E.gather(-3, match[..., None, None].expand(*match.shape, 3, 3))}
+
+
+def population_loss(ent: dict, T: dict) -> dict:
+    """Set prediction against :func:`population_targets` (matched by :func:`population_match`): existence BCE + share
+    L1 (with "other") + share-weighted squared Frobenius distance of the ellipses (minimised by the conditional mean).
+    No direction grid."""
+    ex, sh, PT = ent["pop_exist"].float(), ent["pop_share"].float(), ent["pop_T"].float()
+    K = ex.shape[-1]; mt = population_match(ent, T); has = mt["has"]
     if not bool(has.any()):
-        z = ex.sum() * 0.0
-        return {"pop": z}
-    l_ex = Fn.binary_cross_entropy(ex.clamp(1e-4, 1 - 1e-4), v_m, reduction="none").mean(-1)[has].mean()
-    l_sh = ((sh[..., :K] - s_m).abs().sum(-1) + (sh[..., K] - other).abs())[has].mean()
-    l_T = (s_m * ((PT - E_m) ** 2).sum((-1, -2))).sum(-1)[has].mean()
+        return {"pop": ex.sum() * 0.0}
+    l_ex = Fn.binary_cross_entropy(ex.clamp(1e-4, 1 - 1e-4), mt["v_m"], reduction="none").mean(-1)[has].mean()
+    l_sh = ((sh[..., :K] - mt["s_m"]).abs().sum(-1) + (sh[..., K] - mt["other"]).abs())[has].mean()
+    l_T = (mt["s_m"] * ((PT - mt["E_m"]) ** 2).sum((-1, -2))).sum(-1)[has].mean()
     return {"pop": l_ex + l_sh + 4.0 * l_T, "pop_exist": l_ex.detach(), "pop_share": l_sh.detach(), "pop_T": l_T.detach()}
 
 

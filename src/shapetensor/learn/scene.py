@@ -756,6 +756,10 @@ SCALE_FLOOR = 0.02                # never zero: a family out of its range still 
 P_UNRESOLVED_TEXTURE = 0.85       # unresolved bundles drawn with strand texture (the rest a smooth partial-volume tube)
 P_TORTUOUS = 0.25                 # bundles whose path meanders on a short correlation length (5-15 voxels; curvature 0.03-0.08 / voxel)
 TEXTURE_MAX_STRANDS = 60_000      # the texture family's strands per population (cost: ~S x this points splatted)
+TEXTURE_CLUSTERS = (32, 128)      # a texture field's objects: its strands grouped into compact patches (k-means on the seeds;
+                                  # about one per 100 strands, within these bounds); None: the field one object (before 29 Oct)
+STRAND_OBJECTS = True             # an unresolved bundle's strands (and its smooth partial volume) each an object under the bundle
+                                  # (29 Oct); False: all of them the bundle's one object
 P_TISSUE = 0.5                    # scenes of packed tissue (Scene.tissue: fibres wall to wall), where the voxel size suits
 P_GREY_TISSUE = 0.25              # of those, grey-matter-like (sparse turning fibres among dense cells and neuropil)
 P_NARROW = 0.5                    # crossing angles drawn at 8-40 deg (else 5-90): narrow crossings oversampled
@@ -1063,7 +1067,10 @@ class Scene:
             from . import fibres as FB
             phi_ = r.u(0.3, 0.8); one = lambda v: torch.tensor([v], device=self.device)
             beta = float(fibre["texture"]) if "texture" in fibre else (r.u(0.1, 0.7) if r.p(P_UNRESOLVED_TEXTURE) else 0.0)   # (the strands' share)
-            cv = curves_like(Pc, Rs[None].clone(), r, obj=one(bid), seg=one(bid), contrast=contrast, density=one(phi_ * (1 - beta)), fibre_r=one(rf))
+            tube = bid
+            if STRAND_OBJECTS:                                              # the smooth partial volume: one more child of the bundle
+                tube = int(self.ids(1, rf)[0]); self.parents[tube] = bid    # (its radius the fibres': merged at any window)
+            cv = curves_like(Pc, Rs[None].clone(), r, obj=one(tube), seg=one(bid), contrast=contrast, density=one(phi_ * (1 - beta)), fibre_r=one(rf))
             curves = [cv]; tex = {}
             if beta > 0:                                                    # the rest in strands: groups of sub-voxel fibres whose packing
                 rs = min(r.lu(0.6, 3.0), max(0.6, Rb / 3))                  # varies (fascicles, density fluctuations), wandering -- the
@@ -1078,7 +1085,13 @@ class Scene:
                 oo = o[:, None] + disp
                 P = Pc + Rs[None, :, None] * (oo[..., :1] * e1 + oo[..., 1:] * e2)
                 rad = torch.tensor(R_, dtype=torch.float32, device=self.device)[:, None] * torch.exp(0.15 * smooth_noise1d(r, N, S, lam / H))
-                curves.append(curves_like(P, rad, r, obj=torch.full((N,), bid, device=self.device), seg=torch.full((N,), bid, device=self.device),
+                if STRAND_OBJECTS:                                          # each strand its own object, a leaf under the bundle (29 Oct)
+                    sid = self.ids(N, rad.amin(1))
+                    for o_ in sid.tolist():
+                        self.parents[o_] = bid
+                else:
+                    sid = torch.full((N,), bid, device=self.device)
+                curves.append(curves_like(P, rad, r, obj=sid, seg=torch.full((N,), bid, device=self.device),
                                           contrast=contrast, density=dens, fibre_r=torch.full((N,), rf, device=self.device)))
                 tex = {"texture": round(beta, 2), "strands": N, "strand_vox": round(rs, 2), "strand_turn_deg": round(math.degrees(turn), 1)}
             g = Group("bundle", "line", rf, contrast, curves=curves); g.offsets = None
@@ -2294,10 +2307,34 @@ class Scene:
         occ = occ.clamp(0, 1)
         on = (occ > 1e-4).float(); desc = torch.zeros((5,) + shp, device=dev); desc[0] = re * on
         contrast = self.contrast(25, 100) if r.p(0.8) else self.contrast(5, 25); oid = self.ids(1, max(re, 0.25))   # 80 % clear, 20 % faint
+        obj_map = torch.full(shp, int(oid[0]), device=dev, dtype=torch.long); n_cl = 1
+        if TEXTURE_CLUSTERS is not None:                                                         # compact patches of strands as objects
+            obj_map, n_cl = self._texture_clusters(seeds, int(oid[0]), max(re, 0.25))            # under the field (29 Oct)
         rec.setdefault("pops", []).append({"width": round(width, 2), "elong": round(elong, 1), "phi": round(phi, 3), "spread_deg": round(math.degrees(spread), 1),
-                                           "strands": N, "contrast": round(contrast, 1)})
-        g = Group("texture", "line", re, contrast, dense=[(occ, T, desc, contrast, torch.full(shp, int(oid[0]), device=dev, dtype=torch.long))])
+                                           "strands": N, "contrast": round(contrast, 1), "clusters": n_cl})
+        g = Group("texture", "line", re, contrast, dense=[(occ, T, desc, contrast, obj_map)])
         return g
+
+    def _texture_clusters(self, seeds: torch.Tensor, field: int, radius: float):
+        """A texture field's objects: k-means (10 rounds) on its strands' seeds into ``K`` clusters (one per ~100 strands,
+        within :data:`TEXTURE_CLUSTERS`), each a new object under ``field``; every voxel goes to its nearest centre (a
+        Voronoi map -- compact patches; a strand crossing a patch edge is shared between them). ``radius``: the clusters'
+        (the strands'), so the resolution rule merges them into the field as it would the strands. Returns the voxel ->
+        object map and K."""
+        r = self.r; dev = self.device; shp = self.shape; N = seeds.shape[0]
+        lo, hi = TEXTURE_CLUSTERS; K = int(min(N, max(lo, min(hi, N // 100))))
+        Cc = seeds[torch.randperm(N, generator=r.g, device=dev)[:K]].clone()
+        for _ in range(10):
+            lab = torch.cdist(seeds, Cc).argmin(1)
+            cnt = torch.bincount(lab, minlength=K).float()
+            sm = torch.zeros(K, 3, device=dev).index_add_(0, lab, seeds)
+            Cc = torch.where(cnt[:, None] > 0, sm / cnt.clamp_min(1)[:, None], Cc)
+        cid = self.ids(K, radius)
+        for o_ in cid.tolist():
+            self.parents[o_] = field
+        X = torch.stack(torch.meshgrid(*(torch.arange(n, device=dev, dtype=torch.float32) for n in shp), indexing="ij"), -1).reshape(-1, 3)
+        lab = torch.cat([torch.cdist(X[i:i + 262144], Cc).argmin(1) for i in range(0, X.shape[0], 262144)])
+        return cid[lab].view(shp).long(), K
 
     def texture(self):
         """Oriented texture fields: orientation as a statistical property of a dense, fibre-like texture -- a smooth
@@ -3101,6 +3138,8 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     dfm = getattr(sc, "deform", None)
     vfrac = (lambda oc: float(dfm.valid[tuple(slice(a, a + e) for a, e in zip(oc, ext))].float().mean())) if dfm is not None else (lambda oc: 1.0)
     r = Rng(seed, device); ra = Rng(acq_seed if acq_seed is not None else seed + 31337, device)
+    rg = Rng(seed + 90001, device)                                            # specimen geometry (sparse labels, edges, cut-outs): the scene's,
+                                                                              # never the acquisition's, so an acquisition only changes appearance
     from .generator import MODALITIES
     names = list(MODALITIES); modality = modality or names[ra.i(0, len(names) - 1)]          # X-ray, MRI, histology, EM, fluorescence, cryo-ET, mixed
     hip = profile == "hipct"; sg_ = float(min(max(strength, 0.0), 1.0))
@@ -3188,8 +3227,8 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     lum = _crop(ren["lumen"].float(), sl, zoom); lum_c = _crop(ren["lumen"].float() * ren["lumen_c"].float(), sl, zoom) / lum.clamp_min(1e-9)
     rec = {"scene": sid, "crop": o, "zoom": zoom, "style": st, **sc.record}
     keep_lut, kv = None, None
-    if layers and ra.p(p_sparse):                                            # sparse labelling: most objects unlabelled -- gone from image and targets
-        fk = ra.lu(0.01, 0.3); keep_lut = ra.rand(sc.next_obj + 1) < fk
+    if layers and rg.p(p_sparse):                                            # sparse labelling: most objects unlabelled -- gone from image and targets
+        fk = rg.lu(0.01, 0.3); keep_lut = rg.rand(sc.next_obj + 1) < fk
         ids0 = _crop(ren["ids"][0], sl, zoom, "pick").long(); lab0_ = keep_lut[ids0.clamp_min(0)]
         hidden = (ids0 >= 0) & ~lab0_; kept = (ids0 >= 0) & lab0_
         kv = (~((Fn.max_pool3d(hidden.float()[None, None], 3, 1, 1)[0, 0] > 0) & ~kept)).float()   # the hidden objects and their partial-volume rim
@@ -3197,10 +3236,10 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
             L.occupancy = L.occupancy * kv
         lum = lum * kv; rec["sparse"] = round(fk, 3)
     M = None
-    if ra.p(p_boundary):                                                     # the specimen's edge: tissue on one side, medium on the other
-        M = sample_mask(shape, ra, device)
-    if ra.p(p_cutout):                                                       # chunks of tissue removed: blocks, holes, a knife's gap
-        Mc, kinds = cutout_mask(shape, ra, device); M = Mc if M is None else M * Mc; rec["cutout"] = kinds
+    if rg.p(p_boundary):                                                     # the specimen's edge: tissue on one side, medium on the other
+        M = sample_mask(shape, rg, device)
+    if rg.p(p_cutout):                                                       # chunks of tissue removed: blocks, holes, a knife's gap
+        Mc, kinds = cutout_mask(shape, rg, device); M = Mc if M is None else M * Mc; rec["cutout"] = kinds
     if sc.outside is not None:                                               # a real cortical layout: nothing beyond the pial surface
         Mo = 1.0 - _crop(sc.outside.float(), sl, zoom)
         M = Mo if M is None else M * Mo

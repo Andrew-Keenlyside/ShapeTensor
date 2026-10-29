@@ -2,6 +2,7 @@
 the construction's orientation field; superposed fields are separate populations. CPU, synthetic only."""
 import torch
 
+from shapetensor.learn import scene as SC_
 from shapetensor.learn.scene import Scene
 
 
@@ -21,7 +22,10 @@ def test_texture_populations_are_finite_line_fields():
             assert float(occ.min()) >= 0 and float(occ.max()) <= 1
             on = occ > 0.05
             assert torch.allclose(T[:3].sum(0)[on], torch.ones(int(on.sum())), atol=1e-3)
-            assert om.unique().numel() == 1                                                         # one object per field
+            pop = [p_ for p_ in sc.record["families"][-1]["texture"]["pops"]]
+            n_obj = om[occ > 1e-3].unique().numel()                                                   # the field's cluster objects
+            assert 1 <= n_obj <= SC_.TEXTURE_CLUSTERS[1] and om.unique().numel() <= max(p_["clusters"] for p_ in pop)
+            assert len({sc.parents.get(int(o)) for o in om.unique().tolist()}) == 1                  # all under one field object
 
 
 def test_texture_tensor_follows_its_field():

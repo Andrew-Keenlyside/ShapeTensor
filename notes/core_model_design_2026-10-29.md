@@ -312,7 +312,7 @@ voxels. Targets are each query's populations from construction.
 |---|---|---|
 | A | orientation | median axis error of the matched population at single-line queries (one line population with share >= 0.6), strength 0.3: <= the fitted structure tensor's |
 | B | crossings | queries with two line populations (each share >= 0.2, >= 45 deg apart): both axes found within 15 deg by slots with existence > 0.5 in >= 25 % (strength 0.3); the structure tensor: 0 % |
-| C | populations | existence F1 (slots against target populations) >= 0.6; share error <= 0.8 x that of the trivial "one population takes everything" answer |
+| C | populations | existence F1 for populations holding >= 10 % of the window >= the trivial "every slot present" F1 + 0.05; share error <= 0.8 x that of the trivial "one population takes everything" answer |
 | D | morphology | shape class of matched populations (line / sheet / isotropic, from eigenvalues) correct >= 60 % (chance ~33 %); fibre-free texture phantom: the dominant population's line-ness < 0.4 at >= 60 % of points |
 | E | learning trend | validation population loss at the end <= 0.8 x its value after warm-up; A-D better at the end than at the halfway checkpoint |
 | F | no collapse | predicted existence rate within a factor of 2 of the target's; line-ness of predicted ellipses varies (sd > 0.1) |
@@ -327,3 +327,7 @@ voxels. Targets are each query's populations from construction.
 - B >= 40 % (and >= 40 % at the 90 deg phantom crossing);
 - C F1 >= 0.75;
 - D >= 75 %.
+
+*Amendment before the pilot ran (00:35 ET):* C's first form was met by an untrained model (F1 0.89 from predicting every
+slot), because most windows hold 3-4 populations including small fragments. It now scores populations with >= 10 % of
+the window, against the every-slot-present answer.
