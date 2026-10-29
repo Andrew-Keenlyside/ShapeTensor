@@ -893,6 +893,10 @@ def _shift2d(x: torch.Tensor, dy: int, dx: int) -> torch.Tensor:
 #: confounding gradients and structures): per key the probability at full strength (scaled by the strength, as every
 #: destructive nuisance), the max of the default here and the modality's entry in :data:`EXTREME_MOD`. Never drawn under
 #: the HiP-CT profile.
+#: 29 Oct: the strength each modality's whole profile is drawn at, per unit of the requested strength -- calibrated so a
+#: profile keeps >= ~0.85 of the clean image (|corr|, scripts/check_artefact_strength.py MODALITY=1) at 0.3 and ~0.5 at 1.0
+#: (uncalibrated: 0.67-0.89 at 0.3, 0.19-0.44 at 1.0)
+MOD_STRENGTH = {"mri": 0.45, "histology": 0.5, "cryoet": 0.5, "ct": 0.6, "em": 0.55, "fluorescence": 0.45, "hipct": 0.75, "mixed": 0.55}
 EXTREME_P = {"bh_streaks": 0.05, "scatter": 0.06, "metal": 0.04, "us_speckle": 0.08, "oct_speckle": 0.05, "oriented_noise": 0.15,
              "motion": 0.10, "slice_motion": 0.08, "fold_lut": 0.10, "posterise": 0.08, "clip": 0.08, "local_reversal": 0.08}
 EXTREME_MOD = {"ct": {"bh_streaks": 0.3, "scatter": 0.3, "metal": 0.15}, "hipct": {"bh_streaks": 0.1, "scatter": 0.2, "metal": 0.05},
@@ -1200,6 +1204,7 @@ def _nuisance_once(s: Sample, seed: int = 0, device="cuda", strength: float = 1.
     if hip:
         modality, P = "hipct", HIPCT_PROFILE
     sg = float(min(max(strength, 0.0), 1.0))                                                     # 0: clean; 1: the full ranges (a training curriculum ramps it)
+    sg = sg * MOD_STRENGTH.get(modality, 1.0)                                                    # (29 Oct: each modality's whole profile calibrated)
     KEEP = ("warp", "invert", "bend", "bias")                                                   # remaps that keep the information: not scaled by strength
     on = lambda key: u(0, 1) < max(P.get(key, 0.0), CROSS_KEY.get(key, CROSS_MIX)) * (1.0 if key in KEEP else sg)
     if hip:                                                                                      # no cross-mixing

@@ -448,19 +448,22 @@ class Canvas:
         self.occ = torch.zeros(self.n, device=self.device)
         self.acc = torch.zeros(self.n, 6 + self.NDESC + 1, device=self.device)   # tensor, descriptors, contrast (all weighted)
 
-    def splat(self, Q, W, V, obj=None, moved: bool = False):
+    def splat(self, Q, W, V, obj=None, moved: bool = False, nearest: bool = False):
         """Points ``Q (n, 3)`` with weights ``W (n,)`` (volumes, voxel units) carrying ``V (n, 12)`` (weighted later).
         With a :class:`Deform` the points move with the specimen (direction, volume and sizes with them); ``moved``:
-        already deformed (swept curves deform their centrelines, :func:`render_curves`)."""
+        already deformed (swept curves deform their centrelines, :func:`render_curves`). ``nearest``: each point into its
+        nearest voxel only (sub-voxel fibres in dense scenes: an eighth of the (voxel, object) records)."""
         if self.deform is not None and not moved:
             Q, Fq = self.deform.forward(Q); dF = torch.linalg.det(Fq).clamp_min(1e-3)
             W = W * dF; V = V.clone(); V[:, :6] = self.deform.push_tensor(V[:, :6], Fq); st = dF.pow(1 / 3)
             V[:, 6] = V[:, 6] * st; V[:, 7] = V[:, 7] * st
         Z, Y, X = self.shape
         p0 = Q.floor(); fr = Q - p0; i0 = p0.long(); kc, wc, vc = [], [], []
-        for dz in (0, 1):
-            for dy in (0, 1):
-                for dx in (0, 1):
+        if nearest:
+            i0 = torch.round(Q).long(); fr = torch.zeros_like(Q)
+        for dz in ((0,) if nearest else (0, 1)):
+            for dy in ((0,) if nearest else (0, 1)):
+                for dx in ((0,) if nearest else (0, 1)):
                     iz, iy, ix = i0[:, 0] + dz, i0[:, 1] + dy, i0[:, 2] + dx
                     w = W * (fr[:, 0] if dz else 1 - fr[:, 0]) * (fr[:, 1] if dy else 1 - fr[:, 1]) * (fr[:, 2] if dx else 1 - fr[:, 2])
                     ok = (iz >= 0) & (iz < Z) & (iy >= 0) & (iy < Y) & (ix >= 0) & (ix < X) & (w > 0)
@@ -614,6 +617,7 @@ def _upsample_curves(c: Curves, k: int) -> Curves:
     return Curves(**{f: Pn if f == "P" else lin(getattr(c, f)) for f in c.__dataclass_fields__})
 
 
+THIN_NEAREST = True                # ... and into their nearest voxel (8x fewer (voxel, object) records; dense scenes of objects)
 THIN_SPLAT_R = 0.5                 # curves thinner than this (voxels, solid, no lumen) are splatted along their centreline, one point
                                    # per sample carrying the section's area (the trilinear splat spreads it): a dense matrix of
                                    # sub-voxel fibres in seconds (29 Oct; the swept section cost 16-36 points per sample)
@@ -636,7 +640,7 @@ def _render_thin(cv: Canvas, c: Curves, moved: bool):
     desc = torch.stack([size, z, z, (b / a.clamp_min(1e-9)).reshape(-1), ((c.sexp - 2) / (c.sexp + 2)).clamp(0, 1).reshape(-1)], 1)
     V = torch.cat([tt, desc, c.contrast.reshape(-1)[:, None]], 1)
     keep = W > 0
-    cv.splat(P.reshape(-1, 3)[keep], W[keep], V[keep], obj=c.obj[ci][keep], moved=moved)
+    cv.splat(P.reshape(-1, 3)[keep], W[keep], V[keep], obj=c.obj[ci][keep], moved=moved, nearest=THIN_NEAREST)
 
 
 def render_curves(cv: Canvas, c: Curves, max_points: float = 8e6, refine: bool = True, _deformed: bool = False):
@@ -805,6 +809,9 @@ GROUND_FILL = 1.3                 # the ground's material per volume (over-fille
 SIZE_CLIP = (0.2, 5.0)            # scenes of objects: a bundle's fibre radii, gamma about the mean, clipped to these multiples
 NP_SIZE_SIGMA = 0.5               # ... the matrix neuropil's fibre widths, log-normal spread
 CELL_SIZE_SIGMA = 0.35            # ... the matrix cells' sizes, log-normal spread (clipped to 0.5-2x)
+TISSUE_P = {"vascular": 0.8, "punctate": 0.7, "fibre_systems": 0.8, "cracks": 0.2, "bubbles": 0.25, "regions": 0.6}   # scenes of objects
+FIBRE_FIELD_MAX = 60_000          # a fibre system's fibres at most
+FIELD_FAMILIES = ("texture", "porous", "compartments")   # fields without objects: left out of scenes of objects (fibre systems instead)
 MATRIX_TWO_P = 0.3                # two matrix kinds in one scene
 P_TORTUOUS = 0.25                 # bundles whose path meanders on a short correlation length (5-15 voxels; curvature 0.03-0.08 / voxel)
 TEXTURE_MAX_STRANDS = 60_000      # the texture family's strands per population (cost: ~S x this points splatted)
@@ -1327,7 +1334,11 @@ class Scene:
         rad = (rc * torch.exp(0.15 * r.randn(e.shape[0])))[:, None].expand(-1, S).clone()
         nid = int(self.ids(1, rc)[0]); contrast = self.contrast()
         kw = {"wall": rad * 0.35, "lumen_c": torch.full_like(rad, r.u(-40, 60))} if rc >= 2.0 else {}
-        cv = curves_like(P, rad, r, obj=torch.full((e.shape[0],), nid, device=self.device), seg=torch.arange(e.shape[0], device=self.device), contrast=contrast, **kw)
+        oids = self.ids(e.shape[0], rad[:, 0]) if MATRIX_P > 0 else torch.full((e.shape[0],), nid, device=self.device)   # (scenes of objects: each segment)
+        if MATRIX_P > 0:
+            for o_ in oids.tolist():
+                self.parents[o_] = nid
+        cv = curves_like(P, rad, r, obj=oids, seg=torch.arange(e.shape[0], device=self.device), contrast=contrast, **kw)
         deg = torch.bincount(e.reshape(-1), minlength=n)
         if bool((deg >= 3).any()):
             self.branch.append(pts[deg >= 3])
@@ -1446,7 +1457,8 @@ class Scene:
             reg = gaussian(r.rand(*self.shape), r.lu(10, 30)); occ = occ * (reg > float(torch.quantile(reg.flatten()[::101], r.u(0.2, 0.6)))).float()
         tens = sheet_tensor(nrm.movedim(0, -1)).movedim(-1, 0)
         desc = torch.zeros((5,) + self.shape, device=dev); desc[0] = hw; desc[2] = max(0.0, 1 - 3 * hw / cell)
-        g = Group("porous" if porous else "foam", "sheet", hw, contrast, dense=[(occ, tens, desc, contrast, torch.full(self.shape, oid, device=dev, dtype=torch.long))])
+        oid_map = self._cell_oids(hw) if (MATRIX_P > 0 and not porous) else torch.full(self.shape, oid, device=dev, dtype=torch.long)   # (each cell's
+        g = Group("porous" if porous else "foam", "sheet", hw, contrast, dense=[(occ, tens, desc, contrast, oid_map)])                    # walls its object)
         self.record["families"].append({"porous" if porous else "foam": {"cell_vox": round(cell, 1), "wall_vox": round(hw, 2)}})
         return g
 
@@ -1458,6 +1470,7 @@ class Scene:
         (the metric's transpose and the warp's Jacobian)."""
         r = self.r; dev = self.device; Z, Y, X = self.shape
         occ = torch.zeros(self.shape, device=dev); nrm = torch.zeros((3,) + self.shape, device=dev)
+        cellmap = torch.zeros(self.shape, dtype=torch.long, device=dev)
         g_ = torch.stack(torch.meshgrid(*[torch.arange(n, device=dev, dtype=torch.float32) for n in self.shape], indexing="ij"), -1)
         n = max(4, int(Z * Y * X / cell ** 3)); seeds = r.rand(n, 3) * torch.tensor(self.shape, device=dev)
         Wf = torch.stack([smooth_noise(self.shape, warp_sigma or cell / 3, r.g, dev) for _ in range(3)], -1) * warp if warp > 0 else None
@@ -1477,6 +1490,8 @@ class Scene:
                     near = ((seeds_t >= lo) & (seeds_t <= hi)).all(1)
                     sd = seeds_t[near] if int(near.sum()) >= 2 else seeds_t
                     d2, i2 = torch.cdist(q, sd).topk(2, dim=1, largest=False)
+                    gidx = (torch.nonzero(near)[:, 0] if int(near.sum()) >= 2 else torch.arange(seeds_t.shape[0], device=dev))[i2[:, 0]]
+                    cellmap[blk] = gidx.view(bsh)
                     s1, s2 = sd[i2[:, 0]], sd[i2[:, 1]]; sep = (s2 - s1).norm(dim=1).clamp_min(1e-6)
                     dist = (d2[:, 1] ** 2 - d2[:, 0] ** 2) / (2 * sep)
                     occ[blk] = (0.5 + hw - dist).clamp(0, 1).view(bsh)
@@ -1491,15 +1506,24 @@ class Scene:
                         gv[j] += v[i] * gi[j]
                 v = gv
             nrm = v / v.norm(dim=0, keepdim=True).clamp_min(1e-6)
+        self._vor_cells = (cellmap, int(seeds.shape[0]))                                  # (each voxel's cell: per-cell objects)
         return occ, nrm
+
+    def _cell_oids(self, radius: float) -> torch.Tensor:
+        """The last Voronoi's cells as objects, one id each (scenes of objects); a map of object ids ``(Z, Y, X)``."""
+        cellmap, n = self._vor_cells
+        return self.ids(n, radius)[cellmap]
 
     def _wall_group(self, name: str, occ: torch.Tensor, nrm: torch.Tensor, hw: float, cell: float, record: dict):
         """A sheet population from wall occupancy and normals (one object: an extended surface)."""
         dev = self.device; contrast = self.contrast(); oid = int(self.ids(1, 1e3)[0])
+        self._wall_oids = self._cell_oids(hw) if (MATRIX_P > 0 and getattr(self, "_vor_cells", None) is not None) else None
         tens = sheet_tensor(nrm.movedim(0, -1)).movedim(-1, 0)
         desc = torch.zeros((5,) + self.shape, device=dev); desc[0] = hw; desc[2] = max(0.0, 1 - 3 * hw / cell)
         self.record["families"].append({name: record})
-        return Group(name, "sheet", hw, contrast, dense=[(occ, tens, desc, contrast, torch.full(self.shape, oid, device=dev, dtype=torch.long))])
+        oid_map = self._wall_oids if self._wall_oids is not None else torch.full(self.shape, oid, device=dev, dtype=torch.long)
+        self._vor_cells = None
+        return Group(name, "sheet", hw, contrast, dense=[(occ, tens, desc, contrast, oid_map)])
 
     def _discs(self, C: torch.Tensor, Nrm: torch.Tensor, R: torch.Tensor, ht: float, name: str, oid: torch.Tensor, contrast=None):
         """Flat discs -- centres ``C (n, 3)``, unit normals ``Nrm (n, 3)``, radii ``R (n,)`` voxels, half thickness ``ht``:
@@ -1838,6 +1862,9 @@ class Scene:
         if self.depth is not None:                                          # laminar density
             bd = torch.tensor(self.band_density, device=dev)[self.band_of(C)]
             keep = keep & (r.rand(C.shape[0]) < bd)
+        reg_ = getattr(self, "_mregion", {}).get("cells") if any_scale else None   # its region only (regional composition)
+        if reg_ is not None:
+            ii_ = C.long().clamp(max=min(self.shape) - 1); keep = keep & reg_[ii_[:, 0], ii_[:, 1], ii_[:, 2]]
         perm_ = torch.randperm(int(keep.sum()), generator=r.g, device=dev)[:700]
         C = C[keep][perm_]; n = C.shape[0]                                  # shuffled before the cap
         cell_scale = cell_scale[keep][perm_] if cell_scale is not None else None
@@ -2459,10 +2486,15 @@ class Scene:
             return None
         L = min(L, 0.5 * max(self.shape))
         n = int(min(700, r.u(0.3, 1.0) * 700, 1.5 * np.prod(self.shape) / (math.pi * rf * rf * L) + 1))   # thick neurites (nm scales): about 1.5 canvases of them
+        reg_ = getattr(self, "_mregion", {}).get(name) if fill is not None else None           # its region only (regional composition)
         if fill is not None:                                                                    # the matrix: this share of the volume
             n = int(min(MATRIX_MAX_FIBRES, fill * np.prod(self.shape) / (math.pi * max(rf, 0.05) ** 2 * L) + 1))
         S = max(8, int(L / H))
         start = r.rand(n, 3) * torch.tensor(self.shape, device=dev, dtype=torch.float32)
+        if reg_ is not None:
+            ii_ = start.long().clamp(max=min(self.shape) - 1); start = start[reg_[ii_[:, 0], ii_[:, 1], ii_[:, 2]]]; n = start.shape[0]
+            if n == 0:
+                return None
         P = smooth_paths(start, r.unit(n), torch.full((n,), L, device=dev), S, torch.full((n,), r.lu(0.05, 0.4), device=dev), max(L / 4, 1.0), r)
         rad = torch.full((n, S), max(rf, 0.05), device=dev) * torch.exp((NP_SIZE_SIGMA if fill is not None else 0.2) * r.randn(n, 1)).clamp(0.3, 3.0)
         cv = curves_like(P, rad, r, obj=self.ids(n, rad[:, 0]), seg=torch.zeros(n, dtype=torch.long, device=dev), contrast=self.contrast(10, 90))
@@ -2693,6 +2725,108 @@ class Scene:
         return cv
 
     # ---- the scene
+    # ---- scenes of objects (29 Oct): the tissue's layers, every element an object with its own ODF
+    def tissue_layers(self, iso: bool = False):
+        """The layers real tissue shows at once, besides the families and the matrix: a vascular system (trees, a capillary
+        mesh, a sleeve about each vessel), punctate bodies, one to three faint fibre systems crossing, and defects
+        (cracks, bubbles). Each element is an object with its own ODF."""
+        r = self.r
+        if iso:
+            return
+        if r.p(TISSUE_P["vascular"]):
+            for g_ in self.vascular():
+                self.groups.append(g_)
+        if r.p(TISSUE_P["punctate"]):
+            g_ = self.punctate()
+            if g_ is not None:
+                self.groups.append(g_)
+        if r.p(TISSUE_P["fibre_systems"]):
+            for _ in range(r.i(1, 3)):
+                g_ = self.fibre_field(faint=True)
+                if g_ is not None:
+                    self.groups.append(g_)
+        for g_ in self.defects():
+            self.groups.append(g_)
+
+    def fibre_field(self, faint: bool = True):
+        """A fibre system as objects: fibres following a smooth direction field (thin, 0.15-1.2 voxels; a share of the
+        volume), each its own ODF along its path; their density varies smoothly across the field, so neighbouring
+        fibres share it and the field shows as streaks along its direction (an unresolved system's visible texture)."""
+        r = self.r; dev = self.device; shp = torch.tensor(self.shape, device=dev, dtype=torch.float32)
+        rf = r.lu(0.15, 1.2); L = r.lu(15, 60); fill = r.u(0.05, 0.25)
+        n = int(min(FIBRE_FIELD_MAX, fill * float(np.prod(self.shape)) / (math.pi * rf * rf * L) + 1))
+        if n < 10:
+            return None
+        fld = direction_field(self.shape, r.lu(20, 80), r.g, dev)
+        start = r.rand(n, 3) * shp; ii = start.long().clamp(min=torch.zeros(3, dtype=torch.long, device=dev), max=(shp - 1).long())
+        d0 = fld[:, ii[:, 0], ii[:, 1], ii[:, 2]].T
+        S = max(8, int(L / H))
+        P = smooth_paths(start - 0.5 * L * d0, d0, torch.full((n,), L, device=dev), S, torch.full((n,), r.lu(0.003, 0.03), device=dev), L / 2, r)
+        rad = (rf * torch.exp(0.4 * r.randn(n, 1)).clamp(0.3, 3.0)).expand(n, S).clone()
+        contrast = self.contrast(10, 60)
+        cv = curves_like(P, rad, r, obj=self.ids(n, rad[:, 0]), seg=torch.zeros(n, dtype=torch.long, device=dev), contrast=contrast)
+        nz = smooth_noise(self.shape, r.lu(2.0, 6.0), r.g, dev)
+        mid = P[:, S // 2].long().clamp(min=torch.zeros(3, dtype=torch.long, device=dev), max=(shp - 1).long())
+        cv.density = (1 + r.u(0.3, 0.8) * nz[mid[:, 0], mid[:, 1], mid[:, 2]]).clamp(0.1, 2.0)
+        g = Group("fibre field", "line", rf, contrast, curves=[cv]); g.faint = bool(faint)
+        self.record["families"].append({"fibre field": {"fibres": n, "radius_vox": round(rf, 2), "fill": round(fill, 2)}})
+        return g
+
+    def vascular(self) -> list:
+        """A vascular system: a vessel tree and a capillary mesh (each vessel a wall and a lumen), and about each vessel a
+        sleeve of fluid (the perivascular space: isotropic, its own object), drawn under the vessel."""
+        r = self.r; out = []
+        parts = []
+        t_ = self.tree("vessel")
+        parts += [g_ for g_ in (t_ if isinstance(t_, list) else [t_]) if g_ is not None]
+        if r.p(0.7):
+            nw = self.network()
+            parts += [g_ for g_ in (nw if isinstance(nw, list) else [nw]) if g_ is not None]
+        for g_ in parts:
+            if r.p(0.7) and g_.curves:                                                  # the sleeves, under their vessels
+                k = r.u(1.3, 2.0); cs = []
+                for cv in g_.curves:
+                    N = cv.P.shape[0]
+                    sc_ = curves_like(cv.P, cv.rad * k, r, obj=self.ids(N, cv.rad[:, 0] * k), seg=cv.seg, contrast=self.contrast(20, 80))
+                    sc_.spread = torch.full((N,), ISO_SPREAD_DEG, device=self.device); cs.append(sc_)
+                out.append(Group("perivascular", "blob", float(g_.radius) * k, cs[0].contrast[0, 0].item(), curves=cs))
+            out.append(g_)
+        return out
+
+    def punctate(self):
+        """Punctate bodies: small solid spheres (0.4-1.5 voxels), bright or dark, scattered -- granules, calcifications,
+        capillaries in section. Isotropic, each its own object."""
+        r = self.r; dev = self.device
+        rr = r.lu(0.4, 1.5); n = int(min(6000, r.lu(1e-4, 2e-3) * float(np.prod(self.shape))))
+        if n < 1:
+            return None
+        C = r.rand(n, 3) * torch.tensor(self.shape, device=dev, dtype=torch.float32)
+        A = torch.eye(3, device=dev)[None].expand(n, 3, 3) * (rr * torch.exp(0.3 * r.randn(n)).clamp(0.5, 2.0))[:, None, None]
+        self.record["families"].append({"punctate": {"n": n, "radius_vox": round(rr, 2)}})
+        return self._solids(C, A, "punctate", self.ids(n, rr), contrast=self.contrast(40, 140))
+
+    def defects(self) -> list:
+        """Specimen defects: thin cracks (sheets, either polarity) and bubbles (isotropic spheres), now and then."""
+        r = self.r; dev = self.device; out = []
+        if r.p(TISSUE_P["cracks"]):
+            for _ in range(r.i(1, 3)):
+                g_ = self.sheet(normal=r.unit(), centre=self.centre_point(0.1), half_thickness=r.u(0.3, 0.8))
+                out += [x for x in (g_ if isinstance(g_, list) else [g_]) if x is not None]
+        if r.p(TISSUE_P["bubbles"]):
+            n = r.i(1, 6); rb = torch.tensor([r.lu(2.0, 8.0) for _ in range(n)], device=dev)
+            C = r.rand(n, 3) * torch.tensor(self.shape, device=dev, dtype=torch.float32)
+            out.append(self._solids(C, torch.eye(3, device=dev)[None] * rb[:, None, None], "bubbles", self.ids(n, rb), contrast=self.contrast(60, 140)))
+        return out
+
+    def _region_masks(self, kinds: list):
+        """Regional composition: with two matrix kinds, now and then each fills its own soft-edged region instead of both
+        everywhere (a fibre-rich and a cell-rich part)."""
+        r = self.r
+        if len(kinds) < 2 or not r.p(TISSUE_P["regions"]):
+            return {}
+        f = smooth_noise(self.shape, r.lu(15, 40), r.g, self.device); t_ = float(torch.quantile(f.flatten()[::97], r.u(0.3, 0.7)))
+        return {kinds[0]: f > t_, kinds[1]: f <= t_}
+
     def build(self, families: dict | None = None, n_groups: tuple = (1, 5), layout_p: float = 0.3, underlay_p: float = 0.4,
               cross_p: float = 0.0, deep_tree: bool = False, dense_p: float = 0.0):
         """The scene's families; with probability ``underlay_p`` a neuropil underlay as well (real tissue is full of it),
@@ -2709,12 +2843,13 @@ class Scene:
         if r.p(layout_p):
             self.layout()
         fam = dict(self.FAMILIES); fam.update(families or {})
-        names = [k for k, v in fam.items() if v > 0 and k != "tissue" and (k != "radial" or self.depth is not None)]   # (tissue: a scene, not a group)
+        names = [k for k, v in fam.items() if v > 0 and k != "tissue" and (k != "radial" or self.depth is not None)   # (tissue: a scene, not a group;
+                 and not (MATRIX_P > 0 and k in FIELD_FAMILIES)]                                      # scenes of objects: no fields)
         iso = r.p(ISO_SCENE_P) and fam.get("granules", 0) > 0                                  # nothing with a direction: granules (and crystals)
         if iso:
             names = [k for k in ("granules", "crystals") if fam.get(k, 0) > 0]
             self.record["iso_scene"] = True
-        if not iso and (families is None or families.get("tissue", 0) > 0) and r.p(P_TISSUE * scale_weight("tissue", self.voxel_um)):
+        if not iso and MATRIX_P <= 0 and (families is None or families.get("tissue", 0) > 0) and r.p(P_TISSUE * scale_weight("tissue", self.voxel_um)):
             for g_ in self.tissue(grey=r.p(P_GREY_TISSUE)):                                     # packed tissue (an explicit family list leaves
                 self.groups.append(g_)                                                         # it out unless it names it); its crossings are
             n_groups = (0, 1); crossing = False; underlay_p = 0.0                              # inside it: one family or none on top
@@ -2733,6 +2868,7 @@ class Scene:
         if not iso and MATRIX_P > 0 and r.p(MATRIX_P):                          # the matrix (29 Oct): the tissue around the
             mat = [str(m_) for m_ in r.np.choice(MATRIX_TYPES, size=2 if r.p(MATRIX_TWO_P) else 1, replace=False)]   # families, built
             self.record["matrix"] = mat                                         # of objects with their own ODFs (no painted
+            self._mregion = self._region_masks(mat)                             # (regional composition)
             if "cells" in mat:                                                  # background); cells first, so fibres avoid them
                 for g_ in (self.cells(any_scale=True) or []):
                     g_.matrix = True; self.groups.append(g_)
@@ -2792,6 +2928,16 @@ class Scene:
                 for g_ in (gb if isinstance(gb, list) else [gb] if gb is not None else []):
                     g_.cross = (c, e1, ax); g_.centre_pt = c; self.groups.append(g_)
                 self.record["line_sheet_deg"] = round(math.degrees(beta), 1)
+        if mat:                                                                 # scenes of objects: the tissue's other layers, and
+            self.tissue_layers(iso)                                             # streaks along resolved bundles (their fibres'
+            for g_ in self.groups:                                              # density varying smoothly across the section, so
+                if g_.name == "bundle":                                         # the direction shows where fibres blur together)
+                    for cv in g_.curves:
+                        if cv.P.shape[0] >= 10:
+                            mid = cv.P[:, cv.P.shape[1] // 2].long().clamp(min=0, max=min(self.shape) - 1)
+                            nz_ = smooth_noise(self.shape, r.lu(2.0, 5.0), r.g, self.device)
+                            base = cv.density if cv.density is not None else torch.ones(cv.P.shape[0], device=self.device)
+                            cv.density = (base * (1 + r.u(0.2, 0.6) * nz_[mid[:, 0], mid[:, 1], mid[:, 2]])).clamp(0.1, 2.0)
         if "neuropil" in mat:                                                   # neuropil: drawn first, so what lies in it
             gs = [g_ for g_ in (self.neuropil(fill=r.u(*MATRIX_FILL), r_min=MATRIX_R_MIN) or [])]   # displaces it (it fills the space between)
             for g_ in gs:
@@ -3116,11 +3262,14 @@ BG_TEX_NORM = 40.0                # grey levels: the background's texture is nor
                                   # the background material (29 Oct)
 
 
-ADD_CONTRAST = {"ground": (3.0, 10.0), "matrix": (8.0, 25.0), "fore": (40.0, 120.0)}   # additive: grey levels against the role beneath
-ROLE_CONTRAST = {"ground": (0.02, 0.08), "matrix": (0.05, 0.20), "fore": (0.30, 1.00)}   # relative to the role beneath (29 Oct)
+ADD_CONTRAST = {"ground": (3.0, 10.0), "matrix": (8.0, 25.0), "faint": (12.0, 35.0), "fore": (40.0, 120.0)}   # additive: grey levels against the role beneath
+FORE_MAX_REL = 1.5                # a foreground material at most this far from the matrix's (relative): one population never dwarfs the
+                                  # rest, which 8-bit display then squeezes into a few grey levels (fluorescence, histology: 29 Oct)
+INTRINSIC_NOISE = (0.02, 0.10)    # scenes of objects: noise at any strength, a share of the image's 5-95 % range (blurred 0.4-1 voxel)
+ROLE_CONTRAST = {"ground": (0.02, 0.08), "matrix": (0.05, 0.20), "faint": (0.10, 0.30), "fore": (0.30, 1.00)}   # relative to the role beneath (29 Oct)
 
 
-def _contrast_to(mat: dict, ref: dict, want: float, at_least: bool = False) -> dict:
+def _contrast_to(mat: dict, ref: dict, want: float, at_least: bool = False, at_most: float | None = None) -> dict:
     """``mat`` moved along its difference from ``ref`` so that its largest relative difference (over the keys both carry,
     ``ref``'s nonzero ones) is ``want`` (or at least ``want``)."""
     keys = [k for k, v in mat.items() if k in ref and not isinstance(v, (bool, str))]
@@ -3133,9 +3282,9 @@ def _contrast_to(mat: dict, ref: dict, want: float, at_least: bool = False) -> d
         k0 = nz[0]; out = dict(mat); b = arr(ref[k0]); nv = b * (1 + want)
         out[k0] = float(nv[0]) if np.ndim(mat[k0]) == 0 else type(mat[k0])(nv.tolist()) if isinstance(mat[k0], (list, tuple)) else nv
         return out
-    if at_least and rel >= want:
+    if at_least and rel >= want and (at_most is None or rel <= at_most):
         return mat
-    scale = want / rel; out = dict(mat)
+    scale = (min(rel, at_most) if (at_least and rel >= want) else want) / rel; out = dict(mat)   # (above the cap: brought down to it)
     for k in nz:
         b, v = arr(ref[k]), arr(mat[k]); nv = b + scale * (v - b)
         nv = np.where(b > 0, np.maximum(nv, 0.02 * b), nv)                                      # (densities stay positive)
@@ -3148,11 +3297,12 @@ def _role_materials(mats: list, bgm: dict, roles: list, ra: "Rng") -> list:
     the medium, the matrix weakly against the ground, the foreground clearly (at least) against the matrix -- so a
     scene built of objects shows its foreground over a textured matrix, as tissue does."""
     out = list(mats); first = lambda r_: next((out[k] for k, x in enumerate(roles) if x == r_), None)
-    for role, ref_of in (("ground", lambda: bgm), ("matrix", lambda: first("ground") or bgm), ("fore", lambda: first("matrix") or first("ground") or bgm)):
+    for role, ref_of in (("ground", lambda: bgm), ("matrix", lambda: first("ground") or bgm), ("faint", lambda: first("matrix") or first("ground") or bgm),
+                         ("fore", lambda: first("matrix") or first("ground") or bgm)):
         lo, hi = ROLE_CONTRAST[role]
         for k, x in enumerate(roles):
             if x == role:
-                out[k] = _contrast_to(out[k], ref_of(), ra.u(lo, hi), at_least=(role == "fore"))
+                out[k] = _contrast_to(out[k], ref_of(), ra.u(lo, hi), at_least=(role == "fore"), at_most=FORE_MAX_REL if role == "fore" else None)
     return out
 
 
@@ -3417,7 +3567,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
                   torch.ones(shape, dtype=torch.bool, device=device), g_.contrast, occupancy=occ.clone(), tensor=tens.clone())
         L.desc = torch.stack([d5[0], d5[2], d5[4]])                          # the layer descriptors: thickness, hollowness, angularity
         L.desc5 = d5.clone(); L.cmap = cm[0]; L.name = g_.name
-        L.mrole = "ground" if g_.name == "ground" else ("matrix" if getattr(g_, "matrix", False) else "fore")
+        L.mrole = "ground" if g_.name == "ground" else ("matrix" if getattr(g_, "matrix", False) else ("faint" if getattr(g_, "faint", False) else "fore"))
         group_layer[-1] = len(layers); layers.append(L)
     shapes_ = layers + extra
     lum = _crop(ren["lumen"].float(), sl, zoom); lum_c = _crop(ren["lumen"].float() * ren["lumen_c"].float(), sl, zoom) / lum.clamp_min(1e-9)
@@ -3457,7 +3607,7 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
         c_g = sgn() * ra.u(*ADD_CONTRAST["ground"]); c_m = c_g + sgn() * ra.u(*ADD_CONTRAST["matrix"])
         for L in layers:
             role = getattr(L, "mrole", "fore")
-            c_new = c_g if role == "ground" else c_m + (sgn() * ra.u(*ADD_CONTRAST["matrix"]) * 0.3 if role == "matrix" else sgn() * ra.u(*ADD_CONTRAST["fore"]))
+            c_new = c_g if role == "ground" else c_m + (sgn() * ra.u(*ADD_CONTRAST["matrix"]) * 0.3 if role == "matrix" else sgn() * ra.u(*ADD_CONTRAST["faint" if role == "faint" else "fore"]))
             if abs(L.contrast) > 1e-6:
                 L.cmap = L.cmap * (c_new / L.contrast)
             L.contrast = c_new
@@ -3539,6 +3689,12 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
         nl = int(lab.max()) + 1; reg = torch.tensor([ra.u(-40, 40) for _ in range(nl)], device=device)[lab]
         img_main = g0 + off + reg; routes.append("scramble")
     img = img_main
+    if mtx:                                                                  # intrinsic acquisition noise: real images are never clean
+        flat_ = img.flatten()[:: max(1, img.numel() // 100000)].float()       # (29 Oct; even at strength 0; the targets untouched)
+        q5, q95 = torch.quantile(flat_, torch.tensor([0.05, 0.95], device=device))
+        amp = ra.u(*INTRINSIC_NOISE) * float(q95 - q5)
+        img = _grey(img) + amp * gaussian(torch.randn(shape, generator=ra.g, device=device)[None, None], ra.u(0.4, 1.0))[0, 0] / 0.45
+        rec["intrinsic_noise"] = round(amp, 2)
     if not mtx and ra.p(p_grain):                                                              # unresolved microstructure under the tissue
         flat_ = img.flatten()[:: max(1, img.numel() // 100000)]
         q5, q95 = torch.quantile(flat_.float(), torch.tensor([0.05, 0.95], device=device))
