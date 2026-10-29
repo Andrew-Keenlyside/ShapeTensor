@@ -223,7 +223,8 @@ def set_background_entity(on: bool = True):
 #: the entity targets' sampling: query points per crop, scales (crop voxels, log-uniform), entities kept per query, the
 #: resolution rule (an object is its own entity when its radius >= max(r_min, c_sig * sigma)), padded tree sizes
 ENTITY = {"n_points": 384, "sigma": (1.0, 12.0), "emax": 8, "r_min": 1.5, "c_sig": 0.5, "u_max": 1536, "d_max": 16, "margin": 2, "p_tissue": 0.7,
-          "p_cross": 0.2}
+          "p_cross": 0.2, "p_line": 0.0}   # p_line (29 Oct): a share of the queries on line-kind layers' material (the rest of
+                                             # p_tissue on any object's: blobs and cells took most of it)
 
 
 def acquisition_blur(rec: dict) -> float:
@@ -262,6 +263,13 @@ def entity_queries(s, d: dict, size: int, seed: int, device, points: torch.Tenso
         if cand.shape[0] > 0 and k > 0:
             pick = torch.randint(0, cand.shape[0], (k,), generator=g, device=device)
             pts[:k] = cand[pick] + torch.rand(k, 3, generator=g, device=device) - 0.5
+        kl = min(int(E.get("p_line", 0.0) * n), k)                                                  # the first of them on lines' material
+        line_l = [k_ for k_ in obj_layers if getattr(s.layers[k_], "kind", None) == "line"]
+        if kl > 0 and line_l:
+            lc = torch.nonzero(d["occupancy"][line_l].float().sum(0)[m:size - m, m:size - m, m:size - m] > 0.05).float() + m
+            if lc.shape[0] > 0:
+                pick = torch.randint(0, lc.shape[0], (kl,), generator=g, device=device)
+                pts[:kl] = lc[pick] + torch.rand(kl, 3, generator=g, device=device) - 0.5
         kc = int(E.get("p_cross", 0.0) * n)                                                         # a share in crossing cores: where two
         if kc > 0 and len(obj_layers) >= 2:                                                         # objects' populations overlap
             from ..filters import gaussian as _gauss                                                  # (at window scale: interleaved fibres of
@@ -1058,12 +1066,12 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    dir_lmax: int = 8, vote_unc: bool = False, e_sigma: tuple | None = None, deep_tree: bool = False, lcn: float = 0.0,
                    dens_sh: bool = True, read_keep: float = READ_KEEP, dens_mlp: bool = True, mass_region: bool = True,
                    region_dec: bool = False, where_first: int = 0, z_vote: bool = False, dir_sh: int = 0, background_entity: bool = True,
-                   ray: bool = False, e_cross: float = 0.0, region_density: bool = True, kappa_log: bool = False, vote_objects: bool = False,
+                   ray: bool = False, e_cross: float = 0.0, e_line: float = 0.0, region_density: bool = True, kappa_log: bool = False, vote_objects: bool = False,
                    dens_same_norm: bool = False, own_objects: bool = False, bg_head: bool = False, orient_from_texture: bool = True,
                    obj_head: bool = False, mc_fibres: bool = False, oriented: int = 0, geometry_targets: bool = False, block_norm: int = 1,
                    odirect: int = 0, od_sigmas: list | None = None, split_head: bool = False, mass_vote: bool = False, overfit: int = 0,
                    init_reset: str = "", ovis_targets: bool = True, od_norm: bool = False, dens_vis_w: float = 0.0, dens_gate: bool = False,
-                   freeze_trunk: int = 0, trunk_lr: float = 1.0, init_fresh: str = "", st_path: bool = False, iso_head: bool = False, dens_share: bool = False, freeze_extra: str = "", reset_dens_logit: bool = False, dens_readout: bool = False, readout_lobe: bool = False, gate_share: bool = False, dens_nobg: bool = False, strength_mix: bool = False, dens_ce: bool = False, ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe: bool = False, oprobe_learned: int = 0, pop_seq: bool = False, pop_match_share: bool = False):
+                   freeze_trunk: int = 0, trunk_lr: float = 1.0, init_fresh: str = "", st_path: bool = False, iso_head: bool = False, dens_share: bool = False, freeze_extra: str = "", reset_dens_logit: bool = False, dens_readout: bool = False, readout_lobe: bool = False, gate_share: bool = False, dens_nobg: bool = False, strength_mix: bool = False, dens_ce: bool = False, ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe: bool = False, oprobe_learned: int = 0, pop_seq: int = 0, pop_match_share: bool = False, od_widths: list | None = None, probe_scale: bool = False):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -1109,6 +1117,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     if e_sigma:
         ENTITY["sigma"] = (float(e_sigma[0]), float(e_sigma[1]))
     ENTITY["p_cross"] = float(e_cross)                                                                # queries in crossing cores
+    ENTITY["p_line"] = float(e_line)                                                                  # ... and on lines' material
     from . import entity_train as _et
     _et.VOTE_OBJECTS = bool(vote_objects)                                                              # votes only for oriented owners
     _et.DENS_SAME_NORM = bool(dens_same_norm)                                                          # the density's shape: both sides' means alike
@@ -1116,7 +1125,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
     _et.DENS_READOUT_LOBE = bool(readout_lobe)
     _et.DENS_NOBG = bool(dens_nobg)
     _et.DENS_CE = bool(dens_ce)
-    _et.POP_MATCH_AS_LOSS = not bool(pop_match_share)                                                  # the populations' matching cost
+    _et.POP_MATCH_AS_LOSS = not bool(pop_match_share)
+    _et.POP_BG = int(pop_seq) == 2                                                                     # the background apart (pop_seq 2)                                                  # the populations' matching cost
     _et.DENS_READOUT = bool(dens_readout)                                                              # the two-part gate, the readout trained
     _et.DENS_SHARE = bool(dens_share)                                                                  # the gate = the visible oriented share
     _et.OWN_OBJECTS = bool(own_objects)                                                                # directions owned among oriented entities
@@ -1150,8 +1160,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 dens_mlp=bool(dens_mlp), mass_region=bool(mass_region), region_dec=bool(region_dec), where_first=int(where_first),
                 z_vote=bool(z_vote), dir_sh=int(dir_sh), background_entity=bool(background_entity), ray=bool(ray),
                 region_density=bool(region_density), kappa_log=bool(kappa_log), vote_objects=bool(vote_objects), dens_same_norm=bool(dens_same_norm), own_objects=bool(own_objects), bg_head=bool(bg_head), orient_from_texture=bool(orient_from_texture), obj_head=bool(obj_head),
-                block_norm=int(block_norm), odirect=int(odirect), od_sigmas=list(od_sigmas) if od_sigmas else None, split_head=bool(split_head),
-                mass_vote=bool(mass_vote), od_norm=bool(od_norm), ovis_targets=bool(ovis_targets), dens_vis_w=float(dens_vis_w), dens_gate=bool(dens_gate), gate2=bool(dens_readout), dens_readout=bool(dens_readout), readout_lobe=bool(readout_lobe), gate_share=bool(gate_share), dens_nobg=bool(dens_nobg), strength_mix=bool(strength_mix), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st), pop_k=int(pop_k), pop_dir=int(pop_dir), oprobe=bool(oprobe) or bool(oprobe_learned), oprobe_learned=int(oprobe_learned), pop_seq=bool(pop_seq), pop_match_share=bool(pop_match_share),
+                block_norm=int(block_norm), odirect=int(odirect), od_sigmas=list(od_sigmas) if od_sigmas else None, od_widths=list(od_widths) if od_widths else None, split_head=bool(split_head),
+                mass_vote=bool(mass_vote), od_norm=bool(od_norm), ovis_targets=bool(ovis_targets), dens_vis_w=float(dens_vis_w), dens_gate=bool(dens_gate), gate2=bool(dens_readout), dens_readout=bool(dens_readout), readout_lobe=bool(readout_lobe), gate_share=bool(gate_share), dens_nobg=bool(dens_nobg), strength_mix=bool(strength_mix), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st), pop_k=int(pop_k), pop_dir=int(pop_dir), oprobe=bool(oprobe) or bool(oprobe_learned), oprobe_learned=int(oprobe_learned), pop_seq=int(pop_seq), pop_match_share=bool(pop_match_share), probe_scale=bool(probe_scale),
                 freeze_trunk=int(freeze_trunk), trunk_lr=float(trunk_lr), init_fresh=init_fresh, st_path=bool(st_path), iso_head=bool(iso_head), dens_share=bool(dens_share), freeze_extra=freeze_extra, reset_dens_logit=bool(reset_dens_logit),
                 mc_fibres=bool(mc_fibres), oriented=int(oriented), geometry_targets=bool(geometry_targets))
     skipped = {}                                                                                   # non-finite steps skipped
@@ -1448,6 +1458,7 @@ def main():
     ap.add_argument("--where-first", type=int, default=0, help="entities: steps of the where-losses alone (region, mass, overall), the which-way losses then ramped in over as many")
     ap.add_argument("--no-region-density", action="store_true", help="entities: the region map the populations' union (a probability), not their density")
     ap.add_argument("--e-cross", type=float, default=0.2, help="entities: the share of query points placed in crossing cores (two populations overlapping at window scale)")
+    ap.add_argument("--e-line", type=float, default=0.0, help="entities: the share of query points placed on line-kind layers' material (within the tissue share)")
     ap.add_argument("--ray", action="store_true", help="entities: the decoder reads the features along each queried direction (the ray probe)")
     ap.add_argument("--kappa-log", action="store_true", help="entities: the vote's concentrations in log space (the softplus head collapses)")
     ap.add_argument("--dens-same-norm", action="store_true", help="entities: the density target's shape normalised over the prediction's uniform directions "
@@ -1469,7 +1480,9 @@ def main():
     ap.add_argument("--pop-dir", type=int, default=0, help="entities: each population's ellipse the second moment of learned weights over this many directions (e.g. 96; needs --odirect)")
     ap.add_argument("--oprobe", action="store_true", help="entities: the oriented probe (a learned code of the image sampled along and around each direction); with --pop-dir also read by the populations")
     ap.add_argument("--oprobe-learned", type=int, default=0, help="entities: the oriented probe also samples this many learned fields (the finest trunk level projected; implies --oprobe)")
-    ap.add_argument("--pop-seq", action="store_true", help="entities (--pop-dir): the slots filled in turn, each seeing how much of each direction the earlier slots hold")
+    ap.add_argument("--pop-seq", type=int, nargs="?", const=1, default=0, help="entities (--pop-dir): the slots in turn; 1: each direction scored with the earlier slots' u^T T u; 2: with their smoothed direction weights, the background its own share and the shares by stick breaking")
+    ap.add_argument("--od-widths", type=float, nargs="+", default=None, help="entities: the direct bank's cross-section widths in voxels (default 0.6; e.g. 0.6 1.5 3)")
+    ap.add_argument("--probe-scale", action="store_true", help="entities: the oriented probe's offsets scaled by the query's window (window / 3, within 0.5-2.5)")
     ap.add_argument("--pop-match-share", action="store_true", help="entities: match slots to populations with ellipse costs weighted by share (before 29 Oct 02:20) rather than as the loss weighs them")
     ap.add_argument("--ce-no-st", action="store_true", help="entities (with --dens-ce): no structure tensor in the density (neither its term nor its cues)")
     ap.add_argument("--dens-ce", action="store_true", help="entities: the density as a normalised distribution (log-SH + bank + structure tensor over a uniform floor) trained by cross-entropy against the non-background ODF")
@@ -1535,9 +1548,9 @@ def main():
                        dir_lmax=a.dir_lmax, vote_unc=a.vote_unc, e_sigma=a.e_sigma, deep_tree=a.deep_tree, lcn=a.lcn, dens_sh=not a.no_dens_sh,
                        read_keep=a.read_keep, level_steps=a.level_steps, dens_mlp=not a.no_dens_mlp, mass_region=not a.no_mass_region,
                        region_dec=a.region_dec, where_first=a.where_first, z_vote=a.z_vote, dir_sh=a.dir_sh,
-                       background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, region_density=not a.no_region_density,
+                       background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, e_line=a.e_line, region_density=not a.no_region_density,
                        kappa_log=a.kappa_log, vote_objects=a.vote_objects, dens_same_norm=a.dens_same_norm, own_objects=a.own_objects, bg_head=a.bg_head, orient_from_texture=not a.orient_from_contrast, obj_head=a.obj_head,
-                       block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote, od_norm=a.od_norm, ovis_targets=not a.no_ovis_targets, dens_vis_w=a.dens_vis_w, dens_gate=a.dens_gate, freeze_trunk=a.freeze_trunk, trunk_lr=a.trunk_lr, init_fresh=a.init_fresh, st_path=a.st_path, iso_head=a.iso_head, dens_share=a.dens_share, freeze_extra=a.freeze_extra, reset_dens_logit=a.reset_dens_logit, dens_readout=a.dens_readout, readout_lobe=a.readout_lobe, gate_share=a.gate_share, dens_nobg=a.dens_nobg, strength_mix=a.strength_mix, dens_ce=a.dens_ce, ce_no_st=a.ce_no_st, pop_k=a.pop_k, pop_dir=a.pop_dir, oprobe=a.oprobe, oprobe_learned=a.oprobe_learned, pop_seq=a.pop_seq, pop_match_share=a.pop_match_share,
+                       block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote, od_norm=a.od_norm, ovis_targets=not a.no_ovis_targets, dens_vis_w=a.dens_vis_w, dens_gate=a.dens_gate, freeze_trunk=a.freeze_trunk, trunk_lr=a.trunk_lr, init_fresh=a.init_fresh, st_path=a.st_path, iso_head=a.iso_head, dens_share=a.dens_share, freeze_extra=a.freeze_extra, reset_dens_logit=a.reset_dens_logit, dens_readout=a.dens_readout, readout_lobe=a.readout_lobe, gate_share=a.gate_share, dens_nobg=a.dens_nobg, strength_mix=a.strength_mix, dens_ce=a.dens_ce, ce_no_st=a.ce_no_st, pop_k=a.pop_k, pop_dir=a.pop_dir, oprobe=a.oprobe, oprobe_learned=a.oprobe_learned, pop_seq=a.pop_seq, pop_match_share=a.pop_match_share, od_widths=a.od_widths, probe_scale=a.probe_scale,
                        mc_fibres=a.mc_fibres, oriented=a.oriented, geometry_targets=a.geometry_targets, overfit=a.overfit, init_reset=a.init_reset)
         return
     if a.head == "lobes":

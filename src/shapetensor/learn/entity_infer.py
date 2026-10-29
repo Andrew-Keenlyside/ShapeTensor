@@ -202,7 +202,8 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
             if getattr(dec, "pop_dir", 0):
                 U = dec.pop_quadrature(1, p.device)[0]; cu = dec.od_code(ovp, dec.od_weights(U))
                 if getattr(dec, "oprobe", False):
-                    ou = dec.oprobe_feats(feats, (p - off)[:, None].expand(-1, U.shape[0], -1).reshape(-1, 3), U[None].expand(n, -1, -1).reshape(-1, 3))
+                    scl = (s / 3.0).clamp(0.5, 2.5)[:, None].expand(-1, U.shape[0]).reshape(-1) if getattr(dec, "probe_scale", False) else None
+                    ou = dec.oprobe_feats(feats, (p - off)[:, None].expand(-1, U.shape[0], -1).reshape(-1, 3), U[None].expand(n, -1, -1).reshape(-1, 3), scale=scl)
                     cu = torch.cat([cu, ou.view(n, U.shape[0], -1).to(cu.dtype)], -1)
                 pu = (U, cu)
             full.update(dec.populations(enc, pu))

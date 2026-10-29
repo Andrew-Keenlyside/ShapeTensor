@@ -26,6 +26,7 @@ from odf_render import draw_tensors
 
 ckp, out = sys.argv[1], sys.argv[2]; dev = "cuda"; WIN = float(os.environ.get("WINDOW", 3.0)); STR = float(os.environ.get("STRENGTH", 0.3))
 ck = torch.load(ckp, map_location=dev, weights_only=False); net = PopulationNet.from_args(ck["args"]).to(dev).eval(); net.load_state_dict(ck["model"])
+ET.configure_from_args(ck["args"])                                                                 # (its targets: background apart, matching)
 dirs8 = EI.sphere_dirs(8, dev)
 
 

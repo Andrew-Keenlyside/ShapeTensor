@@ -247,6 +247,7 @@ def st_features_ext(j6: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
 #: training: pool the direct path's bank only where the queries need it (z and y passes over the volume, the x pass at
 #: the queries' trilinear corners; review 5 -- the levels are never stored): ``(B, Q, L, Dd)`` straight into the decoder
 OD_AT_POINTS = False
+POP_CLAIM_DEG = 10.0             # pop_seq 2: the width of an earlier slot's claim around its directions (the quadrature's spacing ~15 deg)
 POP_SHARPNESS = True             # pop_dir: each slot's direction weights sharpened by exp(t(p)), t from the point code (the Cholesky
                                  # rows, unused there; 0 at the start): a line no longer needs large logits at every direction
 
@@ -261,9 +262,9 @@ class EntityDecoder(nn.Module):
     def __init__(self, c0: int, c1: int, c2: int, emb: int = 16, hidden: int = 256, lmax: int = 8, unc: bool = False, mass_head: bool = False,
                  dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False,
                  kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0,
-                 od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False, dens_gate: bool = False, st_path: bool = False,
+                 od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False, dens_gate: bool = False, st_path: bool = False, od_widths=(0.6,),
                  iso_head: bool = False, gate2: bool = False, gate_share: bool = False, dens_ce: bool = False,
-                 ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe_learned: int = 0, pop_seq: bool = False):
+                 ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe_learned: int = 0, pop_seq: int = 0, probe_scale: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -291,7 +292,7 @@ class EntityDecoder(nn.Module):
         # the point code)
         self.oprobe = bool(oprobe) or bool(oprobe_only); self.oprobe_only = bool(oprobe_only)
         self.o_t = (2.0, 4.0, 6.0); self.o_r = (1.5, 3.0); self.o_m = 8; self.o_c = 3 + int(oprobe_learned)   # (``oprobe_learned``: that many
-        self.oprobe_learned = int(oprobe_learned)                                                                      # learned fields from the trunk too)
+        self.oprobe_learned = int(oprobe_learned); self.probe_scale = bool(probe_scale)                                                                      # learned fields from the trunk too)
         if self.oprobe:
             nf = self.o_c * (1 + 3 * len(self.o_r)) * (1 + 2 * len(self.o_t))
             self.o_net = nn.Sequential(nn.Linear(nf, 128), nn.SiLU(), nn.Linear(128, 64))
@@ -311,7 +312,10 @@ class EntityDecoder(nn.Module):
         # the code saw only the energy along u, never the point's angular context -- fitted to convergence on readable
         # crops the path beat flat by 5 %, with these features 9 %; the levels' mean is ~0 since the energies are
         # already normalised per level)
-        self.odirect = int(odirect); self.od_sigmas = tuple(float(x) for x in od_sigmas); self.od_lv = len(self.od_sigmas)
+        # ``od_widths`` (29 Oct): the bank's cross-sections (voxels); each width's filters see the image high-passed at 3 x its
+        # width (at least 3), so a bundle wider than the 0.6 filter registers inside, not only at its edges; levels width-major
+        self.odirect = int(odirect); self.od_sigmas = tuple(float(x) for x in od_sigmas); self.od_widths = tuple(float(w) for w in od_widths)
+        self.od_lv = len(self.od_sigmas) * len(self.od_widths)
         self.od_norm = bool(od_norm)
         # ``dens_gate``: is the orientation visible at this point (a scalar per point, trained on the image-measured
         # visibility): the density read out is g x the lobe + (1 - g) x flat, and the lobe is trained only where the
@@ -366,7 +370,12 @@ class EntityDecoder(nn.Module):
         # ``pop_seq``: the slots filled in turn, each direction's score also given how much of it the earlier slots' ellipses
         # already hold (u^T T_j u summed) and the slot's index: two alike peaks (a crossing) no longer go to every slot
         # alike, so a slot need not average them into a disc (P2: crossings found 0 %)
-        self.pop_k = int(pop_k); self.pop_dir = int(pop_dir); self.pop_seq = bool(pop_seq)
+        # ``pop_seq`` 2 (29 Oct): an earlier slot's claim on a direction is its own direction weights smoothed over ~10 deg (the
+        # ellipse's u^T T u is a cos^2 lobe: half the second fibre's peak taken at a 45 deg crossing); the background is its
+        # own share (its entities leave the slots' targets, so slot 1 is no longer the background); and each slot's existence
+        # and share come in turn, by stick breaking (background, then each slot a fraction of the rest; the remainder
+        # "other"), from the point code and what the earlier slots hold -- a slot repeating one before it can learn to switch off
+        self.pop_k = int(pop_k); self.pop_dir = int(pop_dir); self.pop_seq = int(pop_seq)
         if self.pop_k:
             K_ = self.pop_k
             self.pop = nn.Sequential(nn.Linear(hidden, 256), nn.SiLU(), nn.Linear(256, 256), nn.SiLU(), nn.Linear(256, K_ * 8 + 1))
@@ -376,6 +385,12 @@ class EntityDecoder(nn.Module):
             self.pop_u = nn.Sequential(nn.Linear(hidden + 32 + (64 if self.oprobe else 0) + ((1 + self.pop_k) if self.pop_seq else 0), 128), nn.SiLU(), nn.Linear(128, 128), nn.SiLU(), nn.Linear(128, self.pop_k))
             nn.init.zeros_(self.pop_u[-1].weight); nn.init.zeros_(self.pop_u[-1].bias)               # (uniform weights: isotropic at the start)
             self.register_buffer("pop_u_dirs", fib_hemisphere(self.pop_dir), persistent=False)
+            if self.pop_seq == 2:
+                g_ = fib_hemisphere(self.pop_dir); th = torch.acos((g_ @ g_.T).abs().clamp(max=1.0))     # axial angles (rotation invariant)
+                kern = torch.exp(-0.5 * (th / math.radians(POP_CLAIM_DEG)) ** 2); kern = kern / kern.sum(-1, keepdim=True)
+                self.register_buffer("pop_kern", kern, persistent=False)
+                self.pop_s = nn.Sequential(nn.Linear(hidden + 4 + self.pop_k, 128), nn.SiLU(), nn.Linear(128, 128), nn.SiLU(), nn.Linear(128, 2))
+                nn.init.zeros_(self.pop_s[-1].weight); nn.init.zeros_(self.pop_s[-1].bias)
         self.dens_ce = bool(dens_ce); self.ce_no_st = bool(ce_no_st)                         # (no structure tensor: neither term nor cues)
         if self.dens_ce:
             from .sh import real_sh as _rsh, n_coef as _nc
@@ -483,10 +498,11 @@ class EntityDecoder(nn.Module):
             out.append(torch.cat(parts, -1))
         return torch.cat(out)
 
-    def oprobe_feats(self, feats, pts: torch.Tensor, u: torch.Tensor, b: int = 0, chunk: int = 16384) -> torch.Tensor:
+    def oprobe_feats(self, feats, pts: torch.Tensor, u: torch.Tensor, b: int = 0, chunk: int = 16384, scale: torch.Tensor | None = None) -> torch.Tensor:
         """The oriented probe's code ``(N, 64)`` for item ``b`` at points ``pts (N, 3)`` and directions ``u (N, 3)``: the
         scalar fields at the axis positions 0, +-t (``o_t``) and on rings of ``o_m`` points at radii ``o_r`` around the
-        axis; per ring its mean and the magnitudes of its first two angular frequencies; +-t folded (sum, |difference|)."""
+        axis; per ring its mean and the magnitudes of its first two angular frequencies; +-t folded (sum, |difference|).
+        ``scale (N,)``: the offsets and radii multiplied by it (the query's window over 3: its own scale)."""
         S = feats.scal[b:b + 1].float(); C = S.shape[1]
         size = torch.tensor(S.shape[-3:], device=pts.device, dtype=torch.float32)
         nT = len(self.o_t); T = torch.tensor((0.0,) + tuple(self.o_t) + tuple(-t for t in self.o_t), device=pts.device)
@@ -495,10 +511,11 @@ class EntityDecoder(nn.Module):
         R_ = len(self.o_r); out = []
         for a in range(0, pts.shape[0], chunk):
             p_, u_ = pts[a:a + chunk].float(), Fn.normalize(u[a:a + chunk].float(), dim=-1); n = p_.shape[0]
+            sc = scale[a:a + chunk].float().view(n, 1, 1, 1) if scale is not None else 1.0
             ref = torch.where(u_[:, :1].abs() < 0.9, torch.tensor([1.0, 0.0, 0.0], device=p_.device).expand(n, 3), torch.tensor([0.0, 1.0, 0.0], device=p_.device).expand(n, 3))
             e1 = Fn.normalize(torch.cross(u_, ref, dim=-1), dim=-1); e2 = torch.cross(u_, e1, dim=-1)
-            pos = (p_[:, None, None] + T[None, :, None, None] * u_[:, None, None]
-                   + ring[None, None, :, :1] * e1[:, None, None] + ring[None, None, :, 1:] * e2[:, None, None])   # (n, nt, 1 + R M, 3)
+            pos = (p_[:, None, None] + sc * (T[None, :, None, None] * u_[:, None, None]
+                   + ring[None, None, :, :1] * e1[:, None, None] + ring[None, None, :, 1:] * e2[:, None, None]))   # (n, nt, 1 + R M, 3)
             g = (pos / (size - 1).clamp_min(1) * 2 - 1).flip(-1).reshape(1, -1, 1, 1, 3)
             v = Fn.grid_sample(S, g, mode="bilinear", padding_mode="border", align_corners=True)[0, :, :, 0, 0]
             v = v.view(C, n, T.numel(), -1).permute(1, 0, 2, 3)                                    # (n, C, nt, 1 + R M)
@@ -553,8 +570,9 @@ class EntityDecoder(nn.Module):
                 cu = torch.stack([self.od_code(ovs[b], self.od_weights(U[b])) for b in range(points.shape[0])])
                 if getattr(self, "oprobe", False):                                                   # and the learned probe along each
                     Q_, N_ = points.shape[1], U.shape[1]
-                    ou = torch.stack([self.oprobe_feats(feats, points[b][:, None].expand(-1, N_, -1).reshape(-1, 3), U[b][None].expand(Q_, -1, -1).reshape(-1, 3), b).view(Q_, N_, -1)
-                                      for b in range(points.shape[0])])
+                    scl = lambda b: (sigma[b] / 3.0).clamp(0.5, 2.5)[:, None].expand(-1, N_).reshape(-1) if getattr(self, "probe_scale", False) else None
+                    ou = torch.stack([self.oprobe_feats(feats, points[b][:, None].expand(-1, N_, -1).reshape(-1, 3), U[b][None].expand(Q_, -1, -1).reshape(-1, 3), b,
+                                                        scale=scl(b)).view(Q_, N_, -1) for b in range(points.shape[0])])
                     cu = torch.cat([cu, ou.to(cu.dtype)], -1)
                 pu = (U, cu)
             out.update(self.populations(p, pu))
@@ -589,6 +607,8 @@ class EntityDecoder(nn.Module):
             if not getattr(self, "pop_seq", False):
                 w = torch.softmax(self.pop_u(h.to(self.pop_u[0].weight.dtype)).float() * sharp, -2)  # (..., Q, N, K) over the directions
                 return {"pop_exist": ex, "pop_share": sh, "pop_T": mom(w)}
+            if getattr(self, "pop_seq", 0) == 2:
+                return self._populations_seq2(p, h, o, sharp, mom)
             held = torch.zeros(*h.shape[:-1], 1, device=h.device); Ts = []                         # (..., Q, N, 1): u^T T u of the slots so far
             Ub = U.float() if uu.dim() > 3 else U.float()[None]
             for k in range(K_):
@@ -604,6 +624,26 @@ class EntityDecoder(nn.Module):
                          torch.stack([c[..., 4], c[..., 5], dg[..., 2]], -1)], -2)
         T = L @ L.transpose(-1, -2); T = T / T.diagonal(dim1=-2, dim2=-1).sum(-1).clamp_min(1e-9)[..., None, None]
         return {"pop_exist": ex, "pop_share": sh, "pop_T": T}
+
+    def _populations_seq2(self, p, h, o, sharp, mom) -> dict:
+        """``pop_seq`` 2: the slots in turn (see the constructor). Returns also ``pop_bg (..., Q)``, the background's share."""
+        K_ = self.pop_k; N = h.shape[-2]; dev = h.device
+        held = torch.zeros(*h.shape[:-1], 1, device=dev); Ts, ex, sh = [], [], []
+        rest = torch.ones(p.shape[:-1], device=dev)
+        bg = torch.sigmoid(o[..., K_]) * rest; rest = rest - bg                                     # the first stick: the background
+        for k in range(K_):
+            hot = torch.zeros(*h.shape[:-1], K_, device=dev); hot[..., k] = 1.0
+            lh = torch.log1p(held)
+            lk = self.pop_u(torch.cat([h, lh.to(h.dtype), hot.to(h.dtype)], -1).to(self.pop_u[0].weight.dtype)).float()[..., k:k + 1]
+            wk = torch.softmax(lk * (sharp[..., k:k + 1] if torch.is_tensor(sharp) else sharp), -2)   # (..., Q, N, 1)
+            Ts.append(mom(wk)[..., 0, :, :])
+            summ = torch.stack([lh[..., 0].amax(-1), lh[..., 0].mean(-1), 1 - rest, torch.log(N * wk[..., 0].amax(-1))], -1)
+            hk = torch.zeros(*p.shape[:-1], K_, device=dev); hk[..., k] = 1.0
+            es = self.pop_s(torch.cat([p.float(), summ, hk], -1).to(self.pop_s[0].weight.dtype)).float()
+            ex.append(torch.sigmoid(es[..., 0])); f = torch.sigmoid(es[..., 1] - 1.0986)            # (a quarter of the rest at the start)
+            sh.append(rest * f); rest = rest * (1 - f)
+            held = held + N * (wk[..., 0] @ self.pop_kern.T)[..., None]                             # its claim, smoothed over ~POP_CLAIM_DEG
+        return {"pop_exist": torch.stack(ex, -1), "pop_share": torch.stack(sh + [rest], -1), "pop_T": torch.stack(Ts, -3), "pop_bg": bg}
 
     def ce_density(self, p: torch.Tensor, ov: torch.Tensor | None, j6: torch.Tensor, sigma: torch.Tensor, dirs: torch.Tensor | None = None) -> dict:
         """The normalised density (``dens_ce``) at points with codes ``p (N, hidden)``, bank energies ``ov (N, L, Dd)``,
@@ -778,9 +818,9 @@ class PopulationNet(nn.Module):
                  dens_sh: bool = False, dens_mlp: bool = False, mass_region: bool = False, region_dec: bool = False, z_vote: bool = False,
                  dir_sh: int = 0, ray: bool = False, region_density: bool = False, kappa_log: bool = False, oprobe: bool = False,
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
-                 odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0,
+                 odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0, od_widths=(0.6,),
                  od_norm: bool = False, dens_gate: bool = False, st_path: bool = False, iso_head: bool = False, gate2: bool = False,
-                 gate_share: bool = False, dens_ce: bool = False, ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe_learned: int = 0, pop_seq: bool = False):
+                 gate_share: bool = False, dens_ce: bool = False, ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe_learned: int = 0, pop_seq: int = 0, probe_scale: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -818,8 +858,8 @@ class PopulationNet(nn.Module):
                                      mass_head=bool(mass_head) and not mass_region, dens_sh=bool(dens_sh), dens_mlp=bool(dens_mlp),
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
                                      oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect),
-                                     od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote), od_norm=bool(od_norm), dens_gate=bool(dens_gate),
-                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st), pop_k=int(pop_k), pop_dir=int(pop_dir), oprobe_learned=int(oprobe_learned), pop_seq=bool(pop_seq))
+                                     od_sigmas=tuple(od_sigmas), od_widths=tuple(od_widths), mass_vote=bool(mass_vote), od_norm=bool(od_norm), dens_gate=bool(dens_gate),
+                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st), pop_k=int(pop_k), pop_dir=int(pop_dir), oprobe_learned=int(oprobe_learned), pop_seq=int(pop_seq), probe_scale=bool(probe_scale))
             if oprobe_learned:                                                                       # the probe's learned fields: the finest
                 self.scal_learn = nn.Conv3d(c0, int(oprobe_learned), 1)                              # trunk level projected (scalars per voxel:
                                                                                                      # turning the image turns them)
@@ -895,11 +935,11 @@ class PopulationNet(nn.Module):
                    oprobe_only=bool(args.get("oprobe_only", False)), bg_head=bool(args.get("bg_head", False)),
                    obj_head=bool(args.get("obj_head", False)), oriented=int(args.get("oriented", 0) or 0),
                    odirect=int(args.get("odirect", 0) or 0), split_head=bool(args.get("split_head", False)),
-                   od_sigmas=tuple(args.get("od_sigmas") or (2.0, 4.0, 6.0)), mass_vote=bool(args.get("mass_vote", False)),
+                   od_sigmas=tuple(args.get("od_sigmas") or (2.0, 4.0, 6.0)), od_widths=tuple(args.get("od_widths") or (0.6,)), mass_vote=bool(args.get("mass_vote", False)),
                    block_norm=int(args.get("block_norm", 0) or 0), od_norm=bool(args.get("od_norm", False)),
                    dens_gate=bool(args.get("dens_gate", False)), st_path=bool(args.get("st_path", False)), iso_head=bool(args.get("iso_head", False)),
                    gate2=bool(args.get("gate2", False)), gate_share=bool(args.get("gate_share", False)), dens_ce=bool(args.get("dens_ce", False)),
-                   ce_no_st=bool(args.get("ce_no_st", False)), pop_k=int(args.get("pop_k", 0) or 0), pop_dir=int(args.get("pop_dir", 0) or 0), oprobe_learned=int(args.get("oprobe_learned", 0) or 0), pop_seq=bool(args.get("pop_seq", False))) \
+                   ce_no_st=bool(args.get("ce_no_st", False)), pop_k=int(args.get("pop_k", 0) or 0), pop_dir=int(args.get("pop_dir", 0) or 0), oprobe_learned=int(args.get("oprobe_learned", 0) or 0), pop_seq=int(args.get("pop_seq", 0) or 0), probe_scale=bool(args.get("probe_scale", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
@@ -969,6 +1009,7 @@ class PopulationNet(nn.Module):
         without building the levels: per chunk of directions, the energies blurred along z and y over the volume, along x
         only at the queries' trilinear corners; each level's per-voxel mean over the directions taken at the corners, its
         global mean from the matrices' column sums -- the same sums (review 5: 3.8e-6 relative)."""
+        assert len(getattr(self.ent, "od_widths", (0.6,))) == 1, "direct_at: one bank width only (use direct_levels)"
         with torch.autocast(x.device.type, enabled=False):
             from ..filters import gaussian, filter_matrix, kernel1d
             sig = self.ent.od_sigmas
@@ -1009,12 +1050,12 @@ class PopulationNet(nn.Module):
                 out.append((Nv * W[:, None]).sum((-3, -2, -1)).transpose(1, 2))                    # (B, Q, Dd)
             return torch.stack(out, 2)
 
-    def _od_filters(self, shp, c: int, chunk: int, device) -> torch.Tensor:
+    def _od_filters(self, shp, c: int, chunk: int, device, width: float = 0.6) -> torch.Tensor:
         """The bank's filters ``(chunk, Z, Y, X // 2 + 1)`` on the half spectrum for directions ``c : c + chunk`` (8 voxels
         along, 0.6 across), symmetrised over the Nyquist planes as the full FFT's real part does (H at the Nyquist
         frequency -pi and +pi averaged): exactly the energies of the full-spectrum build. Cached for the last shape."""
         cache = self.__dict__.setdefault("_odf_cache", {})
-        key = (shp, c, chunk, str(device))
+        key = (shp, c, chunk, str(device), float(width))
         if key in cache:
             return cache[key]
         if cache and next(iter(cache))[0] != shp:
@@ -1036,36 +1077,39 @@ class PopulationNet(nn.Module):
         Hs = []
         for kk in (k, kf):
             kp2 = (kk @ d.T).movedim(-1, 0) ** 2; k2 = (kk ** 2).sum(-1)
-            Hs.append(torch.exp(-0.5 * (8.0 ** 2 * kp2 + 0.6 ** 2 * (k2[None] - kp2))))
+            Hs.append(torch.exp(-0.5 * (8.0 ** 2 * kp2 + float(width) ** 2 * (k2[None] - kp2))))
         H = 0.5 * (Hs[0] + Hs[1])
         if H.numel() * 4 * (self.ent.od_dirs.shape[0] // max(chunk, 1)) <= OD_CACHE_BYTES:            # (a whole-volume bank would hold GBs)
             cache[key] = H
         return H
 
     def _direct_levels(self, x: torch.Tensor, chunk: int, strides) -> "Levels":                 # rounding noise in low contrast: review 27 Oct)
-        from ..filters import gaussian, gaussian_mm
+        from ..filters import gaussian, filter_matrix, kernel1d
         sig = self.ent.od_sigmas
         if strides is None:
             strides = OD_STRIDES if OD_STRIDES is not None else tuple(1 if s_ < 8 else 2 for s_ in sig)
         strides = tuple(strides) or (1,); strides = (strides + (strides[-1],) * len(sig))[:len(sig)]
-        xf = x[:, :1].float(); xf = xf - gaussian(xf, 3.0)                                       # high-passed (as oriented_energy's hp)
-        shp = tuple(x.shape[-3:]); F = torch.fft.rfftn(xf, dim=(-3, -2, -1))                    # half the spectrum (real input): the same
-        from ..filters import filter_matrix, kernel1d
-        dirs = self.ent.od_dirs; Dd = dirs.shape[0]; B = x.shape[0]; Z, Y, X = shp               # energies as the full FFT's (its filter made
-        Ms = [[filter_matrix(kernel1d(float(s), 0, 3.0), n, torch.float32, x.device)[::st].contiguous() for n in shp]   # Hermitian on the Nyquist
-              for s, st in zip(sig, strides)]                                                     # planes: review 3); each level's (= gaussian)
-        out = [torch.empty(B, Dd, *(M.shape[0] for M in Mz_y_x), device=x.device) for Mz_y_x in Ms]   # blur as left-multiplied matrices, the
-        for c in range(0, Dd, chunk):                                                             # strided level by row subsets, written in
-            H = self._od_filters(shp, c, chunk, x.device)                                         # place (review 5: -45 % of the pooling)
-            E = torch.fft.irfftn(F * H[None], s=shp, dim=(-3, -2, -1)) ** 2                         # (B, chunk, Z, Y, X)
-            C = E.shape[1]
-            for li, (Mz, My, Mx) in enumerate(Ms):
-                v = My @ (E @ Mx.T)                                                               # x, then y: (B, C, Z, my, mx)
-                out[li][:, c:c + C] = (Mz @ v.reshape(B * C, Z, -1)).view(B, C, Mz.shape[0], My.shape[0], Mx.shape[0])   # z
-            del E, H
-        for Ep in out:
-            Ep.div_(Ep.mean(1, keepdim=True) + 1e-3 * Ep.mean(dim=(1, 2, 3, 4), keepdim=True) + 1e-12)   # (per item)
-        return Levels(out, strides)
+        dirs = self.ent.od_dirs; Dd = dirs.shape[0]; B = x.shape[0]; shp = tuple(x.shape[-3:]); Z, Y, X = shp
+        outs, sts = [], []
+        for wi, wd in enumerate(getattr(self.ent, "od_widths", (0.6,))):
+            xf = x[:, :1].float(); xf = xf - gaussian(xf, max(3.0, 3.0 * wd))                     # high-passed (as oriented_energy's hp)
+            F = torch.fft.rfftn(xf, dim=(-3, -2, -1))                                              # half the spectrum (real input): the same
+            st_w = strides if wi == 0 else tuple(max(2, st) for st in strides)                    # (the wider widths: every 2nd voxel)
+            Ms = [[filter_matrix(kernel1d(float(s), 0, 3.0), n, torch.float32, x.device)[::st].contiguous() for n in shp]   # energies as the full FFT's
+                  for s, st in zip(sig, st_w)]                                                     # (its filter made Hermitian on the Nyquist planes)
+            out = [torch.empty(B, Dd, *(M.shape[0] for M in Mz_y_x), device=x.device) for Mz_y_x in Ms]   # each level's (= gaussian) blur as
+            for c in range(0, Dd, chunk):                                                         # left-multiplied matrices, the strided level by
+                H = self._od_filters(shp, c, chunk, x.device, wd)                                 # row subsets, written in place
+                E = torch.fft.irfftn(F * H[None], s=shp, dim=(-3, -2, -1)) ** 2                     # (B, chunk, Z, Y, X)
+                C = E.shape[1]
+                for li, (Mz, My, Mx) in enumerate(Ms):
+                    v = My @ (E @ Mx.T)                                                           # x, then y: (B, C, Z, my, mx)
+                    out[li][:, c:c + C] = (Mz @ v.reshape(B * C, Z, -1)).view(B, C, Mz.shape[0], My.shape[0], Mx.shape[0])   # z
+                del E, H
+            for Ep in out:
+                Ep.div_(Ep.mean(1, keepdim=True) + 1e-3 * Ep.mean(dim=(1, 2, 3, 4), keepdim=True) + 1e-12)   # (per item)
+            outs += out; sts += list(st_w)
+        return Levels(outs, tuple(sts))
 
     def features(self, x: torch.Tensor):
         """The three feature levels: stride 1, stride 2 and the stride-4 lattice."""

@@ -116,6 +116,7 @@ def tree_distance(anc: torch.Tensor, i: torch.Tensor, j: torch.Tensor) -> torch.
 
 DENS_READOUT_LOBE = False           # ... and the lobe trained through the readout too (it may soften where unsure)
 POP_MIN_SHARE = 0.02                # a target population's smallest share of the window (smaller: pooled into "other")
+POP_BG = False                      # the background's entities apart from the slots (pop_seq 2; set by the trainer, configure_from_args)
 POP_MATCH_AS_LOSS = True           # the matching weighs each real population's ellipse as the loss does (equally); weighted by share
                                    # (before 29 Oct, 02:20) line and isotropic targets swapped slots between like queries and each
                                    # slot learnt their average (line targets' predicted line-ness 0.17-0.19 on clean crops)
@@ -163,13 +164,34 @@ def _t6_mat(t6: torch.Tensor) -> torch.Tensor:
 
 def population_targets(T: dict, K: int):
     """Each query's K largest entities by share of the window's material: ``share (B, Q, K)`` (0 for empty slots),
-    ``ellipse (B, Q, K, 3, 3)``, ``valid (B, Q, K)``, ``other (B, Q)`` the rest's share, ``has (B, Q)`` any material."""
+    ``ellipse (B, Q, K, 3, 3)``, ``valid (B, Q, K)``, ``other (B, Q)`` the rest's share, ``has (B, Q)`` any material.
+    With :data:`POP_BG` the background's entities are not among them (:func:`population_bg` holds their share)."""
     m = (T["e_mass"].float() * T["e_vis"].float()).clamp_min(0) * (T["e_node"] >= 0)
     tot = m.sum(-1, keepdim=True); sh = m / tot.clamp_min(1e-9)
+    if POP_BG and "e_bg" in T:
+        sh = sh * (~T["e_bg"].bool()).to(sh.dtype)
     o = sh.argsort(-1, descending=True)[..., :K]
     s = sh.gather(-1, o); valid = s > POP_MIN_SHARE; s = s * valid
     E = _t6_mat(T["e_T6"].float().gather(2, o[..., None].expand(*o.shape, 6)))
-    return s, E, valid, (1 - s.sum(-1)).clamp_min(0), tot[..., 0] > MASS_EPS
+    return s, E, valid, (1 - s.sum(-1) - population_bg(T)).clamp_min(0), tot[..., 0] > MASS_EPS
+
+
+def population_bg(T: dict) -> torch.Tensor:
+    """``(B, Q)`` the background entities' share of the window's material (0 without :data:`POP_BG`)."""
+    m = (T["e_mass"].float() * T["e_vis"].float()).clamp_min(0) * (T["e_node"] >= 0)
+    if not (POP_BG and "e_bg" in T):
+        return torch.zeros(m.shape[:-1], device=m.device)
+    return (m * T["e_bg"].bool().to(m.dtype)).sum(-1) / m.sum(-1).clamp_min(1e-9)
+
+
+def configure_from_args(args: dict | None, matching: bool = False):
+    """The populations' target conventions a checkpoint was trained with (for evaluation scripts): the background apart
+    or not; with ``matching`` also its matching rule (evaluations keep one rule, so runs stay comparable)."""
+    global POP_BG, POP_MATCH_AS_LOSS
+    args = args or {}
+    POP_BG = int(args.get("pop_seq", 0) or 0) == 2
+    if matching:
+        POP_MATCH_AS_LOSS = not bool(args.get("pop_match_share", False))
 
 
 def population_match(ent: dict, T: dict) -> dict:
@@ -199,7 +221,10 @@ def population_loss(ent: dict, T: dict) -> dict:
     if not bool(has.any()):
         return {"pop": ex.sum() * 0.0}
     l_ex = Fn.binary_cross_entropy(ex.clamp(1e-4, 1 - 1e-4), mt["v_m"], reduction="none").mean(-1)[has].mean()
-    l_sh = ((sh[..., :K] - mt["s_m"]).abs().sum(-1) + (sh[..., K] - mt["other"]).abs())[has].mean()
+    l_sh = ((sh[..., :K] - mt["s_m"]).abs().sum(-1) + (sh[..., K] - mt["other"]).abs())
+    if "pop_bg" in ent:                                                                          # the background's own share
+        l_sh = l_sh + (ent["pop_bg"].float() - population_bg(T)).abs()
+    l_sh = l_sh[has].mean()
     dT = ((PT - mt["E_m"]) ** 2).sum((-1, -2)); vm = mt["v_m"] * has[..., None].float()            # every real population counts
     l_T = (vm * dT).sum() / vm.sum().clamp_min(1.0)                                                 # equally (a share weight let the
     return {"pop": l_ex + l_sh + 4.0 * l_T, "pop_exist": l_ex.detach(), "pop_share": l_sh.detach(), "pop_T": l_T.detach()}

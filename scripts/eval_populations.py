@@ -37,6 +37,7 @@ from shapetensor.learn.model import PopulationNet, st_products, st_matrix, windo
 ckp = sys.argv[1]; N = int(sys.argv[2]) if len(sys.argv) > 2 else 32; dev = "cuda"
 STR = [float(v) for v in os.environ.get("STRENGTHS", "0.3,1.0").split(",")]; WIN = float(os.environ.get("WINDOW", 3.0))
 ck = torch.load(ckp, map_location=dev, weights_only=False); net = PopulationNet.from_args(ck["args"]).to(dev).eval(); net.load_state_dict(ck["model"])
+ET.configure_from_args(ck["args"])                                                                 # (its targets: background apart, matching)
 dirs8 = EI.sphere_dirs(8, dev)
 
 

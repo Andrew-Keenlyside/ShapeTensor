@@ -79,3 +79,33 @@ def test_sequential_slots_turn_with_the_directions():
         Tb = dec.populations(p[None].expand(2, -1, -1), (U[None].expand(2, -1, -1), cu[None].expand(2, -1, -1, -1)))["pop_T"]   # batched
     assert T.shape == (5, 4, 3, 3) and torch.allclose(T.diagonal(dim1=-2, dim2=-1).sum(-1), torch.ones(5, 4), atol=1e-5)
     assert torch.allclose(TR_, R @ T @ R.T, atol=1e-5) and torch.allclose(Tb[0], T, atol=1e-5)
+
+
+def test_sequential_mode2_shares_rotation_and_batching():
+    torch.manual_seed(2)
+    dec = PopulationNet.from_args({"head": "entities", "pop_k": 4, "pop_dir": 48, "odirect": 64, "pop_seq": 2}).ent.eval()
+    p = torch.randn(5, dec.pop[0].in_features); U = dec.pop_quadrature(1, "cpu")[0]; cu = torch.randn(5, U.shape[0], 32)
+    with torch.no_grad():
+        for net in (dec.pop_u, dec.pop_s, dec.pop):
+            for m in net:
+                if isinstance(m, torch.nn.Linear):
+                    m.weight.normal_(0, 0.3)
+        out = dec.populations(p, (U, cu))
+        R = torch.linalg.qr(torch.randn(3, 3))[0]
+        TR_ = dec.populations(p, (U @ R.T, cu))["pop_T"]
+        ob = dec.populations(p[None].expand(2, -1, -1), (U[None].expand(2, -1, -1), cu[None].expand(2, -1, -1, -1)))
+    T, sh, bg = out["pop_T"], out["pop_share"], out["pop_bg"]
+    assert T.shape == (5, 4, 3, 3) and sh.shape == (5, 5) and bg.shape == (5,)
+    assert torch.allclose(sh.sum(-1) + bg, torch.ones(5), atol=1e-5) and bool((sh >= 0).all())
+    assert torch.allclose(T.diagonal(dim1=-2, dim2=-1).sum(-1), torch.ones(5, 4), atol=1e-5)
+    assert torch.allclose(TR_, R @ T @ R.T, atol=1e-5)
+    assert torch.allclose(ob["pop_T"][1], T, atol=1e-5) and torch.allclose(ob["pop_bg"][0], bg, atol=1e-6)
+
+
+def test_background_apart_from_the_slots(monkeypatch):
+    monkeypatch.setattr(ET, "POP_BG", True)
+    T = _targets(); bgf = torch.zeros_like(T["e_mass"], dtype=torch.bool); bgf[..., 0] = True; T["e_bg"] = bgf
+    s, E, valid, other, has = ET.population_targets(T, 4); bg = ET.population_bg(T)
+    m = T["e_mass"]; assert torch.allclose(bg, m[..., 0] / m.sum(-1), atol=1e-5)
+    assert torch.allclose(s.sum(-1) + other + bg, torch.ones_like(bg), atol=1e-5)
+    assert float(bg.min()) > 0 and float((s > 0).sum(-1).max()) <= 3                             # the background never a slot
