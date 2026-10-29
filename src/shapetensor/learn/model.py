@@ -265,7 +265,7 @@ class EntityDecoder(nn.Module):
                  kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0,
                  od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False, dens_gate: bool = False, st_path: bool = False, od_widths=(0.6,),
                  iso_head: bool = False, gate2: bool = False, gate_share: bool = False, dens_ce: bool = False,
-                 ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe_learned: int = 0, pop_seq: int = 0, probe_scale: bool = False):
+                 ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe_learned: int = 0, pop_seq: int = 0, probe_scale: bool = False, pop_scale: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -377,6 +377,12 @@ class EntityDecoder(nn.Module):
         # and share come in turn, by stick breaking (background, then each slot a fraction of the rest; the remainder
         # "other"), from the point code and what the earlier slots hold -- a slot repeating one before it can learn to switch off
         self.pop_k = int(pop_k); self.pop_dir = int(pop_dir); self.pop_seq = int(pop_seq)
+        # ``pop_scale`` (29 Oct): the query's scale of collections s (voxels; 0 = objects alone) enters the point code -- the
+        # same image read as single objects or as collections up to ~s across (zero at the start: no effect until learnt)
+        self.pop_scale = bool(pop_scale)
+        if self.pop_scale:
+            self.scale_mlp = nn.Sequential(nn.Linear(2, 64), nn.SiLU(), nn.Linear(64, hidden))
+            nn.init.zeros_(self.scale_mlp[-1].weight); nn.init.zeros_(self.scale_mlp[-1].bias)
         if self.pop_k:
             K_ = self.pop_k
             self.pop = nn.Sequential(nn.Linear(hidden, 256), nn.SiLU(), nn.Linear(256, 256), nn.SiLU(), nn.Linear(256, K_ * 8 + 1))
@@ -526,11 +532,21 @@ class EntityDecoder(nn.Module):
             out.append(Fn.silu(self.o_net(fold.flatten(1).to(self.o_net[0].weight.dtype))))
         return torch.cat(out)
 
-    def forward(self, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.Tensor, context: torch.Tensor | None = None) -> dict:
-        """``points (B, Q, 3)`` input voxels, ``sigma (B, Q)`` voxels, ``dirs (B, Q, D, 3)`` unit (z, y, x)."""
+    def scale_code(self, p: torch.Tensor, scale: torch.Tensor | None) -> torch.Tensor:
+        """The point code with the query's scale of collections added (``pop_scale``; ``scale (..)`` voxels, 0 = objects)."""
+        if not getattr(self, "pop_scale", False) or scale is None:
+            return p
+        sc = scale.float().clamp_min(0)
+        f = torch.stack([torch.log1p(sc), (sc < 1.0).float()], -1)
+        return p + self.scale_mlp(f.to(self.scale_mlp[0].weight.dtype)).to(p.dtype)
+
+    def forward(self, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.Tensor, context: torch.Tensor | None = None,
+                scale: torch.Tensor | None = None) -> dict:
+        """``points (B, Q, 3)`` input voxels, ``sigma (B, Q)`` voxels, ``dirs (B, Q, D, 3)`` unit (z, y, x); ``scale (B, Q)``
+        the scale of collections (``pop_scale``)."""
         from .bingham import rot6d_to_matrix
         from .sh import real_sh
-        p = self.encode(feats, points, sigma, context)
+        p = self.scale_code(self.encode(feats, points, sigma, context), scale)
         D = dirs.shape[2]
         Y = real_sh(dirs.reshape(-1, 3).float(), self.lmax).view(*dirs.shape[:3], -1)
         r = None
@@ -822,7 +838,7 @@ class PopulationNet(nn.Module):
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
                  odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0, od_widths=(0.6,),
                  od_norm: bool = False, dens_gate: bool = False, st_path: bool = False, iso_head: bool = False, gate2: bool = False,
-                 gate_share: bool = False, dens_ce: bool = False, ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe_learned: int = 0, pop_seq: int = 0, probe_scale: bool = False):
+                 gate_share: bool = False, dens_ce: bool = False, ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe_learned: int = 0, pop_seq: int = 0, probe_scale: bool = False, pop_scale: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -861,7 +877,7 @@ class PopulationNet(nn.Module):
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
                                      oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect),
                                      od_sigmas=tuple(od_sigmas), od_widths=tuple(od_widths), mass_vote=bool(mass_vote), od_norm=bool(od_norm), dens_gate=bool(dens_gate),
-                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st), pop_k=int(pop_k), pop_dir=int(pop_dir), oprobe_learned=int(oprobe_learned), pop_seq=int(pop_seq), probe_scale=bool(probe_scale))
+                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st), pop_k=int(pop_k), pop_dir=int(pop_dir), oprobe_learned=int(oprobe_learned), pop_seq=int(pop_seq), probe_scale=bool(probe_scale), pop_scale=bool(pop_scale))
             if oprobe_learned:                                                                       # the probe's learned fields: the finest
                 self.scal_learn = nn.Conv3d(c0, int(oprobe_learned), 1)                              # trunk level projected (scalars per voxel:
                                                                                                      # turning the image turns them)
@@ -941,7 +957,7 @@ class PopulationNet(nn.Module):
                    block_norm=int(args.get("block_norm", 0) or 0), od_norm=bool(args.get("od_norm", False)),
                    dens_gate=bool(args.get("dens_gate", False)), st_path=bool(args.get("st_path", False)), iso_head=bool(args.get("iso_head", False)),
                    gate2=bool(args.get("gate2", False)), gate_share=bool(args.get("gate_share", False)), dens_ce=bool(args.get("dens_ce", False)),
-                   ce_no_st=bool(args.get("ce_no_st", False)), pop_k=int(args.get("pop_k", 0) or 0), pop_dir=int(args.get("pop_dir", 0) or 0), oprobe_learned=int(args.get("oprobe_learned", 0) or 0), pop_seq=int(args.get("pop_seq", 0) or 0), probe_scale=bool(args.get("probe_scale", False))) \
+                   ce_no_st=bool(args.get("ce_no_st", False)), pop_k=int(args.get("pop_k", 0) or 0), pop_dir=int(args.get("pop_dir", 0) or 0), oprobe_learned=int(args.get("oprobe_learned", 0) or 0), pop_seq=int(args.get("pop_seq", 0) or 0), probe_scale=bool(args.get("probe_scale", False)), pop_scale=bool(args.get("pop_scale", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
@@ -1190,7 +1206,7 @@ class PopulationNet(nn.Module):
 
     def forward(self, x: torch.Tensor, points: torch.Tensor | None = None, sigma: torch.Tensor | None = None,
                 context: torch.Tensor | None = None, voxel: torch.Tensor | None = None, e_points: torch.Tensor | None = None,
-                e_sigma: torch.Tensor | None = None, e_dirs: torch.Tensor | None = None) -> dict:
+                e_sigma: torch.Tensor | None = None, e_dirs: torch.Tensor | None = None, e_scale: torch.Tensor | None = None) -> dict:
         """The lattice outputs; with ``points (B, Q, 3)`` (input voxel coordinates) and ``sigma (B, Q)`` (voxels) and a
         query decoder, also ``q_sh (B, Q, n_coef)``: the populations' density at those points and scales. ``voxel``
         (B,): log2 of the voxel size in µm (NaN: unknown) for a voxel-conditioned model."""
@@ -1207,7 +1223,7 @@ class PopulationNet(nn.Module):
                     fe = with_odv(fe, self.direct_at(x, e_points.float())) if OD_AT_POINTS else with_oe(fe, self.direct_levels(x))
                 if getattr(self.ent, "gate", None) is not None or getattr(self.ent, "st_gain", None) is not None or getattr(self.ent, "dens_ce", False):   # the structure tensor
                     fe = with_st6(fe, st_products(x))                                            # (the gate's cue, the direct path)
-                out["ent"] = self.ent(fe, e_points.float(), e_sigma.float(), e_dirs, None if context is None else context.float())
+                out["ent"] = self.ent(fe, e_points.float(), e_sigma.float(), e_dirs, None if context is None else context.float(), scale=e_scale)
             if self.region is not None:                                                         # the population region, every voxel
                 out["region_logit"] = self.region_map(h0, h1, h); out["region"] = self.region_value(out["region_logit"])
                 if e_points is not None and getattr(self, "mass_region", False):                 # where, once: the mass is the region's

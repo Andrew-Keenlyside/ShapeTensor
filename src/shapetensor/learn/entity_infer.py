@@ -130,7 +130,7 @@ _MAPS: dict = {}                                                                
 
 @torch.no_grad()
 def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.Tensor, offset=(0, 0, 0), vol_shape=None,
-          chunk: int = 1024, t_rel: float | None = None, t_abs: float = 0.0) -> dict:
+          chunk: int = 1024, t_rel: float | None = None, t_abs: float = 0.0, scale=None) -> dict:
     """The decoder at ``points (Q, 3)`` (volume voxels), ``sigma (Q,)`` (voxels), every direction of ``dirs (D, 3)``, from
     ``feats`` of the region starting at ``offset``; the context is the distance to ``vol_shape``'s edge. With ``t_rel``,
     only where the total ODF (the cheap SH head) reaches ``t_rel`` of its peak at the point and ``t_abs`` absolute (the
@@ -159,6 +159,8 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
         p = points[a:a + chunk].float(); s = sigma[a:a + chunk].float(); n = p.shape[0]; D = dirs.shape[0]
         ctx = torch.minimum(p, vs - 1 - p).amin(-1)
         enc = dec.encode(feats, (p - off)[None], s[None], ctx[None])[0]                            # (n, hidden): once per point
+        if scale is not None:                                                                       # the scale of collections (pop_scale)
+            enc = dec.scale_code(enc, torch.as_tensor(scale, device=p.device, dtype=torch.float32).expand(points.shape[0])[a:a + chunk])
         mq = dec.mass_of(enc) if getattr(dec, "mass", None) is not None else None                  # the mass output (where), if the model has one
         if reg is not None:
             mq = window_mean(reg, (p - off)[None], s[None])[0]

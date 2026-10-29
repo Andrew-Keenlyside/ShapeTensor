@@ -177,6 +177,7 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
                    vis: torch.Tensor | None = None, group_layer=None, r_min: float = 1.5, c_sig: float = 0.5, emax: int = 8,
                    bin_size: int = 2, mask: torch.Tensor | None = None, keep: torch.Tensor | None = None, m_min: float = 1e-3,
                    ovis: torch.Tensor | None = None, alone_is_object: bool = True, sig_acq: float = 0.0, share_keep: float = 0.2, level=None,
+                   scale=None, centroids: torch.Tensor | None = None, coll_offset=None,
                    comp: torch.Tensor | None = None) -> dict:
     """The entities at query ``points (Q, 3)`` (output crop voxels) and scales ``sigma (Q,)`` (crop voxels).
 
@@ -258,12 +259,15 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     g = torch.exp(-0.5 * d2 / sg ** 2) * (d2 <= (3 * sg) ** 2)
     # the resolved entity of each pair, then sums per (query, entity)
     gw = g * rw[ri]
-    if level is not None:                                                                       # the grouping level (per query): objects
+    if scale is not None:                                                                       # collections of objects at a scale (per query)
+        node = _collections(rleaf[ri], rgrp[ri], torch.as_tensor(scale, device=dev, dtype=torch.float32).expand(Q)[qi] * zf,
+                            centroids, coll_offset, tree.n)
+    elif level is not None:                                                                     # the grouping level (per query): objects
         node = tree.lift(rleaf[ri], torch.as_tensor(level, device=dev).expand(Q)[qi])            # as they are, or their groups -- no
     else:                                                                                       # resolution rule
         thr = zf * torch.clamp(c_sig * torch.sqrt(sg ** 2 + (2 * float(sig_acq)) ** 2), min=r_min)
         node = tree.resolve(rleaf[ri], thr)
-    if alone_is_object and level is None:                                                                         # a merged entity holding one object here is that object
+    if alone_is_object and level is None and scale is None:                                                                         # a merged entity holding one object here is that object
         node = _single_object(qi, node, rleaf[ri], gw / (zf ** 3 * (2 * math.pi * sg ** 2) ** 1.5), m_min, tree.n)
     vl = torch.ones_like(gw); ol = None
     if group_layer is not None and (vis is not None or ovis is not None):
@@ -313,6 +317,31 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     out["node"][e_, r_] = en[sel]; out["mass"][e_, r_] = mass[sel]; out["vis"][e_, r_] = Vis[sel]
     out["T"][e_, r_] = T[sel]; out["desc"][e_, r_] = desc[sel]
     return out
+
+
+def leaf_centroids(entries, tree: "Tree", canvas_shape) -> torch.Tensor:
+    """``(tree.n, 3)`` each object's centre of mass over the whole canvas (canvas voxels; zero for nodes that are not
+    objects): where it is, for :func:`_collections`."""
+    vox, grp, obj, w, v = entries
+    dev = vox.device; canvas = torch.as_tensor(canvas_shape, device=dev); vox = vox.long()
+    c = torch.stack([vox // (canvas[1] * canvas[2]), (vox // canvas[2]) % canvas[1], vox % canvas[2]], 1).float()
+    leaf = tree.leaves(grp.long(), obj.long()); ok = leaf >= 0
+    W = torch.zeros(tree.n, device=dev).index_add_(0, leaf[ok], w[ok].float())
+    C = torch.zeros(tree.n, 3, device=dev).index_add_(0, leaf[ok], w[ok].float()[:, None] * c[ok])
+    return C / W.clamp_min(1e-12)[:, None]
+
+
+def _collections(leaf: torch.Tensor, grp: torch.Tensor, s: torch.Tensor, cent: torch.Tensor, offset, n_nodes: int) -> torch.Tensor:
+    """Per (query, row) pair: the collection its object belongs to at scale ``s`` (canvas voxels, per pair) -- the
+    objects of one population whose centres of mass fall in one cell of a grid of side ``2^ceil(log2 s)`` (shifted by
+    ``offset``; dyadic sides, so the collections nest across scales), named by its lowest object id (a tree node);
+    ``s < 1``: the object itself. Collections never mix populations and follow no semantic layer (29 Oct)."""
+    k = torch.ceil(torch.log2(s.clamp_min(1.0))).long()                                         # 2^k >= s
+    cell = torch.floor((cent[leaf] + torch.as_tensor(offset, device=leaf.device, dtype=torch.float32)) / (2.0 ** k)[:, None]).long()
+    key = ((((k * 4096 + grp.long()) * 2048 + cell[:, 0]) * 2048 + cell[:, 1]) * 2048 + cell[:, 2])
+    uk, inv = torch.unique(key, return_inverse=True)
+    rep_ = torch.full((uk.shape[0],), n_nodes, dtype=torch.long, device=leaf.device).scatter_reduce_(0, inv, leaf.long(), reduce="amin")
+    return torch.where(s >= 1.0, rep_[inv], leaf)
 
 
 def _single_object(qi: torch.Tensor, node: torch.Tensor, leaf: torch.Tensor, m: torch.Tensor, m_min: float, n_nodes: int) -> torch.Tensor:

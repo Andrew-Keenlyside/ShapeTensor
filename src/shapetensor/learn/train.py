@@ -43,7 +43,7 @@ TKEYS = ("slots", "mass", "kind", "layer", "fraction", "classes", "size", "size_
 HALF = ("slots", "mass", "fraction", "classes", "size")
 QKEYS = ("q_points", "q_sigma", "q_sh", "sh_t")
 LKEYS = ("identity_t", "points_t", "voxel", "fraction")    # the lobe model's extra targets
-EKEYS = ("e_points", "e_sigma", "e_level", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa", "e_gnode", "region_t", "iface_t", "bg_t", "e_bg",
+EKEYS = ("e_points", "e_sigma", "e_level", "e_scale", "e_node", "e_mass", "e_vis", "e_T6", "e_desc", "e_anc", "e_n", "e_R", "e_kappa", "e_gnode", "region_t", "iface_t", "bg_t", "e_bg",
          "ori_t", "iso_t", "e_ovis")   # the entity model's
 HEAD = "slots"                     # "slots" | "lobes" (set by train())
 DESC_KEY = "descriptors"           # the drawn descriptors the descriptor densities use ("descriptors5": the scenes' five)
@@ -222,9 +222,11 @@ def set_background_entity(on: bool = True):
 
 #: the entity targets' sampling: query points per crop, scales (crop voxels, log-uniform), entities kept per query, the
 #: resolution rule (an object is its own entity when its radius >= max(r_min, c_sig * sigma)), padded tree sizes
+P_OBJECT_SCALE = 0.25            # the share of queries at scale 0 (objects alone)
 LEVELS = (0, 1, 2, 99)            # grouping levels drawn per query: objects, one or two steps up their groups, the population
 ENTITY = {"n_points": 384, "sigma": (1.0, 12.0), "emax": 8, "r_min": 1.5, "c_sig": 0.5, "u_max": 4096, "d_max": 16, "margin": 2, "p_tissue": 0.7,
-          "p_cross": 0.2, "p_line": 0.0, "levels": None}   # levels (29 Oct): None, the resolution rule; "object", every query at its
+          "p_cross": 0.2, "p_line": 0.0, "levels": None, "scales": None}   # scales (29 Oct): None; "random" (each query a
+                                             # scale: objects alone at P_OBJECT_SCALE, else log-uniform 1 voxel - the crop); a number   # levels (29 Oct): None, the resolution rule; "object", every query at its
                                              # objects; "random", each query at a grouping level drawn from LEVELS   # p_line (29 Oct): a share of the queries on line-kind layers' material (the rest of
                                              # p_tissue on any object's: blobs and cells took most of it)
 
@@ -291,12 +293,24 @@ def entity_queries(s, d: dict, size: int, seed: int, device, points: torch.Tenso
         lv = torch.full((n,), int(E["levels"]), dtype=torch.long, device=device)
     elif E.get("levels") == "random":
         lv = torch.tensor(LEVELS, device=device)[torch.randint(0, len(LEVELS), (n,), generator=g, device=device)]
+    sc_q = None; cent = off = None                                                                 # the scale of collections of each query
+    if E.get("scales") is not None:
+        if E["scales"] == "random":
+            u_ = torch.rand(n, generator=g, device=device)
+            sc_q = torch.where(torch.rand(n, generator=g, device=device) < P_OBJECT_SCALE, torch.zeros(n, device=device), torch.exp(u_ * math.log(size)))
+        else:
+            sc_q = torch.full((n,), float(E["scales"]), device=device)
+        from .entities import leaf_centroids
+        if "_leaf_cent" not in ctx:                                                                # (once per crop: every object's centre)
+            ctx["_leaf_cent"] = leaf_centroids(ctx["entries"], ctx["tree"], ctx["canvas_shape"])
+            ctx["_coll_off"] = torch.rand(3, generator=g, device=device) * 256
+        cent, off = ctx["_leaf_cent"], ctx["_coll_off"]
     vis, ov = d.get("visibility"), d.get("orientation_visibility")
     K = d["occupancy"].shape[0]
     full = lambda x: None if x is None else (x.float().view(-1, 1, 1, 1).expand(K, *d["occupancy"].shape[1:]) if x.dim() == 1 else x.float())
     t = entity_targets(ctx["entries"], ctx["tree"], ctx["canvas_shape"], ctx["origin"], ctx["zoom"], (size,) * 3, pts, sig, grid=ctx["grid"],
                        vis=full(vis), group_layer=ctx["group_layer"], r_min=E["r_min"], c_sig=E["c_sig"], emax=emax,
-                       mask=ctx.get("mask"), keep=ctx.get("keep"), ovis=full(ov), sig_acq=acquisition_blur(d.get("record", {})), comp=ctx.get("comp"), level=lv)
+                       mask=ctx.get("mask"), keep=ctx.get("keep"), ovis=full(ov), sig_acq=acquisition_blur(d.get("record", {})), comp=ctx.get("comp"), level=lv, scale=sc_q, centroids=cent, coll_offset=off)
     tree = ctx["tree"]; node = t["node"]; live = node >= 0
     anc = tree.ancestors(torch.unique(node[live])) if bool(live.any()) else torch.zeros(0, 1, dtype=torch.long, device=device)
     U = torch.unique(torch.cat([anc[anc >= 0], torch.zeros(1, dtype=torch.long, device=device)]))   # the root always (the dense entities' parent)
@@ -357,7 +371,8 @@ def entity_queries(s, d: dict, size: int, seed: int, device, points: torch.Tenso
     out = {"e_points": pts, "e_sigma": sig, "e_node": e_node.int(), "e_mass": mass.half(), "e_vis": evis.half(),
            "e_T6": T6.half(), "e_desc": desc.half(), "e_anc": e_anc, "e_n": torch.tensor(U.numel() + nd, device=device),
            "e_R": R.float(), "e_kappa": Kp.float(), "e_gnode": torch.where(e_node >= 0, gnode, torch.full_like(gnode, -1)), "e_bg": e_bg,
-           "e_level": lv if lv is not None else torch.full((pts.shape[0],), -1, dtype=torch.long, device=device)}
+           "e_level": lv if lv is not None else torch.full((pts.shape[0],), -1, dtype=torch.long, device=device),
+           "e_scale": sc_q if sc_q is not None else torch.full((pts.shape[0],), -1.0, device=device)}
     if OVIS_TARGETS and "image" in d:
         from .entities import orientation_visibility
         out["e_ovis"] = orientation_visibility(d["image"].float() / 255, pts, sig, R, Kp, (mass * evis).clamp_min(0) * live).half()
@@ -1081,7 +1096,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    obj_head: bool = False, mc_fibres: bool = False, oriented: int = 0, geometry_targets: bool = False, block_norm: int = 1,
                    odirect: int = 0, od_sigmas: list | None = None, split_head: bool = False, mass_vote: bool = False, overfit: int = 0,
                    init_reset: str = "", ovis_targets: bool = True, od_norm: bool = False, dens_vis_w: float = 0.0, dens_gate: bool = False,
-                   freeze_trunk: int = 0, trunk_lr: float = 1.0, init_fresh: str = "", st_path: bool = False, iso_head: bool = False, dens_share: bool = False, freeze_extra: str = "", reset_dens_logit: bool = False, dens_readout: bool = False, readout_lobe: bool = False, gate_share: bool = False, dens_nobg: bool = False, strength_mix: bool = False, dens_ce: bool = False, ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe: bool = False, oprobe_learned: int = 0, pop_seq: int = 0, pop_match_share: bool = False, od_widths: list | None = None, probe_scale: bool = False, pop_tie: float = 0.1):
+                   freeze_trunk: int = 0, trunk_lr: float = 1.0, init_fresh: str = "", st_path: bool = False, iso_head: bool = False, dens_share: bool = False, freeze_extra: str = "", reset_dens_logit: bool = False, dens_readout: bool = False, readout_lobe: bool = False, gate_share: bool = False, dens_nobg: bool = False, strength_mix: bool = False, dens_ce: bool = False, ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe: bool = False, oprobe_learned: int = 0, pop_seq: int = 0, pop_match_share: bool = False, od_widths: list | None = None, probe_scale: bool = False, pop_tie: float = 0.1, pop_scale: bool = False, scales: str | None = None):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -1128,6 +1143,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
         ENTITY["sigma"] = (float(e_sigma[0]), float(e_sigma[1]))
     ENTITY["p_cross"] = float(e_cross)                                                                # queries in crossing cores
     ENTITY["p_line"] = float(e_line)                                                                  # ... and on lines' material
+    if scales:                                                                                        # targets as collections at a scale
+        ENTITY["scales"] = scales if scales == "random" else float(scales)
     from . import entity_train as _et
     _et.VOTE_OBJECTS = bool(vote_objects)                                                              # votes only for oriented owners
     _et.DENS_SAME_NORM = bool(dens_same_norm)                                                          # the density's shape: both sides' means alike
@@ -1172,7 +1189,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 z_vote=bool(z_vote), dir_sh=int(dir_sh), background_entity=bool(background_entity), ray=bool(ray),
                 region_density=bool(region_density), kappa_log=bool(kappa_log), vote_objects=bool(vote_objects), dens_same_norm=bool(dens_same_norm), own_objects=bool(own_objects), bg_head=bool(bg_head), orient_from_texture=bool(orient_from_texture), obj_head=bool(obj_head),
                 block_norm=int(block_norm), odirect=int(odirect), od_sigmas=list(od_sigmas) if od_sigmas else None, od_widths=list(od_widths) if od_widths else None, split_head=bool(split_head),
-                mass_vote=bool(mass_vote), od_norm=bool(od_norm), ovis_targets=bool(ovis_targets), dens_vis_w=float(dens_vis_w), dens_gate=bool(dens_gate), gate2=bool(dens_readout), dens_readout=bool(dens_readout), readout_lobe=bool(readout_lobe), gate_share=bool(gate_share), dens_nobg=bool(dens_nobg), strength_mix=bool(strength_mix), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st), pop_k=int(pop_k), pop_dir=int(pop_dir), oprobe=bool(oprobe) or bool(oprobe_learned), oprobe_learned=int(oprobe_learned), pop_seq=int(pop_seq), pop_match_share=bool(pop_match_share), probe_scale=bool(probe_scale), pop_tie=float(pop_tie),
+                mass_vote=bool(mass_vote), od_norm=bool(od_norm), ovis_targets=bool(ovis_targets), dens_vis_w=float(dens_vis_w), dens_gate=bool(dens_gate), gate2=bool(dens_readout), dens_readout=bool(dens_readout), readout_lobe=bool(readout_lobe), gate_share=bool(gate_share), dens_nobg=bool(dens_nobg), strength_mix=bool(strength_mix), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st), pop_k=int(pop_k), pop_dir=int(pop_dir), oprobe=bool(oprobe) or bool(oprobe_learned), oprobe_learned=int(oprobe_learned), pop_seq=int(pop_seq), pop_match_share=bool(pop_match_share), probe_scale=bool(probe_scale), pop_tie=float(pop_tie), pop_scale=bool(pop_scale),
                 freeze_trunk=int(freeze_trunk), trunk_lr=float(trunk_lr), init_fresh=init_fresh, st_path=bool(st_path), iso_head=bool(iso_head), dens_share=bool(dens_share), freeze_extra=freeze_extra, reset_dens_logit=bool(reset_dens_logit),
                 mc_fibres=bool(mc_fibres), oriented=int(oriented), geometry_targets=bool(geometry_targets))
     skipped = {}                                                                                   # non-finite steps skipped
@@ -1274,7 +1291,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 x, T = stack(val[i:i + 2], aug=False)
                 dirs = ET.sample_dirs(T, n_dirs, g=gv)
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=str(device).startswith("cuda")):
-                    P = model(x, voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
+                    P = model(x, voxel=T["voxel"], e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs, e_scale=T.get("e_scale"))
                 _, parts = ET.entity_loss(P, T, dirs, margin=margin, g=gv)
                 for k, v_ in {**{k: float(v) for k, v in parts.items()}, **ET.axis_error_deg(P, T, dirs), **ET.where_skill(P, T, dirs, margin)}.items():
                     acc.setdefault(k, []).append(v_)
@@ -1321,12 +1338,12 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
             if bench is not None:
                 tick(); t_data += time.perf_counter() - td
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=str(device).startswith("cuda")):
-                P = fwd(x, voxel=v, e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
+                P = fwd(x, voxel=v, e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs, e_scale=T.get("e_scale"))
             total, parts = ET.entity_loss(P, T, dirs, W=which_w(step), margin=margin, g=gd)
             if "_view2" in T and ET.ENT_WEIGHTS.get("contrast", 0) * ramp(step) > 0 and mb == 0 and step % max(1, contrast_every) == 0:   # another route, same geometry
                 x2 = T["_view2"].contiguous(memory_format=torch.channels_last_3d) if channels_last else T["_view2"]
                 with torch.autocast("cuda", dtype=torch.bfloat16, enabled=str(device).startswith("cuda")):
-                    P2 = fwd(x2, voxel=v, e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs)
+                    P2 = fwd(x2, voxel=v, e_points=T["e_points"], e_sigma=T["e_sigma"], e_dirs=dirs, e_scale=T.get("e_scale"))
                 e1, e2 = P["ent"], P2["ent"]
                 lcon = (torch.log1p(e1["f"]) - torch.log1p(e2["f"])).abs().mean() + 0.1 * poincare_dist(e1["z"], e2["z"]).mean() \
                     + ((P["total_sh"].float() - P2["total_sh"].float()) ** 2).mean() / (P["total_sh"].float() ** 2).mean().clamp_min(1e-6)
@@ -1493,6 +1510,7 @@ def main():
     ap.add_argument("--oprobe-learned", type=int, default=0, help="entities: the oriented probe also samples this many learned fields (the finest trunk level projected; implies --oprobe)")
     ap.add_argument("--pop-seq", type=int, nargs="?", const=1, default=0, help="entities (--pop-dir): the slots in turn; 1: each direction scored with the earlier slots' u^T T u; 2: with their smoothed direction weights, the background its own share and the shares by stick breaking; 3: as 2, a slot existing when it holds a share")
     ap.add_argument("--pop-tie", type=float, default=0.1, help="entities (--pop-seq >= 2): slot k matched to the k-th largest population, swaps only within this share; >= 1: free matching")
+    ap.add_argument("--scales", default=None, help="entities: targets as collections of objects at a scale per query ('random', or a number of voxels; 0: objects); gives the model the scale (pop_scale)")
     ap.add_argument("--od-widths", type=float, nargs="+", default=None, help="entities: the direct bank's cross-section widths in voxels (default 0.6; e.g. 0.6 1.5 3)")
     ap.add_argument("--probe-scale", action="store_true", help="entities: the oriented probe's offsets scaled by the query's window (window / 3, within 0.5-2.5)")
     ap.add_argument("--pop-match-share", action="store_true", help="entities: match slots to populations with ellipse costs weighted by share (before 29 Oct 02:20) rather than as the loss weighs them")
@@ -1562,7 +1580,7 @@ def main():
                        region_dec=a.region_dec, where_first=a.where_first, z_vote=a.z_vote, dir_sh=a.dir_sh,
                        background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, e_line=a.e_line, region_density=not a.no_region_density,
                        kappa_log=a.kappa_log, vote_objects=a.vote_objects, dens_same_norm=a.dens_same_norm, own_objects=a.own_objects, bg_head=a.bg_head, orient_from_texture=not a.orient_from_contrast, obj_head=a.obj_head,
-                       block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote, od_norm=a.od_norm, ovis_targets=not a.no_ovis_targets, dens_vis_w=a.dens_vis_w, dens_gate=a.dens_gate, freeze_trunk=a.freeze_trunk, trunk_lr=a.trunk_lr, init_fresh=a.init_fresh, st_path=a.st_path, iso_head=a.iso_head, dens_share=a.dens_share, freeze_extra=a.freeze_extra, reset_dens_logit=a.reset_dens_logit, dens_readout=a.dens_readout, readout_lobe=a.readout_lobe, gate_share=a.gate_share, dens_nobg=a.dens_nobg, strength_mix=a.strength_mix, dens_ce=a.dens_ce, ce_no_st=a.ce_no_st, pop_k=a.pop_k, pop_dir=a.pop_dir, oprobe=a.oprobe, oprobe_learned=a.oprobe_learned, pop_seq=a.pop_seq, pop_match_share=a.pop_match_share, od_widths=a.od_widths, probe_scale=a.probe_scale, pop_tie=a.pop_tie,
+                       block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote, od_norm=a.od_norm, ovis_targets=not a.no_ovis_targets, dens_vis_w=a.dens_vis_w, dens_gate=a.dens_gate, freeze_trunk=a.freeze_trunk, trunk_lr=a.trunk_lr, init_fresh=a.init_fresh, st_path=a.st_path, iso_head=a.iso_head, dens_share=a.dens_share, freeze_extra=a.freeze_extra, reset_dens_logit=a.reset_dens_logit, dens_readout=a.dens_readout, readout_lobe=a.readout_lobe, gate_share=a.gate_share, dens_nobg=a.dens_nobg, strength_mix=a.strength_mix, dens_ce=a.dens_ce, ce_no_st=a.ce_no_st, pop_k=a.pop_k, pop_dir=a.pop_dir, oprobe=a.oprobe, oprobe_learned=a.oprobe_learned, pop_seq=a.pop_seq, pop_match_share=a.pop_match_share, od_widths=a.od_widths, probe_scale=a.probe_scale, pop_tie=a.pop_tie, pop_scale=a.pop_scale or bool(a.scales), scales=a.scales,
                        mc_fibres=a.mc_fibres, oriented=a.oriented, geometry_targets=a.geometry_targets, overfit=a.overfit, init_reset=a.init_reset)
         return
     if a.head == "lobes":
