@@ -797,7 +797,7 @@ MATRIX_P = 0.0                    # scenes with a matrix: the space around the f
                                   # adopted -- figures and tests set it)
 MATRIX_TYPES = ("neuropil", "cells")
 MATRIX_FILL = (0.3, 0.7)          # the matrix neuropil's share of the volume
-MATRIX_MAX_FIBRES = 250_000       # ... at most this many fibres per canvas
+MATRIX_MAX_FIBRES = 120_000       # ... at most this many fibres per canvas
 MATRIX_R_MIN = 0.3                # the matrix's and ground's fibres no thinner (voxels): micro-fascicles at coarse voxels
 GROUND_FILL = 1.3                 # the ground's material per volume (over-filled: the composite scales each voxel back to one)
 MATRIX_TWO_P = 0.3                # two matrix kinds in one scene
@@ -1810,9 +1810,11 @@ class Scene:
         self.record["families"].append({"granules": {"n": n, "radius_vox": round(rg, 2)}})
         return self._solids(C, A, "granules", self.ids(n, rg))
 
-    def cells(self):
+    def cells(self, any_scale: bool = False):
         r = self.r; dev = self.device
         rc = self.size(3, 40, 1.5, 14.0)
+        if rc is None and any_scale:                                        # the matrix at any voxel size (29 Oct): cells of a few
+            rc = r.lu(2.0, 8.0)                                             # voxels when the micron range does not fit the canvas
         if rc is None:
             return None
         elong = r.lu(1.0, 2.5); dmin = 2.1 * rc * max(1.0, elong) * 1.12          # bounding spheres (with the size jitter) never overlap
@@ -2422,16 +2424,20 @@ class Scene:
         self.record["families"].append({"texture": rec})
         return out or None
 
-    def neuropil(self, fill: float | None = None, name: str = "neuropil", r_min: float = 0.0, somata: bool = True):
+    def neuropil(self, fill: float | None = None, name: str = "neuropil", r_min: float = 0.0, somata: bool = True, vox: bool = False):
         """Neuropil: dense, short, tortuous thin fibres (axons and dendrites, 0.1-1.5 um radius) in random directions and
         small somata (3-8 um), filling the canvas -- resolvable at a micron or two, partial-volume texture at 20 um;
         isotropic in aggregate, locally oriented where a fibre is resolved. ``fill``: the fibres' share of the canvas's volume
         (the matrix, 29 Oct: dense, as neuropil is; at most :data:`MATRIX_MAX_FIBRES` fibres); default, a sparse underlay.
         ``r_min``: no fibre thinner (voxels): at coarse voxels each is then a micro-fascicle of unresolved neurites, still one
-        object with its own ODF. ``name``: the population's name; ``somata``: somata among the fibres."""
+        object with its own ODF. ``name``: the population's name; ``somata``: somata among the fibres. ``vox``: sizes in
+        voxels whatever the voxel size (0.15-0.45 voxel thick, 8-40 voxels long: the ground's fibrils at every scale); a
+        matrix whose micron sizes do not fit the canvas falls back to it."""
         r = self.r; dev = self.device
         rf = max(min(r.lu(0.1, 1.5) / self.voxel_um, min(self.shape) / 16), r_min)               # nm scenes: a neurite fills the view, no wider
         L = r.lu(20, 200) / self.voxel_um
+        if vox or (fill is not None and L < 3):                                                 # in voxels: fibrils or micro-fascicles
+            rf = max(r.lu(0.15, 0.45), r_min); L = r.lu(8, 40)
         if L < 3:
             return None
         L = min(L, 0.5 * max(self.shape))
@@ -2708,7 +2714,7 @@ class Scene:
             mat = [str(m_) for m_ in r.np.choice(MATRIX_TYPES, size=2 if r.p(MATRIX_TWO_P) else 1, replace=False)]   # families, built
             self.record["matrix"] = mat                                         # of objects with their own ODFs (no painted
             if "cells" in mat:                                                  # background); cells first, so fibres avoid them
-                for g_ in (self.cells() or []):
+                for g_ in (self.cells(any_scale=True) or []):
                     g_.matrix = True; self.groups.append(g_)
         bundles = []
         from .compose import population as _compose_population
@@ -2772,7 +2778,7 @@ class Scene:
                 g_.matrix = True
             self.groups[0:0] = gs
         if mat and GROUND_FILL > 0:                                             # the ground: fine fibrils filling the volume under
-            gs = [g_ for g_ in (self.neuropil(fill=GROUND_FILL, name="ground", r_min=MATRIX_R_MIN, somata=False) or [])]   # everything,
+            gs = [g_ for g_ in (self.neuropil(fill=GROUND_FILL, name="ground", r_min=MATRIX_R_MIN, somata=False, vox=True) or [])]   # everything,
             for g_ in gs:                                                       # drawn first (all else displaces it): no voxel of
                 g_.matrix = True                                                # the specimen without material and an ODF
             self.groups[0:0] = gs; self.record["ground"] = True
