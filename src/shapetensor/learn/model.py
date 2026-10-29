@@ -261,7 +261,7 @@ class EntityDecoder(nn.Module):
                  kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0,
                  od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False, dens_gate: bool = False, st_path: bool = False,
                  iso_head: bool = False, gate2: bool = False, gate_share: bool = False, dens_ce: bool = False,
-                 ce_no_st: bool = False, pop_k: int = 0):
+                 ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -355,11 +355,21 @@ class EntityDecoder(nn.Module):
         # ``pop_k``: the populations head -- K slots per query, each an existence, a share of the window's material (a
         # softmax with one more "other" slot) and a trace-1 elliptical ODF (Cholesky, so positive by construction), read
         # from the learned point code alone
-        self.pop_k = int(pop_k)
+        # ``pop_dir`` N: each slot's ellipse is instead the second moment of its learned weights over N directions (a
+        # hemisphere set, randomly rotated in training), each direction scored from the point code and what the image
+        # shows along it (the direct path's code). The ellipse then turns with the image by construction: from the point
+        # code alone the head did not fit 8 crops once they were cube-transformed (29 Oct: 0.39 -> 0.40 in 150 steps,
+        # 0.06 without the transforms; the direction-sampled heads learnt the axes from the same trunk)
+        self.pop_k = int(pop_k); self.pop_dir = int(pop_dir)
         if self.pop_k:
             K_ = self.pop_k
             self.pop = nn.Sequential(nn.Linear(hidden, 256), nn.SiLU(), nn.Linear(256, 256), nn.SiLU(), nn.Linear(256, K_ * 8 + 1))
             nn.init.zeros_(self.pop[-1].weight); nn.init.zeros_(self.pop[-1].bias)
+        if self.pop_k and self.pop_dir:
+            assert self.odirect, "pop_dir reads the direct path (odirect)"
+            self.pop_u = nn.Sequential(nn.Linear(hidden + 32, 128), nn.SiLU(), nn.Linear(128, 128), nn.SiLU(), nn.Linear(128, self.pop_k))
+            nn.init.zeros_(self.pop_u[-1].weight); nn.init.zeros_(self.pop_u[-1].bias)               # (uniform weights: isotropic at the start)
+            self.register_buffer("pop_u_dirs", fib_hemisphere(self.pop_dir), persistent=False)
         self.dens_ce = bool(dens_ce); self.ce_no_st = bool(ce_no_st)                         # (no structure tensor: neither term nor cues)
         if self.dens_ce:
             from .sh import real_sh as _rsh, n_coef as _nc
@@ -531,18 +541,40 @@ class EntityDecoder(nn.Module):
             if len(res) > 2:
                 out["gs"] = res[2]                                                            # the line share's estimate
         if getattr(self, "pop_k", 0):
-            out.update(self.populations(p))
+            pu = None
+            if getattr(self, "pop_dir", 0):
+                U = self.pop_quadrature(points.shape[0], points.device)                              # (B, N, 3)
+                pu = (U, torch.stack([self.od_code(ovs[b], self.od_weights(U[b])) for b in range(points.shape[0])]))
+            out.update(self.populations(p, pu))
         if getattr(self, "dens_ce", False) and j6 is not None:                                    # the normalised density on the grid
             ce = [self.ce_density(p[b], ovs[b] if ovs is not None else None, j6[b], sigma[b]) for b in range(p.shape[0])]
             out["logq_g"] = torch.stack([c_["logq_g"] for c_ in ce]); out["w0"] = torch.stack([c_["w0"] for c_ in ce])
         return out
 
-    def populations(self, p: torch.Tensor) -> dict:
+    def pop_quadrature(self, B: int, device) -> torch.Tensor:
+        """``(B, N, 3)``: the ``pop_dir`` hemisphere set, each item's under its own random rotation in training (no
+        preferred axes), as is at inference."""
+        U = self.pop_u_dirs.to(device)
+        if not self.training:
+            return U[None].expand(B, -1, -1)
+        Q_, R_ = torch.linalg.qr(torch.randn(B, 3, 3, device=device))
+        Q_ = Q_ * torch.sign(torch.diagonal(R_, dim1=-2, dim2=-1))[:, None, :]
+        return U[None] @ Q_.transpose(-1, -2)
+
+    def populations(self, p: torch.Tensor, pu=None) -> dict:
         """The populations at points with codes ``p (..., hidden)``: ``pop_exist (..., K)`` probabilities,
         ``pop_share (..., K + 1)`` shares of the window's material (the last: everything else), ``pop_T (..., K, 3, 3)``
-        trace-1 elliptical ODFs in (z, y, x)."""
+        trace-1 elliptical ODFs in (z, y, x). With ``pop_dir``, ``pu = (U, code)``: the directions ``U (..., N, 3)``
+        (shared by a batch item's points) and the direct path's code along them ``(..., Q, N, 32)``."""
         K_ = self.pop_k; o = self.pop(p.to(self.pop[0].weight.dtype)).float()
         ex = torch.sigmoid(o[..., :K_]); sh = torch.softmax(torch.cat([o[..., K_:2 * K_], o[..., -1:]], -1), -1)
+        if pu is not None:                                                                      # second moments of learned direction weights
+            U, cu = pu; N = cu.shape[-2]
+            h = torch.cat([p[..., None, :].expand(*p.shape[:-1], N, p.shape[-1]).to(cu.dtype), cu], -1)
+            w = torch.softmax(self.pop_u(h.to(self.pop_u[0].weight.dtype)).float(), -2)          # (..., Q, N, K) over the directions
+            uu = U.float()[..., :, None] * U.float()[..., None, :]                                # (..., N, 3, 3)
+            T = torch.einsum("...qnk,...nij->...qkij", w, uu) if uu.dim() > 3 else torch.einsum("qnk,nij->qkij", w, uu)
+            return {"pop_exist": ex, "pop_share": sh, "pop_T": T}
         c = o[..., 2 * K_:8 * K_].reshape(*o.shape[:-1], K_, 6)
         z = torch.zeros_like(c[..., 0]); dg = Fn.softplus(c[..., :3] + 0.5413) + 1e-3             # (softplus(0.5413) = 1: isotropic at the start)
         L = torch.stack([torch.stack([dg[..., 0], z, z], -1), torch.stack([c[..., 3], dg[..., 1], z], -1),
@@ -725,7 +757,7 @@ class PopulationNet(nn.Module):
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
                  odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0,
                  od_norm: bool = False, dens_gate: bool = False, st_path: bool = False, iso_head: bool = False, gate2: bool = False,
-                 gate_share: bool = False, dens_ce: bool = False, ce_no_st: bool = False, pop_k: int = 0):
+                 gate_share: bool = False, dens_ce: bool = False, ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -764,7 +796,7 @@ class PopulationNet(nn.Module):
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
                                      oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect),
                                      od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote), od_norm=bool(od_norm), dens_gate=bool(dens_gate),
-                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st), pop_k=int(pop_k))
+                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st), pop_k=int(pop_k), pop_dir=int(pop_dir))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             # the background's occupancy (the isotropic remainder) at every voxel: the density's floor is background plus
@@ -841,7 +873,7 @@ class PopulationNet(nn.Module):
                    block_norm=int(args.get("block_norm", 0) or 0), od_norm=bool(args.get("od_norm", False)),
                    dens_gate=bool(args.get("dens_gate", False)), st_path=bool(args.get("st_path", False)), iso_head=bool(args.get("iso_head", False)),
                    gate2=bool(args.get("gate2", False)), gate_share=bool(args.get("gate_share", False)), dens_ce=bool(args.get("dens_ce", False)),
-                   ce_no_st=bool(args.get("ce_no_st", False)), pop_k=int(args.get("pop_k", 0) or 0)) \
+                   ce_no_st=bool(args.get("ce_no_st", False)), pop_k=int(args.get("pop_k", 0) or 0), pop_dir=int(args.get("pop_dir", 0) or 0)) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":

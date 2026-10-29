@@ -188,15 +188,16 @@ def population_match(ent: dict, T: dict) -> dict:
 
 def population_loss(ent: dict, T: dict) -> dict:
     """Set prediction against :func:`population_targets` (matched by :func:`population_match`): existence BCE + share
-    L1 (with "other") + share-weighted squared Frobenius distance of the ellipses (minimised by the conditional mean).
-    No direction grid."""
+    L1 (with "other") + the squared Frobenius distance of each real population's ellipse, every population weighted
+    equally (minimised by its conditional mean). No direction grid."""
     ex, sh, PT = ent["pop_exist"].float(), ent["pop_share"].float(), ent["pop_T"].float()
     K = ex.shape[-1]; mt = population_match(ent, T); has = mt["has"]
     if not bool(has.any()):
         return {"pop": ex.sum() * 0.0}
     l_ex = Fn.binary_cross_entropy(ex.clamp(1e-4, 1 - 1e-4), mt["v_m"], reduction="none").mean(-1)[has].mean()
     l_sh = ((sh[..., :K] - mt["s_m"]).abs().sum(-1) + (sh[..., K] - mt["other"]).abs())[has].mean()
-    l_T = (mt["s_m"] * ((PT - mt["E_m"]) ** 2).sum((-1, -2))).sum(-1)[has].mean()
+    dT = ((PT - mt["E_m"]) ** 2).sum((-1, -2)); vm = mt["v_m"] * has[..., None].float()            # every real population counts
+    l_T = (vm * dT).sum() / vm.sum().clamp_min(1.0)                                                 # equally (a share weight let the
     return {"pop": l_ex + l_sh + 4.0 * l_T, "pop_exist": l_ex.detach(), "pop_share": l_sh.detach(), "pop_T": l_T.detach()}
 
 

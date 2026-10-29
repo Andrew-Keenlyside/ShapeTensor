@@ -198,7 +198,10 @@ def query(model, feats, points: torch.Tensor, sigma: torch.Tensor, dirs: torch.T
             res = dec.gate_of(enc, ovp, stf, parts=True); g, gv = res[0], res[1]; fm = (full["f"] * ev).sum(1) / ev.sum(1).clamp_min(1); full["gv"] = gv
             full["f_lobe"] = full["f"]; full["f"] = g[:, None] * full["f"] + (1 - g[:, None]) * fm[:, None]; full["g"] = g
         if getattr(dec, "pop_k", 0):                                                                # the populations (pop_k)
-            full.update(dec.populations(enc))
+            pu = None
+            if getattr(dec, "pop_dir", 0):
+                U = dec.pop_quadrature(1, p.device)[0]; pu = (U, dec.od_code(ovp, dec.od_weights(U)))
+            full.update(dec.populations(enc, pu))
         if getattr(dec, "dens_ce", False) and j6 is not None:                                       # the normalised density (dens_ce)
             ce = dec.ce_density(enc, ovp, j6, s, dirs=dirs)
             full["f_dir"] = full["f"]; full["f"] = torch.exp(ce["logq"]); full["logq"] = ce["logq"]

@@ -45,3 +45,21 @@ def test_perfect_prediction_and_slot_order_invariance():
     ent2 = {"pop_exist": ent["pop_exist"][..., perm], "pop_share": torch.cat([s[..., perm], other[..., None]], -1), "pop_T": E[..., perm, :, :]}
     l1 = ET.population_loss(ent2, T)
     assert abs(float(l1["pop"]) - float(l0["pop"])) < 1e-5
+
+
+def test_direction_moment_readout_turns_with_the_directions():
+    torch.manual_seed(0)
+    dec = PopulationNet.from_args({"head": "entities", "pop_k": 4, "pop_dir": 48, "odirect": 64}).ent.eval()
+    p = torch.randn(5, dec.pop[0].in_features); U = dec.pop_quadrature(1, "cpu")[0]; cu = torch.randn(5, U.shape[0], 32)
+    with torch.no_grad():
+        T0 = dec.populations(p, (U, cu))["pop_T"]
+        assert torch.allclose(T0, torch.eye(3).expand_as(T0) / 3, atol=0.02)                      # uniform weights at the start: isotropic
+        for m in dec.pop_u:
+            if isinstance(m, torch.nn.Linear):
+                m.weight.normal_(0, 0.5)
+        T = dec.populations(p, (U, cu))["pop_T"]
+        R = torch.linalg.qr(torch.randn(3, 3))[0]
+        TR_ = dec.populations(p, (U @ R.T, cu))["pop_T"]                                            # the same codes along turned directions
+    assert torch.allclose(T.diagonal(dim1=-2, dim2=-1).sum(-1), torch.ones(5, 4), atol=1e-5)
+    assert bool((torch.linalg.eigvalsh(T) > -1e-6).all())
+    assert torch.allclose(TR_, R @ T @ R.T, atol=1e-5)
