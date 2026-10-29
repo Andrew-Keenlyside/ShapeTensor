@@ -116,6 +116,9 @@ def tree_distance(anc: torch.Tensor, i: torch.Tensor, j: torch.Tensor) -> torch.
 
 DENS_READOUT_LOBE = False           # ... and the lobe trained through the readout too (it may soften where unsure)
 POP_MIN_SHARE = 0.02                # a target population's smallest share of the window (smaller: pooled into "other")
+POP_MATCH_AS_LOSS = True           # the matching weighs each real population's ellipse as the loss does (equally); weighted by share
+                                   # (before 29 Oct, 02:20) line and isotropic targets swapped slots between like queries and each
+                                   # slot learnt their average (line targets' predicted line-ness 0.17-0.19 on clean crops)
 DENS_CE = False                     # the density as a normalised distribution trained by cross-entropy against the
                                     # non-background material's ODF on the model's grid (28 Oct structural review)
 DENS_NOBG = False                   # the readout's target without the background entity (its mass is the bg head's; 28 Oct:
@@ -178,7 +181,8 @@ def population_match(ent: dict, T: dict) -> dict:
     K = ex.shape[-1]
     s, E, valid, other, has = population_targets(T, K)
     dT = ((PT[..., :, None, :, :] - E[..., None, :, :, :]) ** 2).sum((-1, -2))                   # (..., K slots, K targets)
-    cost = s[..., None, :] * dT + (sh[..., :K, None] - s[..., None, :]).abs() + (ex[..., :, None] - valid[..., None, :].float()).abs()
+    wT = (4.0 * valid.float() / valid.float().sum(-1, keepdim=True).clamp_min(1.0)) if POP_MATCH_AS_LOSS else s   # the loss's own weights
+    cost = wT[..., None, :] * dT + (sh[..., :K, None] - s[..., None, :]).abs() + (ex[..., :, None] - valid[..., None, :].float()).abs()
     perms = torch.tensor(list(itertools.permutations(range(K))), device=ex.device)                  # (P, K)
     ck = cost[..., torch.arange(K, device=ex.device)[None, :].expand_as(perms), perms].sum(-1)      # (..., P)
     match = perms[ck.argmin(-1)]

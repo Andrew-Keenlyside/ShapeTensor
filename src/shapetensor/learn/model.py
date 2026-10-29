@@ -247,6 +247,8 @@ def st_features_ext(j6: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
 #: training: pool the direct path's bank only where the queries need it (z and y passes over the volume, the x pass at
 #: the queries' trilinear corners; review 5 -- the levels are never stored): ``(B, Q, L, Dd)`` straight into the decoder
 OD_AT_POINTS = False
+POP_SHARPNESS = True             # pop_dir: each slot's direction weights sharpened by exp(t(p)), t from the point code (the Cholesky
+                                 # rows, unused there; 0 at the start): a line no longer needs large logits at every direction
 
 
 class EntityDecoder(nn.Module):
@@ -261,7 +263,7 @@ class EntityDecoder(nn.Module):
                  kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0,
                  od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False, dens_gate: bool = False, st_path: bool = False,
                  iso_head: bool = False, gate2: bool = False, gate_share: bool = False, dens_ce: bool = False,
-                 ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0):
+                 ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe_learned: int = 0):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -288,7 +290,8 @@ class EntityDecoder(nn.Module):
         # ``oprobe_only``: the density from the probe alone (rotation-equivariant by construction; the other outputs keep
         # the point code)
         self.oprobe = bool(oprobe) or bool(oprobe_only); self.oprobe_only = bool(oprobe_only)
-        self.o_t = (2.0, 4.0, 6.0); self.o_r = (1.5, 3.0); self.o_m = 8; self.o_c = 3
+        self.o_t = (2.0, 4.0, 6.0); self.o_r = (1.5, 3.0); self.o_m = 8; self.o_c = 3 + int(oprobe_learned)   # (``oprobe_learned``: that many
+        self.oprobe_learned = int(oprobe_learned)                                                                      # learned fields from the trunk too)
         if self.oprobe:
             nf = self.o_c * (1 + 3 * len(self.o_r)) * (1 + 2 * len(self.o_t))
             self.o_net = nn.Sequential(nn.Linear(nf, 128), nn.SiLU(), nn.Linear(128, 64))
@@ -577,7 +580,8 @@ class EntityDecoder(nn.Module):
         if pu is not None:                                                                      # second moments of learned direction weights
             U, cu = pu; N = cu.shape[-2]
             h = torch.cat([p[..., None, :].expand(*p.shape[:-1], N, p.shape[-1]).to(cu.dtype), cu], -1)
-            w = torch.softmax(self.pop_u(h.to(self.pop_u[0].weight.dtype)).float(), -2)          # (..., Q, N, K) over the directions
+            sharp = torch.exp(o[..., 2 * K_:3 * K_].clamp(-3, 3))[..., None, :] if POP_SHARPNESS else 1.0   # each slot's learned sharpness
+            w = torch.softmax(self.pop_u(h.to(self.pop_u[0].weight.dtype)).float() * sharp, -2)  # (..., Q, N, K) over the directions
             uu = U.float()[..., :, None] * U.float()[..., None, :]                                # (..., N, 3, 3)
             T = torch.einsum("...qnk,...nij->...qkij", w, uu) if uu.dim() > 3 else torch.einsum("qnk,nij->qkij", w, uu)
             return {"pop_exist": ex, "pop_share": sh, "pop_T": T}
@@ -763,7 +767,7 @@ class PopulationNet(nn.Module):
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
                  odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0,
                  od_norm: bool = False, dens_gate: bool = False, st_path: bool = False, iso_head: bool = False, gate2: bool = False,
-                 gate_share: bool = False, dens_ce: bool = False, ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0):
+                 gate_share: bool = False, dens_ce: bool = False, ce_no_st: bool = False, pop_k: int = 0, pop_dir: int = 0, oprobe_learned: int = 0):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -802,7 +806,10 @@ class PopulationNet(nn.Module):
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
                                      oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect),
                                      od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote), od_norm=bool(od_norm), dens_gate=bool(dens_gate),
-                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st), pop_k=int(pop_k), pop_dir=int(pop_dir))
+                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st), pop_k=int(pop_k), pop_dir=int(pop_dir), oprobe_learned=int(oprobe_learned))
+            if oprobe_learned:                                                                       # the probe's learned fields: the finest
+                self.scal_learn = nn.Conv3d(c0, int(oprobe_learned), 1)                              # trunk level projected (scalars per voxel:
+                                                                                                     # turning the image turns them)
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             # the background's occupancy (the isotropic remainder) at every voxel: the density's floor is background plus
@@ -879,11 +886,19 @@ class PopulationNet(nn.Module):
                    block_norm=int(args.get("block_norm", 0) or 0), od_norm=bool(args.get("od_norm", False)),
                    dens_gate=bool(args.get("dens_gate", False)), st_path=bool(args.get("st_path", False)), iso_head=bool(args.get("iso_head", False)),
                    gate2=bool(args.get("gate2", False)), gate_share=bool(args.get("gate_share", False)), dens_ce=bool(args.get("dens_ce", False)),
-                   ce_no_st=bool(args.get("ce_no_st", False)), pop_k=int(args.get("pop_k", 0) or 0), pop_dir=int(args.get("pop_dir", 0) or 0)) \
+                   ce_no_st=bool(args.get("ce_no_st", False)), pop_k=int(args.get("pop_k", 0) or 0), pop_dir=int(args.get("pop_dir", 0) or 0), oprobe_learned=int(args.get("oprobe_learned", 0) or 0)) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
         self._args = dict(args); return self
+
+    def probe_fields(self, x: torch.Tensor, h0: torch.Tensor) -> torch.Tensor:
+        """The oriented probe's fields: :meth:`scalar_fields` and, with ``oprobe_learned``, the finest trunk level's
+        learned projection."""
+        S = self.scalar_fields(x)
+        if getattr(self, "scal_learn", None) is not None:
+            S = torch.cat([S, self.scal_learn(h0.to(self.scal_learn.weight.dtype)).float()], 1)
+        return S
 
     def scalar_fields(self, x: torch.Tensor) -> torch.Tensor:
         """The image's rotation-invariant scalar fields for the oriented probe: its local contrast (the image itself
@@ -1128,7 +1143,7 @@ class PopulationNet(nn.Module):
             if self.has_points:
                 out["points"] = Fn.softplus(self.points(h))
             if e_points is not None:
-                fe = with_scal((h0, h1, h), self.scalar_fields(x)) if getattr(self.ent, "oprobe", False) else (h0, h1, h)
+                fe = with_scal((h0, h1, h), self.probe_fields(x, h0)) if getattr(self.ent, "oprobe", False) else (h0, h1, h)
                 if getattr(self.ent, "odirect", 0):
                     fe = with_odv(fe, self.direct_at(x, e_points.float())) if OD_AT_POINTS else with_oe(fe, self.direct_levels(x))
                 if getattr(self.ent, "gate", None) is not None or getattr(self.ent, "st_gain", None) is not None or getattr(self.ent, "dens_ce", False):   # the structure tensor

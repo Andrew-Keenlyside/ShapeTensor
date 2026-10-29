@@ -103,7 +103,7 @@ def features(model, x: torch.Tensor, voxel: float | None = None, voxel_um: float
     fe = (h0, h1, model.condition(h, v))
     if getattr(getattr(model, "ent", None), "oprobe", False):                                      # the oriented probe's scalar fields
         from .model import with_scal
-        fe = with_scal(fe, model.scalar_fields(xb))
+        fe = with_scal(fe, model.probe_fields(xb, h0))
     if getattr(getattr(model, "ent", None), "odirect", 0):                                        # the direct oriented path's energies
         from .model import with_oe
         fe = with_oe(fe, model.direct_levels(xb))
