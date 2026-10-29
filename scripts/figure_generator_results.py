@@ -75,11 +75,46 @@ for seed in seeds:
     cl = ((ev[:, 2] - ev[:, 1]) / ev[:, 2].clamp_min(1e-9)).clamp(0, 1) * (Wv > 0.05)
     dec = ax_[:, [2, 1, 0]].abs() * (Wv > 0.05)[:, None]                                            # R = x, G = y, B = z
     dec_raw = dec.view(64, 64, 3).cpu().numpy(); dec_w = (dec * cl[:, None]).view(64, 64, 3).cpu().numpy()
-    rows.append((seed, d["record"].get("modality"), d["record"].get("matrix"), img0, img3, role_map.reshape(64, 64, 3).clip(0, 1), cen, T6, shk, dec_raw, dec_w))
+    # per-object mass targets as training sees them: the trainer's targets at every voxel of the slice, window 0.5 (no
+    # spatial averaging), after the resolution rule (objects thinner than the resolution merged into their population)
+    yy_, xx_ = torch.meshgrid(torch.arange(64, device=dev), torch.arange(64, device=dev), indexing="ij")
+    qp = torch.stack([torch.full_like(yy_, z0), yy_, xx_], -1).reshape(-1, 3).float()
+    tq = TR.entity_queries(s, d, 64, 0, dev, points=qp, sigma=torch.full((qp.shape[0],), 0.5, device=dev))
+    live = tq["e_node"] >= 0; mq = (tq["e_mass"].float() * tq["e_vis"].float()).clamp_min(0) * live
+    shq = mq / mq.sum(-1, keepdim=True).clamp_min(1e-9)
+    qi_, ei_ = torch.nonzero(live, as_tuple=True)
+    pa, oa, sha = qi_, tq["e_gnode"][qi_, ei_].long().clamp_min(0), shq[qi_, ei_]
+    T6q = tq["e_T6"].float()[qi_, ei_]
+    t_iso = ((T6q[:, :3] - 1 / 3).abs().sum(-1) < 0.05)                                            # (isotropic entities, e.g. the ground)
+    big = sha > 0.05; on_g = ((pa // 64) % STEP == STEP // 2) & ((pa % 64) % STEP == STEP // 2) & big
+    cen = torch.stack([pa[on_g] % 64, pa[on_g] // 64], -1).cpu().numpy(); T6 = T6q[on_g].cpu().numpy(); shk = sha[on_g].cpu().numpy()
+    hue = torch.frac(oa.float() * 0.618034); cols = torch.tensor(plt.cm.hsv(hue.cpu().numpy())[:, :3], device=dev, dtype=torch.float32)
+    lum = torch.where(sha > 0.02, 0.35 + 0.65 * torch.frac(oa.float() * 0.381966), torch.zeros_like(sha))   # (neighbours apart)
+    objcol = torch.zeros(64 * 64, 3, device=dev).index_add_(0, pa, sha[:, None] * cols * lum[:, None]).view(64, 64, 3).cpu().numpy()
+    nobj = torch.zeros(64 * 64, device=dev).index_add_(0, pa, (sha >= 0.02).float()).view(64, 64).cpu().numpy()
+    top1 = torch.zeros(64 * 64, device=dev).scatter_reduce_(0, pa, sha, reduce="amax").view(64, 64).cpu().numpy()
+    rows.append((seed, d["record"].get("modality"), d["record"].get("matrix"), img0, img3, role_map.reshape(64, 64, 3).clip(0, 1), cen, T6, shk, dec_raw, dec_w, objcol, nobj, top1))
     SC._scene_cache().clear(); torch.cuda.empty_cache(); print(seed, "ok", d["record"].get("modality"), d["record"].get("matrix"), flush=True)
 
+MASS = bool(os.environ.get("MASS"))
 fig, axs = plt.subplots(len(rows), 6, figsize=(25.5, 4.4 * len(rows))); axs = np.atleast_2d(axs)
-for r_, (seed, mod, mat, img0, img3, rm, cen, T6, shk, dec_raw, dec_w) in enumerate(rows):
+for r_, (seed, mod, mat, img0, img3, rm, cen, T6, shk, dec_raw, dec_w, objcol, nobj, top1) in enumerate(rows):
+  if MASS:                                                                                         # the mass targets
+    norm = lambda x: np.clip((x - np.percentile(x, 1)) / max(np.percentile(x, 99) - np.percentile(x, 1), 1e-6), 0, 1)
+    axs[r_, 0].imshow(norm(img0), cmap="gray"); axs[r_, 0].set_title(f"seed {seed}: clean render ({mod})", fontsize=9)
+    axs[r_, 1].imshow(np.clip(objcol, 0, 1)); axs[r_, 1].set_title("mass targets: every object its own colour,\nbrightness = its share of the voxel", fontsize=9)
+    im_ = axs[r_, 2].imshow(nobj, cmap="viridis", vmin=0, vmax=max(4, float(nobj.max()))); plt.colorbar(im_, ax=axs[r_, 2], fraction=0.046)
+    axs[r_, 2].set_title(f"objects per voxel (share >= 2 %): median {np.median(nobj):.0f}, max {nobj.max():.0f}", fontsize=9)
+    im_ = axs[r_, 3].imshow(top1, cmap="magma", vmin=0, vmax=1); plt.colorbar(im_, ax=axs[r_, 3], fraction=0.046)
+    axs[r_, 3].set_title("the largest object's share of each voxel", fontsize=9)
+    axs[r_, 4].imshow(norm(img0), cmap="gray", alpha=0.35)
+    if len(cen):
+        draw_tensors(axs[r_, 4], cen, T6, 0.62 * STEP, view="z", scale=np.sqrt(shk))
+    axs[r_, 4].set_title(f"ODF targets: the {TOP} largest objects per voxel", fontsize=9)
+    axs[r_, 5].imshow(np.clip(dec_w, 0, 1)); axs[r_, 5].set_title("ideal single vector (DEC x line-ness)", fontsize=9)
+    for a_ in axs[r_]:
+        a_.set_xticks([]); a_.set_yticks([]); a_.set_xlim(-0.5, 63.5); a_.set_ylim(63.5, -0.5)
+    continue
     norm = lambda x: np.clip((x - np.percentile(x, 1)) / max(np.percentile(x, 99) - np.percentile(x, 1), 1e-6), 0, 1)
     axs[r_, 0].imshow(norm(img0), cmap="gray"); axs[r_, 0].set_title(f"seed {seed}: clean render ({mod}; matrix {', '.join(mat or [])})", fontsize=9)
     axs[r_, 1].imshow(norm(img3), cmap="gray"); axs[r_, 1].set_title(f"same scene, strength {STR:g}", fontsize=9)
