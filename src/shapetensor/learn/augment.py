@@ -44,7 +44,9 @@ from ..filters import gaussian
 P = {"lut": 0.7, "nonmono": 0.35, "spatial": 0.25, "gamma": 0.3, "unsharp": 0.3, "log": 0.15, "relief": 0.15, "field": 0.4,
      "noise": 0.4, "lines": 0.25, "blocks": 0.25, "resolution": 0.25, "motion": 0.1, "spikes": 0.08, "varnoise": 0.2,
      "resample": 0.15, "quantise": 0.1, "compress": 0.12, "library": 0.15, "ghosting": 0.1, "saturate": 0.08, "sections": 0.12,
-     "lsstripes": 0.08, "axial_psf": 0.12, "shot": 0.12, "slices": 0.12, "thin_slabs": 0.08}
+     "lsstripes": 0.08, "axial_psf": 0.12, "shot": 0.12, "slices": 0.12, "thin_slabs": 0.08,
+     "fold": 0.10, "local_reversal": 0.08, "oriented_noise": 0.12}   # 29 Oct: strongly non-monotone curves, local contrast
+                                                                     # reversal, oriented noise at many scales
 
 
 #: the batch-time routes' profile: None -- every route (above); "hipct" -- only what keeps a HiP-CT scan a HiP-CT scan
@@ -493,6 +495,20 @@ def contrast_route(x: torch.Tensor, rng: np.random.Generator, strength: float = 
         y = compress(y, rng, rec).clamp(0, 1)
     if on("quantise"):
         y = quantise(y, rng, rec)
+    if on("fold"):                                                                                 # a strongly non-monotone curve (1-4 periods)
+        f = float(rng.uniform(1.0, 4.0)); ph = float(rng.uniform(0, 2 * math.pi)); w = float(rng.uniform(0.5, 1.0))
+        y = w * (0.5 + 0.5 * torch.sin(2 * math.pi * f * y + ph)) + (1 - w) * y; rec["fold"] = (round(f, 2), round(w, 2))
+    if on("local_reversal"):                                                                       # contrast reversed where a smooth field is < 0
+        m_ = gaussian(y, float(math.exp(rng.uniform(math.log(3), math.log(12)))))
+        fld = torch.tanh(float(rng.uniform(1, 4)) * smooth_field(y.shape, float(rng.uniform(8, 30)), y.device, g))
+        y = (m_ + fld * (y - m_)).clamp(0, 1); rec["local_reversal"] = True
+    if on("oriented_noise"):                                                                       # oriented noise at 1-3 scales
+        from .generator import _rand_rot, aniso_noise
+        k = int(rng.integers(1, 4)); nz = torch.zeros_like(y)
+        for _ in range(k):
+            b = float(math.exp(rng.uniform(math.log(0.7), math.log(6.0)))); e = float(math.exp(rng.uniform(math.log(2.0), math.log(8.0))))
+            nz += float(rng.uniform(0.3, 1.0)) * aniso_noise(tuple(y.shape), (b * e, b, b * float(rng.uniform(1.0, e))), _rand_rot(g, y.device), g, y.device)
+        sd = float(rng.uniform(0.03, 0.25)); y = (y + sd * nz / nz.std().clamp_min(1e-9)).clamp(0, 1); rec["oriented_noise"] = (k, round(sd, 3))
     if on("lines"):
         y = missing_lines(y, rng, rec)
     if on("blocks"):

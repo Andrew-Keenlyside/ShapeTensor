@@ -271,38 +271,72 @@ def curves_subset(c: Curves, keep: torch.Tensor) -> Curves | None:
 # rendering: points with weights splatted (trilinear) onto the grid, several channels at once
 # ------------------------------------------------------------------------------------------------------------------
 
+#: the specimen's deformation (:class:`Deform`; 29 Oct: widened -- real crops look like oriented texture under strong,
+#: confounding distortions): the affine's per-axis scale +-``scale``, each shear pair drawn with ``p_shear`` up to
+#: +-``shear``, a bulk shift up to +-``shift`` voxels per axis; the smooth warp's amplitude up to ``amp`` voxels over
+#: ``sigma`` (log-uniform), a fine warp (``p_fine``: up to ``fine_amp`` over ``fine_sigma``), a twist about a random axis
+#: (``p_twist``: up to ``twist_deg`` over the canvas) and a bend (``p_bend``: curvature up to ``bend`` / voxel). Before
+#: 29 Oct: scale 0.2, shear 0.15 (p 0.25 per pair), no shift, amp 6 over 8-30, no fine warp, twist or bend.
+DEFORM = {"scale": 0.25, "shear": 0.3, "p_shear": 0.5, "shift": 6.0, "amp": 10.0, "sigma": (8.0, 40.0), "p_fine": 0.4,
+          "fine_amp": 2.0, "fine_sigma": (3.0, 8.0), "p_twist": 0.25, "twist_deg": 45.0, "p_bend": 0.25, "bend": 0.006}
+#: the deformation before 29 Oct (the HiP-CT profile keeps it: ``draw_scene(profile="hipct")``, p_warp 0.5, p_affine 0.3)
+DEFORM_LEGACY = {"scale": 0.2, "shear": 0.15, "p_shear": 0.25, "shift": 0.0, "amp": 6.0, "sigma": (8.0, 30.0), "p_fine": 0.0,
+                 "fine_amp": 0.0, "fine_sigma": (3.0, 8.0), "p_twist": 0.0, "twist_deg": 0.0, "p_bend": 0.0, "bend": 0.0}
+
+
 class Deform:
-    """A specimen's deformation on the canvas (27 Oct): material at ``x`` moves to ``x + (A - I)(x - c) + w(x)`` -- an
-    affine about the canvas centre (scales +-20 %, shears +-15 %: section compression, shrinkage, calibration) and a
-    smooth warp ``w`` (amplitude 0-6 voxels over 8-30), kept invertible (det >= 0.2). It is applied where the scene is
+    """A specimen's deformation on the canvas (27 Oct; widened 29 Oct, :data:`DEFORM`): material at ``x`` moves to
+    ``x + (A - I)(x - c) + t + w(x)`` -- an affine about the canvas centre (scales, shears: section compression,
+    shrinkage, calibration, sheared mounting), a bulk shift ``t`` and a smooth nonlinear warp ``w`` (a multi-scale
+    random field, a twist, a bend), kept invertible (det >= 0.2). It is applied where the scene is
     rendered, so the geometry itself deforms: swept and splatted material moves forward exactly (its direction by the
     local Jacobian F, its volume by det F, its sizes by det F^(1/3)); dense fields are pulled back through the inverse
     map. The crop-level warp it replaces resampled the crop alone and mirrored or smeared its edge into fake kinks and
     crossings. ``valid``: where the pulled-back source lies on the canvas (crops avoid the rest: no material was
     drawn beyond it)."""
 
-    def __init__(self, shape, rng, warp: bool, affine: bool, device):
+    def __init__(self, shape, rng, warp: bool, affine: bool, device, cfg: dict | None = None):
         self.shape = tuple(shape); dev = device; Z, Y, X = shape
         self.c = torch.tensor([(Z - 1) / 2, (Y - 1) / 2, (X - 1) / 2], device=dev)
-        A = np.eye(3)
+        D_ = cfg or DEFORM; A = np.eye(3); t = np.zeros(3); kinds = []
         if affine:
-            A = A + np.diag([rng.u(-0.2, 0.2) for _ in range(3)])
+            A = A + np.diag([rng.u(-D_["scale"], D_["scale"]) for _ in range(3)])
             for (i, j) in ((0, 1), (0, 2), (1, 2)):
-                if rng.p(0.5):
-                    A[i, j] = rng.u(-0.15, 0.15) if rng.p(0.5) else 0.0
-        self.A = torch.tensor(A, dtype=torch.float32, device=dev)
-        sig = rng.lu(8, 30); amp = rng.u(0, 6) if warp else 0.0
-        n3 = torch.stack([smooth_noise(self.shape, sig, rng.g, dev) for _ in range(3)]) if warp else torch.zeros((3,) + self.shape, device=dev)
+                if rng.p(D_["p_shear"]):
+                    A[i, j] = rng.u(-D_["shear"], D_["shear"])
+            t = np.array([rng.u(-D_["shift"], D_["shift"]) for _ in range(3)]) if D_["shift"] > 0 else t   # a bulk shift
+        self.A = torch.tensor(A, dtype=torch.float32, device=dev); self.t = torch.tensor(t, dtype=torch.float32, device=dev)
+        sig = rng.lu(*D_["sigma"]); amp = rng.u(0, D_["amp"]) if warp else 0.0
+        n3 = torch.stack([smooth_noise(self.shape, sig, rng.g, dev) for _ in range(3)]) * amp if warp else torch.zeros((3,) + self.shape, device=dev)
+        if warp:
+            kinds.append("smooth")
+            if D_["p_fine"] > 0 and rng.p(D_["p_fine"]):                                                                # a fine warp on top (crumpling, local tears healed)
+                n3 = n3 + rng.u(0, D_["fine_amp"]) * torch.stack([smooth_noise(self.shape, rng.lu(*D_["fine_sigma"]), rng.g, dev) for _ in range(3)])
+                kinds.append("fine")
+            P_ = torch.stack(torch.meshgrid(*(torch.arange(n, device=dev, dtype=torch.float32) for n in self.shape), indexing="ij"), 0) - self.c.view(3, 1, 1, 1)
+            if D_["p_twist"] > 0 and rng.p(D_["p_twist"]):                                                               # a twist about a random axis
+                a = rng.unit(); s_ = (P_ * a.view(3, 1, 1, 1)).sum(0)
+                k = math.radians(rng.u(-D_["twist_deg"], D_["twist_deg"])) / max(self.shape)
+                pp = P_ - s_[None] * a.view(3, 1, 1, 1); th = k * s_
+                rot = torch.cos(th)[None] * pp + torch.sin(th)[None] * torch.linalg.cross(a.view(3, 1, 1, 1).expand_as(pp), pp, dim=0)
+                n3 = n3 + (rot - pp); kinds.append("twist")
+            if D_["p_bend"] > 0 and rng.p(D_["p_bend"]):                                                                # a bend: a parabola along a random axis
+                a = rng.unit(); b = rng.unit(); b = b - (b * a).sum() * a; b = b / b.norm().clamp_min(1e-6)
+                s_ = (P_ * a.view(3, 1, 1, 1)).sum(0)
+                n3 = n3 + 0.5 * rng.u(-D_["bend"], D_["bend"]) * (s_ ** 2)[None] * b.view(3, 1, 1, 1); kinds.append("bend")
+        scale = 1.0
         for _ in range(10):                                                                       # invertible: det F >= 0.2
-            G = torch.stack([torch.stack(torch.gradient(n3[i] * amp, dim=(0, 1, 2)), 0) for i in range(3)])   # (3, 3, Z, Y, X)
+            G = torch.stack([torch.stack(torch.gradient(n3[i] * scale, dim=(0, 1, 2)), 0) for i in range(3)])   # (3, 3, Z, Y, X)
             det = float(torch.linalg.det(self.A[..., None, None, None].permute(2, 3, 4, 0, 1) + G.permute(2, 3, 4, 0, 1)).min())
             if det > 0.2:
                 break
-            amp *= 0.7
+            scale *= 0.7
         else:                                                                                     # (never invertible: no warp)
-            amp = 0.0; G = torch.zeros((3, 3) + self.shape, device=dev); det = float(torch.linalg.det(self.A))
-        self.W = n3 * amp; self.G = G                                                             # the warp and its gradient (canvas)
-        self.record = {"affine": [round(float(v), 3) for v in A.flatten()] if affine else None, "warp": (round(amp, 2), round(sig, 1)), "det_min": round(det, 2)}
+            scale = 0.0; G = torch.zeros((3, 3) + self.shape, device=dev); det = float(torch.linalg.det(self.A))
+        self.W = n3 * scale; self.G = G                                                           # the warp and its gradient (canvas)
+        wmax = float(self.W.abs().max()) if warp else 0.0
+        self.record = {"affine": [round(float(v), 3) for v in A.flatten()] if affine else None, "shift": [round(float(v), 2) for v in t] if affine else None,
+                       "warp": (round(wmax, 2), round(sig, 1)), "warp_kinds": kinds, "det_min": round(det, 2)}
         self.prepare()
 
     def prepare(self):
@@ -331,7 +365,7 @@ class Deform:
 
     def forward(self, Q):
         """Material at ``Q (n, 3)`` moved: ``(Q', F)``, F the deformation gradient there."""
-        lin = Q + (Q - self.c) @ (self.A - torch.eye(3, device=Q.device)).T
+        lin = Q + (Q - self.c) @ (self.A - torch.eye(3, device=Q.device)).T + self.t
         if float(self.record["warp"][0]) <= 0:                                                    # an affine alone: no field to sample
             return lin, self.A[None].expand(Q.shape[0], 3, 3)
         w, gw = self._field(Q)
@@ -345,13 +379,13 @@ class Deform:
             out.append(Fn.grid_sample(self.W[None], g, mode="bilinear", padding_mode="border", align_corners=True)[0, :, 0, 0].T)
         return torch.cat(out)
 
-    def inverse(self, Y, iters: int = 6):
+    def inverse(self, Y, iters: int = 10):
         """Where the material now at ``Y (n, 3)`` came from (fixed point of y = c + A (x - c) + w(x); exact for an affine
         alone)."""
-        x = self.c + (Y - self.c) @ self.Ai.T
+        x = self.c + (Y - self.c - self.t) @ self.Ai.T
         if float(self.record["warp"][0]) > 0:
             for _ in range(iters):
-                x = self.c + (Y - self.c - self._warp_at(x)) @ self.Ai.T
+                x = self.c + (Y - self.c - self.t - self._warp_at(x)) @ self.Ai.T
             for _ in range(2):                                                                    # Newton (the fixed point contracts
                 fx, Fx = self.forward(x)                                                          # slowly where |A^-1 grad w| nears 1)
                 x = x - torch.linalg.solve(Fx, (fx - Y)[..., None])[..., 0]
@@ -2597,13 +2631,13 @@ def _compact(ren: dict) -> dict:
 
 def render_scene(canvas, scene_seed: int, device, voxel_um=None, families=None, n_groups=(1, 5), layout_p=0.3, content="general", style=None,
                  underlay_p: float = 0.4, cross_p: float = 0.0, deep_tree: bool = False, dense_p: float = 0.0, p_warp: float = 0.0,
-                 p_affine: float = 0.0):
+                 p_affine: float = 0.0, legacy_deform: bool = False):
     """The scene (cached: crops of one scene are drawn in sequence) and its background on the whole canvas -- a
     texture, regions and possibly a cell stain, so crops at any zoom of one scene share them. With probability
     ``p_warp`` / ``p_affine`` the specimen is deformed (:class:`Deform`): the scene renders deformed, its background
     and outside mask pulled back with it."""
     key = (tuple(canvas), scene_seed, str(device), voxel_um, str(families), tuple(n_groups), layout_p, content, style, underlay_p, cross_p, deep_tree, dense_p,
-           p_warp, p_affine)
+           p_warp, p_affine, legacy_deform)
     _CACHE = _scene_cache()
     if key in _CACHE:
         _CACHE[key] = _CACHE.pop(key)                                       # most recently used last
@@ -2614,7 +2648,7 @@ def render_scene(canvas, scene_seed: int, device, voxel_um=None, families=None, 
         st = style or ["flat", "regions", "tissue", "cells"][sc.r.i(0, 3)]
         bgp = background(tuple(canvas), st, sc.r.g, device, 1.0, content, nprng=sc.r.np)
         dw, da = (p_warp > 0 and sc.r.p(p_warp)), (p_affine > 0 and sc.r.p(p_affine))
-        sc.deform = Deform(tuple(canvas), sc.r, dw, da, device) if (dw or da) else None
+        sc.deform = Deform(tuple(canvas), sc.r, dw, da, device, cfg=DEFORM_LEGACY if legacy_deform else None) if (dw or da) else None
         if sc.deform is not None:                                           # the background deforms with the specimen
             dfm = sc.deform; bg0, lab0, R0, extra0 = bgp
             for E in extra0:
@@ -2877,9 +2911,9 @@ def _oriented_extent(sc, ren, device) -> torch.Tensor:
 def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str | None = None, strength: float = 1.0,
                canvas: int = 128, crops_per_scene: int = 8, voxel_um: float | None = None, families: dict | None = None,
                n_groups=(1, 5), layout_p: float = 0.3, content: str = "general", style: str | None = None, second_contrast: bool = False,
-               zoom: int = 1, physics: str | None = None, p_physics: float = 0.75, p_warp: float = 0.5, acq_seed: int | None = None,
+               zoom: int = 1, physics: str | None = None, p_physics: float = 0.75, p_warp: float = 0.6, acq_seed: int | None = None,
                crop: tuple | None = None, identity_min_r: float = 1.5, p_blend: float = 0.35, p_aniso: float = 0.25, p_scramble: float = 0.3,
-               p_texture: float = 0.5, p_merge: float = 0.25, p_boundary: float = 0.2, p_affine: float = 0.3, p_grain: float = 0.8,
+               p_texture: float = 0.5, p_merge: float = 0.25, p_boundary: float = 0.2, p_affine: float = 0.5, p_grain: float = 0.8,
                underlay_p: float = 0.4, p_sparse: float = 0.12, p_cutout: float = 0.15, entity_ctx: bool = False, cross_p: float = 0.0,
                p_centre: float = 0.0, deep_tree: bool = False, dense_p: float = 0.0, scene_seed: int | None = None,
                fill_quota: tuple | None = None, profile: str | None = None):
@@ -2926,8 +2960,10 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     log2(1 + size), relative wall, lumen fraction, flattening, angularity), ``desc_um``, ``points`` (branch points,
     endpoints), ``recoverability``, ``parents``, the voxel size and the physics."""
     sid = seed // max(1, crops_per_scene) if scene_seed is None else int(scene_seed)            # ``scene_seed``: another crop of that scene
+    if profile == "hipct" and p_warp == 0.6 and p_affine == 0.5:              # the HiP-CT profile keeps the deformation of before
+        p_warp, p_affine = 0.5, 0.3                                           # 29 Oct (the defaults' widening is the universal path's)
     sc, ren, bgp, st = render_scene((canvas,) * 3, 7_000_000 + sid, device, voxel_um, families, n_groups, layout_p, content, style, underlay_p, cross_p, deep_tree, dense_p,
-                                    p_warp, p_affine)                        # the specimen's deformation, per scene (Deform)
+                                    p_warp, p_affine, profile == "hipct")    # the specimen's deformation, per scene (Deform)
     dfm = getattr(sc, "deform", None)
     vfrac = (lambda oc: float(dfm.valid[tuple(slice(a, a + e) for a, e in zip(oc, ext))].float().mean())) if dfm is not None else (lambda oc: 1.0)
     r = Rng(seed, device); ra = Rng(acq_seed if acq_seed is not None else seed + 31337, device)

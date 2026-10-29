@@ -855,6 +855,63 @@ def _shift2d(x: torch.Tensor, dy: int, dx: int) -> torch.Tensor:
     return xp[p - dy: p - dy + H, p - dx: p - dx + W]
 
 
+#: 29 Oct: a wider corruption pool on the universal path (real crops often look like oriented noise at many scales under
+#: confounding gradients and structures): per key the probability at full strength (scaled by the strength, as every
+#: destructive nuisance), the max of the default here and the modality's entry in :data:`EXTREME_MOD`. Never drawn under
+#: the HiP-CT profile.
+EXTREME_P = {"bh_streaks": 0.05, "scatter": 0.06, "metal": 0.04, "us_speckle": 0.08, "oct_speckle": 0.05, "oriented_noise": 0.15,
+             "motion": 0.10, "slice_motion": 0.08, "fold_lut": 0.10, "posterise": 0.08, "clip": 0.08, "local_reversal": 0.08}
+EXTREME_MOD = {"ct": {"bh_streaks": 0.3, "scatter": 0.3, "metal": 0.15}, "hipct": {"bh_streaks": 0.1, "scatter": 0.2, "metal": 0.05},
+               "mixed": {k: 0.15 for k in EXTREME_P}, "histology": {"slice_motion": 0.25}, "em": {"slice_motion": 0.25},
+               "fluorescence": {"motion": 0.15, "slice_motion": 0.15}, "mri": {"motion": 0.2, "slice_motion": 0.15}}
+
+
+def _rand_rot(g: torch.Generator, device) -> torch.Tensor:
+    """A random rotation (3, 3) (columns: its axes)."""
+    q, r = torch.linalg.qr(torch.randn(3, 3, generator=g, device=device))
+    return q * torch.sign(torch.diagonal(r))[None]
+
+
+def aniso_noise(shape, sig3, Rm: torch.Tensor, g: torch.Generator, device) -> torch.Tensor:
+    """Gaussian noise correlated by an anisotropic Gaussian kernel (sigmas ``sig3`` along the columns of ``Rm``): an
+    oriented grain at any direction (Fourier filtered); zero mean, unit spread."""
+    ks = [torch.fft.fftfreq(n, device=device) for n in shape]
+    K = torch.stack(torch.meshgrid(*ks, indexing="ij"), -1) @ Rm                                  # frequencies along the axes
+    H = torch.exp(-2 * math.pi ** 2 * sum((K[..., i] * float(sig3[i])) ** 2 for i in range(3)))
+    n = torch.fft.ifftn(torch.fft.fftn(torch.randn(shape, generator=g, device=device)) * H).real
+    return (n - n.mean()) / n.std().clamp_min(1e-9)
+
+
+def line_blur(img: torch.Tensor, d, length: float, n: int | None = None) -> torch.Tensor:
+    """Motion blur: the mean of ``img`` (2-D or 3-D) along a segment of ``length`` voxels in direction ``d`` (border
+    padding)."""
+    nd = img.dim(); sh = img.shape; dev = img.device
+    n = n or max(3, int(2 * length) + 1)
+    base = torch.stack(torch.meshgrid(*(torch.arange(m, device=dev, dtype=torch.float32) for m in sh), indexing="ij"), -1)
+    sz = torch.tensor(sh, device=dev, dtype=torch.float32); dv = torch.as_tensor(d, device=dev, dtype=torch.float32)
+    acc = torch.zeros_like(img, dtype=torch.float32); x = img.float()[None, None]
+    for t in torch.linspace(-length / 2, length / 2, n).tolist():
+        gr = (2 * (base + t * dv) / (sz - 1).clamp_min(1) - 1).flip(-1)[None]
+        acc += Fn.grid_sample(x, gr, mode="bilinear", padding_mode="border", align_corners=True)[0, 0]
+    return acc / n
+
+
+def _seg_dist(yy, xx, p, q):
+    """In-plane distance of the grid (yy, xx) to the segment p-q (2-vectors)."""
+    py, px = float(p[0]), float(p[1]); dy, dx = float(q[0]) - py, float(q[1]) - px
+    L2 = max(dy * dy + dx * dx, 1e-6)
+    t = (((yy - py) * dy + (xx - px) * dx) / L2).clamp(0, 1)
+    return torch.sqrt((yy - py - t * dy) ** 2 + (xx - px - t * dx) ** 2)
+
+
+def _bright(img: torch.Tensor, n: int, q: float, g: torch.Generator) -> torch.Tensor:
+    """``n`` random voxels among the brightest ``q`` of ``img`` (the dense objects of a CT): ``(n, 3)``."""
+    idx = torch.nonzero(img >= _quantile(img, 1 - q))
+    if idx.shape[0] == 0:
+        idx = torch.nonzero(img >= img.max())
+    return idx[torch.randint(0, idx.shape[0], (n,), generator=g, device=img.device)].float()
+
+
 def _quantile(x: torch.Tensor, q: float) -> float:
     return float(torch.quantile(x.flatten()[:: max(1, x.numel() // 1_000_000)], q))
 
@@ -1264,6 +1321,65 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
             ctf = ctf.abs()
         m0 = float(img.mean()); img = m0 + torch.fft.ifftn(torch.fft.fftn(img - m0) * ctf).real
         rec["ctf"] = (round(per, 1), round(Aa, 2), round(kB, 2), flip)
+    # 29 Oct: the wider pool (EXTREME_P) -- CT physics in the image domain, motion, speckle, oriented noise at many scales
+    onx = lambda key: (not hip) and u(0, 1) < max(EXTREME_MOD.get(modality, {}).get(key, 0.0), EXTREME_P[key]) * sg
+    lo, hi = _quantile(img, 0.001), _quantile(img, 0.999); rng = max(hi - lo, 1e-3)
+    if onx("scatter"):                                                                          # scatter: a low-frequency haze of the content
+        a = u(0.2, 1.0) * sg; s_ = lu(8, 30); img = img + a * gaussian(img - lo, s_); rec["scatter"] = (round(a, 2), round(s_, 1))
+    if onx("bh_streaks"):                                                                       # beam hardening: dark bands between dense objects
+        n = _int(2, 5); P_ = _bright(img, n, 0.01, g); amp = u(0.1, 0.5) * sg * rng; w = u(0.7, 2.5); h = lu(2, max(3, A / 2))
+        zs = torch.arange(A, device=device, dtype=torch.float32)
+        for i in range(n):
+            for j in range(i + 1, n):
+                band = torch.exp(-0.5 * (_seg_dist(yy, xx, P_[i, 1:], P_[j, 1:]) / w) ** 2)
+                wz = torch.exp(-0.5 * ((zs - 0.5 * float(P_[i, 0] + P_[j, 0])) / h) ** 2)
+                img = img - amp * wz[:, None, None] * band[None]
+        rec["bh_streaks"] = (n, round(amp / rng, 2))
+    if onx("metal"):                                                                            # metal / photon starvation: radial streaks
+        n = _int(1, 3); P_ = _bright(img, n, 0.002, g); zs = torch.arange(A, device=device, dtype=torch.float32)
+        for i in range(n):
+            K = _int(6, 25); amp = u(0.2, 0.8) * sg * rng; w = u(0.5, 1.5); h = lu(1, max(2, A / 3)); dec = lu(10, 80)
+            dy, dx = yy - float(P_[i, 1]), xx - float(P_[i, 2]); r_ = torch.sqrt(dy ** 2 + dx ** 2)
+            st = torch.zeros_like(yy)
+            for _ in range(K):
+                ph = u(0, math.pi); perp = (dy * math.cos(ph) - dx * math.sin(ph)).abs()
+                st += (1 if u(0, 1) < 0.4 else -1) * u(0.3, 1.0) * torch.exp(-0.5 * (perp / w) ** 2)
+            st = st * torch.exp(-r_ / dec)
+            img = img + amp * torch.exp(-0.5 * ((zs - float(P_[i, 0])) / h) ** 2)[:, None, None] * st[None]
+        rec["metal"] = n
+    if onx("motion"):                                                                           # motion blur: a line kernel in any direction
+        d = torch.randn(3, generator=g, device=device); d = d / d.norm().clamp_min(1e-6); L = lu(2, 2 + 8 * sg)
+        img = line_blur(img, d, L); rec["motion"] = round(L, 1)
+    if onx("slice_motion"):                                                                     # sequential acquisition: sections blurred / jittered
+        q = u(0.2, 0.7); hit = 0
+        for a in range(A):
+            if u(0, 1) < q:
+                ph = u(0, 2 * math.pi); L = lu(1.5, 1.5 + 6 * sg)
+                if u(0, 1) < 0.5:
+                    img[a] = line_blur(img[a], (math.sin(ph), math.cos(ph)), L)
+                else:                                                                           # a sub-voxel / few-voxel jitter of the section
+                    img[a] = line_blur(img[a], (math.sin(ph), math.cos(ph)), 2 * u(0.3, 1.0) * L / 2, n=1)
+                hit += 1
+        rec["slice_motion"] = hit
+    us_, oc_ = onx("us_speckle"), onx("oct_speckle")
+    if us_ or oc_:                                                                              # fully developed speckle: an oriented grain
+        oct_ = oc_ and (not us_ or u(0, 1) < 0.5)                                                # (Rayleigh amplitude / gamma intensity)
+        Rm = torch.eye(3, device=device) if oct_ else _rand_rot(g, device)
+        s3 = (lu(0.5, 1.2), lu(1.0, 4.0), lu(1.0, 4.0)) if not oct_ else (lu(0.5, 1.0), lu(1.0, 3.0), lu(1.0, 3.0))
+        L_ = _int(1, 4); S_ = sum(aniso_noise((A, B, C), s3, Rm, g, device) ** 2 + aniso_noise((A, B, C), s3, Rm, g, device) ** 2 for _ in range(L_)) / L_
+        S_ = S_ if u(0, 1) < 0.5 else S_.sqrt()                                                  # intensity (gamma) or amplitude (Rayleigh)
+        S_ = S_ / S_.mean().clamp_min(1e-9); m = u(0.5, 1.0) * sg
+        x = ((img - lo) / rng).clamp_min(0) * ((1 - m) + m * S_)
+        if oct_:                                                                                 # OCT: depth decay along the beam, log display
+            zz = torch.arange(A, device=device, dtype=torch.float32).view(A, 1, 1) / max(A - 1, 1)
+            cl = lu(10, 1000); x = torch.log1p(cl * x * torch.exp(-u(0, 3) * sg * zz)) / math.log1p(cl)
+        img = lo + rng * x; rec["oct_speckle" if oct_ else "us_speckle"] = (L_, [round(v, 2) for v in s3], round(m, 2))
+    if onx("oriented_noise"):                                                                   # oriented noise at many scales (additive)
+        k = _int(1, 4); nz = torch.zeros_like(img)
+        for _ in range(k):
+            b = lu(0.7, 6.0); e = lu(2.0, 8.0)
+            nz += u(0.3, 1.0) * aniso_noise((A, B, C), (b * e, b, b * lu(1.0, e)), _rand_rot(g, device), g, device)
+        amp = u(0.05, 0.4) * sg * rng; img = img + amp * nz / nz.std().clamp_min(1e-9); rec["oriented_noise"] = (k, round(amp / rng, 2))
     # noise: Poisson (on the current range), Gaussian, Rician, speckle, a starved dose
     lo, hi = _quantile(img, 0.001), _quantile(img, 0.999); rng = max(hi - lo, 1e-3)
     if on("poisson"):
@@ -1358,6 +1474,23 @@ def nuisance(s: Sample, seed: int = 0, device="cuda", strength: float = 1.0, mod
             present[a0:a1] = 0.5 if m in ("held", "interp") else 0.0                            # a neighbour's data (displaced) or none
             lost.append((a0, w, m))
         rec["slabs"] = lost
+    # 29 Oct: extreme intensity transforms (EXTREME_P): strongly non-monotone curves, posterisation, clipping, local
+    # contrast reversal
+    if not hip:
+        lo, hi = _quantile(img, 0.001), _quantile(img, 0.999); rng = max(hi - lo, 1e-3)
+        x = ((img - lo) / rng).clamp(0, 1); x0 = x
+        if onx("fold_lut"):
+            f = u(1.0, 1.0 + 3.0 * sg); ph = u(0, 2 * math.pi); w = u(0.5, 1.0)
+            x = w * (0.5 + 0.5 * torch.sin(2 * math.pi * f * x + ph)) + (1 - w) * x; rec["fold_lut"] = (round(f, 2), round(w, 2))
+        if onx("local_reversal"):
+            m_ = gaussian(x, lu(3, 12)); fld = torch.tanh(u(1, 4) * smooth_noise((A, B, C), lu(8, 30), g, device))
+            x = m_ + fld * (x - m_); rec["local_reversal"] = True
+        if onx("clip"):
+            a_, b_ = u(0, 0.3 * sg), u(0, 0.3 * sg); x = x.clamp(_quantile(x, a_), _quantile(x, 1 - b_)); rec["clip"] = (round(a_, 2), round(b_, 2))
+        if onx("posterise"):
+            nl = _int(2, 9); x = torch.round(x * (nl - 1)) / (nl - 1); rec["posterise"] = nl
+        if x is not x0:
+            img = lo + rng * x
     img = img.movedim(0, ax).contiguous()
     # ---- the display window: a little clipping at either end, then 8 bits
     clip = u(0.0, 0.05) if u(0, 1) < 0.1 else u(0.0, 0.015)

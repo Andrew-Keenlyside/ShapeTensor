@@ -23,6 +23,12 @@ def test_hipct_profile_draws_only_hipct_nuisances(i):
     assert set(r["routes"]) <= KEPT_ROUTES, r["routes"]
     psf = r["psf"]
     assert len(set(psf)) == 1 and GN.HIPCT_PSF[0] - 1e-6 <= psf[0] <= GN.HIPCT_PSF[1] + 0.01
+    assert not [k for k in GN.EXTREME_P if k in r], r                                              # the universal path's wider pool: never here
+    dfm = r.get("deform")                                                                          # the deformation of before 29 Oct
+    if dfm:
+        assert set(dfm.get("warp_kinds") or []) <= {"smooth"} and not any(dfm.get("shift") or [])
+        if dfm.get("affine"):
+            A = dfm["affine"]; assert max(abs(A[k]) for k in (1, 2, 3, 5, 6, 7)) <= 0.15 + 1e-6
     if strength == 0.0:                                                                            # nearly clean: no artefact, no noise
         assert not [k for k in ("corr_noise", "rings", "seams", "fringes", "local_tomography") if k in r], r
         assert psf[0] == pytest.approx(GN.HIPCT_PSF[0], abs=0.01)
