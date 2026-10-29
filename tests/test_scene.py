@@ -43,7 +43,8 @@ def test_collapse_keeps_one_population_and_closes_the_lumen():
     lum = [float(D[2][:, :, x][occ[:, :, x] > 0.5].mean()) for x in xs]
     assert lum[0] > 0.6 and lum[1] < 0.05 and lum[2] > 0.6
     assert torch.unique(ids[0][occ > 0.5]).tolist() == [7]                               # one object throughout
-    assert float(T[2][occ > 0.5].min()) > 0.99                                           # the same axis throughout
+    assert float(T[2][occ > 0.5].min()) > 0.499                                          # the axis in every wall sheet's plane (29 Oct:
+    assert float(T[2][:, :, xs[1]][occ[:, :, xs[1]] > 0.5].median()) > 0.99              # walls are sheets) and along the collapsed strand
 
 
 def test_tree_branches_with_tapering_and_records_points():

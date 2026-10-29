@@ -181,7 +181,8 @@ def test_sheets_follow_the_phase():
 
 
 def test_blobs_align_with_the_field():
-    """Blobs' long axis (spindles) or short axis (discs) along a uniform field."""
+    """Blobs' long axis (spindles) or short axis (discs) along a uniform field: their shape (each blob's points' second
+    moment). Their material is isotropic (solids' ODF is I / 3, 29 Oct)."""
     d0 = torch.tensor([0.0, 0.0, 1.0]); checked = 0
     for seed in range(40):
         sc = Scene((64,) * 3, 300 + seed, DEV, 2.0); r = sc.r
@@ -194,8 +195,12 @@ def test_blobs_align_with_the_field():
         first = torch.unique(oid, return_inverse=True)[1]
         idx = torch.stack([torch.nonzero(first == j)[0, 0] for j in range(int(first.max()) + 1)])
         s6 = V[idx, :6]
-        M = torch.stack([torch.stack([s6[:, 0], s6[:, 3], s6[:, 4]], -1), torch.stack([s6[:, 3], s6[:, 1], s6[:, 5]], -1), torch.stack([s6[:, 4], s6[:, 5], s6[:, 2]], -1)], -2)
-        ev, evec = torch.linalg.eigh(M)
+        assert torch.allclose(s6, torch.tensor([1, 1, 1, 0, 0, 0.0], device=s6.device).expand_as(s6) / 3, atol=1e-4)   # material: isotropic
+        M = []
+        for j in range(int(first.max()) + 1):                                                   # shape: the points' spread
+            q_ = Q[first == j].float(); w_ = W[first == j].float()[:, None]; q_ = q_ - (w_ * q_).sum(0) / w_.sum()
+            M.append((w_ * q_).T @ q_ / w_.sum())
+        ev, evec = torch.linalg.eigh(torch.stack(M))
         ax = evec[..., -1] if rec["elong"] > 1 else evec[..., 0]
         assert float(ang(ax, d0.expand_as(ax)).median()) < 10.0, rec
         checked += 1

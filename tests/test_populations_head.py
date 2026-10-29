@@ -109,3 +109,15 @@ def test_background_apart_from_the_slots(monkeypatch):
     m = T["e_mass"]; assert torch.allclose(bg, m[..., 0] / m.sum(-1), atol=1e-5)
     assert torch.allclose(s.sum(-1) + other + bg, torch.ones_like(bg), atol=1e-5)
     assert float(bg.min()) > 0 and float((s > 0).sum(-1).max()) <= 3                             # the background never a slot
+
+
+def test_ordered_matching_swaps_only_near_equal_shares(monkeypatch):
+    monkeypatch.setattr(ET, "POP_BG", True)
+    T = _targets(B=1, Q=1); T["e_bg"] = torch.zeros_like(T["e_mass"], dtype=torch.bool)
+    T["e_mass"] = torch.tensor([[[0.5, 0.2, 0.19, 0.05, 0.0, 0.0]]])                             # ranks: 0.5 | 0.2 ~ 0.19 | 0.05
+    s, E, valid, other, has = ET.population_targets(T, 4)
+    perm = torch.tensor([3, 2, 1, 0])                                                             # ellipses that fit the reversed order
+    ent = {"pop_exist": torch.full((1, 1, 4), 0.5), "pop_share": torch.full((1, 1, 5), 0.2), "pop_T": E[..., perm, :, :]}
+    m = ET.population_match(ent, T)["match"][0, 0].tolist()
+    assert m[0] == 0 and m[3] == 3 and sorted(m[1:3]) == [1, 2]                                   # far shares keep their rank
+    assert m[1:3] == [2, 1]                                                                       # near-equal ones follow the ellipses

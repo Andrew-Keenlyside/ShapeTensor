@@ -22,6 +22,7 @@ from shapetensor.learn.model import PopulationNet
 ap = argparse.ArgumentParser()
 ap.add_argument("items"); ap.add_argument("--steps", type=int, default=300); ap.add_argument("--lr", type=float, default=1e-3)
 ap.add_argument("--set", nargs="*", default=[], help="model arguments, key=value (JSON values)")
+ap.add_argument("--et", nargs="*", default=[], help="entity_train constants, KEY=value (JSON values), e.g. POP_TIE=0.3")
 a = ap.parse_args(); dev = "cuda"
 torch.cuda.set_per_process_memory_fraction(float(os.environ.get("MEMFRAC", 0.42)))
 ck = torch.load(os.path.join(os.path.dirname(a.items), "model.pt"), map_location="cpu", weights_only=False); args = dict(ck["args"])
@@ -29,6 +30,8 @@ for kv in a.set:
     k, v = kv.split("=", 1); args[k] = json.loads(v)
 ET.ENT_WEIGHTS.update(args["weights"]); ET.POP_BG = int(args.get("pop_seq", 0) or 0) == 2
 ET.POP_MATCH_AS_LOSS = not bool(args.get("pop_match_share", False)); TR.ROUTES = 1.0
+for kv in a.et:
+    k, v = kv.split("=", 1); setattr(ET, k, json.loads(v))
 items = [(i[0].to(dev), {k: v.to(dev) if torch.is_tensor(v) else v for k, v in i[1].items()}) for i in torch.load(a.items, weights_only=False)]
 V = [TR.stack(items[:4], aug=False), TR.stack(items[4:], aug=False)]
 
@@ -45,7 +48,7 @@ for st in range(a.steps + 1):
     total, parts = ET.entity_loss(P, T, dirs, margin=4, g=gd)
     opt.zero_grad(set_to_none=True); total.backward(); torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0); opt.step()
     if st % 100 == 0:
-        print(f"step {st}: pop {float(parts['pop']):.3f} ellipse {float(parts['pop_T']):.4f}", flush=True)
+        print(f"step {st}: pop {float(parts['pop']):.3f} existence {float(parts['pop_exist']):.3f} share {float(parts['pop_share']):.3f} ellipse {float(parts['pop_T']):.4f}", flush=True)
 
 net.eval(); ang = lambda u, v: torch.rad2deg(torch.acos((u * v).sum(-1).abs().clamp(max=1)))
 rows, cross, dup_p, dup_t = [], [], [], []

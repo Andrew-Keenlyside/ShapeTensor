@@ -116,6 +116,8 @@ def tree_distance(anc: torch.Tensor, i: torch.Tensor, j: torch.Tensor) -> torch.
 
 DENS_READOUT_LOBE = False           # ... and the lobe trained through the readout too (it may soften where unsure)
 POP_MIN_SHARE = 0.02                # a target population's smallest share of the window (smaller: pooled into "other")
+POP_MATCH_SHARE_W = 1.0             # the share term's weight in the matching cost
+POP_TIE = 0.1                       # pop_seq 2: targets whose shares differ by less than this may go to either of their slots
 POP_BG = False                      # the background's entities apart from the slots (pop_seq 2; set by the trainer, configure_from_args)
 POP_MATCH_AS_LOSS = True           # the matching weighs each real population's ellipse as the loss does (equally); weighted by share
                                    # (before 29 Oct, 02:20) line and isotropic targets swapped slots between like queries and each
@@ -204,7 +206,10 @@ def population_match(ent: dict, T: dict) -> dict:
     s, E, valid, other, has = population_targets(T, K)
     dT = ((PT[..., :, None, :, :] - E[..., None, :, :, :]) ** 2).sum((-1, -2))                   # (..., K slots, K targets)
     wT = (4.0 * valid.float() / valid.float().sum(-1, keepdim=True).clamp_min(1.0)) if POP_MATCH_AS_LOSS else s   # the loss's own weights
-    cost = wT[..., None, :] * dT + (sh[..., :K, None] - s[..., None, :]).abs() + (ex[..., :, None] - valid[..., None, :].float()).abs()
+    cost = wT[..., None, :] * dT + POP_MATCH_SHARE_W * (sh[..., :K, None] - s[..., None, :]).abs() + (ex[..., :, None] - valid[..., None, :].float()).abs()
+    if POP_BG and POP_TIE < 1.0:                                                                                   # sequential slots (pop_seq 2): slot k is the
+        far = (s[..., :, None] - s[..., None, :]).abs() >= POP_TIE                               # k-th largest population; it may swap only with
+        cost = cost + 100.0 * (far & ~torch.eye(K, dtype=torch.bool, device=ex.device))         # a target of near-equal share (crossing fibres)
     perms = torch.tensor(list(itertools.permutations(range(K))), device=ex.device)                  # (P, K)
     ck = cost[..., torch.arange(K, device=ex.device)[None, :].expand_as(perms), perms].sum(-1)      # (..., P)
     match = perms[ck.argmin(-1)]

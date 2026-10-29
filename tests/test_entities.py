@@ -7,6 +7,7 @@ import torch
 
 from shapetensor.learn.entities import KIND_POPULATION, KIND_ROOT, KIND_SHARED, _pulled, build_tree, entity_targets
 from shapetensor.learn.scene import Scene, draw_scene
+from shapetensor.learn import scene as SC_
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -44,9 +45,11 @@ def _two_bundles(theta_deg, rf_um=2.0, Rb=10.0, seed=1, shape=96, vu=2.0):
 
 
 @pytest.mark.parametrize("theta", [10, 20, 45, 90])
-def test_two_bundles_are_two_entities_at_any_angle(theta):
+def test_two_bundles_are_two_entities_at_any_angle(theta, monkeypatch):
     """Two bundles stacked along z (so both pass the query's window) at an angle: two entities whose axes are the
-    bundles' -- at 10 degrees too, which an 8th-order density cannot separate."""
+    bundles' -- at 10 degrees too, which an 8th-order density cannot separate. (Fibres of one material: with each its
+    own density, 29 Oct, the window's few edge fibres weigh unequally and the axis is legitimately a few degrees off.)"""
+    monkeypatch.setattr(SC_, "P_VISIBLE_STRANDS", 0.0)
     sc, ren, c, a1, a2 = _two_bundles(theta)
     vox, grp, obj, w, v = ren["entries"]; tree = build_tree(sc, grp, obj)
     p = (c + torch.tensor([0.0, 0.0, 11.0], device=DEV))[None]                                   # between the bundles: both in the window
@@ -60,7 +63,8 @@ def test_two_bundles_are_two_entities_at_any_angle(theta):
     assert not ({int(n) for n in t["node"][0][live].tolist()} & leaves)                              # thin fibres merged: the bundles
 
 
-def test_resolved_fibres_are_their_own_entities():
+def test_resolved_fibres_are_their_own_entities(monkeypatch):
+    monkeypatch.setattr(SC_, "P_VISIBLE_STRANDS", 0.0)
     sc, ren, c, a1, a2 = _two_bundles(90, rf_um=6.0, Rb=14.0)                                       # fibres 3 voxels in radius
     vox, grp, obj, w, v = ren["entries"]; tree = build_tree(sc, grp, obj)
     t = entity_targets(ren["entries"], tree, sc.shape, (0, 0, 0), 1, sc.shape, c[None], torch.tensor([1.0], device=DEV), c_sig=0.5)
@@ -68,8 +72,9 @@ def test_resolved_fibres_are_their_own_entities():
     nodes = t["node"][0][t["node"][0] >= 0]
     assert len(nodes) >= 1 and all(int(n) in leaves for n in nodes)                                 # single fibres
     t2 = entity_targets(ren["entries"], tree, sc.shape, (0, 0, 0), 1, sc.shape, c[None], torch.tensor([8.0], device=DEV), c_sig=0.5)
-    n2 = t2["node"][0][t2["node"][0] >= 0]
-    assert len(n2) >= 1 and not any(int(n) in leaves for n in n2)                                   # at a coarse scale, the bundles
+    live2 = t2["node"][0] >= 0; n2 = t2["node"][0][live2]; m2 = t2["mass"][0][live2]
+    big2 = m2 >= 0.05 * m2.sum()                                                                    # (a lone fibre at the window's edge stays
+    assert len(n2) >= 1 and not any(int(n) in leaves for n in n2[big2])                            # itself, by the rule): at a coarse scale, the bundles
 
 
 def test_tree_every_leaf_reaches_the_root_through_its_population():

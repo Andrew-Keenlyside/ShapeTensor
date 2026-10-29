@@ -255,7 +255,7 @@ def curves_like(P, rad, rng: Rng, obj, seg, contrast, **kw) -> Curves:
     N, S = P.shape[:2]; dev = P.device
     z = lambda v: torch.full((N, S), float(v), device=dev)
     if kw.get("spread") is None:                                                   # each curve its own spread (29 Oct)
-        kw["spread"] = draw_spread(N, rng.g, dev)
+        kw["spread"] = draw_spread(N, rng.g if rng is not None else None, dev)          # (no generator: the global one)
     return Curves(P=P, rad=rad, flat=kw.pop("flat", z(1.0)), wall=kw.pop("wall", z(0.0)), sexp=kw.pop("sexp", z(2.0)),
                   contrast=contrast if torch.is_tensor(contrast) and contrast.dim() == 2 else z(contrast),
                   lumen_c=kw.pop("lumen_c", z(0.0)), obj=obj, seg=seg, **kw)

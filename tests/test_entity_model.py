@@ -27,8 +27,8 @@ def test_entities_hold_the_total(style):
     import shapetensor.learn.train as TR
     from shapetensor.filters import gaussian
     from shapetensor.learn.scene import draw_scene
-    TR.HEAD = "entities"
-    try:
+    TR.HEAD = "entities"; sheets = TR.INTERFACE_SHEETS; TR.INTERFACE_SHEETS = False              # (populations only: the region
+    try:                                                                                              # interfaces' sheets are entities too)
         found = False
         for seed in range(120):
             s, d = draw_scene((48,) * 3, seed=seed, device=DEV, strength=0.0, canvas=96, style=style, n_groups=(1, 2), underlay_p=0.0,
@@ -41,7 +41,7 @@ def test_entities_hold_the_total(style):
             pytest.skip("no scene with population material in the window")
         out = TR.entity_queries(s, d, 48, seed, DEV)
     finally:
-        TR.HEAD = "slots"
+        TR.HEAD = "slots"; TR.INTERFACE_SHEETS = sheets
     keep = [k for k, L in enumerate(s.layers) if L.role not in TR.NOT_ENTITY]                       # populations only: no interfaces
     K = d["occupancy"].shape[0]
     full = lambda x: x.float().view(-1, 1, 1, 1).expand(K, 48, 48, 48) if x.dim() == 1 else x.float()
