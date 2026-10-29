@@ -191,7 +191,7 @@ def configure_from_args(args: dict | None, matching: bool = False):
     or not; with ``matching`` also its matching rule (evaluations keep one rule, so runs stay comparable)."""
     global POP_BG, POP_MATCH_AS_LOSS
     args = args or {}
-    POP_BG = int(args.get("pop_seq", 0) or 0) == 2
+    POP_BG = int(args.get("pop_seq", 0) or 0) >= 2
     if matching:
         POP_MATCH_AS_LOSS = not bool(args.get("pop_match_share", False))
 

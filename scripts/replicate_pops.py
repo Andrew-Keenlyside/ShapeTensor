@@ -28,7 +28,7 @@ torch.cuda.set_per_process_memory_fraction(float(os.environ.get("MEMFRAC", 0.42)
 ck = torch.load(os.path.join(os.path.dirname(a.items), "model.pt"), map_location="cpu", weights_only=False); args = dict(ck["args"])
 for kv in a.set:
     k, v = kv.split("=", 1); args[k] = json.loads(v)
-ET.ENT_WEIGHTS.update(args["weights"]); ET.POP_BG = int(args.get("pop_seq", 0) or 0) == 2
+ET.ENT_WEIGHTS.update(args["weights"]); ET.POP_BG = int(args.get("pop_seq", 0) or 0) >= 2
 ET.POP_MATCH_AS_LOSS = not bool(args.get("pop_match_share", False)); TR.ROUTES = 1.0
 for kv in a.et:
     k, v = kv.split("=", 1); setattr(ET, k, json.loads(v))

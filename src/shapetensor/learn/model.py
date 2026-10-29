@@ -247,6 +247,7 @@ def st_features_ext(j6: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
 #: training: pool the direct path's bank only where the queries need it (z and y passes over the volume, the x pass at
 #: the queries' trilinear corners; review 5 -- the levels are never stored): ``(B, Q, L, Dd)`` straight into the decoder
 OD_AT_POINTS = False
+POP_EXIST_SHARE = 0.03           # pop_seq 3: a slot exists when its share passes this (a smooth step), no existence output of its own
 POP_CLAIM_DEG = 10.0             # pop_seq 2: the width of an earlier slot's claim around its directions (the quadrature's spacing ~15 deg)
 POP_SHARPNESS = True             # pop_dir: each slot's direction weights sharpened by exp(t(p)), t from the point code (the Cholesky
                                  # rows, unused there; 0 at the start): a line no longer needs large logits at every direction
@@ -385,7 +386,7 @@ class EntityDecoder(nn.Module):
             self.pop_u = nn.Sequential(nn.Linear(hidden + 32 + (64 if self.oprobe else 0) + ((1 + self.pop_k) if self.pop_seq else 0), 128), nn.SiLU(), nn.Linear(128, 128), nn.SiLU(), nn.Linear(128, self.pop_k))
             nn.init.zeros_(self.pop_u[-1].weight); nn.init.zeros_(self.pop_u[-1].bias)               # (uniform weights: isotropic at the start)
             self.register_buffer("pop_u_dirs", fib_hemisphere(self.pop_dir), persistent=False)
-            if self.pop_seq == 2:
+            if self.pop_seq >= 2:
                 g_ = fib_hemisphere(self.pop_dir); th = torch.acos((g_ @ g_.T).abs().clamp(max=1.0))     # axial angles (rotation invariant)
                 kern = torch.exp(-0.5 * (th / math.radians(POP_CLAIM_DEG)) ** 2); kern = kern / kern.sum(-1, keepdim=True)
                 self.register_buffer("pop_kern", kern, persistent=False)
@@ -607,7 +608,7 @@ class EntityDecoder(nn.Module):
             if not getattr(self, "pop_seq", False):
                 w = torch.softmax(self.pop_u(h.to(self.pop_u[0].weight.dtype)).float() * sharp, -2)  # (..., Q, N, K) over the directions
                 return {"pop_exist": ex, "pop_share": sh, "pop_T": mom(w)}
-            if getattr(self, "pop_seq", 0) == 2:
+            if getattr(self, "pop_seq", 0) >= 2:
                 return self._populations_seq2(p, h, o, sharp, mom)
             held = torch.zeros(*h.shape[:-1], 1, device=h.device); Ts = []                         # (..., Q, N, 1): u^T T u of the slots so far
             Ub = U.float() if uu.dim() > 3 else U.float()[None]
@@ -640,8 +641,9 @@ class EntityDecoder(nn.Module):
             summ = torch.stack([lh[..., 0].amax(-1), lh[..., 0].mean(-1), 1 - rest, torch.log(N * wk[..., 0].amax(-1))], -1)
             hk = torch.zeros(*p.shape[:-1], K_, device=dev); hk[..., k] = 1.0
             es = self.pop_s(torch.cat([p.float(), summ, hk], -1).to(self.pop_s[0].weight.dtype)).float()
-            ex.append(torch.sigmoid(es[..., 0])); f = torch.sigmoid(es[..., 1] - 1.0986)            # (a quarter of the rest at the start)
+            f = torch.sigmoid(es[..., 1] - 1.0986)                                              # (a quarter of the rest at the start)
             sh.append(rest * f); rest = rest * (1 - f)
+            ex.append(torch.sigmoid((sh[-1] - POP_EXIST_SHARE) / 0.01) if self.pop_seq == 3 else torch.sigmoid(es[..., 0]))   # 3: exists = holds a share
             held = held + N * (wk[..., 0] @ self.pop_kern.T)[..., None]                             # its claim, smoothed over ~POP_CLAIM_DEG
         return {"pop_exist": torch.stack(ex, -1), "pop_share": torch.stack(sh + [rest], -1), "pop_T": torch.stack(Ts, -3), "pop_bg": bg}
 
