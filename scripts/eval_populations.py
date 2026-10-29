@@ -14,7 +14,8 @@ to the model's slots exactly as in training. Metrics:
 Phantoms (`shapetensor.phantoms`): bundle axis error, crossing both-found at 90/60/45 deg, and the fibre-free texture's
 dominant line-ness (D).
 
-    PYTHONPATH=src python scripts/eval_populations.py CKPT [N]   (env STRENGTHS=0.3,1.0 WINDOW=3 OUT=metrics.json)
+    PYTHONPATH=src python scripts/eval_populations.py CKPT [N]   (env STRENGTHS=0.3,1.0 WINDOW=3 WINDOWS=6,12 OUT=metrics.json;
+WINDOWS: the synthetic metrics at strength 0.3 also at these windows, keys synthetic_s0.3_w6 ...)
 """
 import json
 import math
@@ -66,7 +67,7 @@ def st_axis(x, pts, sig):
 
 
 res = {"checkpoint": ckp, "step": ck.get("step"), "window": WIN}
-for S in STR:
+def synthetic(S, WIN):
     base = dict(canvas=128, crops_per_scene=8, cross_p=0.5, p_centre=0.5, deep_tree=True, fill_quota=SC.FILL_QUOTA)
     gen = LT.difficulty_gen(0.4 + 0.6 * S, base)
     acc = {k: [] for k in ("ax_m", "ax_st", "cross", "tp", "fp", "fn", "sh_err", "sh_triv", "cls_ok", "ex_pred", "ex_true", "lin")}
@@ -96,6 +97,10 @@ for S in STR:
         big = v_t & (s_t >= 0.2) & has[:, None]
         acc["cls_ok"].append((cls_t == cls_p)[big].float().cpu())
         acc["lin"].append(wp[..., 0][on & has[:, None]].cpu())
+        for M_, ok_, key_ in ((P["pop_T"], on & has[:, None], "dup_p"), (E_t, v_t & has[:, None], "dup_t")):   # near-identical slot pairs
+            dd_ = ((M_[:, :, None] - M_[:, None]) ** 2).sum((-1, -2)); K_ = M_.shape[1]
+            pr_ = ok_[:, :, None] & ok_[:, None, :] & torch.triu(torch.ones(K_, K_, dtype=torch.bool, device=dev), 1)
+            acc.setdefault(key_, []).append((((dd_ < 0.05) & pr_).sum((-1, -2)).float())[has].cpu())
         line_t = v_t & (cls_t == 0)
         single = has & ((line_t & (s_t >= 0.6)).sum(-1) == 1)
         if bool(single.any()):
@@ -120,9 +125,18 @@ for S in STR:
          "C_exist_f1": f1, "C_exist_f1_trivial": f1_triv, "C_share_err": float(cat("sh_err").mean()), "C_share_err_trivial": float(cat("sh_triv").mean()),
          "D_shape_acc": float(cat("cls_ok").mean()) if acc["cls_ok"] else float("nan"),
          "F_exist_rate_pred": float(cat("ex_pred").mean()), "F_exist_rate_true": float(cat("ex_true").mean()),
-         "F_lineness_sd": float(cat("lin").std()) if acc["lin"] else float("nan")}
+         "F_lineness_sd": float(cat("lin").std()) if acc["lin"] else float("nan"),
+         "dup_pairs_pred": float(cat("dup_p").mean()) if acc.get("dup_p") else float("nan"), "dup_pairs_true": float(cat("dup_t").mean()) if acc.get("dup_t") else float("nan")}
+    return r
+
+
+for S in STR:
+    r = synthetic(S, WIN)
     res[f"synthetic_s{S}"] = r
     print(f"strength {S}: " + ", ".join(f"{k} {v:.3f}" if isinstance(v, float) else f"{k} {v}" for k, v in r.items()), flush=True)
+for W in [float(v) for v in os.environ.get("WINDOWS", "").split(",") if v]:                    # other windows (strength 0.3)
+    r = synthetic(0.3, W); res[f"synthetic_s0.3_w{W:g}"] = r
+    print(f"strength 0.3, window {W:g}: " + ", ".join(f"{k} {v:.3f}" if isinstance(v, float) else f"{k} {v}" for k, v in r.items()), flush=True)
 
 # phantoms
 ph = {}

@@ -454,3 +454,24 @@ the window, against the every-slot-present answer.
   contrast-blind).
 - **04:32** **Pilot P3** (1500 steps, from scratch): L2's structure with the share-weighted matching restored
   (`--pop-match-share`), to isolate the cause of the regression.
+
+## Day log (29 Oct 2026, times ET)
+
+- **~05:00** The overnight session ended. P3 died at step ~450 with no long run. The machine rebooted at 09:37.
+  - CUDA now starts only when limited to the card at 41:00, by UUID; the card at 2B:00 errors.
+  - Jobs are now started with `setsid` and drivers live in the repo (`scripts/pilot.sh`), so a session ending can't
+    kill them.
+- **10:20** **HiP-CT deep brain** (S-21-46, P2 model; `scripts/figure_hipct_dec.py`). In fibre crops the model's
+  predominant direction is a near-uniform yellow-green (mostly y, some x).
+  - **10:58** **Check of the line bank's strongest direction** (an image-only reader):
+    - in the two fibre crops it is mostly y, |x| 0.4-0.5 (|y| > 0.8 at 54-94 % of points, against 20 % for random);
+    - in a grey-matter crop it has no preference (7-17 %).
+  - **So the y is anatomical, not an acquisition artefact,** and the model's colour there is coarsely right. The
+    remaining fault is coarseness: no spatial variation, and duplicated slots.
+- **10:30-11:00** **Fixes implemented** (unit-tested, CPU smoke-tested together):
+  - `--pop-seq 2`: claims from smoothed direction weights (not cos^2 lobes); the background as its own share; shares
+    by stick breaking with sequential existence;
+  - `--od-widths 0.6 1.5 3`: bank cross-sections, each high-passed at 3 x its width;
+  - `--probe-scale`: the probe's offsets follow the window;
+  - `--e-line`: a line-stratified share of queries;
+  - evaluation at extra windows (`WINDOWS`) and duplicate-slot pairs.
