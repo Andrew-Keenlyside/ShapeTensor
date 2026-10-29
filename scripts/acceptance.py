@@ -23,7 +23,8 @@ check("C", f["C_exist_f1"] >= f["C_exist_f1_trivial"] + 0.05 and f["C_share_err"
       f"existence F1 {f['C_exist_f1']:.3f} vs every-slot {f['C_exist_f1_trivial']:.3f}; share error {f['C_share_err']:.3f} vs trivial {f['C_share_err_trivial']:.3f}")
 tex = fin["phantoms"].get("texture_tex0.5", {}).get("dominant_lineness_below_0.4", float("nan"))
 check("D", f["D_shape_acc"] >= 0.6 and tex >= 0.6, f"shape class {f['D_shape_acc'] * 100:.0f} % (need >= 60); texture phantom isotropic {tex * 100:.0f} % (need >= 60)")
-vals = [(int(m.group(1)), float(m.group(2))) for m in re.finditer(r"val (\d+)[^\n]*?val_pop ([0-9.]+)", log)]
+vals = [(int(m.group(1)), float(m.group(2))) for m in re.finditer(r"val (\d+):[^\n]*?val_pop ([0-9.]+)", log)]   # (not the "(baseline)" lines: a
+                                                                                                   # resumed run scores one at its resume step)
 vals = [v for v in vals if v[0] > 0]
 if len(vals) >= 2:
     first, last = vals[0][1], vals[-1][1]
