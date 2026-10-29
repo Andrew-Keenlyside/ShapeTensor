@@ -51,10 +51,13 @@ def draw(ax, centres, coefs, size: float, view: str = "z", flat_ratio: float = 1
     ax.add_collection(PolyCollection([polys[i] for i in o], facecolors=[colours[i] for i in o], edgecolors="none", antialiased=False))
 
 
-def draw_tensors(ax, centres, T6_zyx, size: float, view: str = "z", scale=None):
+def draw_tensors(ax, centres, T6_zyx, size: float, view: str = "z", scale=None, min_axis: float = 0.12):
     """Elliptical ODF glyphs: the ellipsoids of trace-1 second-moment tensors ``T6_zyx (N, 6)`` (zz, yy, xx, zy, zx, yx),
-    semi-axes proportional to the eigenvalues (a line is a needle, a sheet a disc, isotropic a sphere), each surface
-    point coloured by its own direction (DEC). ``scale (N,)`` optionally shrinks each glyph (e.g. by its mass)."""
+    semi-axes proportional to the eigenvalues (a line is a needle, a sheet a disc, isotropic a sphere), drawn no thinner
+    than ``min_axis`` of their length so a line reads as a slim ellipsoid. Each glyph is one colour (29 Oct; colouring
+    each surface patch by its own direction made one ellipsoid look like broken, multicoloured pieces): DEC of its main
+    axis for a line, of its normal for a sheet, grey when near isotropic; shaded by a fixed light. ``scale (N,)``
+    optionally shrinks each glyph (e.g. by its share)."""
     v = MESH.vertices; faces = MESH.faces
     cols, rows, depth = {"z": (0, 1, 2), "y": (0, 2, 1), "x": (1, 2, 0)}[view]
     polys, colours, depths = [], [], []
@@ -63,7 +66,9 @@ def draw_tensors(ax, centres, T6_zyx, size: float, view: str = "z", scale=None):
         T = np.array([[xx, yx, zx], [yx, yy, zy], [zx, zy, zz]])                                 # (x, y, z)
         T = T / max(np.trace(T), 1e-12)
         lam, V = np.linalg.eigh(T); iso = lam[0] / max(lam[2], 1e-12) > 0.6                   # near isotropic: a small grey sphere
-        lam = np.clip(lam, 0.04 * lam.max(), None)
+        cl, cp = (lam[2] - lam[1]) / max(lam[2], 1e-12), (lam[1] - lam[0]) / max(lam[2], 1e-12)
+        base = np.full(3, 0.62) if iso else np.abs(V[:, 2] if cl >= cp else V[:, 0])           # (x, y, z) -> R, G, B
+        lam = np.clip(lam, min_axis * lam.max(), None)
         M = V @ np.diag(lam / lam.max()) @ V.T
         sc = size * (1.0 if scale is None else float(scale[i])) * (0.3 if iso else 1.0)            # (iso small: a background sphere scaled by its
                                                                                                   # larger share hid the lines inside it)
@@ -73,11 +78,11 @@ def draw_tensors(ax, centres, T6_zyx, size: float, view: str = "z", scale=None):
         nrm *= np.sign((nrm * tri.mean(1)).sum(1))[:, None]
         view_dir = np.zeros(3); view_dir[depth] = -1.0
         front = (nrm @ view_dir) < 0.25
-        shade = 0.45 + 0.55 * np.clip(nrm @ _LIGHT, 0, 1)
-        dirc = np.abs(tri.mean(1)); dirc /= np.linalg.norm(dirc, axis=1, keepdims=True) + 1e-12
-        col = np.clip((np.full_like(dirc, 0.62) if iso else dirc) * shade[:, None], 0, 1)
+        shade = 0.35 + 0.65 * np.clip(nrm @ _LIGHT, 0, 1)
+        col = np.clip(base[None] * shade[:, None] + 0.08, 0, 1)
         for tt, cc, dd in zip(tri[front], col[front], tri[front][:, :, depth].mean(1)):
             polys.append(np.stack([cx + tt[:, cols], cy + tt[:, rows]], 1)); colours.append(cc); depths.append(dd)
     if polys:
         o = np.argsort(depths)[::-1]
-        ax.add_collection(PolyCollection([polys[i] for i in o], facecolors=[colours[i] for i in o], edgecolors="none", antialiased=False))
+        fc = [colours[i] for i in o]
+        ax.add_collection(PolyCollection([polys[i] for i in o], facecolors=fc, edgecolors=fc, linewidths=0.2, antialiased=True))
