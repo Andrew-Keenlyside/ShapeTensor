@@ -1050,7 +1050,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                    obj_head: bool = False, mc_fibres: bool = False, oriented: int = 0, geometry_targets: bool = False, block_norm: int = 1,
                    odirect: int = 0, od_sigmas: list | None = None, split_head: bool = False, mass_vote: bool = False, overfit: int = 0,
                    init_reset: str = "", ovis_targets: bool = True, od_norm: bool = False, dens_vis_w: float = 0.0, dens_gate: bool = False,
-                   freeze_trunk: int = 0, trunk_lr: float = 1.0, init_fresh: str = "", st_path: bool = False, iso_head: bool = False, dens_share: bool = False, freeze_extra: str = "", reset_dens_logit: bool = False, dens_readout: bool = False, readout_lobe: bool = False, gate_share: bool = False, dens_nobg: bool = False, strength_mix: bool = False, dens_ce: bool = False):
+                   freeze_trunk: int = 0, trunk_lr: float = 1.0, init_fresh: str = "", st_path: bool = False, iso_head: bool = False, dens_share: bool = False, freeze_extra: str = "", reset_dens_logit: bool = False, dens_readout: bool = False, readout_lobe: bool = False, gate_share: bool = False, dens_nobg: bool = False, strength_mix: bool = False, dens_ce: bool = False, ce_no_st: bool = False):
     """The entity-field model's training (notes/plan_entity_field_model.md; :mod:`~shapetensor.learn.entity_train`):
     the scene generator with entity targets at random points and scales, the overall ODF on the lattice, directions
     sampled per query, the difficulty widened linearly from ``level0`` to 1 over the first ``level_steps`` of the run,
@@ -1137,7 +1137,7 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 z_vote=bool(z_vote), dir_sh=int(dir_sh), background_entity=bool(background_entity), ray=bool(ray),
                 region_density=bool(region_density), kappa_log=bool(kappa_log), vote_objects=bool(vote_objects), dens_same_norm=bool(dens_same_norm), own_objects=bool(own_objects), bg_head=bool(bg_head), orient_from_texture=bool(orient_from_texture), obj_head=bool(obj_head),
                 block_norm=int(block_norm), odirect=int(odirect), od_sigmas=list(od_sigmas) if od_sigmas else None, split_head=bool(split_head),
-                mass_vote=bool(mass_vote), od_norm=bool(od_norm), ovis_targets=bool(ovis_targets), dens_vis_w=float(dens_vis_w), dens_gate=bool(dens_gate), gate2=bool(dens_readout), dens_readout=bool(dens_readout), readout_lobe=bool(readout_lobe), gate_share=bool(gate_share), dens_nobg=bool(dens_nobg), strength_mix=bool(strength_mix), dens_ce=bool(dens_ce),
+                mass_vote=bool(mass_vote), od_norm=bool(od_norm), ovis_targets=bool(ovis_targets), dens_vis_w=float(dens_vis_w), dens_gate=bool(dens_gate), gate2=bool(dens_readout), dens_readout=bool(dens_readout), readout_lobe=bool(readout_lobe), gate_share=bool(gate_share), dens_nobg=bool(dens_nobg), strength_mix=bool(strength_mix), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st),
                 freeze_trunk=int(freeze_trunk), trunk_lr=float(trunk_lr), init_fresh=init_fresh, st_path=bool(st_path), iso_head=bool(iso_head), dens_share=bool(dens_share), freeze_extra=freeze_extra, reset_dens_logit=bool(reset_dens_logit),
                 mc_fibres=bool(mc_fibres), oriented=int(oriented), geometry_targets=bool(geometry_targets))
     skipped = {}                                                                                   # non-finite steps skipped
@@ -1451,6 +1451,7 @@ def main():
     ap.add_argument("--reset-dens-logit", action="store_true", help="warm start: the direction MLP's density logit row at zero (its lobes no longer multiply the density path)")
     ap.add_argument("--freeze-extra", default="", help="entities: comma-separated modules frozen with the trunk (--freeze-trunk), e.g. ent.dir")
     ap.add_argument("--dens-readout", action="store_true", help="entities (with --dens-gate): a two-part gate (visibility x amplitude), the visibility on the image-measured v, the gated readout trained end to end")
+    ap.add_argument("--ce-no-st", action="store_true", help="entities (with --dens-ce): no structure tensor in the density (neither its term nor its cues)")
     ap.add_argument("--dens-ce", action="store_true", help="entities: the density as a normalised distribution (log-SH + bank + structure tensor over a uniform floor) trained by cross-entropy against the non-background ODF")
     ap.add_argument("--strength-mix", action="store_true", help="entities: each step's crops at a random strength and difficulty between strength0/level0 and strength1/1 (a mix, not a ramp)")
     ap.add_argument("--dens-nobg", action="store_true", help="entities (with --dens-readout): the readout's target without the background entity (the bg head's)")
@@ -1516,7 +1517,7 @@ def main():
                        region_dec=a.region_dec, where_first=a.where_first, z_vote=a.z_vote, dir_sh=a.dir_sh,
                        background_entity=not a.no_background_entity, ray=a.ray, e_cross=a.e_cross, region_density=not a.no_region_density,
                        kappa_log=a.kappa_log, vote_objects=a.vote_objects, dens_same_norm=a.dens_same_norm, own_objects=a.own_objects, bg_head=a.bg_head, orient_from_texture=not a.orient_from_contrast, obj_head=a.obj_head,
-                       block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote, od_norm=a.od_norm, ovis_targets=not a.no_ovis_targets, dens_vis_w=a.dens_vis_w, dens_gate=a.dens_gate, freeze_trunk=a.freeze_trunk, trunk_lr=a.trunk_lr, init_fresh=a.init_fresh, st_path=a.st_path, iso_head=a.iso_head, dens_share=a.dens_share, freeze_extra=a.freeze_extra, reset_dens_logit=a.reset_dens_logit, dens_readout=a.dens_readout, readout_lobe=a.readout_lobe, gate_share=a.gate_share, dens_nobg=a.dens_nobg, strength_mix=a.strength_mix, dens_ce=a.dens_ce,
+                       block_norm=a.block_norm, odirect=a.odirect, od_sigmas=a.od_sigmas, split_head=a.split_head, mass_vote=a.mass_vote, od_norm=a.od_norm, ovis_targets=not a.no_ovis_targets, dens_vis_w=a.dens_vis_w, dens_gate=a.dens_gate, freeze_trunk=a.freeze_trunk, trunk_lr=a.trunk_lr, init_fresh=a.init_fresh, st_path=a.st_path, iso_head=a.iso_head, dens_share=a.dens_share, freeze_extra=a.freeze_extra, reset_dens_logit=a.reset_dens_logit, dens_readout=a.dens_readout, readout_lobe=a.readout_lobe, gate_share=a.gate_share, dens_nobg=a.dens_nobg, strength_mix=a.strength_mix, dens_ce=a.dens_ce, ce_no_st=a.ce_no_st,
                        mc_fibres=a.mc_fibres, oriented=a.oriented, geometry_targets=a.geometry_targets, overfit=a.overfit, init_reset=a.init_reset)
         return
     if a.head == "lobes":

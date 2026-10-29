@@ -260,7 +260,8 @@ class EntityDecoder(nn.Module):
                  dens_sh: bool = False, dens_mlp: bool = False, z_vote: bool = False, dir_sh: int = 0, ray: bool = False,
                  kappa_log: bool = False, oprobe: bool = False, dens_log: bool = False, oprobe_only: bool = False, odirect: int = 0,
                  od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, od_norm: bool = False, dens_gate: bool = False, st_path: bool = False,
-                 iso_head: bool = False, gate2: bool = False, gate_share: bool = False, dens_ce: bool = False):
+                 iso_head: bool = False, gate2: bool = False, gate_share: bool = False, dens_ce: bool = False,
+                 ce_no_st: bool = False):
         super().__init__()
         from .sh import n_coef
         self.emb, self.lmax, self.unc = emb, lmax, bool(unc)
@@ -351,7 +352,7 @@ class EntityDecoder(nn.Module):
         # oriented bank's term + the structure tensor's -g (u^T M u - 1/3); Z on a fixed hemisphere grid (exact on it),
         # trained by cross-entropy against the non-background material's ODF. At the start (zero heads) it is the
         # classical structure-tensor reader over a floor.
-        self.dens_ce = bool(dens_ce)
+        self.dens_ce = bool(dens_ce); self.ce_no_st = bool(ce_no_st)                         # (no structure tensor: neither term nor cues)
         if self.dens_ce:
             from .sh import real_sh as _rsh, n_coef as _nc
             g_ = fib_hemisphere(CE_GRID); self.register_buffer("ce_grid", g_, persistent=False)
@@ -537,7 +538,7 @@ class EntityDecoder(nn.Module):
                 ovf = ov.float(); x.append(torch.log(ovf.amax(-1).clamp_min(1e-12) / ovf.mean(-1).clamp_min(1e-6)).clamp(-5.0, 5.0))
             else:
                 x.append(torch.zeros(p.shape[0], self.od_lv, device=p.device))
-        x.append(st_features_ext(j6, sigma)); x = torch.cat(x, -1)
+        x.append(torch.zeros(p.shape[0], 7, device=p.device) if self.ce_no_st else st_features_ext(j6, sigma)); x = torch.cat(x, -1)
         wdt = self.ce_sh[0].weight.dtype
         c = self.ce_sh(x.to(wdt)).float(); o3 = self.ce_floor(x.to(wdt)).float()
         w0 = torch.sigmoid(o3[:, 0]); gs = torch.exp(o3[:, 1:2].clamp(-3.0, 1.5)); bs = torch.exp(o3[:, 2:3].clamp(-3.0, 3.0))   # per point (the overfit
@@ -549,6 +550,8 @@ class EntityDecoder(nn.Module):
             l_ = c @ Y_.T.float()
             if self.ce_od is not None and ov is not None:
                 l_ = l_ + bs * self.ce_od(self.od_code(ov, self.od_weights(U))).float()[..., 0]
+            if self.ce_no_st:
+                return l_
             qd = torch.einsum("di,nij,dj->nd", U.float(), Mn, U.float())
             return l_ - self.ce_gain.float() * gs * (qd - 1.0 / 3.0)
 
@@ -699,7 +702,7 @@ class PopulationNet(nn.Module):
                  dens_log: bool = False, oprobe_only: bool = False, bg_head: bool = False, obj_head: bool = False, oriented: int = 0,
                  odirect: int = 0, split_head: bool = False, od_sigmas=(2.0, 4.0, 6.0), mass_vote: bool = False, block_norm: int = 0,
                  od_norm: bool = False, dens_gate: bool = False, st_path: bool = False, iso_head: bool = False, gate2: bool = False,
-                 gate_share: bool = False, dens_ce: bool = False):
+                 gate_share: bool = False, dens_ce: bool = False, ce_no_st: bool = False):
         super().__init__()
         self.region_density = bool(region_density)                                              # the region map a density (sum of the
         self.sh_lmax, self.lcn, self.has_query, self.desc_lmax, self.axis_head = sh_lmax, lcn, bool(query), desc_lmax, bool(axis_head)
@@ -738,7 +741,7 @@ class PopulationNet(nn.Module):
                                      z_vote=bool(z_vote), dir_sh=int(dir_sh), ray=bool(ray), kappa_log=bool(kappa_log),
                                      oprobe=bool(oprobe), dens_log=bool(dens_log), oprobe_only=bool(oprobe_only), odirect=int(odirect),
                                      od_sigmas=tuple(od_sigmas), mass_vote=bool(mass_vote), od_norm=bool(od_norm), dens_gate=bool(dens_gate),
-                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share), dens_ce=bool(dens_ce))
+                                     st_path=bool(st_path), iso_head=bool(iso_head), gate2=bool(gate2), gate_share=bool(gate_share), dens_ce=bool(dens_ce), ce_no_st=bool(ce_no_st))
             self.mass_region = bool(mass_region) and bool(region_head)                            # the mass: the region map in the query's window
             self.region = nn.Sequential(nn.Conv3d(c0 + c1 + c2, 32, 1), nn.SiLU(), nn.Conv3d(32, 1, 1)) if region_head else None
             # the background's occupancy (the isotropic remainder) at every voxel: the density's floor is background plus
@@ -814,7 +817,8 @@ class PopulationNet(nn.Module):
                    od_sigmas=tuple(args.get("od_sigmas") or (2.0, 4.0, 6.0)), mass_vote=bool(args.get("mass_vote", False)),
                    block_norm=int(args.get("block_norm", 0) or 0), od_norm=bool(args.get("od_norm", False)),
                    dens_gate=bool(args.get("dens_gate", False)), st_path=bool(args.get("st_path", False)), iso_head=bool(args.get("iso_head", False)),
-                   gate2=bool(args.get("gate2", False)), gate_share=bool(args.get("gate_share", False)), dens_ce=bool(args.get("dens_ce", False))) \
+                   gate2=bool(args.get("gate2", False)), gate_share=bool(args.get("gate_share", False)), dens_ce=bool(args.get("dens_ce", False)),
+                   ce_no_st=bool(args.get("ce_no_st", False))) \
             ._with_args(args)
 
     def _with_args(self, args: dict) -> "PopulationNet":
