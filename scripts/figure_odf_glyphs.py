@@ -42,7 +42,7 @@ def glyphs(ax, img, P, Q, rax, cax, step, title):
     ax.imshow(img, cmap="gray", vmin=0, vmax=1, alpha=0.55, interpolation="nearest")
     keep = [i for i, q in enumerate(Q) if q is not None and np.isfinite(q).all()]
     if keep:
-        view = {0: "x", 1: "y", 2: "z"}[3 - rax - cax]
+        view = {0: "z", 1: "y", 2: "x"}[3 - rax - cax]                                       # axes indexed (z, y, x)
         draw(ax, np.stack([[P[i][cax], P[i][rax]] for i in keep]), fit_sh(np.stack([Q[i] for i in keep]), grid.cpu().numpy()), 0.46 * step, view=view)
     ax.set_title(title, fontsize=8); ax.set_xticks([]); ax.set_yticks([])
 
@@ -115,12 +115,21 @@ else:
         label = f"{name} {', '.join(f'{k} {v:g}' for k, v in kw.items())} (texture {tx})"
         rows.append((label, x[:, y0, :].cpu().numpy(), pts.cpu().numpy(), truth, qm, ax_.cpu().numpy(), lin.cpu().numpy(), 0, 2, step))
 
-fig, axs = plt.subplots(len(rows), 4, figsize=(17, 4.3 * len(rows))); axs = np.atleast_2d(axs)
+minimal = os.environ.get("MINIMAL") == "1"                                                  # image, truth and model only
+nc = 3 if minimal else 4
+fig, axs = plt.subplots(len(rows), nc, figsize=(4.6 * nc, 4.6 * len(rows))); axs = np.atleast_2d(axs)
 for k, (label, img, P, truth, qm, sta, lin, rax, cax, step) in enumerate(rows):
     lo, hi = np.percentile(img, [1, 99]); im = np.clip((img - lo) / max(hi - lo, 1e-6), 0, 1)
-    axs[k, 0].imshow(im, cmap="gray", interpolation="nearest"); axs[k, 0].set_title(label, fontsize=8); axs[k, 0].set_xticks([]); axs[k, 0].set_yticks([])
-    glyphs(axs[k, 1], im, P, [None if (t is None or not np.isfinite(np.asarray(t)).all()) else np.asarray(t) for t in truth], rax, cax, step, "truth (from construction)")
-    glyphs(axs[k, 2], im, P, list(qm), rax, cax, step, f"model {mname}")
-    sticks(axs[k, 3], im, P, sta, lin, rax, cax, step, "structure tensor axis (length = line-ness)")
-fig.suptitle(f"ODFs at window sigma {SIG}: DEC glyphs (R = x, G = y, B = z), grey = near flat", fontsize=11)
-fig.tight_layout(rect=(0, 0, 1, 0.98)); fig.savefig(out, dpi=100); print("saved", out)
+    axs[k, 0].imshow(im, cmap="gray", interpolation="nearest"); axs[k, 0].set_xticks([]); axs[k, 0].set_yticks([])
+    axs[k, 0].set_title("synthetic image" if minimal else label, fontsize=10 if minimal else 8)
+    glyphs(axs[k, 1], im, P, [None if (t is None or not np.isfinite(np.asarray(t)).all()) else np.asarray(t) for t in truth], rax, cax, step,
+           "ground truth (from construction)")
+    glyphs(axs[k, 2], im, P, list(qm), rax, cax, step, "model" if minimal else f"model {mname}")
+    if not minimal:
+        sticks(axs[k, 3], im, P, sta, lin, rax, cax, step, "structure tensor axis (length = line-ness)")
+if not minimal:
+    fig.suptitle(f"ODFs at window sigma {SIG}: SH glyphs (DEC: R = x, G = y, B = z), grey = near flat", fontsize=11)
+if minimal:
+    for ax in axs.flat:
+        ax.title.set_fontsize(11)
+fig.tight_layout(rect=(0, 0, 1, 0.97 if minimal else 0.98)); fig.savefig(out, dpi=110); print("saved", out)
