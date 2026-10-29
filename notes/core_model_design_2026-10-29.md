@@ -221,3 +221,52 @@ code, the scene geometry, today's target bug fixes, the evaluation script struct
 
 Still open: whether real data may be used for hyperparameter choice or early stopping; the real-crop provenance of the
 phantoms' texture parameters and the generator's grain comment.
+
+## Implementation plan: per-object second-order ODFs (29 Oct 2026, 23:15 ET)
+
+**Framing.**
+- **Per voxel, per object:** the second moment of the object's local material directions, with its own spread drawn at
+  construction. Solids are isotropic.
+- **Per query, per object (at the grouping level):** one second-order Bingham lobe (axis + two spreads, so fanning) and a
+  mass.
+- **Scene target:** the mass-weighted sum of the objects' lobes (sum of densities, never of tensors).
+
+### Issues to settle first
+1. **Post-render displacement** (drift, misalignment, slice motion, ghosts, folds, held sections, augment `sections`,
+   `resample_artefacts`) moves the image but not the targets. Disable now; route through the targets' `grid` later.
+2. **Oriented nuisances** (`oriented_noise`, oriented speckle) look like texture populations without targets. Make them
+   isotropic.
+3. **Solids** carry their whole shape moment at every voxel. Make them I/3 unless the family is declared fibrous.
+4. **Fibres and strands** are pure tangent dyads. Give each its own spread at construction, then remove the global
+   `ENTITY_DISPERSION` floor.
+5. **Vessel walls** (user's choice): the local material (planar wall), or the vessel axis (line).
+6. **Sharpness against the direction grid.** Without the floor, straight fibres have kappa in the hundreds; the 256-point
+   grid (about 9 deg) cannot represent that. Keep an explicit *resolution* cap per lobe, tied to the grid, or use a
+   denser grid. This is a representational limit, not a semantic floor.
+7. **Texture-family visibility.** Most draws visible, a minority faint.
+8. **Mass dropped** by `m_min` / `share_keep` / `emax`: measure and report; keep it negligible.
+
+### Steps, each with its tests (no training until A-C pass)
+- **A. Construction semantics** (scene, generator, compose).
+  - Tests on single-object scenes:
+    - a straight fibre gives axis = its direction and kappa = its drawn spread;
+    - a sphere gives isotropic;
+    - a sheet gives a girdle;
+    - a fan gives kappa1 >> kappa2 with the spread in the fan plane;
+    - a solid ellipsoid gives isotropic.
+- **B. Targets** (entities.py, train.py, entity_train.py).
+  - Per-object window moments become one Bingham each, with the resolution cap and no floor.
+  - The CE target is their mass-weighted sum.
+  - Tests:
+    - the scene target equals the sum of the object lobes;
+    - the dropped mass is reported;
+    - the construction figure is re-rendered.
+- **C. Acquisition consistency.**
+  - Displacement nuisances off; oriented nuisances isotropic.
+  - Tests: a rod scene's image axis matches its target axis within 5 deg under every corruption, and the records contain
+    no displacement nuisance.
+- **D. Short training tests** (at most 30 min each):
+  - the capacity overfit on 8 clear crops (at least 80 % of the oracle);
+  - from scratch against a warm start on a balanced strength mix;
+  - figures: synthetic truth against model, phantoms with a fanning case added, and the construction figure.
+- **E. Per-object set head**, once D passes.
