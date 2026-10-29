@@ -22,7 +22,8 @@ def _only(key: str):
 @pytest.fixture
 def isolated(monkeypatch):
     monkeypatch.setattr(G, "CROSS_MIX", 0.0); monkeypatch.setattr(G, "CROSS_KEY", {})
-    yield
+    monkeypatch.setattr(G, "SIGNAL_REDRAW", 0.0)                                                    # (the signal floor's half-strength redraw
+    yield                                                                                           # may leave the one nuisance out)
     for k in list(G.MODALITIES):
         if k.startswith("_only_"):
             del G.MODALITIES[k]

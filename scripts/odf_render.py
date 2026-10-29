@@ -29,7 +29,7 @@ def draw(ax, centres, coefs, size: float, view: str = "z", flat_ratio: float = 1
     """Draw glyphs at display ``centres (N, 2)`` (column, row) for SH ``coefs (N, n_coef)``; ``size`` the glyph radius
     in display units. ``view``: the axis looked along -- "z" (columns = x, rows = y) or "y" (columns = x, rows = z)."""
     v = MESH.vertices; faces = MESH.faces
-    cols, rows, depth = {"z": (0, 1, 2), "y": (0, 2, 1)}[view]
+    cols, rows, depth = {"z": (0, 1, 2), "y": (0, 2, 1), "x": (1, 2, 0)}[view]
     polys, colours, depths = [], [], []
     for (cx, cy), c in zip(centres, coefs):
         r = c @ _B
@@ -56,7 +56,7 @@ def draw_tensors(ax, centres, T6_zyx, size: float, view: str = "z", scale=None):
     semi-axes proportional to the eigenvalues (a line is a needle, a sheet a disc, isotropic a sphere), each surface
     point coloured by its own direction (DEC). ``scale (N,)`` optionally shrinks each glyph (e.g. by its mass)."""
     v = MESH.vertices; faces = MESH.faces
-    cols, rows, depth = {"z": (0, 1, 2), "y": (0, 2, 1)}[view]
+    cols, rows, depth = {"z": (0, 1, 2), "y": (0, 2, 1), "x": (1, 2, 0)}[view]
     polys, colours, depths = [], [], []
     for i, ((cx, cy), t) in enumerate(zip(centres, T6_zyx)):
         zz, yy, xx, zy, zx, yx = [float(a) for a in t]
@@ -65,7 +65,8 @@ def draw_tensors(ax, centres, T6_zyx, size: float, view: str = "z", scale=None):
         lam, V = np.linalg.eigh(T); iso = lam[0] / max(lam[2], 1e-12) > 0.6                   # near isotropic: a small grey sphere
         lam = np.clip(lam, 0.04 * lam.max(), None)
         M = V @ np.diag(lam / lam.max()) @ V.T
-        sc = size * (1.0 if scale is None else float(scale[i])) * (0.55 if iso else 1.0)
+        sc = size * (1.0 if scale is None else float(scale[i])) * (0.3 if iso else 1.0)            # (iso small: a background sphere scaled by its
+                                                                                                  # larger share hid the lines inside it)
         p = (v @ M.T) * sc
         tri = p[faces]
         nrm = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]); nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-12
