@@ -39,8 +39,8 @@ import torch
 import torch.nn.functional as Fn
 
 from ..filters import gaussian
-from .generator import (Layer, Sample, _composite, background, companion_field, direction_field, eye6, layer_density, line_tensor,
-                        nuisance, render_layer, sheet_tensor, smooth_noise)
+from .generator import (Layer, Sample, _composite, background, companion_field, direction_field, draw_spread, eye6, layer_density,
+                        line_tensor, nuisance, render_layer, sheet_tensor, smooth_noise, spread_e, spread_tensor)
 from .physics import BY_MODALITY as PHYS_BY_MODALITY, MODES as PHYS_MODES, _to_grey, draw_material, draw_sequence, form_image
 
 
@@ -242,6 +242,8 @@ class Curves:
     phi: torch.Tensor | None = None
     density: torch.Tensor | None = None
     fibre_r: torch.Tensor | None = None    # descriptor: the constituents' radius (voxels) when the curve is an unresolved bundle
+    spread: torch.Tensor | None = None     # (N,) each curve's own spread angle (degrees): its material ODF (1 - e) t t^T + e (I - t t^T) / 2,
+                                           # e = sin^2 spread (29 Oct); hollow walls are sheets of material instead
 
     @property
     def N(self):
@@ -251,6 +253,8 @@ class Curves:
 def curves_like(P, rad, rng: Rng, obj, seg, contrast, **kw) -> Curves:
     N, S = P.shape[:2]; dev = P.device
     z = lambda v: torch.full((N, S), float(v), device=dev)
+    if kw.get("spread") is None:                                                   # each curve its own spread (29 Oct)
+        kw["spread"] = draw_spread(N, rng.g, dev)
     return Curves(P=P, rad=rad, flat=kw.pop("flat", z(1.0)), wall=kw.pop("wall", z(0.0)), sexp=kw.pop("sexp", z(2.0)),
                   contrast=contrast if torch.is_tensor(contrast) and contrast.dim() == 2 else z(contrast),
                   lumen_c=kw.pop("lumen_c", z(0.0)), obj=obj, seg=seg, **kw)
@@ -264,7 +268,7 @@ def curves_subset(c: Curves, keep: torch.Tensor) -> Curves | None:
     pick = lambda v: None if v is None else v[idx]
     return Curves(P=c.P[idx], rad=c.rad[idx], flat=c.flat[idx], wall=c.wall[idx], sexp=c.sexp[idx], contrast=c.contrast[idx],
                   lumen_c=c.lumen_c[idx], obj=c.obj[idx], seg=c.seg[idx], lam=pick(c.lam), phi=pick(c.phi), density=pick(c.density),
-                  fibre_r=pick(c.fibre_r))
+                  fibre_r=pick(c.fibre_r), spread=pick(c.spread))
 
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -674,14 +678,20 @@ def render_curves(cv: Canvas, c: Curves, max_points: float = 8e6, refine: bool =
             ph = phi[ci, si][:, None]
             xr = x * torch.cos(ph) - y * torch.sin(ph); yr = x * torch.sin(ph) + y * torch.cos(ph)
             Q = P[ci, si][:, None] + xr[..., None] * e1[ci, si][:, None] + yr[..., None] * e2[ci, si][:, None]   # (p, m, 3)
-            tt = line_tensor(T[ci, si])                                         # (p, 6)
+            tt = (spread_tensor(T[ci, si], spread_e(c.spread[ci])) if c.spread is not None   # (p, 6): the fibre's material ellipse
+                  else line_tensor(T[ci, si]))
             size = 0.5 * (a[ci, si] + b[ci, si]) if fr is None else fr[ci]          # the constituents' radius for an unresolved bundle
             desc = torch.stack([size, t[ci, si], lum_frac[ci, si], (b / a.clamp_min(1e-9))[ci, si], ang[ci, si]], 1)   # (p, 5)
             V = torch.cat([tt, desc, c.contrast[ci, si][:, None]], 1)            # (p, 12)
             idx = torch.nonzero(wall_pt)
             if idx.numel():
                 pi, mi = idx[:, 0], idx[:, 1]
-                cv.splat(Q[pi, mi], (w_area[:, 0] * dens[ci])[pi], V[pi], obj=c.obj[ci][pi], moved=moved)
+                Vp = V[pi]
+                hol = (op | multi)[:, 0][pi]                                    # a hollow tube's wall (or lamellae): a sheet of material,
+                if bool(hol.any()):                                             # its normal the local radial direction (29 Oct)
+                    rv = xr[pi, mi][:, None] * e1[ci, si][pi] + yr[pi, mi][:, None] * e2[ci, si][pi]
+                    Vp = Vp.clone(); Vp[hol, :6] = sheet_tensor(Fn.normalize(rv[hol], dim=-1))
+                cv.splat(Q[pi, mi], (w_area[:, 0] * dens[ci])[pi], Vp, obj=c.obj[ci][pi], moved=moved)
             lidx = torch.nonzero(lumen_pt & (c.lumen_c[ci, si][:, None] != 0))
             if lidx.numel():
                 pi, mi = lidx[:, 0], lidx[:, 1]
@@ -806,6 +816,7 @@ class Scene:
         self.obstacles = []                                # (centres (n, 3), radii (n,)) that fibres yield to
         self.parents = {}                                  # object id -> parent id (nuclei in cells, fibres in bundles)
         self.obj_r = {}                                    # object id -> its smallest radius (voxels): which level of the hierarchy resolves
+        self.obj_spread = {}                               # object id -> its fibres' spread angle (degrees; the last curve drawn for it)
         self.depth = None                                  # the laminar depth coordinate (voxels), if a layout was drawn
         self.outside = None                                # (Z, Y, X) bool: beyond the specimen (a real cortical layout's pial side)
         self.record = {"voxel_um": round(self.voxel_um, 4), "families": []}
@@ -1679,8 +1690,7 @@ class Scene:
         sv = torch.linalg.svdvals(A); amin = float(sv.min())
         rho = f ** (e1 / 2)                                                                     # ~ the radial coordinate (1 on the surface)
         occ = (0.5 + (1 - rho) * amin).clamp(0, 1)
-        M2 = A @ A.T; M2 = M2 / M2.trace()
-        tens = _sym6(M2).view(6, 1, 1, 1).expand(6, *self.shape)
+        tens = (eye6(dev) / 3).view(6, 1, 1, 1).expand(6, *self.shape)                         # solid material: isotropic (29 Oct)
         desc = torch.zeros((5,) + self.shape, device=dev); desc[0] = float(sv.mean()); desc[3] = float(sv[2] / sv[0])
         oid = int(self.ids(1, float(sv.min()))[0])
         return Group(name, "blob", float(sv.mean()), contrast, dense=[(occ, tens, desc, contrast, torch.full(self.shape, oid, device=dev, dtype=torch.long))])
@@ -1807,7 +1817,8 @@ class Scene:
         Q = C[:, None] + torch.einsum("nij,mj->nmi", A, G3)
         W = (torch.linalg.det(A).abs() * (2 / ns) ** 3)[:, None].expand(-1, G3.shape[0])
         Mg = (G3[:, :, None] * G3[:, None, :]).mean(0)                                                     # the unit shape's second moment
-        M2 = A @ Mg @ A.transpose(1, 2); M2 = M2 / M2.diagonal(dim1=1, dim2=2).sum(-1).clamp_min(1e-9)[:, None, None]
+        M2 = torch.eye(3, device=dev).expand(n, 3, 3) / 3                                                   # solid material: isotropic (29 Oct;
+                                                                                                            # was the solid's shape moment)
         sv = torch.linalg.svdvals(A)                                                                        # (n, 3) descending
         Vn = torch.cat([_sym6(M2), torch.stack([sv.mean(1), torch.zeros(n, device=dev), torch.zeros(n, device=dev), sv[:, 2] / sv[:, 0].clamp_min(1e-9),
                                                 torch.full((n,), float(min(1.0, max(0.0, (exps[0] - 2) / (exps[0] + 2)))) if shape != "polyhedron" else 0.6, device=dev)], -1),
@@ -2021,7 +2032,8 @@ class Scene:
                 P = _trim_paths(P_all[pid_all == j]) if P_all is not None else None
                 pid = int(self.ids(1, float(p["mask"].sum()) ** (1 / 3))[0])
                 g = Group("tract" if p["kind"] != "grey" else "grey fibres", "line", re, p["contrast"])
-                tens = line_tensor(p["dg"]).movedim(-1, 0)                                          # (6, Z, Y, X) along the field
+                tens = spread_tensor(p["dg"], float(spread_e(draw_spread(1, r.g, dev))[0])).movedim(-1, 0)   # (6, Z, Y, X) along the field,
+                                                                                                    # the smooth fill's own spread (29 Oct)
                 if P is not None and P.shape[0]:
                     N, S = P.shape[:2]
                     if fibres:                                                                      # resolved: each fibre an object
@@ -2037,7 +2049,7 @@ class Scene:
                         xi = torch.exp(r.u(0.15, 0.5) * r.randn(N)); xi = xi / xi.mean()            # group of fine fibres is; the swept
                         cap_ = 0.7 * (1 - p["phi"] * (1 - beta))                                     # renderer took minutes on a CPU). A strand's
                         dens = (beta * p["phi"] / fill * xi).clamp(0.02, max(cap_, 0.05))           # blurred peak is ~1.39 dens: capped below
-                        occ_s, ten_s = self._strand_field(P, re, dens)                              # saturation, the shortfall in the smooth part
+                        occ_s, ten_s = self._strand_field(P, re, dens, spread=draw_spread(P.shape[0], r.g, dev))   # saturation, the shortfall in the smooth part
                         phi_b = max(p["phi"] - fill * float(dens.mean()), 0.0)
                         m_in = p["mask"]
                         for _ in range(2):                                                          # overlapping strands: the field's 99th
@@ -2107,15 +2119,17 @@ class Scene:
         self.record["tissue"] = rec
         return groups
 
-    def _strand_field(self, P: torch.Tensor, re: float, dens: torch.Tensor):
+    def _strand_field(self, P: torch.Tensor, re: float, dens: torch.Tensor, spread: torch.Tensor | None = None):
         """Strands ``P (N, S, 3)`` of radius ``re`` and density ``dens (N,)`` as fields: each segment's material volume
-        (pi re^2 ds dens) and its direction dyad splatted trilinearly at its midpoint, then blurred (sigma 0.6 ``re``) --
+        (pi re^2 ds dens) and its direction dyad (with ``spread (N,)`` degrees: the strand's material ellipse) splatted
+        trilinearly at its midpoint, then blurred (sigma 0.6 ``re``) --
         ``occ (Z, Y, X)`` (mass kept) and the occupancy-weighted tensor ``(6, Z, Y, X)``."""
         shp = self.shape; dev = self.device
         sg = P[:, 1:] - P[:, :-1]; ds = sg.norm(dim=-1); keep = ds > 1e-6
         X = (0.5 * (P[:, 1:] + P[:, :-1]))[keep]; T = (sg / ds.clamp_min(1e-9)[..., None])[keep]
         W = (math.pi * re * re * ds * dens[:, None])[keep]
-        V = torch.cat([W[:, None], W[:, None] * line_tensor(T)], 1)                                  # (n, 7)
+        Tt = line_tensor(T) if spread is None else spread_tensor(T, spread_e(spread)[:, None].expand_as(ds)[keep])
+        V = torch.cat([W[:, None], W[:, None] * Tt], 1)                                              # (n, 7)
         G = torch.zeros(int(np.prod(shp)), 7, device=dev); Z_, Y_, X_ = shp
         p0 = X.floor(); fr = X - p0; i0 = p0.long()
         for dz in (0, 1):
@@ -2279,7 +2293,7 @@ class Scene:
             occ = occ * (0.9 / q99)
         occ = occ.clamp(0, 1)
         on = (occ > 1e-4).float(); desc = torch.zeros((5,) + shp, device=dev); desc[0] = re * on
-        contrast = self.contrast(5, 100); oid = self.ids(1, max(re, 0.25))
+        contrast = self.contrast(25, 100) if r.p(0.8) else self.contrast(5, 25); oid = self.ids(1, max(re, 0.25))   # 80 % clear, 20 % faint
         rec.setdefault("pops", []).append({"width": round(width, 2), "elong": round(elong, 1), "phi": round(phi, 3), "spread_deg": round(math.degrees(spread), 1),
                                            "strands": N, "contrast": round(contrast, 1)})
         g = Group("texture", "line", re, contrast, dense=[(occ, T, desc, contrast, torch.full(shp, int(oid[0]), device=dev, dtype=torch.long))])
@@ -2674,6 +2688,8 @@ class Scene:
                 desc = torch.stack([d3[0], torch.zeros_like(d3[0]), d3[1], torch.ones_like(d3[0]) * (occ > 0), d3[2]])
                 cv.add_dense(occ, tens, desc, g_.contrast, torch.full(self.shape, int(self.ids(1)[0]), device=self.device, dtype=torch.long))
             for c in g_.curves:
+                if c.spread is not None:
+                    self.obj_spread.update(zip(c.obj.tolist(), [round(v, 2) for v in c.spread.tolist()]))
                 render_curves(cv, c, max_points=2e6 if c.N > 1000 else 4e6)                          # (chunks: the splat's peak ~2 GB per 1e6 points;
                                                                                                      # the trainer's producer thread shares the GPU)
             for Q, W, V, obj in g_.points:                                      # (in chunks: a field of cells can be 10^7 points,
@@ -2685,6 +2701,10 @@ class Scene:
             if half:
                 res = {k: v.half() for k, v in res.items()}
             res["group"] = g_; out.append(res)
+        if self.obj_spread:                                                                     # the fibres' spread angles (degrees), inspectable:
+            sv_ = np.array(list(self.obj_spread.values()))                                      # per object in ``obj_spread``, summarised here
+            self.record["spread_deg"] = {"n": int(sv_.size), "q10": round(float(np.percentile(sv_, 10)), 2), "median": round(float(np.median(sv_)), 2),
+                                         "q90": round(float(np.percentile(sv_, 90)), 2)}
         ids, frac = cv.identities(2)
         ent = cv.entries()                                                                      # (voxel, population, object): the entities' targets
         lum = cv.lumen.view(self.shape).clamp(0, 1); lum_c = cv.lumen_c.view(self.shape) / cv.lumen.view(self.shape).clamp_min(1e-9)
@@ -3144,6 +3164,8 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
     extra = []
     for E in extra0:
         oc, (tc,) = _pool_fields(E.occupancy[tuple(sl)], [E.tensor[(slice(None),) + tuple(sl)]], zoom)
+        if E.kind == "blob":                                                 # a cell stain's cells: solid material, isotropic (29 Oct)
+            tc = (eye6(device) / 3).view(6, 1, 1, 1).expand(6, *tc.shape[1:]).clone()
         L = Layer(E.kind, torch.zeros(3, 1, 1, 1, device=device), E.radius / zoom, E.length / zoom, 0.0, torch.ones(shape, dtype=torch.bool, device=device),
                   E.contrast, occupancy=oc.clone(), tensor=tc.clone())
         L.desc = torch.tensor([E.radius / zoom, 0.0, 0.0], device=device).view(3, 1, 1, 1) * (oc > 0)[None]

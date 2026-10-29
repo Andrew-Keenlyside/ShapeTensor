@@ -30,7 +30,7 @@ G.ORIENT_FROM_TEXTURE = True; G.ORIENT_VIS = False; G.TARGETS_FROM_GEOMETRY = Tr
 from shapetensor.filters import gaussian
 from shapetensor.learn import scene as SC, lobe_train as LT, bingham as BG, entity_train as ET, augment as AU
 from shapetensor.learn.model import fib_hemisphere, CE_GRID
-from odf_render import draw, fit_sh
+from odf_render import draw, fit_sh, draw_tensors
 
 out = sys.argv[1]; seed = int(sys.argv[2]) if len(sys.argv) > 2 else 230_000_000; dev = "cuda"
 WIN = float(os.environ.get("WINDOW", 3.0)); LEV = float(os.environ.get("LEVEL", 0.6))
@@ -104,16 +104,16 @@ for j, n in enumerate(picked):
     ax = fig.add_subplot(gsp[0, j]); ax.imshow(mm, cmap="magma", vmin=0, vmax=max(float(mm.max()), 1e-6), extent=(0, 64, 64, 0), interpolation="nearest")
     sel = (tgl["e_gnode"] == n) & ((tgl["e_mass"].float() * tgl["e_vis"].float()) > 0.03)
     q_i, e_i = torch.nonzero(sel, as_tuple=True)
+    T6 = tgl["e_T6"].float()[q_i, e_i].cpu().numpy()
     if len(q_i):
-        R_ = tgl["e_R"].float()[q_i, e_i]; K_ = tgl["e_kappa"].float()[q_i, e_i].clamp(max=ET.DENS_KAPPA_MAX)
-        p_ = BG.pdf(grid.view(1, -1, 3), R_[:, None], K_[:, None]).cpu().numpy()
-        draw(ax, pts.cpu().numpy()[q_i.cpu().numpy()][:, [2, 1]], fit_sh(p_, grid.cpu().numpy()), 0.46 * step, view="z")
-        kap = np.median(K_.cpu().numpy(), 0)
+        draw_tensors(ax, pts.cpu().numpy()[q_i.cpu().numpy()][:, [2, 1]], T6, 0.46 * step, view="z")
+        ev = np.linalg.eigvalsh(np.stack([[[t[2], t[5], t[4]], [t[5], t[1], t[3]], [t[4], t[3], t[0]]] for t in T6]))
+        ev = ev / ev.sum(1, keepdims=True); lin = float(np.median(ev[:, 2] - ev[:, 1])); iso = float(np.median(3 * ev[:, 0]))
     else:
-        kap = [np.nan, np.nan]
+        lin = iso = float("nan")
     rad = float(tree.radius[n]) if n < tree.n else float("nan")
     lvl = "object" if n < tree.n and int(tree.kind[n]) == 0 else "population-level entity"
-    ax.set_title(f"one {lvl}: {pop_name(n)}, radius {rad:.1f} vox\nits mass (window {WIN:g}) + its own ODFs (median kappa {kap[0]:.0f}, {kap[1]:.0f})", fontsize=9)
+    ax.set_title(f"one {lvl}: {pop_name(n)}, radius {rad:.1f} vox\nits mass + its own elliptical ODFs (median line-ness {lin:.2f}, isotropy {iso:.2f})", fontsize=9)
     ax.set_xticks([]); ax.set_yticks([]); ax.set_xlim(0, 64); ax.set_ylim(64, 0)
 # all objects and the scene's target
 ax = fig.add_subplot(gsp[1, 0]); occ = d["occupancy"].float()[:, z0].cpu().numpy()
@@ -125,10 +125,12 @@ ax.set_xticks([]); ax.set_yticks([])
 t = tgl
 mm = (t["e_mass"].float() * t["e_vis"].float()).clamp_min(0) * (t["e_node"] >= 0); mo = mm * (~t["e_bg"].bool()).float()
 pt = BG.pdf(grid.view(1, -1, 1, 3), t["e_R"].float()[:, None], t["e_kappa"].float()[:, None].clamp(max=ET.DENS_KAPPA_MAX)); pt = (mo[:, None] * pt).sum(-1)
-ok = (mo.sum(1) > ET.MASS_EPS).cpu().numpy()
 ax = fig.add_subplot(gsp[1, 1]); ax.imshow(U_img[z0], cmap="gray", alpha=0.35)
-draw(ax, pts.cpu().numpy()[ok][:, [2, 1]], fit_sh(pt[torch.tensor(ok, device=dev)].cpu().numpy(), grid.cpu().numpy()), 0.46 * step, view="z")
-ax.set_title(f"scene target: mass-weighted mixture of all objects' ODFs\n(non-background, window {WIN:g} voxels; this is what the model is trained on)", fontsize=9)
+mt = mo.sum(1).clamp_min(1e-9); q_i, e_i = torch.nonzero(mo > 0.02, as_tuple=True)
+if len(q_i):
+    draw_tensors(ax, pts.cpu().numpy()[q_i.cpu().numpy()][:, [2, 1]], t["e_T6"].float()[q_i, e_i].cpu().numpy(), 0.46 * step, view="z",
+                 scale=torch.sqrt(mo[q_i, e_i] / mt[q_i]).cpu().numpy())
+ax.set_title(f"scene target: every object's elliptical ODF, stacked\n(scaled by its share of the mass; window {WIN:g} voxels)", fontsize=9)
 ax.set_xticks([]); ax.set_yticks([]); ax.set_xlim(-0.5, 63.5); ax.set_ylim(63.5, -0.5)
 rec = d.get("record", {}); rec1 = d1.get("record", {})
 ax = fig.add_subplot(gsp[1, 2]); ax.imshow(U_img[z0], cmap="gray"); ax.set_xticks([]); ax.set_yticks([])
@@ -144,6 +146,6 @@ except Exception as e:                                                          
     xa = x1; r_ = {"route": f"not applied ({type(e).__name__})"}
 ax = fig.add_subplot(gsp[1, 4]); ax.imshow(xa[z0].float().cpu().numpy(), cmap="gray"); ax.set_xticks([]); ax.set_yticks([])
 ax.set_title(f"training input after a batch augmentation route\n{', '.join(map(str, r_.keys()))[:70]}", fontsize=9)
-fig.suptitle(f"One synthetic scene, built object by object (seed {seed}; ODF glyphs: SH order 8, DEC R = x, G = y, B = z)", fontsize=12)
+fig.suptitle(f"One synthetic scene, built object by object (seed {seed}; elliptical ODFs: needle = line, disc = sheet, sphere = isotropic; DEC R = x, G = y, B = z)", fontsize=12)
 fig.tight_layout(rect=(0, 0, 1, 0.96)); fig.savefig(out, dpi=95); print("saved", out)
 print("picked:", [(n, pop_name(n), round(tot[n], 1)) for n in picked])

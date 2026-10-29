@@ -49,3 +49,33 @@ def draw(ax, centres, coefs, size: float, view: str = "z", flat_ratio: float = 1
             polys.append(np.stack([cx + t[:, cols], cy + t[:, rows]], 1)); colours.append(cc); depths.append(dd)
     o = np.argsort(depths)[::-1]                                                            # far first (viewer at -depth)
     ax.add_collection(PolyCollection([polys[i] for i in o], facecolors=[colours[i] for i in o], edgecolors="none", antialiased=False))
+
+
+def draw_tensors(ax, centres, T6_zyx, size: float, view: str = "z", scale=None):
+    """Elliptical ODF glyphs: the ellipsoids of trace-1 second-moment tensors ``T6_zyx (N, 6)`` (zz, yy, xx, zy, zx, yx),
+    semi-axes proportional to the eigenvalues (a line is a needle, a sheet a disc, isotropic a sphere), each surface
+    point coloured by its own direction (DEC). ``scale (N,)`` optionally shrinks each glyph (e.g. by its mass)."""
+    v = MESH.vertices; faces = MESH.faces
+    cols, rows, depth = {"z": (0, 1, 2), "y": (0, 2, 1)}[view]
+    polys, colours, depths = [], [], []
+    for i, ((cx, cy), t) in enumerate(zip(centres, T6_zyx)):
+        zz, yy, xx, zy, zx, yx = [float(a) for a in t]
+        T = np.array([[xx, yx, zx], [yx, yy, zy], [zx, zy, zz]])                                 # (x, y, z)
+        T = T / max(np.trace(T), 1e-12)
+        lam, V = np.linalg.eigh(T); lam = np.clip(lam, 0.04 * lam.max(), None)
+        M = V @ np.diag(lam / lam.max()) @ V.T
+        sc = size * (1.0 if scale is None else float(scale[i]))
+        p = (v @ M.T) * sc
+        tri = p[faces]
+        nrm = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]); nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-12
+        nrm *= np.sign((nrm * tri.mean(1)).sum(1))[:, None]
+        view_dir = np.zeros(3); view_dir[depth] = -1.0
+        front = (nrm @ view_dir) < 0.25
+        shade = 0.45 + 0.55 * np.clip(nrm @ _LIGHT, 0, 1)
+        dirc = np.abs(tri.mean(1)); dirc /= np.linalg.norm(dirc, axis=1, keepdims=True) + 1e-12
+        col = np.clip(dirc * shade[:, None], 0, 1)
+        for tt, cc, dd in zip(tri[front], col[front], tri[front][:, :, depth].mean(1)):
+            polys.append(np.stack([cx + tt[:, cols], cy + tt[:, rows]], 1)); colours.append(cc); depths.append(dd)
+    if polys:
+        o = np.argsort(depths)[::-1]
+        ax.add_collection(PolyCollection([polys[i] for i in o], facecolors=[colours[i] for i in o], edgecolors="none", antialiased=False))

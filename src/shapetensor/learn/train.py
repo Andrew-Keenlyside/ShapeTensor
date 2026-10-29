@@ -209,10 +209,9 @@ NOT_OBJECT = ("isotropic", "interface")
 REGION_DENSITY = True
 OVIS_TARGETS = True                # entities: the orientation targets' visibility measured on the acquired image at each query
                                    # (``entities.orientation_visibility``; 28 Oct review): an erased lobe asks for a flat density
-#: the entity tensors' dispersion floor ``T' = c T + (1 - c)(I - T) / 2`` (trace 1; isotropic unchanged): straight objects
-#: gave kappa at the fit's cap (600) -- delta lobes no image shows and the density basis (order 16) cannot draw; 0.94
-#: caps a line near kappa 17, as the phantoms' fibres. None: off (2026-10-27)
-ENTITY_DISPERSION = 0.94
+#: an optional global dispersion floor on the entity tensors, ``T' = c T + (1 - c)(I - T) / 2``. Off: every object's
+#: own spread is drawn at construction, so the targets are exactly the window-summed per-object elliptical ODFs
+ENTITY_DISPERSION = None
 
 
 def set_background_entity(on: bool = True):

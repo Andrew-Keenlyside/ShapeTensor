@@ -149,6 +149,28 @@ def sheet_tensor(n: torch.Tensor) -> torch.Tensor:
     return (eye6(n.device, n.shape[:-1]) - outer6(n)) / 2
 
 
+def spread_tensor(t: torch.Tensor, e) -> torch.Tensor:
+    """A fibre's local material ODF as an ellipse (29 Oct): ``(1 - e) t t^T + e (I - t t^T) / 2`` for directions
+    ``t (..., 3)`` and spread ``e = sin^2 s`` (scalar or ``(...)``; 0: the tangent's dyad, 2/3: isotropic). Trace 1."""
+    e = torch.as_tensor(e, dtype=t.dtype, device=t.device)
+    e = e[..., None] if e.dim() else e
+    d = outer6(t)
+    return (1 - e) * d + e * (eye6(t.device, t.shape[:-1]) - d) / 2
+
+
+SPREAD_DEG = (1.0, 15.0)            # each fibre-like object's own spread angle s (degrees, log-uniform): e = sin^2 s (29 Oct)
+
+
+def draw_spread(n: int, g: torch.Generator, device) -> torch.Tensor:
+    """``n`` spread angles (degrees), log-uniform in :data:`SPREAD_DEG`."""
+    lo, hi = math.log(SPREAD_DEG[0]), math.log(SPREAD_DEG[1])
+    return torch.exp(lo + (hi - lo) * torch.rand(n, generator=g, device=device))
+
+
+def spread_e(spread_deg: torch.Tensor) -> torch.Tensor:
+    return torch.sin(torch.deg2rad(spread_deg)) ** 2
+
+
 def blob_tensor(d: torch.Tensor, radius: float, length: float, step: float = 0.5) -> torch.Tensor:
     """The normalised second moment of a blob's rendered mass: its points (every ``step`` over ``length`` along
     ``d``: variance ``step² h (h + 1) / 3``) blurred by a Gaussian of ``radius`` plus the splat (variance
