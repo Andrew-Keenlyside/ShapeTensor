@@ -1,0 +1,577 @@
+"""Training of the entity-field model: directions per query, the losses and evaluation metrics.
+
+Per query point (``e_points``, scale ``e_sigma``) the targets hold up to E entities: node (in the crop's local tree),
+mass and visibility, Bingham frame ``e_R`` and concentrations ``e_kappa`` (moment-matched to the entity's shape tensor)
+and descriptors. The decoder is evaluated at D directions per query, half drawn from the entities' Bingham ODFs (by
+visible mass) and half uniform, and the losses compare, per direction:
+
+* **density**: ``f`` against the target ``rho(u) = sum_e m_e v_e p_e(u)``: L1 of the logs with a floor relative to the
+  query's mean density, so the angular shape is learned at any mass;
+* **mass**: with a mass output ``m``, its log ratio to the entities' total visible mass (floor 1 %); the density is then
+  compared by shape only (each normalised by its mean), so where and which way are learned apart;
+* **region**: the population region (visible occupancy of every oriented layer) at every voxel, by binary
+  cross-entropy: a segmentation-like objective that teaches the trunk regions, not only their edges;
+* **vote**: on directions one entity owns (its share of rho > 1/2, rho above ``OWN_REL`` of the query's mean): the
+  Bingham frame (axis-invariant, :func:`~shapetensor.learn.bingham.frame_loss`), the concentrations (log1p L1) and
+  the descriptors;
+* **tree**: hyperbolic distortion between owned directions' embeddings, ``(d_P(z_i, z_j) - t_ij)^2 / (1 + t_ij)`` with
+  ``t_ij`` the tree distance of their entities (0 within an entity), at any depth; and a gauge term: each embedding's
+  distance from the centre equals its entity's depth (the root at the centre, ancestors toward it);
+* **overall**: the overall ODF head (free SH per lattice cell) against the exact pooled density; **fraction** and
+  **points** on the lattice.
+"""
+from __future__ import annotations
+
+import math
+
+import torch
+import torch.nn.functional as Fn
+
+from . import bingham as BG
+
+#: the region map as a density (the sum of the populations' occupancies; crossings count each population); set by the
+#: trainer
+REGION_DENSITY = False
+ENT_WEIGHTS = {"density": 1.0, "mass": 1.0, "region": 1.0, "vote": 1.0, "kappa": 0.2, "desc": 0.2, "tree": 0.5, "overall": 1.0, "fraction": 0.2, "points": 0.5, "contrast": 0.5, "cross": 0.5}
+N_DIRS = 32
+TREE_PAIRS = 4096
+#: hyperbolic length of a tree edge: with the ball's radius capped at 1 - 1e-4 (9.9 from the centre), depth ~16 fits
+TREE_EDGE = 0.6
+#: the density loss's floor, as a share of the query's mean density (scale-free); its tails cost more than its peaks, so
+#: the mass term holds the level
+DENS_FLOOR = 0.05
+DENS_EPS = 1e-3                     # and at least this: empty queries go to low density, not -inf
+#: the density target's lobes no sharper than the direction basis can draw (order 16); the votes keep the full kappa
+DENS_KAPPA_MAX = 40.0
+MASS_EPS = 0.01                     # mass floor (1 % of the window): empty windows need not reach 0
+OWN_REL = 0.25                      # owned: density above this share of the query's mean
+#: votes (frame, concentrations, descriptors) only where an oriented entity owns the direction. The isotropic
+#: background's frame is undefined and its kappa 0; owning most directions, it would pull the per-direction
+#: concentration toward 0. The background's directions then vote anything; the readout takes the density's floor as the
+#: background (:func:`~shapetensor.learn.entity_infer.cluster` ``floor``). The tree keeps every owned direction.
+VOTE_OBJECTS = False
+VOTE_KAPPA_MIN = 0.5                # owners with kappa1 below this are isotropic (background: 0)
+#: the density's shape loss weighted toward the lobes: each direction by 1 + this x its target density relative to the
+#: sphere mean (a kappa-17 lobe's tip ~10, the floor < 1). Unweighted, every sampled direction counts alike and few land
+#: on a lobe's tip
+DENS_LOBE_WEIGHT = 0.0
+#: the target's shape normalised by its mean over the same uniform directions as the prediction's (``fbar``), not by its
+#: exact sphere mean: a few uniform directions often miss a sharp lobe (a kappa-17 lobe covers ~3 % of the sphere), so
+#: ``fbar`` is biased low, and normalising both the same way keeps them comparable
+DENS_SAME_NORM = False
+#: directions owned among the non-background entities only (by kappa1 >= VOTE_KAPPA_MIN where the targets carry no
+#: background flag), wherever their density reaches OWN_REL of the query's mean. The background owns no direction, as
+#: the readout takes the density's floor as the background; a lobe's flanks, where the floor outweighs the lobe, then
+#: train with the lobe's identity rather than the background's
+OWN_OBJECTS = False
+#: the overall ODF's relative error: energy floor per lattice cell (~ occupancy 0.03)
+OVERALL_FLOOR = 0.01
+
+
+#: the density target's angular smoothing, as a concentration ``ks`` (None: off). The per-direction L1 is minimised by
+#: the per-direction median: once the uncertainty about where a lobe lies exceeds its width, the optimum is flat. Lobes
+#: broader than that uncertainty keep their place in the median, so ``ks`` is annealed from broad (~2-3, ~35 deg) to
+#: sharp: the model first places the lobes, then narrows them.
+DENS_KAPPA_SMOOTH = None
+
+
+#: the entity half of the sampled directions drawn from the oriented entities only (by visible mass): isotropic
+#: entities' draws are uniform, and the background often holds most of the mass, which leaves few draws per lobe
+SAMPLE_ORIENTED = False
+
+
+def sample_dirs(T: dict, D: int = N_DIRS, frac_entity: float = 0.5, g: torch.Generator | None = None) -> torch.Tensor:
+    """``(B, Q, D, 3)`` directions per query: a share drawn near the entities' Bingham ODFs (entity chosen by visible
+    mass; mode axis spread by 1/sqrt(2 kappa + 1) along the frame's other axes), the rest uniform."""
+    m = (T["e_mass"] * T["e_vis"]).clamp_min(0) * (T["e_node"] >= 0)
+    B, Q, E = m.shape; dev = m.device
+    De = int(round(D * frac_entity)); Du = D - De
+    uni = Fn.normalize(torch.randn(B, Q, D, 3, generator=g, device=dev), dim=-1)
+    if De == 0:
+        return uni
+    if SAMPLE_ORIENTED:                                                                          # the oriented entities' lobes only
+        m = m * (T["e_kappa"][..., 0] >= VOTE_KAPPA_MIN)
+    has = m.sum(-1) > 0
+    pe = torch.where(has[..., None], m / m.sum(-1, keepdim=True).clamp_min(1e-12), torch.full_like(m, 1.0 / E))
+    comp = torch.multinomial(pe.view(-1, E), De, replacement=True, generator=g).view(B, Q, De)
+    R = torch.gather(T["e_R"], 2, comp[..., None, None].expand(-1, -1, -1, 3, 3))
+    k = torch.gather(T["e_kappa"], 2, comp[..., None].expand(-1, -1, -1, 2))
+    n = torch.randn(B, Q, De, 2, generator=g, device=dev)
+    u = R[..., :, 2] + n[..., :1] * R[..., :, 0] / torch.sqrt(2 * k[..., :1] + 1) + n[..., 1:] * R[..., :, 1] / torch.sqrt(2 * k[..., 1:] + 1)
+    # isotropic entities: uniform directions (the frame-based draw is not uniform at kappa 0)
+    iso = (k[..., 0] < VOTE_KAPPA_MIN)[..., None]
+    u = torch.where(iso, uni[:, :, :De], u)
+    u = torch.where(has[..., None, None], Fn.normalize(u, dim=-1), uni[:, :, :De])
+    return torch.cat([uni[:, :, De:], u], 2)
+
+
+def tree_distance(anc: torch.Tensor, i: torch.Tensor, j: torch.Tensor) -> torch.Tensor:
+    """Tree distances between local nodes ``i`` and ``j`` (``(P,)``) of one crop's ancestor table ``anc (U, Dm)`` (each
+    row the chain from the node to the root, -1 padded): depth_i + depth_j - 2 depth(lca)."""
+    ai, aj = anc[i], anc[j]; vi, vj = ai >= 0, aj >= 0
+    di = vi.sum(1) - 1; dj = vj.sum(1) - 1
+    eq = (ai[:, :, None] == aj[:, None, :]) & vi[:, :, None] & vj[:, None, :]
+    hit = eq.any(2)                                                                              # (P, Dm): which of i's ancestors j shares
+    k = torch.where(hit.any(1), hit.float().argmax(1), di + 1)                                    # the first shared one, counted up from i
+    return (di + dj - 2 * (di - k)).float()
+
+
+DENS_READOUT_LOBE = False           # with DENS_READOUT: the lobe also trained through the readout
+#: the density as a normalised distribution on the model's direction grid, trained by cross-entropy against the
+#: non-background material's ODF
+DENS_CE = False
+#: the readout's target without the background entity (whose mass is the background head's)
+DENS_NOBG = False
+DENS_READOUT = False                # with the two-part gate: the gated readout trained end to end
+#: with the gate: its target is the visible oriented share (the line entities' mass over the total, times the
+#: visibility), and the lobe is trained on the oriented part alone, weighted by that share; the isotropic pedestal is
+#: then a regression target
+DENS_SHARE = False
+#: the density loss weighted per query by 1 + this x the orientation's visibility
+DENS_VIS_WEIGHT = 0.0
+
+
+def density_shape_loss(f: torch.Tensor, rho: torch.Tensor, m_t: torch.Tensor, n_uni: int, w_q: torch.Tensor | None = None) -> torch.Tensor:
+    """The density's shape loss (its mass is the mass output's): ``f (B, Q, D)`` predicted and ``rho`` target densities
+    at the sampled directions (the first ``n_uni`` uniform), ``m_t (B, Q)`` the target masses. Log L1 of the densities
+    over their sphere means -- the prediction's estimated on its uniform directions, the target's exactly (its mass) or,
+    with :data:`DENS_SAME_NORM`, on the same directions; weighted toward the lobes with :data:`DENS_LOBE_WEIGHT`, and per
+    query by ``w_q (B, Q)`` if given."""
+    fbar = f[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-6) if n_uni > 0 else f.mean(-1, keepdim=True).clamp_min(1e-6)
+    has = (m_t > MASS_EPS)[..., None].expand_as(f)
+    tbar = rho[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-9) if (DENS_SAME_NORM and n_uni > 0) else m_t.clamp_min(1e-9)[..., None]
+    rel = rho / tbar
+    sh_p = torch.log(f / fbar + DENS_FLOOR); sh_t = torch.log(rel + DENS_FLOOR)
+    if not bool(has.any()):
+        return f.sum() * 0.0
+    if DENS_LOBE_WEIGHT > 0 or w_q is not None:
+        wd = (1 + DENS_LOBE_WEIGHT * rel).detach() if DENS_LOBE_WEIGHT > 0 else torch.ones_like(rel)
+        if w_q is not None:
+            wd = wd * w_q.detach()[..., None]
+        return ((sh_p - sh_t).abs() * wd)[has].sum() / wd[has].sum()
+    return (sh_p - sh_t).abs()[has].mean()
+
+
+def entity_loss(P: dict, T: dict, dirs: torch.Tensor, W: dict | None = None, margin: int = 4, g: torch.Generator | None = None):
+    """The entity losses for one batch: ``P`` the model's outputs (``P["ent"]`` at ``dirs``), ``T`` the targets."""
+    W = {**ENT_WEIGHTS, **(W or {})}
+    ent = P["ent"]; dev = dirs.device; parts = {}
+    mass = (T["e_mass"] * T["e_vis"]).clamp_min(0) * (T["e_node"] >= 0)                         # (B, Q, E)
+    pe = BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], T["e_kappa"][:, :, None].clamp(max=DENS_KAPPA_MAX))   # (B, Q, D, E)
+    contrib = mass[:, :, None] * pe; rho = contrib.sum(-1)
+    # the density's target smoothed on the sphere: each lobe's concentration combined with the kernel's,
+    # 1/k' = 1/k + 1/ks
+    if DENS_KAPPA_SMOOTH is not None:
+        ks = float(DENS_KAPPA_SMOOTH); kt = T["e_kappa"].clamp(max=DENS_KAPPA_MAX)
+        pe_s = BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], (kt * ks / (kt + ks))[:, :, None])
+        rho_d = (mass[:, :, None] * pe_s).sum(-1)
+    else:
+        rho_d = rho
+    rm = rho.mean(-1, keepdim=True)                                                                # each query's mean density (its mass)
+    n_uni = dirs.shape[2] - int(round(dirs.shape[2] * 0.5))                                        # sample_dirs: the uniform directions first
+    m_t = mass.sum(-1)
+    w_q = None; gate = ent.get("g")
+    if "e_ovis" in T:                                                                              # the orientation's visibility in the image
+        v = T["e_ovis"].float()[..., None]; hq = m_t > MASS_EPS
+        # DENS_READOUT: the gated readout (g x lobe + (1 - g) x flat) trained against the visibility-mixed target at
+        # every query, the lobe detached unless DENS_READOUT_LOBE (with DENS_NOBG, the background left to its own head);
+        # the lobe trained on the oriented part where its axis shows, the gate's visibility head on the image-measured v
+        if gate is not None and DENS_READOUT:
+            line = (T["e_kappa"][..., 1] >= 2.0) & (mass > 0)
+            lq = (mass * line).sum(-1) > 0.02
+            if DENS_NOBG and "e_bg" in T:
+                mass_r = mass * (~T["e_bg"].bool()).to(mass.dtype); rho_r = (mass_r[:, :, None] * pe).sum(-1); m_r = mass_r.sum(-1)
+            else:
+                mass_r, rho_r, m_r = mass, rho, m_t
+            hq = m_r > MASS_EPS
+            rho_d = (contrib * line[:, :, None]).sum(-1); w_q = v[..., 0] * lq + 0.02
+            gv = ent.get("gv", gate).float(); sel = hq & lq
+            parts["gate"] = (Fn.binary_cross_entropy(gv.clamp(1e-4, 1 - 1e-4), v[..., 0], reduction="none")[sel].mean()
+                             if bool(sel.any()) else gv.sum() * 0.0)
+            f_ = ent["f"].float() if DENS_READOUT_LOBE else ent["f"].float().detach(); fm_ = f_[:, :, :n_uni].mean(-1, keepdim=True); gg = gate.float()[..., None]
+            if "gs" in ent:                                                                         # the line share's head (every query with mass)
+                share_t = ((mass_r * line).sum(-1) / m_r.clamp_min(1e-9)).clamp(0, 1)
+                parts["gshare"] = (Fn.binary_cross_entropy(ent["gs"].float().clamp(1e-4, 1 - 1e-4), share_t, reduction="none")[hq].mean()
+                                   if bool(hq.any()) else ent["gs"].float().sum() * 0.0)
+            parts["readout"] = density_shape_loss(gg * f_ + (1 - gg) * fm_, v * rho_r + (1 - v) * m_r[..., None], m_r, n_uni)
+        # DENS_SHARE: the gate's target is the visible oriented share; the lobe is the oriented part alone, where shown
+        elif gate is not None and DENS_SHARE:
+            line = (T["e_kappa"][..., 1] >= 2.0) & (mass > 0)
+            share = ((mass * line).sum(-1) / m_t.clamp_min(1e-9)).clamp(0, 1); s_t = v[..., 0] * share
+            rho_d = (contrib * line[:, :, None]).sum(-1); w_q = s_t + 0.02
+            parts["gate"] = (Fn.binary_cross_entropy(gate.float().clamp(1e-4, 1 - 1e-4), s_t, reduction="none")[hq].mean()
+                             if bool(hq.any()) else gate.float().sum() * 0.0)
+        else:
+            rho_d = v * rho_d + (1 - v) * m_t[..., None]                                           # an erased lobe asks for flat at the same mass
+        # gated: the lobe trained where the orientation shows (partial credit where partly visible), the gate on it
+        if gate is not None and not DENS_SHARE and not DENS_READOUT:
+            w_q = v[..., 0] + 0.02
+            parts["gate"] = (Fn.binary_cross_entropy(gate.float().clamp(1e-4, 1 - 1e-4), v[..., 0], reduction="none")[hq].mean()
+                             if bool(hq.any()) else gate.float().sum() * 0.0)
+        elif DENS_VIS_WEIGHT > 0:                                                                  # ungated: one output
+            w_q = 1 + DENS_VIS_WEIGHT * v[..., 0]
+    # where and which way apart: the mass from its own output, the density by its shape only
+    if "m" in ent:
+        parts["mass"] = (torch.log(ent["m"].float() + MASS_EPS) - torch.log(m_t + MASS_EPS)).abs().mean()
+        parts["density"] = density_shape_loss(ent["f"].float(), rho_d, m_t, n_uni, w_q=w_q)
+    else:
+        eps = (DENS_FLOOR * rm).clamp_min(DENS_EPS)
+        parts["density"] = (torch.log(ent["f"].float() + eps) - torch.log(rho_d + eps)).abs().mean()  # scale-free: shape at any mass
+        if n_uni > 0:                                                                              # the mass: the density's mean over the sphere
+            m_p = ent["f"][:, :, :n_uni].float().mean(-1)
+            parts["mass"] = (torch.log(m_p + DENS_EPS) - torch.log(m_t + DENS_EPS)).abs().mean()
+    # with OWN_OBJECTS the owners ``(B, Q, 1, E)`` are every entity but the background (isotropic objects too, for their
+    # tree identity)
+    if OWN_OBJECTS:
+        ori = (~T["e_bg"].bool() if "e_bg" in T else (T["e_kappa"][..., 0] >= VOTE_KAPPA_MIN))[:, :, None, :]
+        co = contrib * ori; ro = co.sum(-1)
+        share = co / ro.clamp_min(1e-9)[..., None]; best, owner = share.max(-1)
+        owned = (best > 0.5) & (ro > OWN_REL * rm) & (rm > DENS_EPS)
+    else:
+        share = contrib / rho.clamp_min(1e-9)[..., None]; best, owner = share.max(-1)
+        owned = (best > 0.5) & (rho > OWN_REL * rm) & (rm > DENS_EPS)
+    # cross-entropy on the direction grid against the material's ODF without the background and without visibility
+    # mixing: what the image does not show, the model expresses as spread
+    if DENS_CE and "logq_g" in ent:
+        from .model import fib_hemisphere
+        lq_ = ent["logq_g"].float(); G_ = lq_.shape[-1]
+        grid = fib_hemisphere(G_, dev)
+        mo = mass * (~T["e_bg"].bool()).to(mass.dtype) if "e_bg" in T else mass
+        pt = BG.pdf(grid.view(1, 1, G_, 1, 3), T["e_R"][:, :, None].float(), T["e_kappa"][:, :, None].float().clamp(max=DENS_KAPPA_MAX))
+        pt = (mo[:, :, None, :].float() * pt).sum(-1); m_o = mo.sum(-1).float()
+        ok = (m_o > MASS_EPS) & (pt.sum(-1) > 0)
+        pt = pt / pt.sum(-1, keepdim=True).clamp_min(1e-30)
+        lqd = lq_ + math.log(4 * math.pi / G_)                                                     # log of the grid point's probability
+        if bool(ok.any()):
+            kl = (pt * (torch.log(pt.clamp_min(1e-30)) - lqd)).sum(-1)
+            parts["density"] = kl[ok].mean()
+            parts["ce_gain"] = (pt * (lqd + math.log(G_))).sum(-1)[ok].mean().detach()             # over uniform, nats (logged)
+            parts["ce_oracle"] = (pt * torch.log((pt * G_).clamp_min(1e-30))).sum(-1)[ok].mean().detach()
+            parts["ce_w0"] = ent["w0"].float()[ok].mean().detach()
+        else:
+            parts["density"] = lq_.sum() * 0.0
+    total = W["density"] * parts["density"] + W.get("mass", 0.0) * parts.get("mass", 0.0)
+    if "gate" in parts:
+        total = total + W.get("gate", 1.0) * parts["gate"]
+    if "gshare" in parts:
+        total = total + W.get("gate", 1.0) * parts["gshare"]
+    if "readout" in parts:
+        total = total + W.get("readout", 4.0) * parts["readout"]
+    # each oriented population's share of the density (its directions weighted by the target's ownership) against the
+    # target's, as the readout's mass split reads it: the split of mass between crossing lobes is trained directly
+    if W.get("lobe_mass", 0.0) > 0 and n_uni > 0:
+        f_ = ent["f"].float(); fb = f_[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-6)
+        tb = rho_d[:, :, :n_uni].mean(-1, keepdim=True).clamp_min(1e-9)
+        w_own = (contrib / rho.clamp_min(1e-9)[..., None]).detach()
+        Mm = ((f_ / fb)[..., None] * w_own).mean(2); Mt = ((rho_d / tb)[..., None] * w_own).mean(2)
+        ori_e = (T["e_kappa"][..., 0] >= VOTE_KAPPA_MIN) & (mass > 0.02)
+        if bool(ori_e.any()):
+            parts["lobe_mass"] = (torch.log(Mm + 0.05) - torch.log(Mt + 0.05)).abs()[ori_e].mean()
+            total = total + W["lobe_mass"] * parts["lobe_mass"]
+    if bool(owned.any()):
+        R_t = torch.gather(T["e_R"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1, -1), 3, owner[..., None, None, None].expand(-1, -1, -1, 1, 3, 3))[..., 0, :, :]
+        k_t = torch.gather(T["e_kappa"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1), 3, owner[..., None, None].expand(-1, -1, -1, 1, 2))[..., 0, :]
+        d_t = torch.gather(T["e_desc"][:, :, None].expand(-1, -1, dirs.shape[2], -1, -1), 3, owner[..., None, None].expand(-1, -1, -1, 1, 5))[..., 0, :]
+        vm = owned & (k_t[..., 0] >= VOTE_KAPPA_MIN) if VOTE_OBJECTS else owned                        # the directions that vote
+        if bool(vm.any()):
+            parts["kappa"] = (torch.log1p(ent["kappa"][vm]) - torch.log1p(k_t[vm])).abs().mean()
+            total = total + W["kappa"] * parts["kappa"]
+            fl = BG.frame_loss(ent["R"][vm], R_t[vm], k_t[vm])
+            parts["vote"] = fl.mean()
+            # the vote's uncertainty, a readout of its error: error / s^2 + log s^2 on the detached error, so the vote
+            # itself keeps its plain loss
+            if "log_s2" in ent:
+                ls = ent["log_s2"][vm]
+                parts["vote_unc"] = 0.5 * ((fl.detach() + 1e-3) * torch.exp(-ls) + ls).mean()
+                total = total + W.get("vote_unc", 0.2) * parts["vote_unc"]
+            # the mass votes: on every direction that an oriented population mostly owns among the oriented ones (share
+            # > 0.4) and where they stand above a tenth of the mean, so the flanks and overlaps the readout averages
+            # over vote too
+            if "mvote" in ent:
+                orie = (T["e_kappa"][..., 0] >= VOTE_KAPPA_MIN)[:, :, None, :]
+                co_ = contrib * orie; ro_ = co_.sum(-1); sh_, own_ = (co_ / ro_.clamp_min(1e-9)[..., None]).max(-1)
+                mvm = (sh_ > 0.4) & (ro_ > 0.1 * rm) & (rm > DENS_EPS)
+                if bool(mvm.any()):
+                    m_own = torch.gather(mass, 2, own_)
+                    parts["mvote"] = (torch.log(ent["mvote"][mvm].float() + 0.01) - torch.log(m_own[mvm] + 0.01)).abs().mean()
+                    total = total + W.get("mvote", 1.0) * parts["mvote"]
+            dt = torch.cat([torch.log2(1 + d_t[..., :1].clamp_min(0)), (d_t[..., 1:2] / d_t[..., :1].clamp_min(1e-3)).clamp(0, 1), d_t[..., 2:]], -1)
+            parts["desc"] = (ent["desc"][vm] - dt[vm]).abs().mean()
+            total = total + W["vote"] * parts["vote"] + W["desc"] * parts["desc"]
+        # the tree: pairs of owned directions within each crop
+        node = torch.gather(T["e_node"], 2, owner)                                                  # (B, Q, D) local node of the owner
+        # isotropic owners (OWN_OBJECTS): their tree identity at a lower weight
+        iso_own = owned & (k_t[..., 0] < VOTE_KAPPA_MIN)
+        w_iso = W.get("tree_iso", 0.2)
+        lt = []
+        for b in range(dirs.shape[0]):
+            idx = torch.nonzero(owned[b].flatten())[:, 0]
+            if idx.numel() < 2:
+                continue
+            n_ = min(TREE_PAIRS, idx.numel() * 4)
+            pi = idx[torch.randint(0, idx.numel(), (n_,), generator=g, device=dev)]; pj = idx[torch.randint(0, idx.numel(), (n_,), generator=g, device=dev)]
+            zb = ent["z"][b].reshape(-1, ent["z"].shape[-1]); nb = node[b].flatten()
+            t = TREE_EDGE * tree_distance(T["e_anc"][b], nb[pi], nb[pj])
+            from .model import poincare_dist
+            dz = poincare_dist(zb[pi], zb[pj])
+            # the gauge: each entity's distance from the ball's centre is its depth in the tree (the root at the centre,
+            # ancestors toward it) -- depth readable at inference, embeddings comparable across windows and volumes
+            dep = TREE_EDGE * ((T["e_anc"][b][nb[idx]] >= 0).sum(1) - 1).float(); r0 = 2 * torch.atanh(zb[idx].norm(dim=-1).clamp(max=1 - 1e-5))
+            wt = 1.0
+            # populations first: a pair from two populations (their ancestors just below the root differ) gets the extra
+            # weight tree_pop x (1 + t), so its error is not discounted by the 1 / (1 + t)
+            if W.get("tree_pop", 0.0) > 0:
+                A = T["e_anc"][b]
+                pop = lambda n_: A[n_].gather(1, ((A[n_] >= 0).sum(1) - 2).clamp(min=0)[:, None])[:, 0]
+                wt = 1.0 + W["tree_pop"] * (pop(nb[pi]) != pop(nb[pj])).float() * (1 + t)
+            io = iso_own[b].flatten()
+            wp = torch.where(io[pi] | io[pj], torch.full_like(t, w_iso), torch.ones_like(t)); wg = torch.where(io[idx], torch.full_like(dep, w_iso), torch.ones_like(dep))
+            lt.append((wp * wt * (dz - t) ** 2 / (1 + t)).mean() + (wg * (r0 - dep) ** 2 / (1 + dep)).mean())
+        if lt:
+            parts["tree"] = torch.stack(lt).mean(); total = total + W["tree"] * parts["tree"]
+        parts["owned_share"] = owned.float().mean().detach()
+    # the overall ODF, fraction, points on the lattice (cells away from the faces)
+    c = lambda x: x[..., margin:x.shape[-3] - margin, margin:x.shape[-2] - margin, margin:x.shape[-1] - margin]
+    lat = P.get("total_sh", P.get("fraction_logit"))
+    lat_ok = lat is not None and min(lat.shape[-3:]) > 2 * margin                                   # a lattice left inside the margins
+    if "sh_t" in T and "total_sh" in P and lat_ok:
+        nsh = P["total_sh"].shape[1]; tt = c(T["sh_t"][:, :nsh].float()); pt = c(P["total_sh"].float())
+        floor = OVERALL_FLOOR * tt[:, 0].numel()                                                    # near-empty crops: no blow-up
+        parts["overall"] = ((pt - tt) ** 2).sum() / ((tt ** 2).sum() + floor); total = total + W["overall"] * parts["overall"]
+    if "region_t" in T and "region_logit" in P:                                                     # the population region, every voxel
+        rl = P["region_logit"].float(); rt = T["region_t"].float()
+        mv = 2 * margin                                                                            # voxels from the faces
+        cr = lambda x: x[..., mv:x.shape[-3] - mv, mv:x.shape[-2] - mv, mv:x.shape[-1] - mv]
+        # ``iface``: the interfaces between background regions, where there is no material, weighted as hard negatives
+        wr = 1.0 + W.get("iface", 0.0) * cr(T["iface_t"].float()) * (1 - cr(rt)) if "iface_t" in T and W.get("iface", 0.0) > 0 else None
+        if REGION_DENSITY and "region" in P:                                                      # a density: log L1 (scale-free, as the mass)
+            rv = cr(P["region"].float()); lr_ = (torch.log(rv + 0.05) - torch.log(cr(rt) + 0.05)).abs()
+            parts["region"] = (lr_ * wr).sum() / wr.sum() if wr is not None else lr_.mean()
+        else:
+            parts["region"] = Fn.binary_cross_entropy_with_logits(cr(rl), cr(rt), weight=wr)
+        total = total + W.get("region", 1.0) * parts["region"]
+    # the background's occupancy as the readout uses it: window means at the queries (a per-voxel log-L1 on a
+    # near-binary map would fit a median)
+    if "bg_t" in T and "bg" in P:
+        from .model import window_mean
+        wb = window_mean(P["bg"].float(), T["e_points"].float(), T["e_sigma"].float())
+        wt = window_mean(T["bg_t"].float(), T["e_points"].float(), T["e_sigma"].float())
+        parts["bg"] = (torch.log(wb + 0.05) - torch.log(wt + 0.05)).abs().mean()
+        total = total + W.get("bg", 1.0) * parts["bg"]
+    # the objects' occupancy: window means at the queries, log-L1 (relative: thin bundles count as well as dense ones)
+    if "obj" in P and "region_t" in T:
+        from .model import window_mean
+        ot = (T["region_t"].float() - (T["bg_t"].float() if "bg_t" in T else 0.0)).clamp_min(0)
+        wo = window_mean(P["obj"].float(), T["e_points"].float(), T["e_sigma"].float())
+        wt = window_mean(ot, T["e_points"].float(), T["e_sigma"].float())
+        parts["obj"] = (torch.log(wo + 0.01) - torch.log(wt + 0.01)).abs().mean()
+        total = total + W.get("obj", 1.0) * parts["obj"]
+    # the objects by kind (oriented material; isotropic objects): window means at the queries, log-L1 as the objects';
+    # the targets are the populations' masses (``ori_m``, ``iso_m``) where given, else window means
+    if "split" in P and "ori_t" in T:
+        from .model import window_mean
+        for ch, key in enumerate(("ori_t", "iso_t")):
+            wp = window_mean(P["split"][:, ch].float(), T["e_points"].float(), T["e_sigma"].float())
+            wt = T[key[:3] + "_m"].float() if key[:3] + "_m" in T else window_mean(T[key].float(), T["e_points"].float(), T["e_sigma"].float())
+            parts["split_" + key[:3]] = (torch.log(wp + 0.01) - torch.log(wt + 0.01)).abs().mean()
+            total = total + W.get("split", 1.0) * parts["split_" + key[:3]]
+    if "fraction" in T and "fraction_logit" in P and lat_ok:
+        parts["fraction"] = Fn.binary_cross_entropy_with_logits(c(P["fraction_logit"].float()), c(T["fraction"].float())); total = total + W["fraction"] * parts["fraction"]
+    if "points" in P and "points_t" in T and lat_ok:
+        from . import lobes as LB
+        parts["points"] = LB.points_loss(c(P["points"]), c(T["points_t"])); total = total + W["points"] * parts["points"]
+    return total, parts
+
+
+@torch.no_grad()
+def axis_error_deg(P: dict, T: dict, dirs: torch.Tensor) -> dict:
+    """On owned directions: the error of the voted mode axis (peaked entities, kappa2 > 4) and of the a-axis (girdles,
+    kappa1 - kappa2 > 4), in degrees (medians)."""
+    ent = P["ent"]
+    mass = (T["e_mass"] * T["e_vis"]).clamp_min(0) * (T["e_node"] >= 0)
+    pe = BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], T["e_kappa"][:, :, None]); contrib = mass[:, :, None] * pe
+    rho = contrib.sum(-1); rm = rho.mean(-1, keepdim=True)
+    share = contrib / rho.clamp_min(1e-9)[..., None]; best, owner = share.max(-1); owned = (best > 0.5) & (rho > OWN_REL * rm) & (rm > DENS_EPS)
+    out = {"owned_share": float(owned.float().mean())}
+    if not bool(owned.any()):
+        return out
+    D = dirs.shape[2]
+    R_t = torch.gather(T["e_R"][:, :, None].expand(-1, -1, D, -1, -1, -1), 3, owner[..., None, None, None].expand(-1, -1, -1, 1, 3, 3))[..., 0, :, :][owned]
+    k_t = torch.gather(T["e_kappa"][:, :, None].expand(-1, -1, D, -1, -1), 3, owner[..., None, None].expand(-1, -1, -1, 1, 2))[..., 0, :][owned]
+    Rp = ent["R"][owned]
+    ang = lambda a, b: torch.rad2deg(torch.acos((a * b).sum(-1).abs().clamp(max=1)))
+    pk = k_t[:, 1] > 4; gd = (k_t[:, 0] - k_t[:, 1]) > 4
+    if bool(pk.any()):
+        out["mode_axis_deg"] = float(ang(Rp[pk][:, :, 2], R_t[pk][:, :, 2]).median())
+    if bool(gd.any()):
+        out["a_axis_deg"] = float(ang(Rp[gd][:, :, 0], R_t[gd][:, :, 0]).median())
+    return out
+
+
+@torch.no_grad()
+def where_skill(P: dict, T: dict, dirs: torch.Tensor, margin: int = 4) -> dict:
+    """Whether the model knows where the material is and which way it lies, as skills a constant cannot fake:
+    ``region_corr`` (the region map against its target, voxels away from the faces), ``mass_skill`` (1 - the mass
+    error / the error of the batch's median mass: 0 a constant, 1 exact) and ``dens_corr`` (per query with an
+    anisotropic target, the correlation of the density with its target over the asked directions; median)."""
+    out = {}
+    if "region_logit" in P and "region_t" in T:
+        mv = 2 * margin; cr = lambda x: x[..., mv:x.shape[-3] - mv, mv:x.shape[-2] - mv, mv:x.shape[-1] - mv]
+        a = cr(P["region"].float() if "region" in P else torch.sigmoid(P["region_logit"].float())).flatten(); b = cr(T["region_t"].float()).flatten()
+        if float(b.std()) > 1e-6:
+            out["region_corr"] = float(torch.corrcoef(torch.stack([a, b]))[0, 1])
+    ent = P["ent"]
+    mass = (T["e_mass"] * T["e_vis"]).clamp_min(0) * (T["e_node"] >= 0); m_t = mass.sum(-1)
+    if "m" in ent:
+        lt = torch.log(m_t + MASS_EPS); e_m = (torch.log(ent["m"].float() + MASS_EPS) - lt).abs().mean(); e_c = (lt - lt.median()).abs().mean()
+        out["mass_skill"] = float(1 - e_m / e_c.clamp_min(1e-6))
+    rho = (mass[:, :, None] * BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], T["e_kappa"][:, :, None].clamp(max=DENS_KAPPA_MAX))).sum(-1)
+    f = ent["f"].float(); an = (rho.amax(-1) > 2 * rho.mean(-1)) & (m_t > MASS_EPS)
+    if bool(an.any()):
+        a = f[an] - f[an].mean(-1, keepdim=True); b = rho[an] - rho[an].mean(-1, keepdim=True)
+        c = (a * b).sum(-1) / (a.norm(dim=-1) * b.norm(dim=-1)).clamp_min(1e-9)
+        out["dens_corr"] = float(c.median())
+    return out
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# across windows: overlapping crops of one scene must agree on the entities' places in the tree
+# ---------------------------------------------------------------------------------------------------------------
+
+def owners(T: dict, dirs: torch.Tensor):
+    """The entity owning each direction (its share of the target density > 1/2, density above OWN_REL of the query's
+    mean): ``(owner, owned)``, both ``(B, Q, D)``."""
+    mass = (T["e_mass"] * T["e_vis"]).clamp_min(0) * (T["e_node"] >= 0)
+    contrib = mass[:, :, None] * BG.pdf(dirs[..., None, :], T["e_R"][:, :, None], T["e_kappa"][:, :, None])
+    rho = contrib.sum(-1); best, owner = (contrib / rho.clamp_min(1e-9)[..., None]).max(-1)
+    rm = rho.mean(-1, keepdim=True)
+    return owner, (best > 0.5) & (rho > OWN_REL * rm) & (rm > DENS_EPS)
+
+
+def cross_distances(tree, g1: torch.Tensor, g2: torch.Tensor) -> torch.Tensor:
+    """Tree distances between the entities of two windows at the same queries: ``g1``, ``g2`` ``(Q, E)`` nodes of the
+    scene's tree (-1: none; ``>= tree.n``: dense layers, children of the root) -> ``(Q, E, E)`` (-1 where either is
+    none)."""
+    Q, E = g1.shape; N = tree.n
+    def chains(gg):                                                                               # nodes past the tree (dense layers): under the root
+        gf = gg.flatten(); A = tree.ancestors(gf.clamp(0, N - 1))
+        if A.shape[1] < 2:                                                                       # a tree of the root alone: room for a dense layer's chain
+            A = torch.cat([A, torch.full_like(A[:, :1], -1)], 1)
+        ext = gf >= N
+        if bool(ext.any()):
+            A[ext] = -1; A[ext, 0] = gf[ext]; A[ext, 1] = 0
+        return A.view(Q, E, -1)
+    A1, A2 = chains(g1), chains(g2)
+    v1, v2 = A1 >= 0, A2 >= 0
+    d1 = (v1.sum(-1) - 1)[:, :, None]; d2 = (v2.sum(-1) - 1)[:, None, :]
+    eq = (A1[:, :, None, :, None] == A2[:, None, :, None, :]) & v1[:, :, None, :, None] & v2[:, None, :, None, :]
+    hit = eq.any(-1)                                                                              # (Q, E, E, D): i's ancestors shared with j
+    k = torch.where(hit.any(-1), hit.float().argmax(-1), (d1 + 1).expand(-1, -1, E))
+    t = (d1 + d2 - 2 * (d1 - k)).float()
+    return torch.where((g1[:, :, None] >= 0) & (g2[:, None, :] >= 0), t, torch.full_like(t, -1.0))
+
+
+def cross_window_loss(P1: dict, P2: dict, T1: dict, T2: dict, X: torch.Tensor, dirs: torch.Tensor) -> torch.Tensor:
+    """At the same points and directions of two overlapping windows: the hyperbolic distance between the two windows'
+    embeddings against the tree distance of their owners (0 for the same entity) -- one embedding across windows."""
+    from .model import poincare_dist
+    o1, w1 = owners(T1, dirs); o2, w2 = owners(T2, dirs)
+    B, Q, D = o1.shape; E = X.shape[-1]
+    t = torch.gather(X.view(B, Q, E * E), 2, (o1 * E + o2)).view(B, Q, D)
+    t = torch.where(t >= 0, TREE_EDGE * t, t)
+    ok = w1 & w2 & (t >= 0)
+    if not bool(ok.any()):
+        return dirs.new_zeros(())
+    dz = poincare_dist(P1["ent"]["z"][ok].float(), P2["ent"]["z"][ok].float())
+    return ((dz - t[ok]) ** 2 / (1 + t[ok])).mean()
+
+
+class EntityPairBuffer:
+    """Overlapping windows of one scene (``shift``: offset by multiples of 8 voxels, the same acquisition or another;
+    ``modality``: the same window under another acquisition), their entity targets at the same queries (in the overlap)
+    and the tree distances between the two windows' entities; drawn on demand into a small rotating buffer."""
+
+    def __init__(self, n: int, size: int, device, gen: dict, seed0: int = 60_000_000, kinds=("shift", "modality"), n_points: int = 192,
+                 out_device=None, n0: int | None = None, strength: float = 1.0):
+        # ``device``: where the pairs are drawn (the CPU keeps the trainer's GPU free of the draws' many small kernels
+        # and syncs); ``out_device``: where batches go (default ``device``); ``strength``: the acquisition strength, set
+        # by the trainer as its curriculum moves
+        self.size, self.device, self.gen, self.next, self.kinds, self.n_points = size, device, dict(gen or {}), seed0, kinds, n_points
+        self.out_device = out_device or device; self.cap = int(n); self.strength = float(strength)
+        self.items = [self._make() for _ in range(min(n, n0 or n))]                               # ``n0``: a few now, the rest as refreshes come
+
+    def _make(self):
+        from . import train as TR
+        from .entities import _vis_at
+        from .scene import draw_pair
+        kind = self.kinds[self.next % len(self.kinds)]; seed = self.next; self.next += 1
+        kw = {k: v for k, v in self.gen.items() if k not in ("crops_per_scene", "p_centre")}
+        kw["canvas"] = max(kw.get("canvas", 128), 2 * self.size)
+        (s1, d1), (s2, d2), info = draw_pair((self.size,) * 3, seed=seed, device=self.device, kind=kind, crops_per_scene=4, entity_ctx=True,
+                                             strength=self.strength, **kw)
+        sh = torch.tensor(info.get("shift", [0, 0, 0]), device=self.device, dtype=torch.float32)
+        m = TR.ENTITY["margin"]; n = self.n_points; dev = self.device
+        lo = torch.clamp(sh, min=0) + m; hi = torch.clamp(sh + self.size, max=self.size) - 1 - m           # the overlap, crop 1's voxels
+        g = torch.Generator(device=dev).manual_seed(seed + 77)
+        pts = lo + torch.rand(4 * n, 3, generator=g, device=dev) * (hi - lo)
+        kl = [k for k, L in enumerate(s1.layers) if L.role not in TR.NOT_OBJECT]                          # most queries on the objects' material
+        occ = d1["occupancy"][kl].float().sum(0) if kl else torch.zeros_like(d1["occupancy"][0]).float()
+        on = _vis_at(occ[None], pts)[:, 0] > 0.05
+        pts = torch.cat([pts[on], pts[~on]])[:n]
+        lo_s, hi_s = TR.ENTITY["sigma"]; sig = torch.exp(math.log(lo_s) + torch.rand(n, generator=g, device=dev) * math.log(hi_s / lo_s))
+        t1 = TR.entity_queries(s1, d1, self.size, seed, dev, points=pts, sigma=sig)
+        t2 = TR.entity_queries(s2, d2, self.size, seed, dev, points=pts - sh, sigma=sig)
+        X = cross_distances(d1["entity_ctx"]["tree"], t1["e_gnode"], t2["e_gnode"]).half()
+        vox = lambda d: torch.tensor(math.log2(d["voxel_um"]), device=dev)
+        t1["voxel"], t2["voxel"] = vox(d1), vox(d2)
+        return d1["image"].to(torch.uint8), d2["image"].to(torch.uint8), t1, t2, X, info
+
+    def start_async(self, maxq: int = 2):
+        """Draw pairs in a background thread, so slow scene draws do not hold up the training loop; :meth:`refresh`
+        then takes the pairs that are ready, never waiting. (The scene cache is per thread.)"""
+        import queue, threading
+        self._q = queue.Queue(maxq); self._stop = False; self._err = None
+
+        def run():
+            while not self._stop:
+                try:
+                    it = self._make()
+                except Exception as e:                                                           # (a failed draw: reported, the next tried)
+                    self._err = repr(e); continue
+                while not self._stop:
+                    try:
+                        self._q.put(it, timeout=1.0); break
+                    except queue.Full:
+                        continue
+
+        self._th = threading.Thread(target=run, daemon=True, name="entity-pairs"); self._th.start()
+        return self
+
+    def stop(self, timeout: float = 120.0):
+        """Stop the background draws and wait for the one in progress (a thread still inside torch at exit aborts it)."""
+        if getattr(self, "_th", None) is not None:
+            self._stop = True; self._th.join(timeout); self._th = None
+
+    def refresh(self, k: int = 1):
+        q = getattr(self, "_q", None)
+        for _ in range(k):
+            if q is not None:                                                                    # asynchronous: the pairs ready, if any
+                import queue
+                try:
+                    it = q.get_nowait()
+                except queue.Empty:
+                    return
+            else:
+                it = self._make()
+            if len(self.items) < getattr(self, "cap", len(self.items)):
+                self.items.append(it); continue
+            self.slot = (getattr(self, "slot", 0) + 1) % len(self.items); self.items[self.slot] = it
+
+    def batch(self, B: int, g: torch.Generator):
+        idx = torch.randint(0, len(self.items), (B,), generator=g).tolist(); sel = [self.items[i] for i in idx]
+        f = lambda k, v: v.float() if k in ("e_mass", "e_vis", "e_T6", "e_desc") else (v.long() if k in ("e_node", "e_anc", "e_gnode") else v)
+        st = lambda j: {k: torch.stack([f(k, it[j][k]) for it in sel]) for k in sel[0][j]}
+        x1 = torch.stack([it[0].float() / 255 for it in sel])[:, None]; x2 = torch.stack([it[1].float() / 255 for it in sel])[:, None]
+        T1, T2 = st(2), st(3); od = self.out_device
+        mv = lambda T: {k: (v.to(od, non_blocking=True) if torch.is_tensor(v) else v) for k, v in T.items()}
+        return x1.to(od), x2.to(od), mv(T1), mv(T2), torch.stack([it[4].float() for it in sel]).to(od)

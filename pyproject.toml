@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shapetensor"
+version = "0.1.0"
+description = "Object-level orientation distributions from any intensity volume: a shape latent trained on synthetic data"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Andrew Keenlyside" }]
+license = { text = "MIT" }
+keywords = ["orientation", "ODF", "computer vision", "synthetic data", "domain randomisation", "3D imaging"]
+classifiers = ["Programming Language :: Python :: 3", "License :: OSI Approved :: MIT License", "Topic :: Scientific/Engineering :: Image Processing", "Environment :: GPU :: NVIDIA CUDA"]
+dependencies = ["numpy", "scipy", "torch", "matplotlib"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+figures = ["dipy", "zarr"]
+
+[project.urls]
+Homepage = "https://github.com/Andrew-Keenlyside/ShapeTensor/tree/synthetic-orientations"
+
+[tool.setuptools.packages.find]
+where = ["src"]
