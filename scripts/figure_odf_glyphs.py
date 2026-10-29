@@ -11,6 +11,8 @@ import math
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -23,26 +25,25 @@ TR.ENTITY["p_cross"] = 0.2
 import shapetensor.learn.generator as G
 G.ORIENT_FROM_TEXTURE = True; G.ORIENT_VIS = False; G.TARGETS_FROM_GEOMETRY = os.environ.get("GEOM", "1") == "1"   # targets from construction only
 from shapetensor.learn import scene as SC, entity_infer as EI, lobe_train as LT, bingham as BG, entity_train as ET
+from odf_render import draw, fit_sh
 from shapetensor.learn.model import PopulationNet, fib_hemisphere, st_products, st_matrix, window_mean, CE_GRID
 
 mode, out, ckp = sys.argv[1], sys.argv[2], sys.argv[3]; dev = "cuda"
 torch.cuda.set_per_process_memory_fraction(float(os.environ.get("MEMFRAC", 0.5)))
 ck = torch.load(ckp, map_location=dev, weights_only=False); net = PopulationNet.from_args(ck["args"]).to(dev).eval(); net.load_state_dict(ck["model"])
-mname = f"{os.path.basename(os.path.dirname(ckp))} @ {ck.get('step')}"
+mname = os.environ.get("LABEL") or f"{os.path.basename(os.path.dirname(ckp))} @ {ck.get('step')}"
 grid = fib_hemisphere(CE_GRID, dev); U = torch.cat([grid, -grid]).cpu().numpy(); DEC = np.clip(np.abs(U[:, ::-1]), 0, 1)   # (x, y, z) -> RGB
 SIG = 3.0
 
 
 def glyphs(ax, img, P, Q, rax, cax, step, title):
-    """``P (n, 3)`` centres (z, y, x), ``Q (n, G)`` densities on the grid; rows along axis ``rax``, columns ``cax``."""
+    """ODF glyphs (SH surfaces, order 8) at centres ``P (n, 3)`` (z, y, x) for densities ``Q`` on the grid; rows along
+    axis ``rax``, columns along ``cax`` (the view is along the remaining axis)."""
     ax.imshow(img, cmap="gray", vmin=0, vmax=1, alpha=0.55, interpolation="nearest")
-    for p, q in zip(P, Q):
-        if q is None or not np.isfinite(q).all():
-            continue
-        q2 = np.concatenate([q, q]); r = 0.48 * step * q2 / max(q2.max(), 1e-12)
-        flat = q.max() / max(q.mean(), 1e-12) < 1.3
-        o = np.argsort(U[:, 3 - rax - cax])                                                       # back to front along the viewing axis
-        ax.scatter(p[cax] + r[o] * U[o, cax], p[rax] + r[o] * U[o, rax], s=0.6, c=("0.6" if flat else DEC[o]), linewidths=0)
+    keep = [i for i, q in enumerate(Q) if q is not None and np.isfinite(q).all()]
+    if keep:
+        view = {0: "x", 1: "y", 2: "z"}[3 - rax - cax]
+        draw(ax, np.stack([[P[i][cax], P[i][rax]] for i in keep]), fit_sh(np.stack([Q[i] for i in keep]), grid.cpu().numpy()), 0.46 * step, view=view)
     ax.set_title(title, fontsize=8); ax.set_xticks([]); ax.set_yticks([])
 
 
