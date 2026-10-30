@@ -1282,13 +1282,13 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
             st_, lv_ = strength0 + (strength1 - strength0) * u, level0 + (1.0 - level0) * u       # and difficulty together
             x_, t_ = make(seed * 1_000_000_000 + 700_000_000 + i, size, device, st_, {"scene": LT.difficulty_gen(lv_, base)})
             shard.append((x_.cpu(), {kk: (vv.cpu() if torch.is_tensor(vv) else vv) for kk, vv in t_.items()}))
-            if len(shard) == 64 or i == int(make_pool) - 1:
+            if len(shard) == 16 or i == int(make_pool) - 1:                                        # (small shards: a deadline loses little)
                 torch.save(shard, pd / f"shard_{k_:04d}.pt"); k_ += 1; shard = []
                 log(f"pool: {i + 1} of {make_pool} crops in {time.time() - t0p:.0f} s -> {pd}")
         return
-    poolsrc = DF.PoolSource(pool, seed) if pool else None
+    poolsrc = DF.PoolSource(pool, seed, hold=val_n) if pool else None
     if poolsrc is not None:
-        producer, cpu_workers = False, 0; log(f"pool: {len(poolsrc)} crops from {pool} (no producer, no CPU workers)")
+        producer, cpu_workers = False, 0; log(f"pool: {len(poolsrc)} crops from {pool}, {val_n} more held out for validation (no producer, no CPU workers)")
     seed0 = seed * 1_000_000_000 + rank * 100_000_000 + start * refresh * 4
     buf = Buffer(buffer, size, device, seed0=seed0, strength=strength(start), log=log, gen=cur_gen(),
                  n0=(1 if poolsrc is not None else min(buffer, max(16, 2 * batch))) if (producer or cpu_workers > 0 or poolsrc is not None) else None)   # the rest from the producers, as they come
@@ -1318,6 +1318,8 @@ def train_entities(out: str, steps: int = 6000, size: int = 128, batch: int = 4,
                 torch.cuda.empty_cache(); log(f"val crop {i}: GPU out of memory, {'retrying in 30 s' if t_ == 0 else 'drawing it on the CPU'}"); time.sleep(30 if t_ == 0 else 0)
     if overfit and main:
         val = list(buf.items[:val_n]); torch.save([(x_.cpu() if torch.is_tensor(x_) else x_, {k: v.cpu() if torch.is_tensor(v) else v for k, v in t_.items()}) for x_, t_ in buf.items], outd / "overfit_items.pt")
+    elif main and not benchmark and poolsrc is not None:                                           # from the pool: its last crops, held out
+        val = [augment(*it, torch.Generator().manual_seed(i)) for i, it in enumerate(poolsrc.holdout(val_n, device))]
     elif main and not benchmark:
         val = [augment(*make_val(i), torch.Generator().manual_seed(i)) for i in range(val_n)]
     def evaluate():

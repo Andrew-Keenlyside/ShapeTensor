@@ -268,13 +268,19 @@ class PoolSource:
     """Pre-made pairs (``train --make-pool``: shards of ``(image, targets)`` on the CPU) served in a random order, a new
     permutation each pass; :meth:`take` moves them to the device. For a card that cannot train and generate at once."""
 
-    def __init__(self, path: str, seed: int = 0):
+    def __init__(self, path: str, seed: int = 0, hold: int = 0):
         import glob
         files = sorted(glob.glob(os.path.join(path, "shard_*.pt")))
         if not files:
             raise FileNotFoundError(f"no pool shards in {path}")
         self.items = [it for f in files for it in torch.load(f, map_location="cpu", weights_only=False)]
+        hold = min(int(hold), len(self.items) // 4)                                                 # the last crops held out (validation)
+        self.held, self.items = (self.items[-hold:], self.items[:-hold]) if hold else ([], self.items)
         self.g = torch.Generator().manual_seed(int(seed) + 4049); self.order, self.i, self.passes = [], 0, 0
+
+    def holdout(self, k: int, device) -> list:
+        """The held-out crops (up to ``k``) on the device."""
+        return [(img.to(device), {kk: (vv.to(device) if torch.is_tensor(vv) else vv) for kk, vv in t.items()}) for img, t in self.held[:k]]
 
     def __len__(self) -> int:
         return len(self.items)

@@ -269,8 +269,10 @@ def curves_like(P, rad, rng: Rng, obj, seg, contrast, **kw) -> Curves:
     if kw.get("spread") is None:                                                   # each curve its own spread (29 Oct): its unrendered
         kw["spread"] = (draw_dispersion if unres else draw_spread)(N, rng.g if rng is not None else None, dev)   # fibrils'; a tube
     if "wave" not in kw:                                                           # standing for unseen fibres, theirs (30 Oct). Each solid
-        kw["wave"] = None if unres else draw_wave(rad if torch.is_tensor(rad) else torch.full((N, S), float(rad), device=dev),   # fibre its
-                                                  rng.g_wave if rng is not None else None)                                          # undulation
+        rr_ = rad if torch.is_tensor(rad) else torch.full((N, S), float(rad), device=dev)                                        # fibre its
+        kw["wave"] = None if (unres or float(rr_.max()) < THIN_SPLAT_R) else draw_wave(rr_, rng.g_wave if rng is not None else None)   # undulation
+                                                                                   # (30 Oct: none below a voxel -- sub-voxel fibrils drawn
+                                                                                   # as a line of points; waving them cost 5x in targets)
     solid = (kw.get("wall") is None or float(kw["wall"].max()) <= 0) and (kw.get("lumen_c") is None or float(kw["lumen_c"].abs().max()) <= 0)
     if TEXTURE_ODF and not unres and not given and solid:                          # each solid fibre's disorder (30 Oct): its internal texture
         gw_ = rng.g_wave if rng is not None else None                              # (depth, streaks tilted off the axis) and its ODF's spread

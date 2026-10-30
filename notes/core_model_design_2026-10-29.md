@@ -504,3 +504,28 @@ the window, against the every-slot-present answer.
   - **P4:** mode 3, free matching.
   - **P5:** P4 + bank widths 0.6/1.5/3, learned probe fields scaled by the window, 30 % line-stratified queries.
   - Two pilots cannot share the 48 GB card: validation draws fell back to the CPU.
+
+## Overnight rich-scene pilot (night of 30-31 Oct 2026, times ET)
+
+The first training on the rich scenes ("scenes built of objects"), one unattended run on the one card
+(`scripts/overnight.sh`; the user stops it at 08:00):
+
+- **Data:** a pool of crops made with the whole card until ~02:10 (`train --make-pool`), then training from it
+  (`--pool`); one card cannot generate these scenes and train at once (0.1-0.2 new crops per step when tried).
+  Another job (BRIDGE, ~15 GB) shares the card tonight, so phases end by the clock, not by a count.
+- **Scenes:** all rich (`--matrix-p 1`): ground, matrix, tissue layers, foreground families; each fibre's internal
+  texture tied to its ODF (one disorder per fibre, varying along it); undulation; the visibility boost (0.85).
+- **Targets:** collections at a random scale per query (`--scales random`, the scale given to the model); shares of
+  the window's total; the ground as the populations head's background.
+- **Model:** the populations head as in pilot P4 (`--pop-seq 3 --pop-tie 1.0`), from scratch; strength and difficulty
+  drawn per step from clean to full.
+- **Morning:** the acceptance criteria (A-F) halfway vs final on the older scenes (comparable with P4) and on the rich
+  ones, and the populations figures (`eval/pilot_rich_overnight_*`).
+- **Known, not fixed before the run:** collections group fibres by their whole-fibre centre (small scales rarely group
+  long fibres); the ground is ~2/3 of a window's material; "mixed" invisibility is mostly the merge route.
+- **01:07** Launched (`POOL_END=03:00 TRAIN_END=06:20 SPS=2.8 scripts/overnight.sh`). The smoke test (48 crops, 94 steps,
+  evaluation on 2 scenes) ran end to end: ~2.6-3.2 s/step and ~0.13 crops/s with the BRIDGE job on the card; the
+  evaluation took 17 min even on 2 scenes (phantoms), hence training ends at 06:20. Validation now comes from crops held
+  out of the pool (16 new rich scenes took ~10 min to draw); pool shards of 16 (a deadline loses little). On rich
+  scenes criteria A and B have no queries (no window holds a single fibre at >= 60 %: the ground is ~2/3), so they are
+  read on the older scenes.
