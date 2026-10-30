@@ -39,6 +39,10 @@ ckp = sys.argv[1]; N = int(sys.argv[2]) if len(sys.argv) > 2 else 32; dev = "cud
 STR = [float(v) for v in os.environ.get("STRENGTHS", "0.3,1.0").split(",")]; WIN = float(os.environ.get("WINDOW", 3.0))
 ck = torch.load(ckp, map_location=dev, weights_only=False); net = PopulationNet.from_args(ck["args"]).to(dev).eval(); net.load_state_dict(ck["model"])
 ET.configure_from_args(ck["args"])                                                                 # (its targets: background apart, matching)
+SC.MATRIX_P = float(os.environ.get("MATRIX", 0))                                                   # 1: scenes built of objects (rich scenes)
+SCALE = float(os.environ.get("EVAL_SCALE", 4)) if ck["args"].get("scales") else None               # a model given the scale: one fixed scale
+if SCALE is not None:                                                                              # for its targets and its queries
+    TR.ENTITY["scales"] = SCALE
 dirs8 = EI.sphere_dirs(8, dev)
 
 
@@ -57,7 +61,8 @@ def ang(a, b):
 
 def predict(x, pts, sig):
     with torch.no_grad():
-        f = EI.features(net, x); r = EI.query(net, f, pts, sig, dirs8, vol_shape=x.shape)
+        f = EI.features(net, x)
+        r = EI.query(net, f, pts, sig, dirs8, vol_shape=x.shape, scale=None if SCALE is None else torch.full_like(sig, SCALE))
     return {k: r[k].float() for k in ("pop_exist", "pop_share", "pop_T")}
 
 
@@ -66,7 +71,7 @@ def st_axis(x, pts, sig):
     return torch.linalg.eigh(st_matrix(j6).double())[1][..., :, 0].float()
 
 
-res = {"checkpoint": ckp, "step": ck.get("step"), "window": WIN}
+res = {"checkpoint": ckp, "step": ck.get("step"), "window": WIN, "matrix_p": SC.MATRIX_P, "scale": SCALE}
 def synthetic(S, WIN):
     base = dict(canvas=128, crops_per_scene=8, cross_p=0.5, p_centre=0.5, deep_tree=True, fill_quota=SC.FILL_QUOTA)
     gen = LT.difficulty_gen(0.4 + 0.6 * S, base)

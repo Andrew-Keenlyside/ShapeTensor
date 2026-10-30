@@ -3,9 +3,10 @@
 (ground, matrix, foreground) and by modality; and the share of foreground material whose population is effectively
 invisible (|correlation| below 0.1). Synthetic only.
 
-    PYTHONPATH=src python scripts/check_visibility.py [N_SCENES]
+    PYTHONPATH=src python scripts/check_visibility.py [N_SCENES]   (env VISP: the visibility guarantee's probability)
 """
 import collections
+import os
 import sys
 
 import numpy as np
@@ -19,6 +20,8 @@ from shapetensor.filters import gaussian
 from shapetensor.learn import scene as SC, lobe_train as LT
 
 dev = "cuda"; torch.cuda.set_per_process_memory_fraction(0.45); SC.MATRIX_P = 1.0
+if os.environ.get("VISP"):
+    SC.VIS_GUARANTEE_P = float(os.environ["VISP"])
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 24
 gen = LT.difficulty_gen(0.6, dict(canvas=128, crops_per_scene=8, cross_p=0.5, p_centre=0.5, deep_tree=True, fill_quota=SC.FILL_QUOTA))
 hp = lambda x: (x.float() - gaussian(x.float()[None, None], 4.0)[0, 0]).flatten()
@@ -44,7 +47,7 @@ for i in range(N):
     if fore_tot > 0:
         inv_fore.append(fore_inv / fore_tot)
     SC._scene_cache().clear(); torch.cuda.empty_cache()
-    print(f"scene {i}: {mod}", flush=True)
+    print(f"scene {i}: {mod}, raised {d['record'].get('vis_raised', 0)}", flush=True)
 q = lambda v: f"median {np.median(v):.2f} (25 % {np.percentile(v, 25):.2f}, share < 0.1: {np.mean(np.array(v) < 0.1) * 100:.0f} %, n {len(v)})"
 print("\nvisibility, |corr(population, image)|, high-passed:")
 for role in ("fore", "faint", "matrix", "ground"):

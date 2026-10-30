@@ -38,7 +38,7 @@ import numpy as np
 import torch
 import torch.nn.functional as Fn
 
-from ..filters import gaussian
+from ..filters import gaussian, gaussian_mm
 from .generator import (Layer, Sample, _composite, background, companion_field, direction_field, draw_spread, eye6, layer_density,
                         line_tensor, nuisance, render_layer, sheet_tensor, smooth_noise, spread_e, spread_tensor)
 from .physics import BY_MODALITY as PHYS_BY_MODALITY, MODES as PHYS_MODES, _to_grey, draw_material, draw_sequence, form_image
@@ -91,7 +91,8 @@ class Rng:
     def __init__(self, seed: int, device):
         self.np = np.random.default_rng(seed)
         self.g = torch.Generator(device=device).manual_seed(int(seed) + 104729)
-        self.device = device
+        self.g_wave = torch.Generator(device=device).manual_seed(int(seed) + 7_368_787)   # the fibres' undulation: its own stream, so
+        self.device = device                                                            # adding it changed no other draw (30 Oct)
 
     def u(self, a, b):
         return float(self.np.uniform(a, b))
@@ -252,6 +253,8 @@ class Curves:
     fibril: torch.Tensor | None = None     # (N, 3) longitudinal fibrils inside the section (29 Oct): density depth, period (voxels), phase
     spread: torch.Tensor | None = None     # (N,) each curve's own spread angle (degrees): its material ODF (1 - e) t t^T + e (I - t t^T) / 2,
                                            # e = sin^2 spread (29 Oct); hollow walls are sheets of material instead
+    wave: torch.Tensor | None = None       # (N, 5) each curve's own undulation (30 Oct): amplitude (voxels), two wavelengths (voxels, one per
+                                           # section axis), two phases -- applied once when rendered (:func:`undulate`)
 
     @property
     def N(self):
@@ -261,8 +264,29 @@ class Curves:
 def curves_like(P, rad, rng: Rng, obj, seg, contrast, **kw) -> Curves:
     N, S = P.shape[:2]; dev = P.device
     z = lambda v: torch.full((N, S), float(v), device=dev)
-    if kw.get("spread") is None:                                                   # each curve its own spread (29 Oct)
-        kw["spread"] = draw_spread(N, rng.g if rng is not None else None, dev)          # (no generator: the global one)
+    unres = kw.get("fibre_r") is not None                                          # an unresolved bundle's tube (its fibres not drawn)
+    given = kw.get("spread") is not None; dis = kw.pop("disorder", None)
+    if kw.get("spread") is None:                                                   # each curve its own spread (29 Oct): its unrendered
+        kw["spread"] = (draw_dispersion if unres else draw_spread)(N, rng.g if rng is not None else None, dev)   # fibrils'; a tube
+    if "wave" not in kw:                                                           # standing for unseen fibres, theirs (30 Oct). Each solid
+        kw["wave"] = None if unres else draw_wave(rad if torch.is_tensor(rad) else torch.full((N, S), float(rad), device=dev),   # fibre its
+                                                  rng.g_wave if rng is not None else None)                                          # undulation
+    solid = (kw.get("wall") is None or float(kw["wall"].max()) <= 0) and (kw.get("lumen_c") is None or float(kw["lumen_c"].abs().max()) <= 0)
+    if TEXTURE_ODF and not unres and not given and solid:                          # each solid fibre's disorder (30 Oct): its internal texture
+        gw_ = rng.g_wave if rng is not None else None                              # (depth, streaks tilted off the axis) and its ODF's spread
+        d_ = dis if dis is not None else 0.5 * (torch.rand(N, generator=gw_, device=dev) + torch.rand(N, generator=gw_, device=dev))   # one
+                                                                                   # parameter, mostly mid-range: a clean fibre sharp, a disordered one broad
+        r_ = (rad if torch.is_tensor(rad) else torch.full((N, S), float(rad), device=dev)).float().mean(1)
+        d_ = d_ * ((r_ - 0.5) / 1.0).clamp(0, 1)                                   # (texture shows from ~1.5 voxels radius: narrower, clean)
+        tex_on = r_ >= 1.0                                                         # (below a voxel's radius: no internal texture at all)
+        kw["spread"] = TEX_SPREAD[0] + d_ * (TEX_SPREAD[1] - TEX_SPREAD[0])
+        fb = kw.get("fibril")
+        per = fb[:, 1] if fb is not None else torch.exp(math.log(1.2) + math.log(3.5 / 1.2) * torch.rand(N, generator=gw_, device=dev))
+        ph = fb[:, 2] if fb is not None else 6.28 * torch.rand(N, generator=gw_, device=dev)
+        kw["fibril"] = torch.stack([TEX_DEPTH[0] + d_ * (TEX_DEPTH[1] - TEX_DEPTH[0]), per, ph], 1) if bool(tex_on.any()) else None
+        if kw["fibril"] is not None and not bool(tex_on.all()):
+            kw["fibril"] = torch.where(tex_on[:, None], kw["fibril"], torch.stack([torch.zeros_like(per), per, ph - 1e3], 1))   # (phase - 1e3:
+                                                                                                                              # flagged clean)
     return Curves(P=P, rad=rad, flat=kw.pop("flat", z(1.0)), wall=kw.pop("wall", z(0.0)), sexp=kw.pop("sexp", z(2.0)),
                   contrast=contrast if torch.is_tensor(contrast) and contrast.dim() == 2 else z(contrast),
                   lumen_c=kw.pop("lumen_c", z(0.0)), obj=obj, seg=seg, **kw)
@@ -276,7 +300,7 @@ def curves_subset(c: Curves, keep: torch.Tensor) -> Curves | None:
     pick = lambda v: None if v is None else v[idx]
     return Curves(P=c.P[idx], rad=c.rad[idx], flat=c.flat[idx], wall=c.wall[idx], sexp=c.sexp[idx], contrast=c.contrast[idx],
                   lumen_c=c.lumen_c[idx], obj=c.obj[idx], seg=c.seg[idx], lam=pick(c.lam), phi=pick(c.phi), density=pick(c.density),
-                  fibre_r=pick(c.fibre_r), spread=pick(c.spread), fibril=pick(c.fibril))
+                  fibre_r=pick(c.fibre_r), spread=pick(c.spread), fibril=pick(c.fibril), wave=pick(c.wave))
 
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -651,13 +675,129 @@ def _render_thin(cv: Canvas, c: Curves, moved: bool):
     dens = (c.density if c.density is not None else torch.ones(N, device=dev))[:, None]
     W = (math.pi * a * b * ds * dens).reshape(-1)
     ci = torch.arange(N, device=dev)[:, None].expand(N, S).reshape(-1); Tf = T.reshape(-1, 3)
-    tt = spread_tensor(Tf, spread_e(c.spread[ci])) if c.spread is not None else line_tensor(Tf)
+    sp_ = None if c.spread is None else (c.spread.clamp(max=TEX_THIN_SPREAD) if (TEXTURE_ODF and c.fibre_r is None) else c.spread)   # (no texture
+    tt = spread_tensor(Tf, spread_e(sp_[ci])) if sp_ is not None else line_tensor(Tf)                                                    # shows: sharp)
     size = (0.5 * (a + b)).reshape(-1) if c.fibre_r is None else c.fibre_r[ci]
     z = torch.zeros_like(size)
     desc = torch.stack([size, z, z, (b / a.clamp_min(1e-9)).reshape(-1), ((c.sexp - 2) / (c.sexp + 2)).clamp(0, 1).reshape(-1)], 1)
     V = torch.cat([tt, desc, c.contrast.reshape(-1)[:, None]], 1)
     keep = W > 0
     cv.splat(P.reshape(-1, 3)[keep], W[keep], V[keep], obj=c.obj[ci][keep], moved=moved, nearest=THIN_NEAREST)
+
+
+TEXTURE_ODF = True                # each solid fibre's internal texture tied to its ODF (30 Oct): its disorder d (0-1, uniform) sets
+TEX_SPREAD = (4.0, 35.0)          # its spread (degrees, lo + d (hi - lo): the target ODF's breadth) and its texture's depth and
+TEX_DEPTH = (0.0, 0.7)            # misalignment (streak families tilted off the axis by up to the spread) -- a clean fibre sharp, a
+TEX_THIN_SPREAD = 5.0             # textured, disordered one broad; a fibre too thin to show texture (centreline-splatted): at most this
+TEX_STREAKS = 8                   # oriented noise: streak families (more: noise-like, not cross-hatched)
+TEX_ALONG = 0.25                  # the disorder varies along the fibre (30 Oct): +- this over 10-60 voxel stretches -- a noisier
+                                  # stretch broader, a cleaner one sharper, texture and ODF from the same local value
+
+
+def local_disorder(c: "Curves", arcl: torch.Tensor) -> torch.Tensor | None:
+    """``(N, S)`` each textured fibre's disorder at each sample: its own (from its spread) varied smoothly along its
+    arc length ``arcl`` by +-:data:`TEX_ALONG`; None where the curves carry no texture."""
+    if not TEXTURE_ODF or c.fibril is None or c.spread is None:
+        return None
+    lo, hi = TEX_SPREAD; d0 = ((c.spread - lo) / (hi - lo)).clamp(0, 1)[:, None]
+    ph = c.fibril[:, 2:3]; fr = lambda z: z - torch.floor(z); h = lambda k: fr(torch.sin(ph * k + 0.91 * k) * 43758.5453)
+    v = 0.5 * (torch.sin(2 * math.pi * arcl / (10 + 20 * h(1.3)) + 6.28 * h(2.9)) + torch.sin(2 * math.pi * arcl / (25 + 35 * h(4.7)) + 6.28 * h(6.1)))
+    return torch.where(ph < -100, d0.expand_as(arcl), (d0 + TEX_ALONG * v).clamp(0, 1))     # (a fibre too thin for texture: unchanged)
+
+
+def fibre_texture(x, y, sl, Q, spread, per, ph, depth):
+    """A solid fibre's internal texture at its section points (``x, y`` across, ``sl`` arc length along, ``Q`` canvas
+    position), as axons look in HiP-CT (30 Oct): a smooth intensity profile along its length (darker and brighter
+    stretches), static noise (unoriented, per voxel) and oriented noise (short streaks along the fibre, each family tilted
+    off the axis by a draw within the fibre's ``spread`` -- its ODF's breadth). ``depth`` (its disorder: 0 clean) scales
+    the static and oriented parts; the profile along the length is any fibre's. Returns the material's fractional
+    reduction, 0-0.9."""
+    fr = lambda z: z - torch.floor(z)                                                         # (in [0, 1): torch.frac keeps the sign)
+    h = lambda k: fr(torch.sin(ph * k + 0.37 * k) * 43758.5453)                               # per-fibre draws from its phase
+    prof = 0.5 + 0.25 * (torch.sin(2 * math.pi * sl / (6 + 14 * h(1.1)) + 6.28 * h(2.3))      # along the length: 6-20 and 15-45 voxel
+                         + torch.sin(2 * math.pi * sl / (15 + 30 * h(3.7)) + 6.28 * h(4.1)))  # stretches
+    a_prof = 0.15 + 0.3 * h(5.3)
+    vk = torch.floor(Q); stat = fr(torch.sin((vk * torch.tensor([12.9898, 78.233, 37.719], device=Q.device)).sum(-1) + ph) * 43758.5453)
+    ori = torch.zeros_like(x)
+    for k in range(TEX_STREAKS):                                                              # streaks: across-wave of period ~per, a
+        az = 6.28 * h(10.0 + k); tilt = spread * (2 * h(20.0 + k) - 1) * 1.2                  # dash envelope along (8-20 voxels)
+        u = x * torch.cos(az) + y * torch.sin(az)
+        ori = ori + torch.sin(2 * math.pi * (u * torch.cos(tilt) - sl * torch.sin(tilt)) / (per * (0.7 + 0.6 * h(30.0 + k))) + 6.28 * h(40.0 + k)) \
+            * (0.6 + 0.4 * torch.sin(2 * math.pi * sl / (8 + 12 * h(50.0 + k)) + 6.28 * h(60.0 + k)))
+    ori = 0.5 + ori / (2.2 * math.sqrt(TEX_STREAKS))
+    t = a_prof * prof + depth * (0.45 * ori.clamp(0, 1) + 0.35 * stat * (0.4 + spread / math.radians(TEX_SPREAD[1])))
+    return torch.where(ph < -100, torch.zeros_like(t), t.clamp(0, 0.9))                       # (a fibre too thin for texture: clean)
+
+
+WAVE_DEG = (2.0, 40.0)            # each fibre's undulation (30 Oct): its peak angle off the mean axis (degrees, uniform) -- below the
+WAVE_LEN = (4.0, 12.0)            # voxel too, so a fibre's own ODF (its tangents within each voxel) is as anisotropic as the fibre
+WAVE_MIN_LEN = 3.0                # actually is: straight ones thin, wavy ones wide. Wavelength in radii (log-uniform), at least
+                                  # WAVE_MIN_LEN voxels; the peak angle capped so the curvature radius stays >= 2.5 radii (no fold)
+WAVE_SAMPLES = 4                  # samples per shortest wavelength (curves resampled finer where needed, at most 4x: 8 cost 2.5x)
+
+
+def draw_wave(rad: torch.Tensor, g: torch.Generator | None) -> torch.Tensor:
+    """``(N, 5)`` each curve's undulation from its radius ``rad (N, S)``: amplitude, two wavelengths, two phases."""
+    N = rad.shape[0]; dev = rad.device; r_ = rad.float().mean(1).clamp_min(0.05)
+    u = lambda: torch.rand(N, generator=g, device=dev)
+    lo, hi = math.log(WAVE_LEN[0]), math.log(WAVE_LEN[1])
+    lam1 = (r_ * torch.exp(lo + (hi - lo) * u())).clamp_min(WAVE_MIN_LEN); lam2 = lam1 * (0.7 + 0.6 * u())
+    th = torch.deg2rad(WAVE_DEG[0] + (WAVE_DEG[1] - WAVE_DEG[0]) * u())
+    th = torch.minimum(th, torch.minimum(lam1, lam2) / (5 * math.pi * r_))                     # curvature radius lam / (2 pi tan th) >= 2.5 r
+    amp = torch.tan(th) * torch.minimum(lam1, lam2) / (2 * math.pi)
+    return torch.stack([amp, lam1, lam2, 2 * math.pi * u(), 2 * math.pi * u()], 1)
+
+
+def _wave_need(c: Curves) -> torch.Tensor:
+    """Per curve: the resampling factor (1-4) that gives its shortest wave :data:`WAVE_SAMPLES` samples."""
+    seg = (c.P[:, 1:] - c.P[:, :-1]).norm(dim=-1)
+    return torch.ceil(seg.amax(1) * WAVE_SAMPLES / c.wave[:, 1:3].amin(1)).clamp(1, 4).long()
+
+
+def _wave_offset(c: Curves) -> Curves:
+    """``c`` (sampled finely enough) with its undulation added along its section axes (a rotation-minimising frame) as
+    a function of arc length; the wave then cleared (applied once)."""
+    P = c.P; T = tangents(P); e1, e2 = rmf(P, T)
+    seg = (P[:, 1:] - P[:, :-1]).norm(dim=-1)
+    sl = torch.cat([torch.zeros_like(seg[:, :1]), torch.cumsum(seg, 1)], 1)                   # arc length
+    a, l1, l2, p1, p2 = (c.wave[:, i:i + 1] for i in range(5))
+    off = a[..., None] * (torch.sin(2 * math.pi * sl / l1 + p1)[..., None] * e1 + torch.sin(2 * math.pi * sl / l2 + p2)[..., None] * e2)
+    return Curves(**{**{f: getattr(c, f) for f in c.__dataclass_fields__}, "P": P + off, "wave": None})
+
+
+def undulate(c: Curves) -> list:
+    """``c`` with each solid curve's undulation (``c.wave``; a vessel's or tube's wall is a sheet: none), as batches of
+    equal resampling (each curve resampled where a wave would get fewer than :data:`WAVE_SAMPLES` samples; no padding
+    between batches). Every returned batch has its wave cleared."""
+    nowave = lambda c_: Curves(**{**{f: getattr(c_, f) for f in c_.__dataclass_fields__}, "wave": None})
+    if c.wave is None or c.N == 0 or c.P.shape[1] < 3:
+        return [nowave(c)]
+    und = (c.wall.amax(1) <= 0) & (c.lumen_c.abs().amax(1) <= 0)
+    out = [nowave(curves_subset(c, ~und))] if bool((~und).any()) else []
+    cu = curves_subset(c, und) if not bool(und.all()) else c
+    if cu is not None:
+        need = _wave_need(cu)
+        for k in torch.unique(need).tolist():
+            sub = curves_subset(cu, need == k)
+            out.append(_wave_offset(_upsample_curves(sub, k) if k > 1 else sub))
+    return out
+
+
+def wavy_paths(P: torch.Tensor, rad: float, g: torch.Generator | None) -> torch.Tensor:
+    """Paths ``P (N, S, 3)`` with each its own undulation (:func:`draw_wave`, :func:`undulate`) for fibres of radius
+    ``rad`` drawn without a swept section (a bundle's strands)."""
+    N, S, _ = P.shape
+    c = Curves(P=P, rad=torch.full((N, S), float(rad), device=P.device), flat=P.new_ones(N, S), wall=P.new_zeros(N, S), sexp=P.new_full((N, S), 2.0),
+               contrast=P.new_zeros(N, S), lumen_c=P.new_zeros(N, S), obj=torch.zeros(N, dtype=torch.long, device=P.device),
+               seg=torch.zeros(N, dtype=torch.long, device=P.device), wave=draw_wave(torch.full((N, S), float(rad), device=P.device), g))
+    k = int(_wave_need(c).max())                                                                 # (one resampling for all: paths stay one array)
+    return _wave_offset(_upsample_curves(c, k) if k > 1 else c).P
+
+
+def draw_dispersion(n: int, g: torch.Generator | None, device) -> torch.Tensor:
+    """``n`` spread angles (degrees) for material drawn without fibre geometry (a smooth fill along a field): the same
+    range as the fibres' undulation (:data:`WAVE_DEG`), so a fill is as anisotropic as the fibres it stands for."""
+    return WAVE_DEG[0] + (WAVE_DEG[1] - WAVE_DEG[0]) * torch.rand(n, generator=g, device=device)
 
 
 def render_curves(cv: Canvas, c: Curves, max_points: float = 8e6, refine: bool = True, _deformed: bool = False):
@@ -673,6 +813,13 @@ def render_curves(cv: Canvas, c: Curves, max_points: float = 8e6, refine: bool =
         st = (dF / lam.clamp_min(0.05)).sqrt().clamp(0.3, 3.0).view(N, S)      # isotropic)
         c = Curves(**{**{f: getattr(c, f) for f in c.__dataclass_fields__}, "P": P, "rad": c.rad * st,
                       "wall": c.wall * st if c.wall is not None else None})
+    if c.wave is not None:                                                      # each fibre's own undulation (30 Oct), once; batches
+        parts = undulate(c)                                                     # of equal resampling rendered apart (no padding)
+        if len(parts) > 1:
+            for p_ in parts:
+                render_curves(cv, p_, max_points, refine, _deformed=True)
+            return
+        c = parts[0]; P = c.P; N, S, _ = P.shape
     thin = (c.rad.amax(1) < THIN_SPLAT_R) & (c.wall.amax(1) <= 0) & (c.lumen_c.abs().amax(1) <= 0)
     if bool(thin.any()):                                                        # sub-voxel fibres: their centreline splatted (29 Oct)
         _render_thin(cv, curves_subset(c, thin), moved)
@@ -690,6 +837,9 @@ def render_curves(cv: Canvas, c: Curves, max_points: float = 8e6, refine: bool =
     ds = torch.zeros(N, S, device=dev)
     seglen = (P[:, 1:] - P[:, :-1]).norm(dim=-1)
     ds[:, 1:] += 0.5 * seglen; ds[:, :-1] += 0.5 * seglen
+    arcl = torch.cat([torch.zeros_like(seglen[:, :1]), torch.cumsum(seglen, 1)], 1)       # arc length (the texture's streaks)
+    dloc = local_disorder(c, arcl)                                                           # (N, S) the local disorder, or None
+    sploc = None if dloc is None else TEX_SPREAD[0] + dloc * (TEX_SPREAD[1] - TEX_SPREAD[0])   # its spread there (degrees)
     f = c.flat.clamp(0.02, 1.0); a = 2 * c.rad / (1 + f); b = f * a              # perimeter-preserving flattening
     t = c.wall
     lam = c.lam if c.lam is not None else torch.ones(N, device=dev, dtype=torch.long)
@@ -731,7 +881,10 @@ def render_curves(cv: Canvas, c: Curves, max_points: float = 8e6, refine: bool =
             ph = phi[ci, si][:, None]
             xr = x * torch.cos(ph) - y * torch.sin(ph); yr = x * torch.sin(ph) + y * torch.cos(ph)
             Q = P[ci, si][:, None] + xr[..., None] * e1[ci, si][:, None] + yr[..., None] * e2[ci, si][:, None]   # (p, m, 3)
-            tt = (spread_tensor(T[ci, si], spread_e(c.spread[ci])) if c.spread is not None   # (p, 6): the fibre's material ellipse
+            sp_p = (sploc[ci, si] if sploc is not None else c.spread[ci]) if c.spread is not None else None   # (the local spread: 30 Oct)
+            if sploc is not None:
+                sp_p = torch.where(c.fibril[ci, 2] < -100, c.spread[ci], sp_p)                  # (untextured fibres: their own)
+            tt = (spread_tensor(T[ci, si], spread_e(sp_p)) if c.spread is not None                # (p, 6): the fibre's material ellipse
                   else line_tensor(T[ci, si]))
             size = 0.5 * (a[ci, si] + b[ci, si]) if fr is None else fr[ci]          # the constituents' radius for an unresolved bundle
             desc = torch.stack([size, t[ci, si], lum_frac[ci, si], (b / a.clamp_min(1e-9))[ci, si], ang[ci, si]], 1)   # (p, 5)
@@ -748,8 +901,15 @@ def render_curves(cv: Canvas, c: Curves, max_points: float = 8e6, refine: bool =
                 if c.fibril is not None:                                        # fibrils: the material's density varies across the section,
                     fa, fpd, fph = c.fibril[ci][pi].unbind(-1)                  # constant along the fibre (streaks along its axis)
                     xp, yp = xr[pi, mi], yr[pi, mi]; ca, sa = torch.cos(fph), torch.sin(fph)
-                    pat = 0.5 + 0.25 * (torch.sin(2 * math.pi * (xp * ca + yp * sa) / fpd + fph) + torch.sin(2 * math.pi * (yp * ca - xp * sa) / (1.3 * fpd) + 2 * fph))
-                    Wp = Wp * (1 - fa * pat)
+                    if TEXTURE_ODF and c.spread is not None:                    # (30 Oct) the fibre's own texture, as axons look in HiP-CT:
+                        dl_ = dloc[ci, si][pi] if dloc is not None else ((c.spread[ci][pi] - TEX_SPREAD[0]) / (TEX_SPREAD[1] - TEX_SPREAD[0])).clamp(0, 1)
+                        pat = fibre_texture(xp, yp, arcl[ci, si][pi], Q[pi, mi], torch.deg2rad(TEX_SPREAD[0] + dl_ * (TEX_SPREAD[1] - TEX_SPREAD[0])),
+                                            fpd, fph, TEX_DEPTH[0] + dl_ * (TEX_DEPTH[1] - TEX_DEPTH[0]))   # (texture from the local disorder)
+                        Wp = Wp * (1 - pat); pat = None                         # (its depth already in the pattern)
+                    else:
+                        pat = 0.5 + 0.25 * (torch.sin(2 * math.pi * (xp * ca + yp * sa) / fpd + fph) + torch.sin(2 * math.pi * (yp * ca - xp * sa) / (1.3 * fpd) + 2 * fph))
+                    if pat is not None:
+                        Wp = Wp * (1 - fa * pat)
                 cv.splat(Q[pi, mi], Wp, Vp, obj=c.obj[ci][pi], moved=moved)
             lidx = torch.nonzero(lumen_pt & (c.lumen_c[ci, si][:, None] != 0))
             if lidx.numel():
@@ -2165,8 +2325,9 @@ class Scene:
                 P = _trim_paths(P_all[pid_all == j]) if P_all is not None else None
                 pid = int(self.ids(1, float(p["mask"].sum()) ** (1 / 3))[0])
                 g = Group("tract" if p["kind"] != "grey" else "grey fibres", "line", re, p["contrast"])
-                tens = spread_tensor(p["dg"], float(spread_e(draw_spread(1, r.g, dev))[0])).movedim(-1, 0)   # (6, Z, Y, X) along the field,
-                                                                                                    # the smooth fill's own spread (29 Oct)
+                tens = spread_tensor(p["dg"], float(spread_e(draw_dispersion(1, r.g, dev))[0])).movedim(-1, 0)   # (6, Z, Y, X) along the field,
+                                                                                                    # the smooth fill's own spread (29 Oct; 30 Oct:
+                                                                                                    # the fibres' undulation range)
                 if P is not None and P.shape[0]:
                     N, S = P.shape[:2]
                     if fibres:                                                                      # resolved: each fibre an object
@@ -2183,6 +2344,7 @@ class Scene:
                         xi = torch.exp((r.u(0.3, 0.7) if vis_ else r.u(0.15, 0.5)) * r.randn(N)); xi = xi / xi.mean()   # group of fine fibres is; the swept
                         cap_ = 0.7 * (1 - p["phi"] * (1 - beta))                                     # renderer took minutes on a CPU). A strand's
                         dens = (beta * p["phi"] / fill * xi).clamp(0.02, max(cap_, 0.05))           # blurred peak is ~1.39 dens: capped below
+                        P = wavy_paths(P, re, r.g_wave)                                             # (30 Oct: each strand its own undulation)
                         occ_s, ten_s = self._strand_field(P, re, dens, spread=draw_spread(P.shape[0], r.g, dev))   # saturation, the shortfall in the smooth part
                         phi_b = max(p["phi"] - fill * float(dens.mean()), 0.0)
                         m_in = p["mask"]
@@ -2519,10 +2681,11 @@ class Scene:
         P = smooth_paths(start, r.unit(n), torch.full((n,), L, device=dev), S, torch.full((n,), r.lu(0.05, 0.4), device=dev), max(L / 4, 1.0), r)
         rad = torch.full((n, S), max(rf, 0.05), device=dev) * torch.exp((NP_SIZE_SIGMA if fill is not None else 0.2) * r.randn(n, 1)).clamp(0.3, 3.0)
         cv = curves_like(P, rad, r, obj=self.ids(n, rad[:, 0]), seg=torch.zeros(n, dtype=torch.long, device=dev), contrast=self.contrast(10, 90))
-        if fill is not None and (vox or rf < UNRESOLVED_R):                                     # unresolved, randomly directed: the
-            cv.spread = torch.full((n,), ISO_SPREAD_DEG, device=dev)                            # material's ODF is its population's,
-        out = [Group(name, "line", float(rad.median()), float(cv.contrast[0, 0]), curves=[cv])]   # isotropic (29 Oct): no voxel's own
-                                                                                                # few fibrils, which no image shows
+        out = [Group(name, "line", float(rad.median()), float(cv.contrast[0, 0]), curves=[cv])]   # (30 Oct: each fibre its own ODF -- its
+                                                                                                # undulation within the voxel -- not an
+                                                                                                # assigned isotropic one: randomly directed
+                                                                                                # fibres are isotropic as a population, at
+                                                                                                # its scale, not each alone)
         rs = r.lu(3, 8) / self.voxel_um
         if somata and 0.4 <= rs <= min(self.shape) / 6:                                                    # somata among the fibres
             m = int(min(400, r.u(0.2, 1.0) * np.prod(self.shape) / (40 * rs) ** 3 * 8 + 1))
@@ -2809,7 +2972,7 @@ class Scene:
                 for cv in g_.curves:
                     N = cv.P.shape[0]
                     sc_ = curves_like(cv.P, cv.rad * k, r, obj=self.ids(N, cv.rad[:, 0] * k), seg=cv.seg, contrast=self.contrast(20, 80))
-                    sc_.spread = torch.full((N,), ISO_SPREAD_DEG, device=self.device); cs.append(sc_)
+                    sc_.spread = torch.full((N,), ISO_SPREAD_DEG, device=self.device); sc_.wave = None; cs.append(sc_)   # (fluid: isotropic)
                 out.append(Group("perivascular", "blob", float(g_.radius) * k, cs[0].contrast[0, 0].item(), curves=cs))
             out.append(g_)
         return out
@@ -3288,6 +3451,54 @@ FORE_MAX_REL = 1.5                # a foreground material at most this far from 
                                   # rest, which 8-bit display then squeezes into a few grey levels (fluorescence, histology: 29 Oct)
 INTRINSIC_NOISE = (0.02, 0.10)    # scenes of objects: noise at any strength, a share of the image's 5-95 % range (blurred 0.4-1 voxel)
 ROLE_CONTRAST = {"ground": (0.02, 0.08), "matrix": (0.05, 0.20), "faint": (0.20, 0.50), "fore": (0.30, 1.00)}   # relative to the role beneath (29 Oct)
+VIS_GUARANTEE_P = 0.85            # scenes of objects: a foreground or faint population the formed image barely shows (|corr| below
+VIS_MIN = 0.1                     # VIS_MIN, both high-passed) is raised to VIS_TARGET with this probability; the rest stay faint
+VIS_TARGET = (0.15, 0.40)         # (real material can be invisible). Populations merged into the background are left as they are (29 Oct)
+VIS_MAX_ADD = 0.5                 # ... by at most this share of the image's 5-95 % range (a few voxels' object is not made the
+                                  # image's darkest or brightest speck: it may stay below its target)
+VIS_KEEP = 0.6                    # ... and only if every population that showed (any role) keeps >= VIS_MIN and this share of its
+                                  # visibility (one population raised over another does not wash it out); else the other sign, else none
+
+
+def _visibility_guarantee(img: torch.Tensor, layers: list, occs: torch.Tensor, skip: set, rv: np.random.Generator) -> tuple:
+    """``img`` with each barely visible foreground or faint population raised (:data:`VIS_GUARANTEE_P`): its material,
+    modulated along it as its contrast map is, added with the amplitude that brings its high-passed correlation with the
+    image to a draw from :data:`VIS_TARGET` (its sign kept, at most :data:`VIS_MAX_ADD` of the image's range), provided
+    no other population loses its visibility (:data:`VIS_KEEP`). Returns the image and the indices raised."""
+    hp = lambda x: (lambda h: h - h.mean((-3, -2, -1), keepdim=True))(x - gaussian_mm(x, 4.0, truncate=3.0))
+    roles = [getattr(L, "mrole", None) for L in layers]
+    ks = [k for k, r_ in enumerate(roles) if r_ is not None and float(occs[k].sum()) >= 50]
+    if not ks:
+        return img, []
+    mods = [(layers[k].cmap / layers[k].contrast).clamp(0.3, 3.0) if abs(layers[k].contrast) > 1e-6 else torch.ones_like(occs[k]) for k in ks]
+    pats = torch.stack([occs[k] * m_ for k, m_ in zip(ks, mods)])                                  # (J, Z, Y, X) each population's material
+    O = hp(pats); vo = (O * O).mean((1, 2, 3)); OO = torch.einsum("izyx,jzyx->ij", O, O) / O[0].numel()   # (J,), (J, J)
+    I = hp(img.float()[None])[0]; ci = (O * I).mean((1, 2, 3)); vi = float((I * I).mean())
+    flat_ = img.flatten()[:: max(1, img.numel() // 100000)].float()
+    q5, q95 = torch.quantile(flat_, torch.tensor([0.05, 0.95], device=img.device)); span = float(q95 - q5)
+    corr = lambda ci_, vi_: ci_ / (vi_ * vo).clamp_min(1e-20).sqrt()
+    raised = []
+    for j, k in enumerate(ks):
+        if roles[k] not in ("fore", "faint") or k in skip or float(vo[j]) < 1e-12 or vi < 1e-12:
+            continue
+        c0 = corr(ci, vi); r0 = float(c0[j].abs())
+        if r0 >= VIS_MIN or rv.random() >= VIS_GUARANTEE_P:
+            continue
+        t = rv.uniform(*VIS_TARGET); pref = (1.0 if float(ci[j]) > 0 else -1.0) if r0 > 0.02 else (1.0 if rv.random() < 0.5 else -1.0)
+        pmax = float(torch.quantile(pats[j][pats[j] > 1e-3].float()[:: max(1, int((pats[j] > 1e-3).sum()) // 100000)], 0.99))
+        a_max = VIS_MAX_ADD * span / max(pmax, 1e-6)
+        shown = (c0.abs() >= VIS_MIN); shown[j] = False
+        for sg in (pref, -pref):
+            c = sg * float(ci[j]); v_o = float(vo[j])                                              # corr(I + a o, o) = t, solved for a >= 0
+            a = (-c * (1 - t * t) + t * math.sqrt(max((1 - t * t) * (v_o * vi - c * c), 0.0))) / (v_o * (1 - t * t))
+            a = min(a, a_max)
+            ci_new = ci + sg * a * OO[:, j]; vi_new = vi + 2 * sg * a * float(ci[j]) + a * a * v_o
+            c1 = corr(ci_new, vi_new)
+            if bool(((c1.abs() < torch.clamp(VIS_KEEP * c0.abs(), min=VIS_MIN)) & shown).any()):
+                continue                                                                           # it would hide another population
+            img = img + sg * a * pats[j]; ci, vi = ci_new, vi_new; raised.append(k)
+            break
+    return img, raised
 
 
 def _contrast_to(mat: dict, ref: dict, want: float, at_least: bool = False, at_most: float | None = None) -> dict:
@@ -3710,6 +3921,9 @@ def draw_scene(shape=(64, 64, 64), seed: int = 0, device="cuda", modality: str |
         nl = int(lab.max()) + 1; reg = torch.tensor([ra.u(-40, 40) for _ in range(nl)], device=device)[lab]
         img_main = g0 + off + reg; routes.append("scramble")
     img = img_main
+    if mtx and VIS_GUARANTEE_P > 0 and layers:                               # most foreground populations seen at least weakly
+        img, raised = _visibility_guarantee(img, layers, occs, {k for k, t in merge.items() if t == -1}, np.random.default_rng((int(seed), 7177)))
+        rec["vis_raised"] = len(raised)
     if mtx:                                                                  # intrinsic acquisition noise: real images are never clean
         flat_ = img.flatten()[:: max(1, img.numel() // 100000)].float()       # (29 Oct; even at strength 0; the targets untouched)
         q5, q95 = torch.quantile(flat_, torch.tensor([0.05, 0.95], device=device))

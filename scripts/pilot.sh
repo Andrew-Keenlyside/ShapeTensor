@@ -5,10 +5,11 @@
 #
 #   scripts/pilot.sh NAME [extra trainer flags...]
 # env: GPU (a CUDA_VISIBLE_DEVICES value), RESULTS (the results directory), EVAL (a directory for the scores and figures),
-#      STEPS (default 1500)
+#      STEPS (default 1500), DATA (where pairs are made; default 20 CPU workers, no GPU producer)
 set -u
 NAME=$1; shift
 cd "$(dirname "$0")/.."
+DATA=${DATA:---no-producer --cpu-workers 20 --cpu-threads 3}
 GPU=${GPU:-0}; R=${RESULTS:-/home/andrew/bridge_wmcov/shapetensor/results/dev_pipeline/scene_v2}; E=${EVAL:-$R/eval}; STEPS=${STEPS:-1500}
 PY=/home/andrew/.conda/envs/shapetensors/bin/python; OUT=$R/$NAME
 export PYTHONPATH=src PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=$GPU
@@ -21,7 +22,7 @@ $PY -m shapetensor.learn.train \
     --val-n 16 --val-every 300 --log-every 25 --ckpt-minutes 4 --resume auto --strength0 0.0 --strength1 1.0 --level0 0.4 --strength-mix \
     --pairs 0 --dir-lmax 16 --vote-unc --deep-tree --lcn 3 --region-dec --e-cross 0.2 --kappa-log \
     --vote-objects --own-objects --dens-same-norm --bg-head --obj-head --block-norm 1 --odirect 256 --od-sigmas 2 4 6 8 --split-head --mass-vote \
-    --od-norm --no-producer --cpu-workers 20 --cpu-threads 3 --gen "$GEN" --geometry-targets --pop-k 4 --pop-dir 96 --weights "$WPOP" "$@" \
+    --od-norm $DATA --gen "$GEN" --geometry-targets --pop-k 4 --pop-dir 96 --weights "$WPOP" "$@" \
     >> $OUT.log 2>&1 &
 TP=$!
 while kill -0 $TP 2>/dev/null; do                                                       # the halfway checkpoint, as it appears

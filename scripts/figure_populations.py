@@ -27,6 +27,7 @@ from odf_render import draw_tensors
 ckp, out = sys.argv[1], sys.argv[2]; dev = "cuda"; WIN = float(os.environ.get("WINDOW", 3.0)); STR = float(os.environ.get("STRENGTH", 0.3))
 ck = torch.load(ckp, map_location=dev, weights_only=False); net = PopulationNet.from_args(ck["args"]).to(dev).eval(); net.load_state_dict(ck["model"])
 ET.configure_from_args(ck["args"])                                                                 # (its targets: background apart, matching)
+SC.MATRIX_P = float(os.environ.get("MATRIX", 0))                                                   # 1: scenes built of objects
 dirs8 = EI.sphere_dirs(8, dev)
 
 
@@ -44,7 +45,9 @@ def stack(ax, img, cen, T6, share, step, title, view):
 
 def model_pops(x, pts, sig):
     with torch.no_grad():
-        f = EI.features(net, x); r = EI.query(net, f, pts, sig, dirs8, vol_shape=x.shape)
+        f = EI.features(net, x)
+        r = EI.query(net, f, pts, sig, dirs8, vol_shape=x.shape,
+                     scale=torch.full_like(sig, float(os.environ.get("EVAL_SCALE", 4))) if ck["args"].get("scales") else None)
     on = r["pop_exist"] > 0.5; q, k = torch.nonzero(on, as_tuple=True)
     return q, m6(r["pop_T"][q, k]), r["pop_share"][q, k]
 

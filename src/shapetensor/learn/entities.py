@@ -178,7 +178,7 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
                    bin_size: int = 2, mask: torch.Tensor | None = None, keep: torch.Tensor | None = None, m_min: float = 1e-3,
                    ovis: torch.Tensor | None = None, alone_is_object: bool = True, sig_acq: float = 0.0, share_keep: float = 0.2, level=None,
                    scale=None, centroids: torch.Tensor | None = None, coll_offset=None,
-                   comp: torch.Tensor | None = None) -> dict:
+                   comp: torch.Tensor | None = None, bg_groups: torch.Tensor | None = None) -> dict:
     """The entities at query ``points (Q, 3)`` (output crop voxels) and scales ``sigma (Q,)`` (crop voxels).
 
     ``entries`` the canvas's ``(vox, group, obj, w, v)`` (canvas linear index; ``v`` the w-weighted tensor (6) and
@@ -197,7 +197,9 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     composite factor (pre-warp crop space: occlusion and the volume budget, as the image and the total target). Only
     entries inside the crop count (the image shows nothing beyond it); visibility is taken where each part of the
     window lies (as the total target weighs each voxel). Returns, padded to ``emax`` entities per query (by mass):
-    ``node (Q, E)`` (tree nodes, -1 pad), ``mass``, ``vis``, ``T (Q, E, 3, 3)`` (trace 1), ``desc (Q, E, 5)``."""
+    ``node (Q, E)`` (tree nodes, -1 pad), ``mass``, ``vis``, ``T (Q, E, 3, 3)`` (trace 1), ``desc (Q, E, 5)``, and per query
+    ``tot (Q,)`` the visible mass of all its entities (not only the ``emax`` kept: a dense window holds hundreds) and
+    ``bg (Q,)`` the part of it in the populations ``bg_groups`` (the ground: the populations head's background)."""
     vox, grp, obj, w, v = entries
     dev = points.device; Q = points.shape[0]; zf = float(zoom)
     o = torch.as_tensor(origin, device=dev, dtype=torch.float32)
@@ -321,6 +323,11 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     # visible mass; negligible entities (window edges, masked tissue) dropped; pad per query, heaviest first
     score = mass * Vis
     tot = torch.zeros(Q, device=dev).index_add_(0, eq, score)
+    if bg_groups is not None and bg_groups.numel():
+        ing = torch.isin(tree.group[en.clamp(0, tree.n - 1)], bg_groups) & (en < tree.n)
+        bgm = torch.zeros(Q, device=dev).index_add_(0, eq, score * ing)
+    else:
+        bgm = torch.zeros(Q, device=dev)
     big = (score >= m_min) | ((score >= share_keep * tot[eq]) & (score > 1e-7))
     eq, en, mass, Vis, T, desc, score = eq[big], en[big], mass[big], Vis[big], T[big], desc[big], score[big]
     o1 = torch.argsort(-score); order = o1[torch.argsort(eq[o1], stable=True)]                  # by query, then visible mass descending
@@ -332,6 +339,7 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
            "vis": torch.zeros(Q, emax, device=dev), "T": torch.zeros(Q, emax, 3, 3, device=dev), "desc": torch.zeros(Q, emax, 5, device=dev)}
     out["node"][e_, r_] = en[sel]; out["mass"][e_, r_] = mass[sel]; out["vis"][e_, r_] = Vis[sel]
     out["T"][e_, r_] = T[sel]; out["desc"][e_, r_] = desc[sel]
+    out["tot"], out["bg"] = tot, bgm
     return out
 
 

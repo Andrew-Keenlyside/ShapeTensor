@@ -169,7 +169,7 @@ def population_targets(T: dict, K: int):
     ``ellipse (B, Q, K, 3, 3)``, ``valid (B, Q, K)``, ``other (B, Q)`` the rest's share, ``has (B, Q)`` any material.
     With :data:`POP_BG` the background's entities are not among them (:func:`population_bg` holds their share)."""
     m = (T["e_mass"].float() * T["e_vis"].float()).clamp_min(0) * (T["e_node"] >= 0)
-    tot = m.sum(-1, keepdim=True); sh = m / tot.clamp_min(1e-9)
+    tot = _window_total(T, m)[..., None]; sh = m / tot.clamp_min(1e-9)
     if POP_BG and "e_bg" in T:
         sh = sh * (~T["e_bg"].bool()).to(sh.dtype)
     o = sh.argsort(-1, descending=True)[..., :K]
@@ -178,12 +178,21 @@ def population_targets(T: dict, K: int):
     return s, E, valid, (1 - s.sum(-1) - population_bg(T)).clamp_min(0), tot[..., 0] > MASS_EPS
 
 
+def _window_total(T: dict, m: torch.Tensor) -> torch.Tensor:
+    """``(B, Q)`` the window's visible mass: all its entities (``e_tot``, 30 Oct: shares over the ``emax`` kept only
+    put 70 % of a dense window's material into its top few), else the kept ones'."""
+    return torch.maximum(T["e_tot"].float(), m.sum(-1)) if "e_tot" in T else m.sum(-1)
+
+
 def population_bg(T: dict) -> torch.Tensor:
-    """``(B, Q)`` the background entities' share of the window's material (0 without :data:`POP_BG`)."""
+    """``(B, Q)`` the background entities' share of the window's material (0 without :data:`POP_BG`): all of them
+    (``e_bgm``) where known, else the kept ones."""
     m = (T["e_mass"].float() * T["e_vis"].float()).clamp_min(0) * (T["e_node"] >= 0)
     if not (POP_BG and "e_bg" in T):
         return torch.zeros(m.shape[:-1], device=m.device)
-    return (m * T["e_bg"].bool().to(m.dtype)).sum(-1) / m.sum(-1).clamp_min(1e-9)
+    kept = (m * T["e_bg"].bool().to(m.dtype)).sum(-1)
+    bg = torch.maximum(T["e_bgm"].float(), kept) if "e_bgm" in T else kept
+    return (bg / _window_total(T, m).clamp_min(1e-9)).clamp(0, 1)
 
 
 def configure_from_args(args: dict | None, matching: bool = False):

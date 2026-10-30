@@ -114,6 +114,9 @@ def _cpu_worker(rank: int, n: int, size: int, seed0: int, cfg, q, state: dict, t
         elif k.startswith("FB."):                                                                  # the fibre architecture's (Monte Carlo fibres)
             from . import fibres as FB
             setattr(FB, k[3:], v)
+        elif k.startswith("SC."):                                                                  # the scene generator's (scenes of objects)
+            from . import scene as SC
+            setattr(SC, k[3:], v)
         else:
             setattr(TR, k, v)
     k = 0; fails = 0
@@ -259,3 +262,28 @@ def finish_distributed(world: int):
         import torch.distributed as dist
         if dist.is_initialized():
             dist.barrier(); dist.destroy_process_group()
+
+
+class PoolSource:
+    """Pre-made pairs (``train --make-pool``: shards of ``(image, targets)`` on the CPU) served in a random order, a new
+    permutation each pass; :meth:`take` moves them to the device. For a card that cannot train and generate at once."""
+
+    def __init__(self, path: str, seed: int = 0):
+        import glob
+        files = sorted(glob.glob(os.path.join(path, "shard_*.pt")))
+        if not files:
+            raise FileNotFoundError(f"no pool shards in {path}")
+        self.items = [it for f in files for it in torch.load(f, map_location="cpu", weights_only=False)]
+        self.g = torch.Generator().manual_seed(int(seed) + 4049); self.order, self.i, self.passes = [], 0, 0
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def take(self, k: int, device) -> list:
+        out = []
+        for _ in range(k):
+            if self.i >= len(self.order):
+                self.order = torch.randperm(len(self.items), generator=self.g).tolist(); self.i = 0; self.passes += 1
+            img, t = self.items[self.order[self.i]]; self.i += 1
+            out.append((img.to(device, non_blocking=True), {kk: (vv.to(device, non_blocking=True) if torch.is_tensor(vv) else vv) for kk, vv in t.items()}))
+        return out

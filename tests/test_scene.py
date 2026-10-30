@@ -407,10 +407,37 @@ def test_thin_fibres_splatted_keep_their_volume_and_orientation(monkeypatch, rad
     out = {}
     for name, thr in (("thin", 2.0), ("swept", 0.0)):
         monkeypatch.setattr(SC_, "THIN_SPLAT_R", thr)
-        c = SC_.curves_like(P, torch.full((1, S), rad, device=DEV), SC_.Rng(0, DEV), obj=torch.tensor([1], device=DEV), seg=torch.tensor([1], device=DEV), contrast=50.0)
+        c = SC_.curves_like(P, torch.full((1, S), rad, device=DEV), SC_.Rng(0, DEV), obj=torch.tensor([1], device=DEV), seg=torch.tensor([1], device=DEV), contrast=50.0,
+                            wave=None)                                                        # (the splat, not the fibre's undulation)
         cv = SC_.Canvas((64, 64, 64), DEV); SC_.render_curves(cv, c); out[name] = cv.finish()
     va, vb = float(out["thin"]["occupancy"].sum()), float(out["swept"]["occupancy"].sum())
     assert abs(va - vb) / vb < 0.05, (va, vb)
     m = out["thin"]["occupancy"] > 0.05
     ta, tb = out["thin"]["tensor"][:, m].T.float(), out["swept"]["tensor"][:, m].T.float()
     assert float((ta - tb).abs().max()) < 0.1
+
+
+@pytest.mark.parametrize("rad", [0.3, 1.5])
+def test_fibre_odf_is_its_own_undulation(rad):
+    """A fibre's own ODF is its geometry (30 Oct): straight, a needle; undulating, as wide as its tangents within each
+    voxel -- the line-ness falls with the wave's angle, and the measured spread matches the drawn angle."""
+    from shapetensor.learn import scene as SC_
+    S = 240; xs = torch.linspace(4, 60, S, device=DEV)
+    P = torch.stack([torch.full_like(xs, 32.0), torch.full_like(xs, 32.0), xs], -1)[None]
+    lin = {}
+    for deg in (0.0, 15.0, 35.0):
+        lam = max(SC_.WAVE_MIN_LEN, 8 * rad)
+        th = min(math.radians(deg), lam / (5 * math.pi * rad)) if deg else 0.0
+        amp = math.tan(th) * lam / (2 * math.pi)
+        wave = torch.tensor([[amp, lam, lam, 0.3, 1.1]], device=DEV)
+        c = SC_.curves_like(P, torch.full((1, S), rad, device=DEV), SC_.Rng(0, DEV), obj=torch.tensor([1], device=DEV), seg=torch.tensor([1], device=DEV),
+                            contrast=50.0, spread=torch.tensor([0.5], device=DEV), wave=wave)
+        cv = SC_.Canvas((64, 64, 64), DEV); SC_.render_curves(cv, c); r = cv.finish()
+        m = r["occupancy"] > 0.2
+        xx = r["tensor"][2][m].float()                                                          # the axis (x) component: 1 for a needle
+        lin[deg] = (float(xx.mean()), math.degrees(th))
+    assert lin[0.0][0] > 0.97, lin
+    assert lin[0.0][0] > lin[15.0][0] > lin[35.0][0], lin
+    for deg in (15.0, 35.0):                                                                    # sin^2 of the transverse part ~ the wave's
+        meas = math.degrees(math.asin(math.sqrt(max(1 - lin[deg][0], 0.0))))                    # mean squared angle (th^2 / 2 per axis, two axes)
+        assert 0.5 * lin[deg][1] < meas < 1.3 * lin[deg][1], (deg, meas, lin)

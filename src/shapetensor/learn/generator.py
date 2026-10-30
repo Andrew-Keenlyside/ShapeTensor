@@ -158,7 +158,8 @@ def spread_tensor(t: torch.Tensor, e) -> torch.Tensor:
     return (1 - e) * d + e * (eye6(t.device, t.shape[:-1]) - d) / 2
 
 
-SPREAD_DEG = (1.0, 15.0)            # each fibre-like object's own spread angle s (degrees, log-uniform): e = sin^2 s (29 Oct)
+SPREAD_DEG = (0.5, 5.0)             # each fibre-like object's own spread angle s (degrees, log-uniform): e = sin^2 s (29 Oct) -- since 30 Oct
+                                    # only its unrendered fibrils' (1-15 before): its dispersion is its rendered undulation (scene.WAVE_DEG)
 
 
 def draw_spread(n: int, g: torch.Generator, device) -> torch.Tensor:

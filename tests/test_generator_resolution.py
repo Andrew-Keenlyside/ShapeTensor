@@ -47,7 +47,10 @@ def test_a_textured_unresolved_bundle_shows_its_direction_inside_and_keeps_its_p
     for seed in range(12):
         occ, T, rec = _render(monkeypatch, True, [A], seed)
         core = _core()
-        if float(T[0, 2][core].mean()) < 0.93:                                            # (a fanning bundle: its directions spread)
+        tm = T[0][:, core].float().mean(1)                                                 # (a fanning bundle: its mean axis off A; 30 Oct --
+        Mm = torch.tensor([[tm[0], tm[3], tm[4]], [tm[3], tm[1], tm[5]], [tm[4], tm[5], tm[2]]], dtype=torch.float64)   # the fibres' own undulation
+        ax = torch.linalg.eigh(Mm)[1][:, -1].float()                                       # widens every bundle's tensor, so its size no
+        if math.degrees(math.acos(min(1.0, abs(float(ax @ torch.tensor(A, dtype=torch.float32)))))) > 10:   # longer tells a fan)
             continue
         b = rec["families"][0]["bundle"]
         assert b["texture"] > 0 and abs(float(occ[0][core].mean()) - b["packing"]) < 0.12, (b, float(occ[0][core].mean()))
@@ -144,7 +147,8 @@ def test_tract_tensors_follow_their_direction_fields():
         T = g["tensor"].float(); o = g["occupancy"].float(); m = o > 0.2
         M = torch.stack([torch.stack([T[0], T[3], T[4]], -1), torch.stack([T[3], T[1], T[5]], -1), torch.stack([T[4], T[5], T[2]], -1)], -2)[m]
         ev = torch.linalg.eigvalsh(M.double() + 1e-9 * torch.eye(3, device=M.device, dtype=torch.float64))
-        assert float(ev[:, 2].median()) > 0.8                                                # one direction per voxel: line-like
+        assert float(ev[:, 2].median()) > 0.6                                                # one direction per voxel: line-like (30 Oct: with the
+                                                                                             # fibres' dispersion, 2-40 deg, no longer > 0.8)
 
 
 def test_a_crossing_zone_holds_populations_at_its_recorded_angle():
@@ -280,8 +284,10 @@ def test_a_coarsely_sampled_fat_curve_is_swept_without_gaps(monkeypatch):
     full; without the refinement it is striped."""
     s = torch.arange(0, 64, 3.0, device=DEV); S = s.numel()
     P = torch.stack([32 + 6 * torch.sin(s / 10), 32 + 0 * s, s], -1)[None]                     # (1, S, 3): along x, bending in z
-    c = SC.curves_like(P, torch.full((1, S), 8.0, device=DEV), None, obj=torch.tensor([1], device=DEV), seg=torch.tensor([1], device=DEV), contrast=1.0)
+    c = SC.curves_like(P, torch.full((1, S), 8.0, device=DEV), None, obj=torch.tensor([1], device=DEV), seg=torch.tensor([1], device=DEV), contrast=1.0,
+                       wave=None, disorder=torch.zeros(1, device=DEV))                          # (the sweep's sampling, not an undulation's or texture)
     occ = {}
+    monkeypatch.setattr(SC, "TEXTURE_ODF", False)                                              # (the sweep's filling, not a fibre's texture)
     for name, step in (("refined", SC.SWEEP_STEP), ("coarse", 1e9)):
         monkeypatch.setattr(SC, "SWEEP_STEP", step)
         cv = SC.Canvas((64, 64, 64), DEV); SC.render_curves(cv, c); occ[name] = cv.finish()["occupancy"]
