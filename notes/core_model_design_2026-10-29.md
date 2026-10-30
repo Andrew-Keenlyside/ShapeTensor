@@ -529,3 +529,21 @@ The first training on the rich scenes ("scenes built of objects"), one unattende
   out of the pool (16 new rich scenes took ~10 min to draw); pool shards of 16 (a deadline loses little). On rich
   scenes criteria A and B have no queries (no window holds a single fibre at >= 60 %: the ground is ~2/3), so they are
   read on the older scenes.
+- **Results (31 Oct, done 05:54).** The pool stopped at 02:28 (640 crops): CUDA out of memory, ~32 GB of its own plus
+  the BRIDGE job's 15 GB -- the pool needs a memory guard on a shared card. Training 4969 steps (02:28-05:24, ~2.1
+  s/step); val_pop 1.33 (step 500) -> 1.13 (step 2500) -> 1.20 (step 4969): overfitting the 640 crops (~60 uses each).
+
+  | criterion (older scenes) | P4 | overnight |
+  |---|---|---|
+  | A single-line axis | 54.6 deg vs ST 46.9 (FAIL) | 45.7 vs 46.8 (PASS) |
+  | B crossings both found | 0 % | 0 % (FAIL) |
+  | C existence F1 | 0.722 vs 0.573 | 0.708 vs 0.579 (PASS) |
+  | D shape class / texture isotropic | 21 % / 100 % | 55 % / 67 % (FAIL) |
+  | E better than halfway | FAIL | FAIL |
+  | F existence rate, line-ness sd | PASS | PASS |
+
+  Rich scenes: C, F pass; A 77.5 deg vs ST 75.3 (both worse than a random axis: the rich-scene single-line targets
+  and images look inconsistent -- to check first); B 0 % (n 29). The model gives no slot (existence > 0.5) on any
+  phantom: trained only on rich scenes, where textured ground is the background, it reads the phantoms' texture as
+  ground. Next: check the rich-scene targets against the images; mix older and rich scenes (`--matrix-p` 0.5-0.7);
+  more data (the cluster run, generator GPUs apart).
