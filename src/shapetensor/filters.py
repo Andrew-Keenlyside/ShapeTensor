@@ -110,6 +110,20 @@ def gaussian_mm(x: torch.Tensor, sigma: float, truncate: float = 3.0) -> torch.T
     return x
 
 
+def gaussian_pool_mm(x: torch.Tensor, sigma: float, step: int, truncate: float = 3.0) -> torch.Tensor:
+    """:func:`gaussian_mm` then ``avg_pool3d(step)`` (cells of ``step`` voxels, the remainder dropped) as one matrix per
+    axis: each product shrinks the volume, so the later axes cost ``step`` times less (exactly the same sums)."""
+    k = kernel1d(float(sigma), 0, truncate) if sigma > 0 else np.ones(1)
+    def mat(n):
+        M = filter_matrix(k, n, x.dtype, x.device); m = n // step
+        return M[:m * step].reshape(m, step, n).mean(1)
+    Z, Y, X = x.shape[-3:]
+    x = x @ mat(X).T
+    x = (x.transpose(-1, -2) @ mat(Y).T).transpose(-1, -2)
+    x = (x.transpose(-1, -3) @ mat(Z).T).transpose(-1, -3)
+    return x
+
+
 def gaussian(x: torch.Tensor, sigma, order=(0, 0, 0), truncate: float = 3.0, axes=(-3, -2, -1)) -> torch.Tensor:
     """Separable Gaussian (derivative) filter over ``axes``; ``sigma`` a scalar or one value per axis."""
     sig = (sigma,) * len(axes) if np.isscalar(sigma) else tuple(sigma)

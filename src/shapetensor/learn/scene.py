@@ -192,16 +192,23 @@ def rmf(P: torch.Tensor, T: torch.Tensor, stride: int = 4) -> tuple[torch.Tensor
         return e1, torch.linalg.cross(T, e1, dim=-1)
     ref = torch.where(T[:, :1, :1].abs() < 0.9, torch.tensor([1.0, 0, 0], device=P.device), torch.tensor([0, 1.0, 0], device=P.device)).expand(N, 1, 3)[:, 0]
     r = Fn.normalize(ref - (ref * T[:, 0]).sum(-1, keepdim=True) * T[:, 0], dim=-1)
-    R = [r]
-    for i in range(S - 1):
-        v1 = P[:, i + 1] - P[:, i]; c1 = (v1 * v1).sum(-1, keepdim=True).clamp_min(1e-12)
-        rL = r - (2 / c1) * (v1 * r).sum(-1, keepdim=True) * v1
-        tL = T[:, i] - (2 / c1) * (v1 * T[:, i]).sum(-1, keepdim=True) * v1
-        v2 = T[:, i + 1] - tL; c2 = (v2 * v2).sum(-1, keepdim=True)
-        r = torch.where(c2 > 1e-12, rL - (2 / c2.clamp_min(1e-12)) * (v2 * rL).sum(-1, keepdim=True) * v2, rL)
-        r = Fn.normalize(r - (r * T[:, i + 1]).sum(-1, keepdim=True) * T[:, i + 1], dim=-1)
-        R.append(r)
-    e1 = torch.stack(R, 1)
+    if S < 2:
+        return r[:, None], torch.linalg.cross(T, r[:, None], dim=-1)
+    # each step's double reflection is a fixed rotation H2 H1 (the frame is carried, not chosen): every frame at once as
+    # a prefix product of those rotations (a parallel scan, log2 S batched products -- 29 Oct: the step-by-step loop
+    # was ~600k small GPU launches per scene), re-projected onto each normal plane
+    eye = torch.eye(3, device=P.device)
+    v1 = P[:, 1:] - P[:, :-1]; c1 = (v1 * v1).sum(-1, keepdim=True).clamp_min(1e-12)
+    H1 = eye - (2 / c1)[..., None] * v1[..., :, None] * v1[..., None, :]
+    tL = T[:, :-1] - (2 / c1) * (v1 * T[:, :-1]).sum(-1, keepdim=True) * v1
+    v2 = T[:, 1:] - tL; c2 = (v2 * v2).sum(-1, keepdim=True)
+    H2 = eye - torch.where(c2 > 1e-12, 2 / c2.clamp_min(1e-12), torch.zeros_like(c2))[..., None] * v2[..., :, None] * v2[..., None, :]
+    C = H2 @ H1                                                                                 # (N, S-1, 3, 3): step i -> i + 1
+    d = 1
+    while d < S - 1:                                                                            # C_i <- C_i ... C_0 (inclusive scan)
+        C = torch.cat([C[:, :d], C[:, d:] @ C[:, :-d]], 1); d *= 2
+    e1 = torch.cat([r[:, None], (C @ r[:, None, :, None])[..., 0]], 1)
+    e1 = Fn.normalize(e1 - (e1 * T).sum(-1, keepdim=True) * T, dim=-1)
     return e1, torch.linalg.cross(T, e1, dim=-1)
 
 
@@ -458,24 +465,34 @@ class Canvas:
             W = W * dF; V = V.clone(); V[:, :6] = self.deform.push_tensor(V[:, :6], Fq); st = dF.pow(1 / 3)
             V[:, 6] = V[:, 6] * st; V[:, 7] = V[:, 7] * st
         Z, Y, X = self.shape
-        p0 = Q.floor(); fr = Q - p0; i0 = p0.long(); kc, wc, vc = [], [], []
+        p0 = Q.floor(); fr = Q - p0; i0 = p0.long(); kc, wc = [], []
         if nearest:
             i0 = torch.round(Q).long(); fr = torch.zeros_like(Q)
-        for dz in ((0,) if nearest else (0, 1)):
-            for dy in ((0,) if nearest else (0, 1)):
-                for dx in ((0,) if nearest else (0, 1)):
+        for dz in ((0,) if nearest else (0, 1)):                             # a corner outside the canvas: weight 0 (no masked copies,
+            for dy in ((0,) if nearest else (0, 1)):                         # 29 Oct: eight boolean selections per call were a third
+                for dx in ((0,) if nearest else (0, 1)):                     # of the splat's time; adding zero changes no sum)
                     iz, iy, ix = i0[:, 0] + dz, i0[:, 1] + dy, i0[:, 2] + dx
                     w = W * (fr[:, 0] if dz else 1 - fr[:, 0]) * (fr[:, 1] if dy else 1 - fr[:, 1]) * (fr[:, 2] if dx else 1 - fr[:, 2])
                     ok = (iz >= 0) & (iz < Z) & (iy >= 0) & (iy < Y) & (ix >= 0) & (ix < X) & (w > 0)
-                    lin = ((iz * Y + iy) * X + ix)[ok]; ww = w[ok]
-                    self.occ.index_add_(0, lin, ww)
-                    self.acc.index_add_(0, lin, ww[:, None] * V[ok])
-                    if obj is not None:                                      # the same trilinear weights per (voxel, population, object):
-                        kc.append((lin * self.NG + self.group) * self.OBJ + obj[ok]); wc.append(ww); vc.append(ww[:, None] * V[ok, :self.NV])
+                    lin = (iz.clamp(0, Z - 1) * Y + iy.clamp(0, Y - 1)) * X + ix.clamp(0, X - 1); ww = torch.where(ok, w, torch.zeros_like(w))
+                    if obj is None:
+                        self.occ.index_add_(0, lin, ww)
+                        self.acc.index_add_(0, lin, ww[:, None] * V)
+                    else:                                                    # the same trilinear weights per (voxel, population, object):
+                        kc.append((lin * self.NG + self.group) * self.OBJ + obj); wc.append(ww)
         if obj is not None and kc:                                           # entities sum exactly to the population; summed per call first
-            uk, inv = torch.unique(torch.cat(kc), return_inverse=True)
-            self._add_keys(uk, torch.zeros(uk.shape[0], device=self.device).index_add_(0, inv, torch.cat(wc)),
-                           torch.zeros(uk.shape[0], self.NV, device=self.device).index_add_(0, inv, torch.cat(vc)))
+            k_, w_ = torch.cat(kc), torch.cat(wc); live = torch.nonzero(w_ > 0)[:, 0]
+            if live.numel() == 0:
+                return
+            uk, inv = torch.unique(k_[live], return_inverse=True)
+            inv_all = torch.zeros_like(k_).index_put_((live,), inv)          # (zero weights add nothing wherever they point)
+            vs = torch.zeros(uk.shape[0], V.shape[1], device=self.device); n_ = Q.shape[0]
+            for c_ in range(len(kc)):                                        # per corner: no (8n, C) copy
+                vs.index_add_(0, inv_all[c_ * n_:(c_ + 1) * n_], wc[c_][:, None] * V)
+            ws = torch.zeros(uk.shape[0], device=self.device).index_add_(0, inv, w_[live])
+            lin_u = uk // (self.NG * self.OBJ)                               # the voxels' sums from their objects' (29 Oct: each point
+            self.occ.index_add_(0, lin_u, ws); self.acc.index_add_(0, lin_u, vs)   # was added twice, to the voxel and to its object)
+            self._add_keys(uk, ws, vs[:, :self.NV])
 
     def _add_keys(self, keys, w, v):
         self.id_keys.append(keys); self.id_w.append(w); self.id_v.append(v.float()); self._nkeys += keys.numel()
@@ -899,13 +916,17 @@ class Scene:
     def identity_lut(self, min_r: float = 1.5) -> torch.Tensor:
         """A lookup ``id -> identity target``: an object smaller than ``min_r`` voxels is identified by its parent (up the
         chain: an unresolved fibre by its bundle), so the identity asks only what the resolution can separate."""
-        lut = torch.arange(self.next_obj + 1, device=self.device)
-        for o_ in range(1, self.next_obj):
-            t = o_
-            while self.obj_r.get(t, 1e9) < min_r and t in self.parents:
-                t = self.parents[t]
-            lut[o_] = t
-        return lut
+        key = (min_r, self.next_obj)                                          # built once per scene, on the host (29 Oct: one
+        if getattr(self, "_lut", (None,))[0] != key:                         # device write per object was 12 % of the time)
+            lut = list(range(self.next_obj + 1))
+            for o_, r_ in self.obj_r.items():
+                if 0 < o_ < self.next_obj and r_ < min_r:
+                    t = o_
+                    while self.obj_r.get(t, 1e9) < min_r and t in self.parents:
+                        t = self.parents[t]
+                    lut[o_] = t
+            self._lut = (key, torch.tensor(lut, device=self.device))
+        return self._lut[1].clone()
 
     def size(self, lo_um, hi_um, lo_vox=0.45, hi_vox=None) -> float | None:
         """A size drawn log-uniformly in the physical range intersected with what the canvas can render (voxels)."""

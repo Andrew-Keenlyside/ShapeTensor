@@ -39,7 +39,7 @@ import numpy as np
 import torch
 import torch.nn.functional as Fn
 
-from ..filters import gaussian, kernel1d
+from ..filters import gaussian, gaussian_mm, gaussian_pool_mm, kernel1d
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -973,28 +973,34 @@ def _corr_volume_local(r: torch.Tensor, pool) -> torch.Tensor:
     """:func:`_corr_volume` per window: the lag-1 autocorrelation of the residual along each axis pooled with the
     target's window (``pool``), so a thick-sliced or blurred part of a block is not credited with white-noise evidence
     and a clean part is not penalised for another part's correlation. ``(c...)``."""
-    v = None; rr = pool((r * r)[None])[0].clamp_min(1e-12)
+    v = None; Pm = pool(torch.stack([r * r] + [r * torch.roll(r, -1, dims=a) for a in range(3)])); rr = Pm[0].clamp_min(1e-12)
     for a in range(3):
-        x1 = torch.roll(r, -1, dims=a)
-        rho = (pool((r * x1)[None])[0] / rr).clamp(1e-6, 0.99)
+        rho = (Pm[1 + a] / rr).clamp(1e-6, 0.99)
         sig = torch.sqrt(-1.0 / (4.0 * torch.log(rho)))
         f = (2.0 * math.sqrt(math.pi) * sig).clamp_min(1.0)
         v = f if v is None else v * f
     return v
 
 
-def _vis_t(img, regressors, idx, s_hp, sigma_v, step, local_corr):
+def _vis_t(img, regressors, idx, s_hp, sigma_v, step, local_corr, hp_cache: dict | None = None):
     """The t-statistics ``(c..., len(idx))`` of a joint regression of the high-passed image on the high-passed
-    regressors ``idx`` in a Gaussian window at each lattice cell (see :func:`visibility`)."""
+    regressors ``idx`` in a Gaussian window at each lattice cell (see :func:`visibility`; ``hp_cache``: the high-passed
+    image and regressors by scale, shared by the windows)."""
     dev = img.device; shp = img.shape
-    hp = lambda x: x - gaussian(x, s_hp, truncate=3.0)
-    y = hp(img); A = hp(regressors[idx]); n = len(idx)
-    pool = lambda x: Fn.avg_pool3d(gaussian(x, sigma_v, truncate=3.0)[None], step)[0]
+    hp = lambda x: x - gaussian_mm(x, s_hp, truncate=3.0)
+    if hp_cache is None or s_hp not in hp_cache:
+        yA = hp(torch.cat([img[None], regressors[idx]]))
+        if hp_cache is not None:
+            hp_cache[s_hp] = yA
+    else:
+        yA = hp_cache[s_hp]
+    y, A = yA[0], yA[1:]; n = len(idx)
+    pool = lambda x: gaussian_pool_mm(x, sigma_v, step, truncate=3.0)                        # (all channels in one call, 29 Oct:
+    iu, ju = torch.triu_indices(n, n, device=dev)                                                  # one call per pair was half the generator's time)
+    Pm = pool(torch.cat([A[iu] * A[ju], A * y[None], (y * y)[None]]))
     Gm = torch.zeros((n, n) + tuple(s // step for s in shp), device=dev)
-    for i in range(n):
-        for j in range(i, n):
-            Gm[i, j] = Gm[j, i] = pool((A[i] * A[j])[None])[0]
-    bm = pool(A * y[None]); yy = pool((y * y)[None])[0]
+    Gm[iu, ju] = Pm[:len(iu)]; Gm[ju, iu] = Pm[:len(iu)]
+    bm = Pm[len(iu):len(iu) + n]; yy = Pm[-1]
     G = Gm.movedim(0, -1).movedim(0, -1)                                                          # (c..., n, n)
     ridge = 1e-6 * G.diagonal(dim1=-2, dim2=-1).amax(-1).clamp_min(1e-12)[..., None, None] * torch.eye(n, device=dev)
     Gi = torch.linalg.inv(G + ridge)
@@ -1057,24 +1063,25 @@ def visibility(img: torch.Tensor, regressors: torch.Tensor, units, radii=None, s
         for k in idx:                                                                             # scales within a factor of ~1.4 share a regression
             bins.setdefault(round(math.log2(scale_of[k]) * 2), []).append(k)
         t = torch.zeros(tuple(s // step for s in shp) + (len(idx),), device=dev)
+        hpc = {}                                                                                  # (each scale high-passed once)
         for key, ks in bins.items():
             s_hp = max(scale_of[k] for k in ks)
             tg = None
             for fw in window_ladder:
                 for f_ in ladder:
                     if f_ == 1 or s_hp * f_ <= ladder_max * 1.001:
-                        t_ = _vis_t(img, regressors, idx, s_hp * f_, sigma_v * fw, step, local_corr) / WINDOW_PENALTY(fw)
+                        t_ = _vis_t(img, regressors, idx, s_hp * f_, sigma_v * fw, step, local_corr, hpc) / WINDOW_PENALTY(fw)
                         tg = t_ if tg is None else torch.maximum(tg, t_)
             for k in ks:
                 j = idx.index(k); t[..., j] = tg[..., j]
     else:
         rmax = max([float(radii[k]) for k in idx] if radii is not None else [1.0])
         s0 = cap(max(4.0, 2.5 * rmax))
-        t = None
+        t = None; hpc = {}
         for fw in window_ladder:
             for f_ in ladder:
                 if f_ == 1 or s0 * f_ <= ladder_max * 1.001:
-                    t_ = _vis_t(img, regressors, idx, s0 * f_, sigma_v * fw, step, local_corr) / WINDOW_PENALTY(fw)
+                    t_ = _vis_t(img, regressors, idx, s0 * f_, sigma_v * fw, step, local_corr, hpc) / WINDOW_PENALTY(fw)
                     t = t_ if t is None else torch.maximum(t, t_)
     if return_t:                                                                                  # the evidence itself, upsampled (for calibration)
         tv = Fn.interpolate(t.movedim(-1, 0)[None], scale_factor=step, mode="trilinear", align_corners=False)[0]

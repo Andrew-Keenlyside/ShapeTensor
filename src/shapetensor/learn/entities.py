@@ -200,16 +200,22 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     ``node (Q, E)`` (tree nodes, -1 pad), ``mass``, ``vis``, ``T (Q, E, 3, 3)`` (trace 1), ``desc (Q, E, 5)``."""
     vox, grp, obj, w, v = entries
     dev = points.device; Q = points.shape[0]; zf = float(zoom)
-    canvas = torch.as_tensor(canvas_shape, device=dev)
-    # entries -> crop coordinates (a crop voxel's centre sits at origin + zoom j + (zoom - 1) / 2 on the canvas)
-    vox = vox.long(); cz = vox // (canvas[1] * canvas[2]); cy = (vox // canvas[2]) % canvas[1]; cx = vox % canvas[2]
     o = torch.as_tensor(origin, device=dev, dtype=torch.float32)
-    c = (torch.stack([cz, cy, cx], 1).float() - o - (zf - 1) / 2) / zf
     xp, Jq = _pulled(points.float(), grid, shape)
     hi_ = torch.tensor(shape, device=dev, dtype=torch.float32) - 1
     xp = torch.minimum(torch.maximum(xp, torch.zeros_like(xp)), hi_)                              # pulled beyond a face: the face (the image's padding)
-    smax = float(sigma.max()); m = 3 * smax + bin_size
+    bq = _bins_of(sigma, bin_size)                                                               # each query's bin (its window's scale)
+    smax = float(sigma.max()); m = 3 * smax + int(bq.max())
     lo = xp.min(0).values - m; hi = xp.max(0).values + m
+    # entries -> crop coordinates (a crop voxel's centre sits at origin + zoom j + (zoom - 1) / 2 on the canvas): the
+    # canvas coordinates decoded once per scene, the entries near the crop picked by them first (29 Oct: every crop
+    # decoded and scanned the whole canvas's entries)
+    cc = _canvas_coords(vox, canvas_shape)
+    blo = (torch.maximum(lo, torch.full_like(lo, -0.5)) * zf + o + (zf - 1) / 2).floor() - 1
+    bhi = (torch.minimum(hi, hi_ + 0.5) * zf + o + (zf - 1) / 2).ceil() + 1
+    near = torch.nonzero(((cc >= blo) & (cc <= bhi)).all(1))[:, 0]
+    vox, grp, obj, w, v = vox[near], grp[near], obj[near], w[near], v[near]
+    c = (cc[near].float() - o - (zf - 1) / 2) / zf
     sel_ = ((c >= lo) & (c <= hi)).all(1) & ((c >= -0.5) & (c <= hi_ + 0.5)).all(1)              # inside the crop only
     if keep is not None:                                                                        # sparse labelling: unlabelled objects are gone
         sel_ &= torch.as_tensor(keep, device=dev)[obj.long().clamp(max=int(keep.numel()) - 1)]
@@ -219,41 +225,50 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
         w = w * mw; v = v * mw[:, None]
     leaf = tree.leaves(grp, obj)
     ok = leaf >= 0; c, grp, w, v, leaf = c[ok], grp[ok], w[ok], v[ok], leaf[ok]
-    # bins of bin_size crop voxels: one row per (bin, leaf) with its volume, sums and centroid
-    b3 = torch.floor((c - lo) / bin_size).long(); nb = torch.ceil((hi - lo) / bin_size).long() + 1
-    blin = (b3[:, 0] * nb[1] + b3[:, 1]) * nb[2] + b3[:, 2]
-    key = blin * (tree.n + 1) + leaf
-    uk, inv = torch.unique(key, return_inverse=True)
-    R = uk.shape[0]
-    rw = torch.zeros(R, device=dev).index_add_(0, inv, w)
-    rv = torch.zeros(R, v.shape[1], device=dev).index_add_(0, inv, v)
-    rc = torch.zeros(R, 3, device=dev).index_add_(0, inv, w[:, None] * c) / rw.clamp_min(1e-12)[:, None]
-    rbin = uk // (tree.n + 1); rleaf = uk % (tree.n + 1)
-    rgrp = torch.zeros(R, dtype=torch.long, device=dev).index_put_((inv,), grp)
-    if comp is not None and group_layer is not None:                                           # composite: occlusion, the volume budget
-        gl_r = torch.as_tensor(list(group_layer) + [-1], device=dev, dtype=torch.long)[rgrp.clamp(max=len(group_layer))]
-        fr = torch.ones(R, device=dev)
-        for k in torch.unique(gl_r[gl_r >= 0]).tolist():
-            mk = gl_r == k
-            fr[mk] = _vis_at(comp[k:k + 1].float(), rc[mk])[:, 0]
-        rw = rw * fr; rv = rv * fr[:, None]
-    # (query, row) pairs: the bins within 3 sigma of each query's pulled point
-    starts = torch.searchsorted(rbin, torch.arange(int(nb.prod()), device=dev))
-    ends = torch.searchsorted(rbin, torch.arange(int(nb.prod()), device=dev), right=True)
-    qi_all, ri_all = [], []
-    for rad in torch.unique(torch.ceil((3 * sigma + 1) / bin_size).long()).tolist():
-        qs = torch.nonzero(torch.ceil((3 * sigma + 1) / bin_size).long() == rad)[:, 0]
-        off = torch.arange(-rad, rad + 1, device=dev)
-        O3 = torch.stack(torch.meshgrid(off, off, off, indexing="ij"), -1).view(-1, 3)
-        qb = torch.floor((xp[qs] - lo) / bin_size).long()[:, None] + O3[None]                       # (q, nO, 3)
-        inside = ((qb >= 0) & (qb < nb)).all(-1)
-        ql = ((qb[..., 0] * nb[1] + qb[..., 1]) * nb[2] + qb[..., 2]).clamp(0, int(nb.prod()) - 1)
-        s_, e_ = starts[ql] * inside, ends[ql] * inside
-        cnt = (e_ - s_).flatten()
-        qrep = qs[:, None].expand_as(ql).flatten().repeat_interleave(cnt)
-        first = s_.flatten().repeat_interleave(cnt)
-        within = torch.arange(int(cnt.sum()), device=dev) - torch.repeat_interleave(torch.cumsum(cnt, 0) - cnt, cnt)
-        qi_all.append(qrep); ri_all.append(first + within)
+    # bins of b crop voxels (b by the queries' windows, :func:`_bins_of`): one row per (bin, leaf) with its volume, sums
+    # and centroid; the rows of every bin size used, one after another
+    gl_t = torch.as_tensor(list(group_layer) + [-1], device=dev, dtype=torch.long) if group_layer is not None else None
+    rows, qi_all, ri_all, r0 = [], [], [], 0
+    for b in torch.unique(bq).tolist():
+        b3 = torch.floor((c - lo) / b).long(); nb = torch.ceil((hi - lo) / b).long() + 1
+        blin = (b3[:, 0] * nb[1] + b3[:, 1]) * nb[2] + b3[:, 2]
+        uk, inv = torch.unique(blin * (tree.n + 1) + leaf, return_inverse=True)
+        R = uk.shape[0]
+        rw = torch.zeros(R, device=dev).index_add_(0, inv, w)
+        rv = torch.zeros(R, v.shape[1], device=dev).index_add_(0, inv, v)
+        rc = torch.zeros(R, 3, device=dev).index_add_(0, inv, w[:, None] * c) / rw.clamp_min(1e-12)[:, None]
+        rbin = uk // (tree.n + 1); rleaf = uk % (tree.n + 1)
+        rgrp = torch.zeros(R, dtype=torch.long, device=dev).index_put_((inv,), grp)
+        if comp is not None and gl_t is not None:                                                 # composite: occlusion, the volume budget
+            gl_r = gl_t[rgrp.clamp(max=len(group_layer))]
+            fr = torch.ones(R, device=dev)
+            for k in torch.unique(gl_r[gl_r >= 0]).tolist():
+                mk = gl_r == k
+                fr[mk] = _vis_at(comp[k:k + 1].float(), rc[mk])[:, 0]
+            rw = rw * fr; rv = rv * fr[:, None]
+        rows.append((rw, rv, rc, rleaf, rgrp))
+        # (query, row) pairs: the bins within 3 sigma of each query's pulled point
+        starts = torch.searchsorted(rbin, torch.arange(int(nb.prod()), device=dev))
+        ends = torch.searchsorted(rbin, torch.arange(int(nb.prod()), device=dev), right=True)
+        qb_ = torch.nonzero(bq == b)[:, 0]; rad_q = torch.ceil((3 * sigma[qb_] + 1) / b).long()
+        for rad in torch.unique(rad_q).tolist():
+            qs = qb_[rad_q == rad]
+            off = torch.arange(-rad, rad + 1, device=dev)
+            O3 = torch.stack(torch.meshgrid(off, off, off, indexing="ij"), -1).view(-1, 3)
+            O3 = O3[((O3.float().abs() - 1).clamp_min(0) ** 2).sum(-1) * b * b <= (3 * float(sigma[qs].max())) ** 2]   # (bins that can reach the sphere)
+            qb = torch.floor((xp[qs] - lo) / b).long()[:, None] + O3[None]                          # (q, nO, 3)
+            inside = ((qb >= 0) & (qb < nb)).all(-1)
+            ql = ((qb[..., 0] * nb[1] + qb[..., 1]) * nb[2] + qb[..., 2]).clamp(0, int(nb.prod()) - 1)
+            s_, e_ = starts[ql] * inside, ends[ql] * inside
+            cnt = (e_ - s_).flatten()
+            qrep = qs[:, None].expand_as(ql).flatten().repeat_interleave(cnt)
+            first = s_.flatten().repeat_interleave(cnt)
+            within = torch.arange(int(cnt.sum()), device=dev) - torch.repeat_interleave(torch.cumsum(cnt, 0) - cnt, cnt)
+            ri_ = first + within
+            near_ = ((rc[ri_] - xp[qrep]) ** 2).sum(1) <= (3 * sigma[qrep]) ** 2                   # beyond 3 sigma: no weight (dropped now)
+            qi_all.append(qrep[near_]); ri_all.append(ri_[near_] + r0)
+        r0 += R
+    rw, rv, rc, rleaf, rgrp = (torch.cat(z) for z in zip(*rows))
     qi = torch.cat(qi_all); ri = torch.cat(ri_all)
     d2 = ((rc[ri] - xp[qi]) ** 2).sum(1); sg = sigma[qi]
     g = torch.exp(-0.5 * d2 / sg ** 2) * (d2 <= (3 * sg) ** 2)
@@ -272,8 +287,8 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     vl = torch.ones_like(gw); ol = None
     if group_layer is not None and (vis is not None or ovis is not None):
         gl = torch.as_tensor(list(group_layer) + [-1], device=dev, dtype=torch.long)[rgrp[ri].clamp(max=len(group_layer))]   # long even when empty
-        Ji_q = torch.linalg.inv(Jq)                                                                # each part of the window where it lies in the output
-        y = (points.float()[qi] + (Ji_q[qi] @ (rc[ri] - xp[qi])[..., None])[..., 0])
+        dq = rc[ri] - xp[qi]                                                                       # each part of the window where it lies in the output
+        y = points.float()[qi] + (dq if grid is None else (torch.linalg.inv(Jq)[qi] * dq[:, None, :]).sum(-1))
         y = torch.minimum(torch.maximum(y, torch.zeros_like(y)), hi_)
         vl = torch.zeros_like(gw) if vis is not None else vl                                       # a population absent from the crop: not visible
         ol = torch.ones_like(gw) if ovis is not None else None
@@ -298,8 +313,9 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     T6 = Vs[:, :6] / Wm.clamp_min(1e-12)[:, None]
     T = torch.stack([torch.stack([T6[:, 0], T6[:, 3], T6[:, 4]], -1), torch.stack([T6[:, 3], T6[:, 1], T6[:, 5]], -1),
                      torch.stack([T6[:, 4], T6[:, 5], T6[:, 2]], -1)], 1)
-    Ji = torch.linalg.inv(Jq[eq])
-    T = Ji @ T @ Ji.transpose(1, 2); T = T / T.diagonal(dim1=1, dim2=2).sum(-1).clamp_min(1e-9)[:, None, None]
+    if grid is not None:                                                                           # (no warp: the Jacobian is the identity)
+        Ji = torch.linalg.inv(Jq[eq]); T = Ji @ T @ Ji.transpose(1, 2)
+    T = T / T.diagonal(dim1=1, dim2=2).sum(-1).clamp_min(1e-9)[:, None, None]
     desc = Vs[:, 6:] / Wm.clamp_min(1e-12)[:, None]; desc[:, :2] = desc[:, :2] / zf                 # sizes in the crop's voxels
     desc[:, :2] = desc[:, :2] * torch.linalg.det(Jq[eq]).abs().clamp_min(1e-6).pow(-1.0 / 3)[:, None]   # and in the output's (the warp's stretch)
     # visible mass; negligible entities (window edges, masked tissue) dropped; pad per query, heaviest first
@@ -319,16 +335,45 @@ def entity_targets(entries, tree: Tree, canvas_shape, origin, zoom: int, shape, 
     return out
 
 
+#: query windows and their bins (crop voxels): a window of sigma >= s is binned at b -- a bin never more than the
+#: window's sigma, finer than the narrowest windows already are (sigma 1 on 2-voxel bins); wide windows on fine bins
+#: were 80 M (query, row) pairs per crop in dense scenes (29 Oct)
+BINS_BY_SIGMA = ((8.0, 8), (4.0, 4))
+
+
+def _bins_of(sigma: torch.Tensor, base: int) -> torch.Tensor:
+    """Each query's bin size (crop voxels) from its window ``sigma``: :data:`BINS_BY_SIGMA`, at least ``base``."""
+    b = torch.full_like(sigma, float(base))
+    for s_min, b_ in sorted(BINS_BY_SIGMA):
+        b = torch.where(sigma >= s_min, torch.full_like(sigma, float(max(b_, base))), b)
+    return b.long()
+
+
+_COORDS: dict = {}
+
+
+def _canvas_coords(vox: torch.Tensor, canvas_shape) -> torch.Tensor:
+    """``(n, 3)`` canvas voxel coordinates of the entries' linear indices ``vox`` (int16; the last scene's kept)."""
+    key = tuple(int(s_) for s_ in canvas_shape)
+    if _COORDS.get("vox") is not vox or _COORDS.get("key") != key:                            # (the same tensor: a held reference, not an address)
+        Y, X = int(canvas_shape[1]), int(canvas_shape[2]); vl = vox.long()
+        _COORDS.clear(); _COORDS["vox"] = vox; _COORDS["key"] = key
+        _COORDS["c"] = torch.stack([vl // (Y * X), (vl // X) % Y, vl % X], 1).to(torch.int16)
+    return _COORDS["c"]
+
+
 def leaf_centroids(entries, tree: "Tree", canvas_shape) -> torch.Tensor:
     """``(tree.n, 3)`` each object's centre of mass over the whole canvas (canvas voxels; zero for nodes that are not
     objects): where it is, for :func:`_collections`."""
     vox, grp, obj, w, v = entries
-    dev = vox.device; canvas = torch.as_tensor(canvas_shape, device=dev); vox = vox.long()
-    c = torch.stack([vox // (canvas[1] * canvas[2]), (vox // canvas[2]) % canvas[1], vox % canvas[2]], 1).float()
+    if _COORDS.get("cent_tree") is tree and _COORDS.get("vox") is vox and "cent" in _COORDS:   # once per scene (its crops share it)
+        return _COORDS["cent"]
+    dev = vox.device; c = _canvas_coords(vox, canvas_shape).float()
     leaf = tree.leaves(grp.long(), obj.long()); ok = leaf >= 0
     W = torch.zeros(tree.n, device=dev).index_add_(0, leaf[ok], w[ok].float())
     C = torch.zeros(tree.n, 3, device=dev).index_add_(0, leaf[ok], w[ok].float()[:, None] * c[ok])
-    return C / W.clamp_min(1e-12)[:, None]
+    _COORDS["cent_tree"] = tree; _COORDS["cent"] = C / W.clamp_min(1e-12)[:, None]
+    return _COORDS["cent"]
 
 
 def _collections(leaf: torch.Tensor, grp: torch.Tensor, s: torch.Tensor, cent: torch.Tensor, offset, n_nodes: int) -> torch.Tensor:
